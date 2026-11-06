@@ -1,6 +1,6 @@
 # STATUS
 
-**Milestone:** M1, fork identity and own setup. Code written, **not yet built or tested on the Fold**.
+**Milestone:** M1, fork identity and own setup. **Built** (GalarFork.apk, debug key from the cloud session), not yet tested on the Fold.
 
 ## Decision
 - The fork does its **own setup** (no Shizuku, no sharing with the main app).
@@ -20,7 +20,7 @@
 
 ## Checked here
 - All app Java compiles against Android 15's framework classes. `build_apk.py` and both scripts pass syntax checks.
-- **The C change was not compiled**: no NDK in the cloud container.
+- Full APK built in the cloud: package `com.nxnative.galarfork`, label "Galar Fork", `assets/data_dir`, and the `[FORK]` log line in `libnxnative.so` are all confirmed in the APK.
 
 ## Test on the Fold
 1. `bash scripts/build_fork.sh` and install `GalarFork.apk` next to the main app.
