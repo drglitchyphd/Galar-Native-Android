@@ -112,6 +112,7 @@ public final class SetupActivity extends Activity {
         if (GameActivity.alive) {   // the game is running (in the background): the icon goes back to it
             super.onCreate(b); startActivity(new Intent(this, GameActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)); finish(); return; }
         super.onCreate(b);
+        if (Fork.gate(this)) return;   // FORK: all-files access first, the files live in shared storage
         if (getIntent().getStringExtra("menu") != null) {   // am start ... --es menu 1: the in-game settings panel over this screen (a look at it without the game, over adb)
             setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE); setContentView(new android.view.View(this));
             getWindow().getDecorView().post(() -> GameMenu.show(this, 0)); return;
@@ -369,6 +370,7 @@ public final class SetupActivity extends Activity {
     private boolean askedAccess, pickAfterAccess;
     @Override protected void onResume() {
         super.onResume();
+        Fork.gateResume(this);   // FORK
         if (pickAfterAccess) { pickAfterAccess = false; pick(PICK_GAME, true); }
     }
     private void pick(int what, boolean multi) {

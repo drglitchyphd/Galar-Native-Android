@@ -68,9 +68,12 @@ def main():
     ap.add_argument('--ks', default=os.path.join(ANDROID, 'probe/out/debug.keystore')); ap.add_argument('--bt'); ap.add_argument('--jar'); ap.add_argument('--name')
     ap.add_argument('--game', default='01008DB008C2C000'); ap.add_argument('--package'); ap.add_argument('--version', type=int, default=12)
     ap.add_argument('--debuggable', action='store_true', help='test builds: adb run-as can reach the private storage of the app')
+    ap.add_argument('--data-dir', default='', help='FORK: keep the game, saves and settings in /storage/emulated/0/<this folder> (Fork.java)')   # FORK
+    ap.add_argument('--icon', default='', help='FORK: app icon colours, "top ground" hex, in place of the profile\'s app_icon')   # FORK
     a = ap.parse_args()
     g = _game.load(a.game); fam = _game.family(g)   # the games the engine built for g runs (Pokémon Shield: Shield and Sword, one app)
-    ic = g.get('app_icon', 'dc2832 182040').split(); icon = [tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)) for h in ic[:2]]   # app_icon: top colour, ground colour (hex)
+    ic = (a.icon or g.get('app_icon', 'dc2832 182040')).split();   # FORK: --icon
+    icon = [tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)) for h in ic[:2]]   # app_icon: top colour, ground colour (hex)
     a.name = a.name or (g.get('app_name', 'Galar Native') if len(fam) > 1 else g.get('name'))   # the app's name (the base game's app_name: Galar Native runs Sword and Shield, Paldea Native Scarlet and Violet; each game's own shortcut names it)
     a.package = a.package or 'com.nxnative.' + _game.file_stem(g).lower()   # com.nxnative.pokemonshield: the Shield app's package, so its players update in place
     exe = '.exe' if os.name == 'nt' else ''; bat = '.bat' if os.name == 'nt' else ''
@@ -152,6 +155,7 @@ def main():
         for f in ('cjk_fallback.ttf', 'cjk_fallback.LICENSE.txt'):   # the Chinese / Korean shared-font stand-in (GameActivity copies it into the game's font/)
             p = os.path.join(ANDROID, 'app/assets', f)
             if os.path.isfile(p): z.write(p, 'assets/' + f)
+        if a.data_dir: z.writestr('assets/data_dir', a.data_dir + '\n')   # FORK: Fork.java
         z.writestr('assets/shader_chain', shader_chain(g) + '\n')   # the launcher sends players back to setup when their shader pack was made for another chain
         z.writestr('assets/games', ''.join(f'{f.id}\t{f.get("name")}\t{_game.file_stem(f)}\t{list(f.builds().values())[-1]["display"]}\t{"heavy" if f.get("android_heavy", "off") == "on" else ""}\n' for f in fam))   # the games this app runs, its own first, with the version they need (GameSettings.games)
         z.writestr('assets/app', f'{a.name}\t{g.get("app_repo", "github.com/simipoB/Galar-Native-Android")}\n')   # the app's name and where its official releases are (SetupActivity)

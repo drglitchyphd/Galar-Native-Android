@@ -20,6 +20,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
 
     @Override protected void onCreate(Bundle b) {
         autoSettings();   // before super.onCreate: NativeActivity starts the engine there
+        Fork.exportRoot(this);   // FORK: DM_DATA_ROOT for android_main.c host_start
         // local play (hle_ldn.c) finds other phones by Wi-Fi broadcasts, which many phones drop without a multicast lock
         try { android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
               if (wm != null) { android.net.wifi.WifiManager.MulticastLock ml = wm.createMulticastLock("local play"); ml.setReferenceCounted(false); ml.acquire(); } } catch (Exception e) { }

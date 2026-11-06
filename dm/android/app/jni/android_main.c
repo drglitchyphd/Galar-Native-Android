@@ -612,6 +612,7 @@ static void *inspector_main(void *p) {
 static void host_start(void) {
     if (g_started++) return;
     const char *f = g_app->activity->externalDataPath; snprintf(g_files, sizeof g_files, "%s", f ? f : "/sdcard/nxnative");
+    { const char *fr = getenv("DM_DATA_ROOT"); if (fr && *fr) snprintf(g_files, sizeof g_files, "%s", fr); }   // FORK: shared-storage data folder (Fork.java)
     mkdir(g_files, 0755); choose_game(g_files, sizeof g_files);
     { void touch_ui_set_dir(const char *dir); touch_ui_set_dir(g_files); }   // the player's control layout (touch_ui.c's editor)
     char p[1200], q[1200];
@@ -625,6 +626,7 @@ static void host_start(void) {
     // why Android ended the previous run (GameActivity, ApplicationExitInfo): reason 2 a signal, 3 low memory, 4 / 5 a crash, 6 not responding, 10 / 11 the player /
     //   the app, 13 other (Samsung's game manager, heat), 14 frozen
     { const char *le = getenv("DM_LAST_EXIT"); if (le && *le) fprintf(stderr, "boot: Android says the previous run ended: %s\n", le); }
+    { const char *fr = getenv("DM_DATA_ROOT"); if (fr && *fr) fprintf(stderr, "[FORK] data folder: %s (game files %s)\n", fr, g_files); }   // FORK
     fps_guard_init();   // (before the phone profile: Graphics chosen by hand only)
     device_profile();   // the chip tier's defaults, under env.txt
     // Game files: inside the installed APKs (the all-in-one .apks bundle, read through apkfs.c as /nxapk/...), else copied into the files folder

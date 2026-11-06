@@ -34,7 +34,7 @@ final class GameSettings {
         }
         return games;
     }
-    static File root(Context c) { return c.getExternalFilesDir(null); }
+    static File root(Context c) { return Fork.root(c); }   // FORK: the shared folder in a fork build, else getExternalFilesDir(null)
     // the game version the app runs (the profile's build: Sword / Shield 1.3.2, Violet 4.0.0), the fourth column of assets/games
     static String version(Context c) { String[] g = game(c); return g.length > 3 ? g[3] : "1.3.2"; }
     static String[] game(Context c) {

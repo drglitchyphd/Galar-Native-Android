@@ -98,6 +98,7 @@ else   # an earlier build's copies in $LIBS would otherwise still go into the AP
 
 step "8/8 the APK"
 OUT="$WORK/$(python3 "$REPO/dm/games/game.py" $GAME app_name | tr -d ' ').apk"   # GalarNative.apk / PaldeaNative.apk
+OUT=${APK_OUT:-$OUT}   # FORK: scripts/build_fork.sh names its own APK
 python3 "$A/tools/build_apk.py" --game $GAME --libs "$LIBS" --pylib "$PY/prefix/lib/python3.14" --capstone-py "$WORK/capstone-py/capstone" --bt "$BT" --jar "$JAR" \
-    --ks "$WORK/debug.keystore" --out "$OUT"
+    --ks "$WORK/debug.keystore" --out "$OUT" ${APK_ARGS[@]+"${APK_ARGS[@]}"}   # FORK: extra build_apk.py arguments (scripts/build_fork.sh)
 echo; echo "done: $OUT (install it, open it, choose your game files and keys)"

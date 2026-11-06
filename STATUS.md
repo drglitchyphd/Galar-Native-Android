@@ -1,28 +1,36 @@
 # STATUS
 
-**Milestone:** M0 Recon, done (no code changes). Next is M1.
+**Milestone:** M1, fork identity and own setup. Code written, **not yet built or tested on the Fold**.
 
-## Done
-- `NOTES.md` written: covers all nine M0 topics.
-- `CLAUDE.md`: build command and APK path filled in.
+## Decision
+- The fork does its **own setup** (no Shizuku, no sharing with the main app).
+- All of its per-game files live in **`/storage/emulated/0/GalarFork/`**, outside scoped storage: game files, saves, settings, mods,
+  shader caches and logs. Sword is in the `0100ABF008968000/` subfolder. Keys stay private (`filesDir/keys`).
 
-## Findings that change the plan
-1. **Shared files are app-private.** The main app's Sword files are in
-   `Android/data/com.nxnative.pokemonshield/files/0100ABF008968000/`. "All files access" can't read
-   another app's `Android/data` on Android 11+, so M1 needs Shizuku, or the fork does its own setup (~15 GB).
-2. **The shared-files version check already exists.** The `ready` marker holds a shader-chain string. The fork must
-   match the main app's chain, or it treats the files as stale.
-3. **Fold may already work:** the activity isn't recreated and the swapchain rebuilds on resize.
-   Inner portrait is blocked by `screenOrientation=sensorLandscape`.
-4. **The app's 60fps is not 2× speed.** It uses the same patch site, but `vstep_tick` re-times the game step.
-   The crowd flicker belongs to that path.
-5. **A touch-control editor already exists** (hold − for 2 s). It keeps one layout, not one per screen.
-6. **Picture modes live in `dm_picture_box()`** (`gfx/nvn/nvn_ovl.h`). That is the hook point for M3.
+## Changes
+- `scripts/build_fork.sh` (new) sets the package `com.nxnative.galarfork`, the name "Galar Fork", a blue icon and the data folder.
+  All of these can be changed with environment variables.
+- `Fork.java` (new) resolves the data folder, adds `.nomedia`, and shows the "allow all-files access" screen before setup.
+  It also passes `DM_DATA_ROOT` to the engine.
+- Small `// FORK` edits:
+  - `GameSettings.root`, `SetupActivity.onCreate/onResume`, `GameActivity.onCreate`.
+  - `android_main.c host_start`: reads `DM_DATA_ROOT` and logs `[FORK] data folder: ...`.
+  - `build_apk.py`: `--data-dir`, `--icon`. `build_apk_pc.sh`: `APK_ARGS`, `APK_OUT`.
+- A stock build (`build_apk_pc.sh`) behaves exactly as before.
 
-## Not tested
-- Nothing built or run this session. The cloud container has no NDK/SDK set up; build on the PC.
+## Checked here
+- All app Java compiles against Android 15's framework classes. `build_apk.py` and both scripts pass syntax checks.
+- **The C change was not compiled**: no NDK in the cloud container.
 
-## Next (M1)
-- Decide the shared-files route: Shizuku or own setup.
-- New package (`build_apk.py --package`), name and icon. Check `--game 0100ABF008968000` for a Sword-only build.
-- Steven: before M2 work, fold/unfold mid-battle on the current release and report the `log.txt` lines.
+## Test on the Fold
+1. `bash scripts/build_fork.sh` and install `GalarFork.apk` next to the main app.
+2. Open it, allow all-files access, set up Sword. Check that `GalarFork/0100ABF008968000/` fills up and the main app is untouched.
+3. Play, save, quit and reopen. Then check that the log has `[FORK] data folder:`.
+4. **Watch for loading time or stutter**: shared storage can read slower than `Android/data`. Compare with the main app.
+
+## Known gaps
+- Two in-app hints still say `Android/data/...` (the mods-folder hint in `GameMenu`, and the setup-log path).
+- Uninstalling leaves `GalarFork/`. That is intended; delete it by hand to start over.
+
+## Next
+- After a good test, M2 (fold/unfold).
