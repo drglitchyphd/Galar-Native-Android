@@ -1,6 +1,7 @@
 # STATUS
 
-**Milestone:** M1, fork identity and own setup. v14 built; v12 tested: setup stalled at step 4 (fixed in v13, retest).
+**Milestone:** M1 works on the Fold (v13/v14): setup completed, game launches, loading and caching in the opening area are good.
+Still to confirm: save survives a restart, the `[FORK] data folder:` log line. **Next: M2 (fold/unfold).**
 
 ## Decision
 - The fork does its **own setup** (no Shizuku, no sharing with the main app).
