@@ -310,11 +310,15 @@ def main():
             if f.endswith('_b.json'): shutil.copyfile(os.path.join(built, f), os.path.join(vk, f))
 
         step(5)
-        run([py, os.path.join(DM, 'android/tools/vk_meta.py'), vk, vk, built])
-        # the pack compressed (zlib per shader, the engine inflates each as it loads it: nvn_vk.c pak_blob): about 3.4 times smaller on the phone (Violet 2.9 GB → 0.85 GB, Sword 2.3 → 0.7)
         raw = os.path.join(a.work, 'shaders.raw.pak')
-        run([py, os.path.join(DM, 'android/tools/spv_pak.py'), vk, raw])
-        run([py, os.path.join(DM, 'android/tools/spv_pak.py'), '--compress', raw, os.path.join(a.out, 'shaders.pak')])
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import fork_progress; pstop = threading.Event()   # FORK: a percentage for this step (fork_progress.py)
+        threading.Thread(target=fork_progress.watch_pack, args=(vk, raw, os.path.join(a.out, 'shaders.pak'), pstop), daemon=True).start()   # FORK
+        try:   # FORK
+            run([py, os.path.join(DM, 'android/tools/vk_meta.py'), vk, vk, built])
+            # the pack compressed (zlib per shader, the engine inflates each as it loads it: nvn_vk.c pak_blob): about 3.4 times smaller on the phone (Violet 2.9 GB → 0.85 GB, Sword 2.3 → 0.7)
+            run([py, os.path.join(DM, 'android/tools/spv_pak.py'), vk, raw])
+            run([py, os.path.join(DM, 'android/tools/spv_pak.py'), '--compress', raw, os.path.join(a.out, 'shaders.pak')])
+        finally: pstop.set()   # FORK
         os.remove(raw)
 
     step(6)

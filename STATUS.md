@@ -1,6 +1,6 @@
 # STATUS
 
-**Milestone:** M1, fork identity and own setup. v13 built; v12 tested: setup stalled at step 4 (fixed in v13, retest).
+**Milestone:** M1, fork identity and own setup. v14 built; v12 tested: setup stalled at step 4 (fixed in v13, retest).
 
 ## Decision
 - The fork does its **own setup** (no Shizuku, no sharing with the main app).
@@ -31,6 +31,9 @@
 ## Fixed in v13
 - Setup hung at "translate the shaders 0%": `dmsh_gate` uses `flock`, which shared storage (FUSE) doesn't support. Fork builds now keep the gate's lock files in the private cache (`DM_GATE_LOCK_DIR`, `setup_game.py gate_dir`).
 - Bump `FORK_VERSION` for every build: the app re-unpacks its setup scripts only when the version changes.
+
+## Added in v14
+- Step 5 (pack the shaders) shows a percentage: `android/tools/fork_progress.py` watches vk_meta/spv_pak from outside (file counts, sizes, `/proc/<pid>/io`), hooked into `setup_game.py` step 5 (`# FORK`). Tested with a simulated 30k-shader set; not yet on the phone.
 
 ## Known gaps
 - Two in-app hints still say `Android/data/...` (the mods-folder hint in `GameMenu`, and the setup-log path).
