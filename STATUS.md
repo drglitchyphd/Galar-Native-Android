@@ -1,6 +1,6 @@
 # STATUS
 
-**Milestone:** M1, fork identity and own setup. **Built** (GalarFork.apk, debug key from the cloud session), not yet tested on the Fold.
+**Milestone:** M1, fork identity and own setup. v13 built; v12 tested: setup stalled at step 4 (fixed in v13, retest).
 
 ## Decision
 - The fork does its **own setup** (no Shizuku, no sharing with the main app).
@@ -27,6 +27,10 @@
 2. Open it, allow all-files access, set up Sword. Check that `GalarFork/0100ABF008968000/` fills up and the main app is untouched.
 3. Play, save, quit and reopen. Then check that the log has `[FORK] data folder:`.
 4. **Watch for loading time or stutter**: shared storage can read slower than `Android/data`. Compare with the main app.
+
+## Fixed in v13
+- Setup hung at "translate the shaders 0%": `dmsh_gate` uses `flock`, which shared storage (FUSE) doesn't support. Fork builds now keep the gate's lock files in the private cache (`DM_GATE_LOCK_DIR`, `setup_game.py gate_dir`).
+- Bump `FORK_VERSION` for every build: the app re-unpacks its setup scripts only when the version changes.
 
 ## Known gaps
 - Two in-app hints still say `Android/data/...` (the mods-folder hint in `GameMenu`, and the setup-log path).

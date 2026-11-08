@@ -20,6 +20,14 @@ sys.path.insert(0, os.path.join(DM, 'games')); import game as _game
 PROFILE = _game.load()
 NAME = PROFILE.get('name')
 
+
+# FORK: the gate's slot locks (flock) need a filesystem that has them; shared storage (/storage/emulated, FUSE) does not, and the gate then waits
+# forever. Fork builds pass DM_GATE_LOCK_DIR (the app's private cache, SetupActivity.toolEnv); stock builds keep the work folder
+def gate_dir(default):
+    d = os.environ.get('DM_GATE_LOCK_DIR')
+    if not d: return default
+    os.makedirs(d, exist_ok=True); print(f'[FORK] gate locks in {d}', file=sys.stderr, flush=True); return d
+
 def write_runtime_shader_map(found_map, profile_map, output):
     """Use shader locations found in this dump, retaining profile slots for runtime-captured shaders."""
     with open(found_map, encoding='utf-8') as f: rows = f.readlines()
@@ -264,7 +272,7 @@ def main():
             if not resumed: shutil.rmtree(os.path.dirname(vk), ignore_errors=True); shutil.rmtree(cache, ignore_errors=True)
             os.makedirs(vk, exist_ok=True)
             gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
-            xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=a.work) if gate else dict(XLATE=tool('dmsh_xlate'))
+            xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=gate_dir(a.work)) if gate else dict(XLATE=tool('dmsh_xlate'))
             run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *missing], retry_killed=3,
                 env=dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(a.work, 'cas'), WORK=a.work,
                          DMSH_SOURCE_MAP=os.path.join(a.work, 'shader_map.found.tsv'), DMSH_FACTS=os.path.join(a.work, 'shader_facts.found.tsv'),
@@ -288,7 +296,7 @@ def main():
         threading.Thread(target=watch_translation, args=(found, a.work, os.path.join(cache, 'b-' + chain), stop), daemon=True).start()
         # the translators go through dmsh_gate when the app has it: each beyond the first starts only while the phone has the memory for it (dmsh_gate.c)
         gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
-        xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=a.work) if gate else dict(XLATE=tool('dmsh_xlate'))
+        xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=gate_dir(a.work)) if gate else dict(XLATE=tool('dmsh_xlate'))
         log.write(f'translators: {env.get("J", "8")} at most, ' + ('started as memory allows (dmsh_gate)\n' if gate else 'all at once (no dmsh_gate)\n'))
         try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache], retry_killed=3,
             env=dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(a.work, 'cas'), WORK=a.work,
@@ -449,7 +457,7 @@ def mod_shaders(a):
     keys = [c[3] for c in new]
     print(f'STEP 2/3 translate {len(keys)} shaders', flush=True)
     gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
-    xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=mw) if gate else dict(XLATE=tool('dmsh_xlate'))
+    xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=gate_dir(mw)) if gate else dict(XLATE=tool('dmsh_xlate'))
     benv = dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(mw, 'cas'), WORK=mw, DMSH_SOURCE_MAP=smap, DMSH_FACTS=facts, DMSH_PAIRS=pairs)
     try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *keys], env=benv)
     except RuntimeError as e: log.write(f'mod shaders: {e}; the ones translated are kept\n')

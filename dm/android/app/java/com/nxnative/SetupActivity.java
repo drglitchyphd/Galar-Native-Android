@@ -820,6 +820,7 @@ public final class SetupActivity extends Activity {
         e.put("DOTNET_OPENSSL_VERSION_OVERRIDE", "3"); e.put("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1");
         e.put("TMPDIR", c.getCacheDir().getPath()); e.put("J", String.valueOf(workers));
         e.put("DM_GATE_MB", "600"); e.put("DM_GATE_FLOOR_MB", String.valueOf(gateFloorMb(c)));
+        if (Fork.shared(c)) e.put("DM_GATE_LOCK_DIR", new File(c.getCacheDir(), "gate").getPath());   // FORK: flock does not work in shared storage (setup_game.py gate_dir)
     }
     // setup_game.py off this screen (GameActivity's live shaders), with the tools as the last setup here left them; null when there are none yet
     static Process startTool(Context c, List<String> args, int workers) throws IOException {
