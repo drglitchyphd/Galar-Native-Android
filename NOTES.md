@@ -149,3 +149,16 @@ Paths are relative to `dm/` unless they start with `scripts/` or `docs/`. Line n
   - `WINDOW_RESIZED`, `CONFIG_CHANGED` and `CONTENT_RECT_CHANGED` are not handled. The swapchain resizes lazily in `swap_ensure`.
 - `host/hle_lifecycle.c`: SIGTERM leads to a clean shutdown, nothing more.
 - **For M2:** fold/unfold may already work in place. Portrait (inner screen) is blocked by `sensorLandscape`. Test on the Fold before writing code.
+
+## 10. Inner-screen fullscreen research (frame captures, Nov 8, Adreno 840)
+- **4:3 mod** (`[4.3 Ultrawide v1.3.2]/exefs/1.3.2.pchtxt`, Fl4sh / TLin-Y): `@nsobid-A3B75BCD…` is **Sword 1.3.2**, `offset_shift 0x100`.
+  - `0x6076c4` `b 0x607664`: a cave that sets `w9 = 0x3FAAAAAB` (4/3, both halves, so any ratio fits), then `b 0x6076c8`.
+  - `0xd93414` `movk x12,#0x3faa,lsl16`: replaces the high half only; the low half comes from an earlier instruction.
+  - `0x607de8/dec` `movk x9,#0xd2ab,lsl32` / `movk x9,#0x67aa,lsl48`: not an aspect float; purpose unknown without the game's code.
+- **How a frame ends:**
+  1. Post-processing chain → `149.png`, then `150.png` (the composited scene in `vk 43` / `nvn 0x38`, 1920x1080).
+  2. **UI** is drawn into that same 1080p image with vertex `af0ef3ac1bd35ad3` / fragment `5d53d90745ea1f7d`. The bag and X menu are 46 draws, all this pair.
+  3. **Final copy**: vertex `389df45bf4d9a0f6` / fragment `f7c8611fd795251a` reads that image (texture 264) plus a 32x32 noise texture into the presented image.
+- The overworld frames have no UI draws (no HUD on screen). **A battle capture is still needed** to confirm the HUD over 3D uses the same shader and target.
+- **Plan for fixed UI scaling, in the graphics layer, no game-code patch:** for UI-shader draws into the composite target, scale the viewport and scissor
+  vertically by `k = (W/H) / (16/9)`, centred. Present with the `fill` box. `touch_menu.c` tap mapping needs the same inverse transform.
