@@ -237,6 +237,8 @@ public final class GameMenu {
         choice(a, "DM_ASPECT", t(a, "Picture"), new String[][] { { "", "16:9", t(a, "16:9, as the game is made") }, { "fill", t(a, "Fill"), t(a, "Fill the screen (stretched)") },
                                                                     { "20:9", "20:9", t(a, "20:9, for a widescreen mod") },
                                                                     { "fix", t(a, "Fill, corrected"), t(a, "Fill the screen with the 3D and the menus kept in shape (experimental; no mod needed)") } });   // FORK
+        choice(a, "DM_FORK_PORTRAIT", t(a, "Portrait on the inner screen"), new String[][] { { "", t(a, "Off"), t(a, "Off: always landscape") },   // FORK: Fork.orientation
+            { "on", t(a, "On"), t(a, "On: unfolded, the game turns with the phone; upright, the picture is at the top and the controls below it (their own layout)") } });
         String rec = GameSettings.profile(a)[6].equals("sgsr") ? "SGSR" : t(a, "Sharp");
         choice(a, "DM_SCALER", t(a, "Upscaling"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", rec) },
             { "sharp", t(a, "Sharp"), t(a, "Sharp: the picture upscaled with sharpening (lighter settings keep their detail)") },

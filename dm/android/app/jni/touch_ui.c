@@ -154,7 +154,7 @@ static int hit(int c, float x, float y, float slack) {
     return k->shown && dx * dx + dy * dy <= r * r;
 }
 static int target_at(float x, float y) {
-    if (hit(C_RSTICK, x, y, 1.3f)) return C_RSTICK;
+    if (g_float <= 0 && hit(C_RSTICK, x, y, 1.3f)) return C_RSTICK;   // FORK: floating sticks: the fixed right stick is not there
     for (int c = C_A; c < NCTL; c++) if (hit(c, x, y, 1.3f)) return c;   // thumbs miss: touch areas 1.3 times the drawing
     if (g_float > 0) return x < g_w * 0.5f ? C_STICK : C_CAM;   // FORK: floating sticks, each on its own half
     if (x < g_w * 0.42f && y > g_h * 0.30f) return C_STICK;
@@ -507,7 +507,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     } else if (g_visible) {
         double t = now_s(); int idle = ((g_fade > 0 && t - g_touch_t > g_fade) || touch_menu_active()) && !g_btn && !g_stick_on && !g_rstick_on;   // (in a menu its items are tapped directly)   // nothing touched for 3 s: everything faint
         float ia = idle ? 0.22f : 1.0f;
-        int faint = t - g_inner_t > 2.0;   // the D-pad and the right stick fade 2 s after their last touch
+        int faint = 0; (void)g_inner_t;   // FORK: the D-pad and the right stick fade with the rest (upstream: almost gone 2 s after their last touch)
         for (int c = C_A; c < NCTL; c++) { if (!g_c[c].shown) continue;
             int on = (g_btn & g_c[c].btn) != 0; float al = c >= C_UP && c <= C_RIGHT && faint && !on ? 0.25f : 1.0f; if (idle) al = fminf(al, ia);
             if (c == C_THROW) { pokeball(it, &n, max, &g_c[c], on, al); continue; }
@@ -515,9 +515,10 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
             bubble(it, &n, max, &g_c[c], on, 0, al);
             if (c >= C_UP && al == 1.0f) { float r = g_c[c].r, ox = c == C_LEFT ? -0.42f : c == C_RIGHT ? 0.42f : 0, oy = c == C_UP ? -0.42f : c == C_DOWN ? 0.42f : 0;
                 add(it, &n, max, g_c[c].cx + ox * r, g_c[c].cy + oy * r, r * 0.22f, OVL_DISC, 255, 255, 255, 0.9f); } }
-        compass(it, &n, max, g_stick_on ? 1.0f : idle ? ia : 0.75f, g_stick_x, g_stick_y, g_knob_x, g_knob_y, g_c[C_STICK].r);
+        if (g_float <= 0 || g_stick_on)   // FORK: floating sticks: shown only under the thumb
+            compass(it, &n, max, g_stick_on ? 1.0f : idle ? ia : 0.75f, g_stick_x, g_stick_y, g_knob_x, g_knob_y, g_c[C_STICK].r);
         if (g_fr_on) compass(it, &n, max, 1.0f, g_fr_x, g_fr_y, g_frk_x, g_frk_y, g_c[C_STICK].r);   // FORK: the floating camera stick under the finger
-        if (g_c[C_RSTICK].shown) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,   // faint while unused: it and the D-pad sit over the dialogue box
+        if (g_c[C_RSTICK].shown && g_float <= 0) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,   // faint while unused: it and the D-pad sit over the dialogue box
              g_c[C_RSTICK].cy, g_rknob_x, g_rknob_y, g_c[C_RSTICK].r);
         for (int i = 0; i < n; i++) { it[i].a *= g_opacity; it[i].galpha *= g_opacity; }
     }
