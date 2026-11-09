@@ -156,9 +156,11 @@ static void *fg_worker(void *p) {
         vk_wait(NULL, FG.fence, UINT64_MAX);   // the copy (and the game's frame before it on the queue) is done
         fg_time(1, t0); uint64_t t1 = mono_ns();
         int gen = 0;
-        if (j.n >= 2 && atomic_load(&FG.state) == 2) {
+        // the library on every frame from the first: it counts its own calls and takes input (count % 2) as the newest frame. v23-v27 skipped the first frame,
+        //   so from then on it read the two frames the wrong way round (motion estimated backwards: ghosting). The first frame's output (nothing to go between) is not shown
+        if (j.n >= 1 && atomic_load(&FG.state) == 2) {
             if (FG.run(FG.ctx)) { VLOG("[FORK] [RED] fg: %s: off", FG.err()); atomic_store(&FG.state, -1); }
-            else { gen = 1; fg_time(2, t1); double ms = (mono_ns() - t0) / 1e6; FG.gen_ms = FG.ngen ? FG.gen_ms * 0.98 + ms * 0.02 : ms;
+            else if (j.n >= 2) { gen = 1; fg_time(2, t1); double ms = (mono_ns() - t0) / 1e6; FG.gen_ms = FG.ngen ? FG.gen_ms * 0.98 + ms * 0.02 : ms;
                    if (++FG.ngen == 1 || FG.ngen % 1800 == 0) VLOG("[FORK] fg: %llu frames generated, %.1f ms each (on its own thread)", (unsigned long long)FG.ngen, FG.gen_ms); }
         }
         static int nopace = -1; if (nopace < 0) { const char *e = getenv("DM_FORK_FG_PACE"); nopace = e && !atoi(e); }   // DM_FORK_FG_PACE=0: no display times (a test)
@@ -172,7 +174,7 @@ static void *fg_worker(void *p) {
         pthread_mutex_lock(&g_wmu);
         if (W.sc) {
             uint64_t t2 = mono_ns();
-            if (gen && fg_show(FG.img[2], VK_IMAGE_LAYOUT_GENERAL, 2, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t > j.half ? j.t - j.half : 0, 0)) atomic_fetch_add(&g_fg_shown, 1);
+            if (gen && fg_show(FG.img[2], VK_IMAGE_LAYOUT_GENERAL, 2, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t > j.half ? j.t - j.half : 0, j.id | 0x80000000u)) atomic_fetch_add(&g_fg_shown, 1);   // (an id of its own: the display's timing report lists it too)
             fg_time(3, t2); uint64_t t3 = mono_ns();
             if (W.sc && fg_show(FG.img[j.in], VK_IMAGE_LAYOUT_GENERAL, j.in, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t, j.id)) atomic_fetch_add(&g_fg_shown, 1);
             fg_time(4, t3);
