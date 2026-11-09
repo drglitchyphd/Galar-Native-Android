@@ -1,7 +1,10 @@
 # STATUS
 
 **Milestone:** M1 works on the Fold (v13/v14): setup completed, game launches, loading and caching in the opening area are good.
-Still to confirm: save survives a restart, the `[FORK] data folder:` log line. **Next: M2 (fold/unfold).**
+`[FORK] data folder:` log line confirmed.
+**M2 fold/unfold already works in place** (log Nov 9): inner 2504x2256 ↔ outer 2520x1080 twice, the swapchain resized, no restart, 1–3 long frames per switch.
+M2 left: an optional pause on fold. Portrait on the inner screen does not rotate (manifest `sensorLandscape`): that is M3.
+**Next:** A, merge upstream; B, small fixes; D, built-in aspect fix for the inner (and outer) screen, no mods.
 
 ## Decision
 - The fork does its **own setup** (no Shizuku, no sharing with the main app).
