@@ -288,6 +288,9 @@ static int g_started;
 //   · crashed with mods on: the mods are switched off (each folder renamed with a leading "-", loose .pchtxt files to .pchtxt.off), and the player is told
 // A run Android ends (swiped away, low memory) writes no "crashed": nothing is changed then
 static char g_boot_path[1100]; static int g_boot_fd = -1;
+static _Atomic int g_dev_noted;   // "device" written to boot_state (nvn_vk.c right after the device is made, else boot_guard_main within a second)
+static int g_safe_advanced;       // this start is one safe_start level up (no driver dialog then: the safer settings are tried first)
+void dm_boot_device_up(void) { if (!atomic_exchange(&g_dev_noted, 1) && g_boot_fd >= 0) { static const char m[] = "device\n"; (void)!write(g_boot_fd, m, sizeof m - 1); } }
 static char g_crash_src[1200], g_crash_dl[256];   // log.txt and its copy in Download/ (host_start), for dm_crash_log_copy
 void dm_crash_log_copy(void) {   // from the crash handler: open / read / write only
     if (!g_crash_src[0] || !g_crash_dl[0]) return;
@@ -325,7 +328,7 @@ static void boot_guard(const char *mods) {
         fprintf(stderr, "boot: the last run crashed (%s)\n", device ? "after the graphics device came up" : "before the graphics device came up");
         if (device) setenv("DM_LAST_CRASH_DEVICE", "1", 1);   // (nvn_vk.c: a start that went without the dma-buf heap route and crashed anyway sends the next one back to it)
         if (had_mods) { int n = mods_off(mods); if (n) { char t[200]; snprintf(t, sizeof t, "The game closed while %d mod%s were on, so they are switched off. Switch them back on in the menu, Mods.", n, n == 1 ? "" : "s"); notice("mods", t); } }
-        else if (stock && !strstr(prev, "playing") && !strstr(prev, "in the game's code")) {   // (a crash in the game's own code is the engine's to fix, not the driver's: no driver dialog)
+        else if (stock && !strstr(prev, "playing") && !strstr(prev, "in the game's code") && !g_safe_advanced) {   // (a crash in the game's own code is the engine's to fix, not the driver's: no driver dialog; nor while safe_start has a safer level to try)
             char gpu[256] = ""; char gp[1200]; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "r"); if (g) { if (!fgets(gpu, sizeof gpu, g)) gpu[0] = 0; fclose(g); }
             char *nl = strchr(gpu, '\n'); if (nl) *nl = 0;
             notice("driver", *gpu ? gpu : "unknown");
@@ -339,7 +342,7 @@ static void *boot_guard_main(void *p) {
     (void)p; int dev = 0; time_t t0 = time(NULL);
     for (;;) { sleep(1);
         const char *gpu = nvn_vk_gpu_name ? nvn_vk_gpu_name() : NULL;
-        if (gpu && !dev) { dev = 1; if (g_boot_fd >= 0) { static const char m[] = "device\n"; (void)!write(g_boot_fd, m, sizeof m - 1); }
+        if (gpu && !dev) { dev = 1; dm_boot_device_up();
             char gp[1200]; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "w"); if (g) { fprintf(g, "%s\n", gpu); fclose(g); } }
         uint64_t fr = dm_nvn_frame_count ? dm_nvn_frame_count() : 0;
         if (dev && fr >= 300 && time(NULL) - t0 >= 30) {   // played: the run is known good
@@ -441,7 +444,8 @@ static void device_profile(void) {
     const char *ag = getenv("DM_AUTO_GRAPHICS");
     if (ag && !force) {
         const char *at = getenv("DM_AUTO_TEX"), *aa = getenv("DM_AUTO_ANISO"), *af = getenv("DM_AUTO_FPS");
-        setenv("DM_GRAPHICS", ag, 0); if (at && !strcmp(at, "half")) setenv("DM_VK_TEX_QUALITY", "half", 0); if (aa) setenv("DM_VK_MAX_ANISO", aa, 0);
+        setenv("DM_GRAPHICS", ag, 0); if (aa) setenv("DM_VK_MAX_ANISO", aa, 0);
+        if (at && !strcmp(at, "half") && !getenv("DM_VK_TEX_QUALITY")) { setenv("DM_VK_TEX_QUALITY", "half", 1); setenv("DM_VK_TEX_QUALITY_AUTO", "1", 1); }   // (the profile's half: nvn_vk.c may keep full on a driver that crashed with it)
         if (af && atoi(af) >= 60) setenv("DM_FPS_TARGET", af, 0);   // (60 only when the app found a top phone and a display that 60 divides)
         { const char *as = getenv("DM_AUTO_SCALER"); if (as && *as) setenv("DM_SCALER", as, 0); }   // (SGSR on a mid or top GPU, the lighter Sharp on a low one)
         const char *g = getenv("DM_GRAPHICS"), *tq = getenv("DM_VK_TEX_QUALITY"), *an = getenv("DM_VK_MAX_ANISO"), *ft = getenv("DM_FPS_TARGET"), *w = getenv("DM_AUTO_WHAT"), *hz = getenv("DM_DISPLAY_HZ");
@@ -461,7 +465,7 @@ static void device_profile(void) {
     if (gb > 0 && gb < 5.5) graphics = "low";
     if (graphics) setenv("DM_GRAPHICS", graphics, 0);
     if (aniso) setenv("DM_VK_MAX_ANISO", aniso, 0);
-    if (tex) setenv("DM_VK_TEX_QUALITY", tex, 0);
+    if (tex && !getenv("DM_VK_TEX_QUALITY")) { setenv("DM_VK_TEX_QUALITY", tex, 1); if (!strcmp(tex, "half")) setenv("DM_VK_TEX_QUALITY_AUTO", "1", 1); }
     const char *g = getenv("DM_GRAPHICS"), *tq = getenv("DM_VK_TEX_QUALITY"), *an = getenv("DM_VK_MAX_ANISO");
     fprintf(stderr, "boot: device profile %s, %s (chip %s %s%s, %.1f GB memory): graphics %s, anisotropic filtering %sx, textures %s\n", p ? p->name : "none", p ? p->what : "chip not in the table",
             *maker ? maker : "?", *model ? model : "unknown", force ? ", DM_PROFILE" : "", gb, g ? g : "default", an ? an : "default", tq ? tq : "full");
@@ -505,20 +509,30 @@ static const char *thermal_text(char *buf, size_t n) {
 // Graphics "auto": TV mode while the phone keeps cool; handheld mode (720p, lighter effects) once it is hot (thermal status severe or worse, or throttling forecast
 // within 10 s), back to TV mode after a minute below "moderate" with headroom to spare. The game switches as when a Switch leaves or enters its dock
 void dm_set_opmode(int m);   // host/hle_oe.c: tells the game the console mode changed
-// Frame-rate guard (DM_FPS_TARGET 60 and up, with Graphics on Auto or Adaptive; DM_FPS_GUARD=0 turns it off): the frames presented each 5 s against the target. Two
+// Frame-rate guard (every frame-rate target, 30 included: the project's floor is a locked 30 on every phone; with Graphics on Auto or Adaptive; DM_FPS_GUARD=0 turns
+//   it off): the frames presented each 5 s against the target. Two
 //   checks in a row short of it (under 93 %) drop to handheld mode (720p, the game's lighter settings), which holds the rate where TV mode cannot; TV mode is tried
 //   again after a calm, steady spell, a minute the first time and twice as long after each fall back (up to 16 minutes), so a scene that cannot hold it does not
-//   flip between the two. Game speed stays right meanwhile (hle_nvn.c vstep_tick). Graphics on High or Low chosen by hand is left alone
+//   flip between the two. Game speed stays right meanwhile (hle_nvn.c vstep_tick). Graphics on High, Low or Lowest chosen by hand is left alone
+// Games whose render size is fixed at start (Pokémon Sword / Shield: a mode change while playing does not change it, hle_resscale.c) step the game's own 3D render
+//   scale instead, one step at a time: 100, 85, 70, 60 % of what the game asks, in width and height (72, 49, 36 % of the pixels). Down after the same two checks short
+//   of the target, or while hot at most every 30 s (heat follows slowly); up one step after the same calm, steady spell, with the same doubling wait. Every step down is
+//   checked 10 s later, as a lower scale does not always help: on a strong GPU its governor lowers the clock with the load and frames can get longer (Galaxy S25+: 43
+//   against 36 ms walking at 60 %, hle_resscale.c). A step for a short frame rate that gained under 1 fps (the slowdown is not the GPU's: the CPU, a clock cap while
+//   charging or warm, the replay's own work), or a step for heat that cost over 1 fps, is taken back, and that reason steps nothing for 5 minutes
+int dm_res_scale_ready(void); void dm_res_factor_set(float f);   // host/hle_resscale.c
+static const float k_res_steps[] = { 1.0f, 0.85f, 0.7f, 0.6f };
+#define NRES ((int)(sizeof k_res_steps / sizeof k_res_steps[0]))
 static int g_fps_guard;   // set at start (fps_guard_init): the target, 0 off
 static void fps_guard_init(void) {
     const char *t = getenv("DM_FPS_TARGET"), *off = getenv("DM_FPS_GUARD"), *g = getenv("DM_GRAPHICS");
     if (!t || !*t) t = getenv("DM_AUTO_FPS");   // (Frame rate on Auto: what the app chose for this phone)
-    int fps = t ? atoi(t) : 0;
-    if (fps < 60 || (off && !strcmp(off, "0")) || (g && (!strcmp(g, "high") || !strcmp(g, "low")))) return;   // (read before the phone's profile fills DM_GRAPHICS in)
-    g_fps_guard = fps; fprintf(stderr, "fps guard: %d fps target: handheld mode (720p) whenever TV mode falls short of it\n", fps);
+    int fps = t ? atoi(t) : 0; if (fps <= 0) fps = 30;   // (no target set: the game's own 30)
+    if (fps < 30 || (off && !strcmp(off, "0")) || (g && (!strcmp(g, "high") || !strcmp(g, "low") || !strcmp(g, "lowest")))) return;   // (read before the phone's profile fills DM_GRAPHICS in)
+    g_fps_guard = fps; fprintf(stderr, "fps guard: %d fps target: a lighter picture whenever it falls short of 30 or the phone runs hot\n", fps);
 }
 static void graphics_auto(void) {
-    static int mode = 1, cool, slow, held, wait = 12, primed; static uint64_t last_fr;
+    static int mode = 1, cool, slow, held, wait = 12, primed, lv, since; static uint64_t last_fr;
     const char *g = getenv("DM_GRAPHICS");
     if (!(g && !strcmp(g, "auto") && g_th_mgr && g_th_st) && !g_fps_guard) return;
     int hot = 0, calm = 1;
@@ -530,6 +544,35 @@ static void graphics_auto(void) {
     int short_ = fps > 1 && fps < 30 * 0.93, full = fps >= 30 * 0.97;   // (no frames at all: a load or a pause, not a slow scene)
     slow = short_ ? slow + 1 : 0;
     cool = calm && (!g_fps_guard || full) ? cool + 1 : 0;
+    if (dm_res_scale_ready()) {   // the render scale (a cap set by hand, DM_RES_CAP or Lowest, is left alone)
+        static int probe, probe_hot, nogain, noheat; static double fps_was;
+        if (getenv("DM_RES_CAP")) return;
+        since++;
+        if (nogain > 0) nogain--;
+        if (noheat > 0) noheat--;
+        if (probe && !--probe && fps > 1 && fps_was > 1 && lv > 0 && (probe_hot ? fps < fps_was - 1.0 : fps < fps_was + 1.0)) {   // the step did not help
+            lv--; dm_res_factor_set(k_res_steps[lv]); slow = 0; since = 0;
+            if (probe_hot) noheat = 60; else nogain = 60;
+            fprintf(stderr, "%s: the lighter picture %s (%.1f → %.1f fps): back to 3D render scale %d %%; %s for 5 minutes\n", probe_hot ? "graphics auto" : "fps guard",
+                    probe_hot ? "cost frames" : "did not help", fps_was, fps, (int)(k_res_steps[lv] * 100 + 0.5f),
+                    probe_hot ? "heat lowers it no further" : "the slowdown is not the GPU's, so a short frame rate lowers it no further");
+            return;
+        }
+        if (full) held++;
+        if (held >= 24) wait = 12;   // two minutes held at this step: the next step down waits a minute again
+        int for_heat = hot && since >= 6 && !noheat, for_rate = slow >= 2 && !nogain;
+        if ((for_heat || for_rate) && lv < NRES - 1) {
+            if (!for_heat && held < 24 && wait < 192) wait *= 2;   // short again soon after a step up: wait twice as long next time
+            probe = 2; probe_hot = for_heat; fps_was = fps;
+            lv++; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0;
+            if (for_heat) fprintf(stderr, "graphics auto: the phone is hot: 3D render scale %d %%\n", (int)(k_res_steps[lv] * 100 + 0.5f));
+            else fprintf(stderr, "fps guard: %.1f fps, short of %d: 3D render scale %d %%; a step up after %d s steady\n", fps, g_fps_guard, (int)(k_res_steps[lv] * 100 + 0.5f), wait * 5);
+        } else if (lv > 0 && cool >= wait) {
+            lv--; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
+            fprintf(stderr, "graphics auto: %s: 3D render scale %d %%\n", g_fps_guard ? "steady and cool" : "cooled down", (int)(k_res_steps[lv] * 100 + 0.5f));
+        }
+        return;
+    }
     if (mode == 1) {
         if (full) held++;
         if (held >= 24) wait = 12;   // two minutes held in TV mode: the next fall back waits a minute again
@@ -609,6 +652,7 @@ static void *inspector_main(void *p) {
             if (w) { if (k == 2) inspector_tree(r, w); else if (k) inspector_peek(r, w); else inspector_scan(r, w); fclose(w); rename(t, o); } fclose(r); unlink(q); } }
     return NULL;
 }
+#include "safe_start.h"   // safe_start(): one level safer after a start that crashed in the graphics driver (tests/t_safe_start.c)
 static void host_start(void) {
     if (g_started++) return;
     const char *f = g_app->activity->externalDataPath; snprintf(g_files, sizeof g_files, "%s", f ? f : "/sdcard/nxnative");
@@ -623,6 +667,7 @@ static void host_start(void) {
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
     snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p);
+    g_safe_advanced = safe_start(g_files);   // (after env.txt: the player's settings win; before the phone profile: its defaults do not)
     // why Android ended the previous run (GameActivity, ApplicationExitInfo): reason 2 a signal, 3 low memory, 4 / 5 a crash, 6 not responding, 10 / 11 the player /
     //   the app, 13 other (Samsung's game manager, heat), 14 frozen
     { const char *le = getenv("DM_LAST_EXIT"); if (le && *le) fprintf(stderr, "boot: Android says the previous run ended: %s\n", le); }
@@ -641,8 +686,10 @@ static void host_start(void) {
       if (ld) { while ((e = readdir(ld))) if (e->d_name[0] != '.') { snprintf(f, sizeof f, "%s/%s", getenv("DM_LIVE_SPV"), e->d_name); unlink(f); } closedir(ld); } }   // textures converted for a GPU without BC, kept for the next start (tex_cache.h)
     setenv("DM_AUDIO", "1", 0);
     // graphics (the app's settings screen): high = the console's TV mode (1080p, full effects), low = handheld mode (720p, the game's own lighter settings),
-    // auto = TV mode, switched to handheld while the phone is hot (graphics_auto below). DM_OPMODE in env.txt still wins
-    { const char *g = getenv("DM_GRAPHICS"); if (g && !strcmp(g, "low")) setenv("DM_OPMODE", "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0); }
+    // auto = TV mode, made lighter while the phone is hot or slow (graphics_auto below), lowest = handheld mode with the game's 3D render scale capped at 75 % (960x540 in
+    // Pokémon Sword / Shield, hle_resscale.c; other games: as low). DM_OPMODE and DM_RES_CAP in env.txt still win
+    { const char *g = getenv("DM_GRAPHICS"); if (g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) setenv("DM_OPMODE", "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0);
+      if (g && !strcmp(g, "lowest")) setenv("DM_RES_CAP", "0.75", 0); }
 #if defined(DM_GAME_ANDROID_OPMODE) && DM_GAME_ANDROID_OPMODE >= 0
     { char m[4]; snprintf(m, sizeof m, "%d", DM_GAME_ANDROID_OPMODE); setenv("DM_OPMODE", m, 0); }   // the profile's android_op_mode (env.txt DM_OPMODE wins)
 #endif   // real sound output (AAudio, compat/aaudio_unit.c); env.txt can set 0
