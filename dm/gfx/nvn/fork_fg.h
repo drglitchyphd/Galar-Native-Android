@@ -162,6 +162,13 @@ static void *fg_worker(void *p) {
                    if (++FG.ngen == 1 || FG.ngen % 1800 == 0) VLOG("[FORK] fg: %llu frames generated, %.1f ms each (on its own thread)", (unsigned long long)FG.ngen, FG.gen_ms); }
         }
         static int nopace = -1; if (nopace < 0) { const char *e = getenv("DM_FORK_FG_PACE"); nopace = e && !atoi(e); }   // DM_FORK_FG_PACE=0: no display times (a test)
+        // the times, now that both frames are ready (v26 used the ones worked out ~20 ms earlier on the game's thread: often past by now, and of two frames both
+        //   past due Android shows only the newer, the real one): the generated frame no earlier than the next refresh, the real one half an interval after it
+        if (j.t && g_refresh_ns && !nopace) {
+            uint64_t now = mono_ns(), gt = j.t > j.half ? j.t - j.half : 0;
+            if (gt < now + g_refresh_ns) gt = now + g_refresh_ns;
+            if (j.t < gt + j.half) j.t = gt + j.half;
+            j.half = j.t - gt; }
         pthread_mutex_lock(&g_wmu);
         if (W.sc) {
             uint64_t t2 = mono_ns();
