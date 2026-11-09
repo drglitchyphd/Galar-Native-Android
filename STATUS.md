@@ -1,24 +1,25 @@
 # STATUS
 
-**Build:** v19 on branch `fork/v15` (Sword only; the icon opens the game). Data in `/storage/emulated/0/GalarFork/`.
+**Build:** v20 on branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
 
-## Works (tested on the Fold, v13–v18)
-- Own setup in the shared folder; launch, battles, 30 fps; fold / unfold switch in place.
-- Upstream merged (21 commits), with no new setup needed.
-- Picture "Fill, corrected": the camera is right on both screens. The battle cameras were fixed in v18: the x9 site is the game's second 16:9 constant, and the 4:3 mod has a typo there. Only one place in main builds 16:9, so the camera sites are complete.
-- Layout profiles switch with the screen (`touch_layout_<profile>.txt`).
+## Works (tested on the Fold, v13–v19)
+- Own setup in the shared folder, launch, battles, 30 fps, fold / unfold in place, upstream merged.
+- Picture "Fill, corrected": the camera is right on both screens, the battle cameras too (v18). Main menu fades are fixed (v19).
+- DLC through in-game menu → System → Setup screen (v19). Layout profiles per screen.
 
-## New in v19 (not tested yet)
-- In-game menu → System → **Setup screen**, over the running game, for DLC, saves and the driver (one-game builds had no way there).
-- Fades no longer leave flashing bars: a shrunk UI draw that samples only ≤4x4 textures is drawn full size again (`fork_ui_fill`).
-
-## Not tested yet
-- Add DLC (`ForkDlc.java`) and the touch editor's Save / Reset / Cancel bar.
+## New in v20 (not tested yet)
+- Controls → **Control scheme: Floating sticks** (`DM_FORK_TOUCH=float`; default Stock):
+  - left half = movement stick, right half = camera stick, each based where the thumb lands;
+  - a quick tap that is not on a button = A (a menu item while a game menu shows); two-finger tap = B.
+- Controls → **Stick dead zone** (`DM_FORK_DEADZONE`, 0–40 %, default 12).
+- Touch editor bar: drag it by its label (⠿); its position is kept per screen.
 
 ## Known / watch
-- Unknown shaders drawn before the first UI shader stay full size (logged: `ecacdb40…`, `b6ff050a…`). Check whether they are UI pieces that look stretched.
-- The game is killed in the background after a few minutes (about 2.4 GB). Idea: a foreground-service toggle.
+- A brief flash at the top / bottom when the in-game (X) menu opens. Needs `DM_FORK_CAPTURE=1` and the zip.
+- Unknown shaders drawn before the first UI shader are kept full size (`ecacdb40…`, `b6ff050a…`). Check for stretched HUD pieces.
 
-## Next
-1. Steven tests v19: fades, DLC via Setup screen, the editor bar.
-2. Portrait on the inner screen and pause on fold (M2/M3). Then the keep-alive toggle and save backups (M6).
+## Next (agreed with Steven, Nov 9)
+1. Portrait on the inner screen.
+2. Keep alive in background (foreground-service toggle).
+3. Frame generation 30→60 (research first: lsfg-vk / the player's own Lossless.dll, vs one built into the fork). Steven is collecting documentation.
+- The game's own 60 fps mode changes some animation speeds: not pursued.

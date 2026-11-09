@@ -41,6 +41,11 @@ static float g_rknob_x, g_rknob_y; static int g_rstick_on;
 static double g_inner_t;   // the last touch of the D-pad or the right stick   // the right stick: its base stays put, the knob follows the thumb
 static int g_visible = 1;
 static int g_edit;   // the layout editor is on (touch_ui_event, front_overlay)
+// FORK: the control scheme (DM_FORK_TOUCH=float; off = the stock controls). Floating sticks: a finger down anywhere on the left half that is not on a button is the
+//   movement stick, its base where the finger landed; on the right half the camera stick the same way (tilt from where the finger landed, not the finger's speed).
+//   A quick tap on either half presses A (a menu item when one of the game's menus shows); two fingers tapping together stay B. DM_FORK_DEADZONE: 0-40 % of the stick
+static int g_float = -1; static float g_dead = 0.12f;
+static int g_fr_on; static float g_fr_x, g_fr_y, g_frk_x, g_frk_y;   // the floating camera stick: on, its base, its knob
 static double g_touch_t; static double g_two_t, g_tap_mute;   // two-finger tap: when the second finger landed; single taps ignored until g_tap_mute
 int touch_menu_active(void);   // touch_menu.c: one of the game's menus shows
 #if defined(DM_GAME_TOUCH_MENU) && DM_GAME_TOUCH_MENU
@@ -136,6 +141,7 @@ static int hit(int c, float x, float y, float slack) {
 static int target_at(float x, float y) {
     if (hit(C_RSTICK, x, y, 1.3f)) return C_RSTICK;
     for (int c = C_A; c < NCTL; c++) if (hit(c, x, y, 1.3f)) return c;   // thumbs miss: touch areas 1.3 times the drawing
+    if (g_float > 0) return x < g_w * 0.5f ? C_STICK : C_CAM;   // FORK: floating sticks, each on its own half
     if (x < g_w * 0.42f && y > g_h * 0.30f) return C_STICK;
     if (x > g_w * 0.45f) return C_CAM;
     return -1;
@@ -199,8 +205,13 @@ static void recompute_locked(void) {
         int c = g_ptr[i].target;
         if (c == C_STICK) { float r = g_c[C_STICK].r, dx = g_ptr[i].x - g_stick_x, dy = g_ptr[i].y - g_stick_y, d = sqrtf(dx * dx + dy * dy);
             if (d > r) { dx *= r / d; dy *= r / d; }
-            float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < 0.12f * 0.12f) nx = ny = 0;   // dead zone
+            float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < g_dead * g_dead) nx = ny = 0;   // dead zone (FORK: g_dead, DM_FORK_DEADZONE)
             lx = nx; ly = ny; stick = 1; g_knob_x = g_stick_x + dx; g_knob_y = g_stick_y + dy; }
+        else if (c == C_CAM && g_float > 0 && !g_ptr[i].thr) {   // FORK: the floating camera stick, tilt from where the finger landed
+            float r = g_c[C_STICK].r, dx = g_ptr[i].x - g_fr_x, dy = g_ptr[i].y - g_fr_y, d = sqrtf(dx * dx + dy * dy);
+            if (d > r) { dx *= r / d; dy *= r / d; }
+            float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < g_dead * g_dead) nx = ny = 0;
+            rx = nx; ry = ny; rstick = 2; g_frk_x = g_fr_x + dx; g_frk_y = g_fr_y + dy; }
         else if (c == C_RSTICK) { const ctl *k = &g_c[C_RSTICK]; float r = k->r, dx = g_ptr[i].x - k->cx, dy = g_ptr[i].y - k->cy, d = sqrtf(dx * dx + dy * dy);
             if (d > r) { dx *= r / d; dy *= r / d; }
             float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < 0.12f * 0.12f) nx = ny = 0;
@@ -213,10 +224,12 @@ static void recompute_locked(void) {
                                      fabsf(g_ptr[i].x - g_ptr[i].x0) < g_h * 0.03f && fabsf(g_ptr[i].y - g_ptr[i].y0) < g_h * 0.03f) { g_ptr[i].lp = 1; b |= DM_BTN_ZL; }   // press and hold: ZL (lock on)
     for (int i = 0; i < 10; i++) if (g_ptr[i].id >= 0 && g_ptr[i].lp) b |= DM_BTN_ZL;   // a throw swipe holds ZR (aim) until the finger lifts (throw)
     if (rstick || (b & (DM_BTN_UP | DM_BTN_DOWN | DM_BTN_LEFT | DM_BTN_RIGHT))) g_inner_t = t;   // held: stays clear
+    g_fr_on = rstick == 2; if (rstick == 2) rstick = 0;   // FORK: the floating camera stick is not the on-screen right stick (drawn on its own)
     g_rstick_on = rstick; if (!rstick) { g_rknob_x = g_c[C_RSTICK].cx; g_rknob_y = g_c[C_RSTICK].cy; }
     if (!stick) { g_stick_on = 0; g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }
     // the camera: the finger's speed, full turn at about a screen height per 0.6 s, at rest within 60 ms of the finger stopping
     float vmax = g_h / 0.6f; if (t - g_cam_t > 0.06) g_cam_vx = g_cam_vy = 0;
+    if (g_fr_on) rstick = 1;   // FORK: the floating camera stick's tilt instead of the finger's speed
     g_btn = b; g_lx = ax(lx); g_ly = ax(ly); g_rx = rstick ? ax(rx) : ax(g_cam_vx / vmax); g_ry = rstick ? ax(ry) : ax(-g_cam_vy / vmax);
 }
 // ---------- the layout editor: hold − for 2 s to enter; drag a control to move it, pinch on it to resize it, double-tap it to hide / show it;
@@ -316,7 +329,9 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (t >= C_A) g_held_until[t] = now_s() + 0.08;
             if (t == C_RSTICK || (t >= C_UP && t <= C_RIGHT)) g_inner_t = now_s();
             if (t == C_STICK) { float r = g_c[C_STICK].r; g_stick_on = 1;   // the base comes to the thumb, kept on screen
-                (void)r; g_stick_x = g_c[C_STICK].cx; g_stick_y = g_c[C_STICK].cy; }   // fixed, as on a Joy-Con: the thumb's offset from the base is the tilt
+                (void)r; g_stick_x = g_c[C_STICK].cx; g_stick_y = g_c[C_STICK].cy;
+                if (g_float > 0) { g_stick_x = x; g_stick_y = y; } }   // FORK: floating: the base where the thumb landed
+            if (t == C_CAM && g_float > 0) { g_fr_x = g_frk_x = x; g_fr_y = g_frk_y = y; }   // FORK   // fixed, as on a Joy-Con: the thumb's offset from the base is the tilt
             break; }
     } else if (act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) {
         int32_t id = AMotionEvent_getPointerId(e, act == AMOTION_EVENT_ACTION_UP ? 0 : idx);
@@ -327,7 +342,7 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             double t = now_s();
             if (t - g_two_t < 0.4) { g_two_t = 0; g_tap_mute = t + 0.3; dm_input_press(DM_BTN_B, 80000000ull); click_locked(); }
             else if (t >= g_tap_mute && !g_ptr[i].lp) { static int dg = -1; if (dg < 0) dg = getenv("DM_TOUCH_DIAG") != NULL; if (dg && !touch_menu_active()) touch_menu_tap(g_ptr[i].x0, g_ptr[i].y0, g_w, g_h);   // (diagnosis: what is under the tap)
-                if (touch_menu_active()) touch_menu_tap(g_ptr[i].x0, g_ptr[i].y0, g_w, g_h); else if (GESTURES && g_ptr[i].target == C_CAM) { dm_input_press(DM_BTN_A, 80000000ull); click_locked(); } }
+                if (touch_menu_active()) touch_menu_tap(g_ptr[i].x0, g_ptr[i].y0, g_w, g_h); else if ((GESTURES && g_ptr[i].target == C_CAM) || g_float > 0) { dm_input_press(DM_BTN_A, 80000000ull); click_locked(); } }   // FORK: || floating (a tap on either half)
         }
         // quick swipes on the camera side (under 0.35 s, a tenth of the screen height or more): left / right = L / R (the item or Pokémon), down = X (items / Pokémon)
         for (int i = 0; i < 10; i++) if (GESTURES && g_ptr[i].id == id && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !g_ptr[i].lp && now_s() - g_ptr[i].t0 < 0.35 && !touch_menu_active()) {
@@ -442,6 +457,8 @@ void touch_ui_setting(const char *key, const char *value) {
     pthread_mutex_lock(&g_mu);
     if (!strcmp(key, "DM_TOUCH_OPACITY")) g_opacity = value ? clampf((float)atof(value) / 100.0f, 0.2f, 1.0f) : 1.0f;
     else if (!strcmp(key, "DM_TOUCH_FADE")) g_fade = value ? fmaxf(0.0f, (float)atof(value)) : 3.0f;
+    else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
+    else if (!strcmp(key, "DM_FORK_DEADZONE")) g_dead = value ? clampf((float)atof(value) / 100.0f, 0.0f, 0.4f) : 0.12f;   // FORK
     g_touch_t = now_s();
     pthread_mutex_unlock(&g_mu);
 }
@@ -457,6 +474,8 @@ static void prefs(void) {
     if (g_opacity >= 0) return;
     const char *o = getenv("DM_TOUCH_OPACITY"), *f = getenv("DM_TOUCH_FADE");
     g_opacity = o ? clampf((float)atof(o) / 100.0f, 0.2f, 1.0f) : 1.0f; if (f) g_fade = fmaxf(0.0f, (float)atof(f));
+    { const char *ft = getenv("DM_FORK_TOUCH"), *dz = getenv("DM_FORK_DEADZONE"); g_float = ft && !strcmp(ft, "float");   // FORK: the control scheme, the dead zone
+      if (dz && *dz) g_dead = clampf((float)atof(dz) / 100.0f, 0.0f, 0.4f); if (g_float) fprintf(stderr, "[FORK] [touch] floating sticks, tap for A (dead zone %.0f %%)\n", g_dead * 100); }
 }
 int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     pthread_mutex_lock(&g_mu); prefs();
@@ -482,6 +501,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
             if (c >= C_UP && al == 1.0f) { float r = g_c[c].r, ox = c == C_LEFT ? -0.42f : c == C_RIGHT ? 0.42f : 0, oy = c == C_UP ? -0.42f : c == C_DOWN ? 0.42f : 0;
                 add(it, &n, max, g_c[c].cx + ox * r, g_c[c].cy + oy * r, r * 0.22f, OVL_DISC, 255, 255, 255, 0.9f); } }
         compass(it, &n, max, g_stick_on ? 1.0f : idle ? ia : 0.75f, g_stick_x, g_stick_y, g_knob_x, g_knob_y, g_c[C_STICK].r);
+        if (g_fr_on) compass(it, &n, max, 1.0f, g_fr_x, g_fr_y, g_frk_x, g_frk_y, g_c[C_STICK].r);   // FORK: the floating camera stick under the finger
         if (g_c[C_RSTICK].shown) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,   // faint while unused: it and the D-pad sit over the dialogue box
              g_c[C_RSTICK].cy, g_rknob_x, g_rknob_y, g_c[C_RSTICK].r);
         for (int i = 0; i < n; i++) { it[i].a *= g_opacity; it[i].galpha *= g_opacity; }

@@ -273,6 +273,10 @@ public final class GameMenu {
         heading(a, t(a, "Touch controls"));
         slider(a, t(a, "Opacity"), "DM_TOUCH_OPACITY", 20, 100, 100, v -> v + " %");
         slider(a, t(a, "Fade after"), "DM_TOUCH_FADE", 0, 10, 3, v -> v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));
+        // FORK: the control scheme (touch_ui.c g_float) and the sticks' dead zone
+        choice(a, "DM_FORK_TOUCH", t(a, "Control scheme"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the stick on the left, drag on the right turns the camera") },
+            { "float", t(a, "Floating sticks"), t(a, "Floating sticks: the left half is the movement stick and the right half the camera stick, each where your thumb lands; a quick tap anywhere that is not a button presses A, two fingers B") } });
+        slider(a, t(a, "Stick dead zone"), "DM_FORK_DEADZONE", 0, 40, 12, v -> v + " %");
         action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Save, Reset or Cancel on the bar at the top. Each screen and orientation keeps its own layout."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); ForkTouch.bar(a); } catch (UnsatisfiedLinkError e) { } });   // FORK: ForkTouch.bar
     }
