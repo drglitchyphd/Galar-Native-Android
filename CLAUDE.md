@@ -23,6 +23,8 @@ Linux or WSL (Ubuntu). Details: `docs/BUILDING.md`.
 - Stock output: `~/psa-build/GalarNative.apk` (name comes from `dm/games/game.py <GAME> app_name`)
 - Engine only, after `dm/host`, `dm/gfx` or `dm/android/app/jni` changes:
   `cd dm/android && make -f Makefile.host GAME=01008DB008C2C000 NDK=~/psa-build/android-ndk-r27c lib`, then rerun the full script (finished parts are reused)
+- **Header edits don't trigger rebuilds** (the Makefile tracks only .c files): `touch` every .c that includes an edited .h (`grep -rl name.h dm`), or the old object is linked silently.
+- Raise `FORK_VERSION` for every build: the app re-unpacks its scripts only on a new version.
 - Keep `~/psa-build/debug.keystore`: updates only install over a build signed with the same key.
 
 ## Test

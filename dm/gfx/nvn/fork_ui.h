@@ -11,13 +11,22 @@ static const void *g_fk_img;   // the composite's image (its vtex), learnt from 
 static int g_fk_comp, g_fk_clear;   // this frame: the composite was drawn / the bands were cleared
 static uint64_t g_fk_ui;   // UI draws shrunk (logged now and then)
 
-static void fork_ui_frame(void) { g_fk_comp = 0; g_fk_clear = 0; }   // present_window_locked: a new frame begins
+static int g_fk_inimg, g_fk_prev_comp, g_fk_capped;   // this frame: draws into the image; last frame had the composite; the automatic capture was taken
+// present_window_locked: a new frame begins. DM_FORK_CAPTURE=1 (env.txt): the frame after the first one that went from 3D to UI only (a transition, a menu opening)
+//   is captured (frame-capture.zip in Download, as the menu's Capture a frame), to see what the game draws there
+static void fork_ui_frame(void) {
+    static int want = -1; if (want < 0) { const char *e = getenv("DM_FORK_CAPTURE"); want = e && atoi(e) > 0; }
+    if (want && !g_fk_capped && g_fk_prev_comp && !g_fk_comp && g_fk_inimg && atomic_load(&g_cap) == 0) {
+        g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after a switch from 3D to UI only"); }
+    g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0;
+}
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {
     if (!vkey || !img) return;
     if (!strncmp(vkey, "7fa0c6373aca1086", 16)) {   // the 3D composite: its image is the one the UI goes into
         if (g_fk_img != img) { g_fk_img = img; VLOG("[FORK] UI image found (%ux%u)", tw, th); }
         g_fk_comp = 1; return; }
     if (img != g_fk_img || !strncmp(vkey, "389df45bf4d9a0f6", 16)) return;
+    g_fk_inimg++;
     float kx, ky; dm_fork_ui_scale(&kx, &ky);
     if (kx == 1 && ky == 1) return;
     float cx = tw * 0.5f, cy = th * 0.5f;

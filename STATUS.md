@@ -1,6 +1,12 @@
 # STATUS
 
-**Build:** v15 (`fork/v15`). Upstream merged, fork fixes, and Picture "Fill, corrected" (experimental). **Not yet tested on the Fold.**
+**Build:** v16 (`fork/v15` branch). **Not yet tested on the Fold.**
+v15 test: "Fill, corrected" looks good in normal play. Transitions flash a squished image, or show the old picture in the bands; some battle camera cuts are squished.
+v16 adds:
+- DLC card on the setup screen ("Add DLC (.nsp)": `ForkDlc.java`, nx_extract `--aoc` into `aoc/`, no new setup).
+- Touch layout per screen and orientation (`touch_layout_<profile>.txt`, from `profile_of` in `touch_ui.c`).
+- Save / Reset / Cancel bar in the touch editor (`ForkTouch.java`).
+- `DM_FORK_CAPTURE=1`: captures the frame after a switch from 3D to UI only, to diagnose the transition glitches.
 
 ## What works (tested on v13/v14)
 - Own setup in `/storage/emulated/0/GalarFork/` (game, saves, settings, mods, caches, logs). Keys stay private.

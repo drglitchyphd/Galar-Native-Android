@@ -10,13 +10,13 @@
 #   FORK_NAME      app name under the icon          default "Galar Fork"
 #   FORK_DATA_DIR  folder in /storage/emulated/0    default GalarFork  (setup writes the ~15 GB game here; it survives uninstalling)
 #   FORK_ICON      icon colours "top ground" (hex)  default "2a6fdb 182040"
-#   FORK_VERSION   versionCode                      default 15 (raise it for each build you install over an older one)
+#   FORK_VERSION   versionCode                      default 16 (raise it for each build you install over an older one)
 set -euo pipefail
 FORK_PACKAGE=${FORK_PACKAGE:-com.nxnative.galarfork}
 FORK_NAME=${FORK_NAME:-Galar Fork}
 FORK_DATA_DIR=${FORK_DATA_DIR:-GalarFork}
 FORK_ICON=${FORK_ICON:-2a6fdb 182040}
-FORK_VERSION=${FORK_VERSION:-15}
+FORK_VERSION=${FORK_VERSION:-16}
 APK_ARGS=(--package "$FORK_PACKAGE" --name "$FORK_NAME" --data-dir "$FORK_DATA_DIR" --icon "$FORK_ICON" --version "$FORK_VERSION")
 APK_OUT="${WORK:-$HOME/psa-build}/$(echo "$FORK_NAME" | tr -d ' ').apk"
 echo "[FORK] package $FORK_PACKAGE, name \"$FORK_NAME\", data folder /storage/emulated/0/$FORK_DATA_DIR"

@@ -50,6 +50,7 @@ import java.util.zip.ZipInputStream;
 
 public final class SetupActivity extends Activity {
     private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_DRIVER = 3, PICK_SAVE_EXPORT = 4, PICK_SAVE_IMPORT = 5;
+    private static final int PICK_DLC = 6;   // FORK: ForkDlc
     private TextView driverText;
     private final List<String> games = new ArrayList<>();
     private final List<File> importedGames = new ArrayList<>();
@@ -203,6 +204,7 @@ public final class SetupActivity extends Activity {
         saveImport = pill(r4, T.t(this, "Import edited save data"), 0xFF2A2E37, 0xFFF2F3F5, v -> chooseSaveImport());
         shortcut = pill(saveBox, T.t(this, "Add %s to the home screen", gameName()), 0xFF2A2E37, 0xFFF2F3F5, v -> pinShortcut());
         ((LinearLayout.LayoutParams) shortcut.getLayoutParams()).topMargin = px(8);
+        forkDlcCard(more, acc);   // FORK: DLC added without setting the game up again (ForkDlc.java)
         // the Vulkan driver: the phone's own, or an Adreno driver package (a zip with meta.json and the library, e.g. Mesa Turnip) opened through libadrenotools;
         // most players never need it, so it stays folded away unless a driver package is in use
         LinearLayout cd = card(more, null, T.t(this, "Graphics driver"), acc);
@@ -353,6 +355,40 @@ public final class SetupActivity extends Activity {
         c.setOnCheckedChangeListener((b, v) -> envSet(key, v ? on : "")); root.addView(c);
     }
     // a driver package into the app's private storage (libadrenotools loads drivers only from there): its meta.json names the library
+    // FORK: the DLC card: what is set up (aoc/), and "Add DLC" for .nsp files picked on the phone (ForkDlc.install, off this thread)
+    private TextView dlcText;
+    private void forkDlcCard(LinearLayout more, int acc) {
+        LinearLayout c = card(more, null, T.t(this, "DLC"), acc);
+        dlcText = text(c, "", 14, 0xFFF2F3F5, false); forkDlcShow();
+        pill(c, T.t(this, "Add DLC (.nsp)"), 0xFF2A2E37, 0xFFF2F3F5, v -> {
+            if (running) { status.setText(T.t(this, "Please wait for the current setup or file copy to finish.")); return; }
+            if (!setUp()) { status.setText(T.t(this, "Set the game up first, then add its DLC.")); return; }
+            pick(PICK_DLC, true); });
+    }
+    private void forkDlcShow() {
+        if (dlcText == null) return; List<String> d = ForkDlc.installed(this);
+        dlcText.setText(d.isEmpty() ? T.t(this, "None set up. The expansions need their DLC files (small .nsp packages); adding them does not set the game up again.")
+                                    : T.t(this, "Set up: %d DLC package(s) (%s).", d.size(), String.join(", ", d)));
+    }
+    private void forkDlcAdd(Intent data) {
+        final List<Uri> us = new ArrayList<>();
+        if (data.getClipData() != null) for (int k = 0; k < data.getClipData().getItemCount(); k++) us.add(data.getClipData().getItemAt(k).getUri()); else if (data.getData() != null) us.add(data.getData());
+        running = true; status.setText(T.t(this, "Adding the DLC..."));
+        new Thread(() -> {
+            StringBuilder msg = new StringBuilder();
+            try {
+                File py = unpackPython(), dm = unpackScripts(), bin = binDir();
+                for (Uri u : us) {
+                    String name = nameOf(u), path = pathOf(u); File copy = null;
+                    if (path == null) { copy = new File(getCacheDir(), "dlc.nsp"); try (java.io.InputStream in = getContentResolver().openInputStream(u); java.io.OutputStream out = new java.io.FileOutputStream(copy)) { copy(in, out); } path = copy.getPath(); }
+                    String err = ForkDlc.install(this, path, bin, keysDir(), py, dm);
+                    if (copy != null) copy.delete();
+                    msg.append(err == null ? T.t(this, "%s: added.", name) : T.t(this, "%s: %s", name, err)).append('\n');
+                }
+            } catch (Exception e) { msg.append(e.toString()); }
+            runOnUiThread(() -> { running = false; status.setText(msg.toString().trim()); forkDlcShow(); });
+        }).start();
+    }
     private void installDriver(Uri u, String name) { status.setText(DriverPackages.install(this, u, name)); refresh(); }   // (DriverPackages: shared with the in-game menu)
     private static void deleteTree(File f) { File[] k = f.listFiles(); if (k != null) for (File c : k) deleteTree(c); f.delete(); }
     private static long treeSize(File f) { if (f.isFile()) return f.length(); long s = 0; File[] k = f.listFiles(); if (k != null) for (File c : k) s += treeSize(c); return s; }
@@ -420,6 +456,7 @@ public final class SetupActivity extends Activity {
         if (data == null) { status.setText(T.t(this, "The file picker returned no selected file. Try the phone's Files app and select a file from Downloads or Documents.")); return; }
         if (req == PICK_SAVE_EXPORT) { exportSave(data.getData()); return; }
         if (req == PICK_SAVE_IMPORT) { importSave(data.getData()); return; }
+        if (req == PICK_DLC) { forkDlcAdd(data); return; }   // FORK
         List<Uri> uris = new ArrayList<>();
         if (data.getClipData() != null) for (int k = 0; k < data.getClipData().getItemCount(); k++) uris.add(data.getClipData().getItemAt(k).getUri()); else if (data.getData() != null) uris.add(data.getData());
         if (uris.isEmpty()) { status.setText(T.t(this, "The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.")); return; }

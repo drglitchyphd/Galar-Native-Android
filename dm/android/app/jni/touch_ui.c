@@ -57,10 +57,25 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu" };
 static struct { int set; float fx, fy, fr; int shown; } g_ov[NCTL];
 static char g_lay_path[1100]; static int g_lay_loaded;
-void touch_ui_set_dir(const char *dir) { snprintf(g_lay_path, sizeof g_lay_path, "%s/touch_layout.txt", dir); g_lay_loaded = 0; }
+// FORK: one layout per screen and orientation: touch_layout_<profile>.txt (outer_landscape, inner_landscape, inner_portrait, outer_portrait), picked from the window's
+//   shape in layout(). A profile without its own file starts from the old single touch_layout.txt when there is one, else from the default layout
+static char g_lay_dir[1000]; static const char *g_lay_prof = "";
+void touch_ui_set_dir(const char *dir) { snprintf(g_lay_dir, sizeof g_lay_dir, "%s", dir); g_lay_path[0] = 0; g_lay_prof = ""; g_lay_loaded = 0; }
+static const char *profile_of(float w, float h) {
+    float lo = w < h ? w : h, hi = w < h ? h : w; int outer = lo > 0 && hi / lo > 1.6f;   // the outer screen is about 21:9, the inner nearly square
+    return h > w ? (outer ? "outer_portrait" : "inner_portrait") : (outer ? "outer_landscape" : "inner_landscape");
+}
+const char *touch_ui_profile(void) { return g_lay_prof; }   // (android_main.c: the editor bar names it)
+static void layout_profile(float w, float h) {
+    const char *pf = profile_of(w, h); if (!g_lay_dir[0] || !strcmp(pf, g_lay_prof)) return;
+    g_lay_prof = pf; snprintf(g_lay_path, sizeof g_lay_path, "%s/touch_layout_%s.txt", g_lay_dir, pf); g_lay_loaded = 0;
+    fprintf(stderr, "[FORK] [touch] layout profile %s (%.0fx%.0f)\n", pf, w, h);
+}
 static void layout_load(void) {
     g_lay_loaded = 1; memset(g_ov, 0, sizeof g_ov); if (!g_lay_path[0]) return;
-    FILE *f = fopen(g_lay_path, "r"); char ln[160], nm[32]; float fx, fy, fr; int sh;
+    FILE *f = fopen(g_lay_path, "r");
+    if (!f) { char old[1100]; snprintf(old, sizeof old, "%s/touch_layout.txt", g_lay_dir); f = fopen(old, "r"); }   // FORK: the old single layout as a start
+    char ln[160], nm[32]; float fx, fy, fr; int sh;
     while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "%31s %f %f %f %d", nm, &fx, &fy, &fr, &sh) == 5)
         for (int c = 0; c < NCTL; c++) if (!strcmp(nm, CTL_NAME[c])) { g_ov[c].set = 1; g_ov[c].fx = fx; g_ov[c].fy = fy; g_ov[c].fr = fr; g_ov[c].shown = sh; }
     if (f) fclose(f);
@@ -77,6 +92,7 @@ static void layout_apply(float w, float h) {
 static void layout(float w, float h) {
     static int init; if (!init++) for (int i = 0; i < 10; i++) g_ptr[i].id = -1;   // no finger down
     if (w == g_w && h == g_h) return;
+    layout_profile(w, h);   // FORK: this screen's own layout file
     g_w = w; g_h = h;
     // the outer controls keep about 0.2 of the height (~290 px on a 1440 px phone) clear of the screen's long edges, where the system's navigation buttons and edge
     // swipes are: with the A button nearer, a thumb on it opened recents
@@ -248,6 +264,24 @@ static void edit_event(const AInputEvent *e) {
             g_ep[i].id = -1; }
     }
 }
+// FORK: the editor's commands, also from its Save / Reset / Cancel bar (ForkTouch.java through android_main.c)
+static void edit_reset_locked(void) {   // the default layout for this profile, kept: an empty file (a missing one would start from the old single layout again)
+    memset(g_ov, 0, sizeof g_ov); FILE *f = g_lay_path[0] ? fopen(g_lay_path, "w") : NULL; if (f) fclose(f); g_lay_loaded = 1; g_w = g_h = 0;
+    fprintf(stderr, "[FORK] [touch] layout %s reset to the default\n", g_lay_prof);
+}
+static void edit_leave_locked(void) { g_edit = 0; for (int i = 0; i < 10; i++) g_ep[i].id = -1; }
+// cmd 0: save and leave, 1: reset to the default (the editor stays), 2: leave without saving (the saved layout back)
+void touch_ui_edit_cmd(int cmd) {
+    pthread_mutex_lock(&g_mu);
+    if (g_edit) {
+        if (cmd == 0) { layout_save(); edit_leave_locked(); fprintf(stderr, "[FORK] [touch] layout %s saved: %s\n", g_lay_prof, g_lay_path); }
+        else if (cmd == 1) edit_reset_locked();
+        else { g_lay_loaded = 0; g_w = g_h = 0; edit_leave_locked(); fprintf(stderr, "[FORK] [touch] layout %s: changes dropped\n", g_lay_prof); }
+        click_locked();
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+int touch_ui_editing(void) { return g_edit; }
 // the 2-second holds, checked once a frame (a finger held still sends no events): − toggles the editor (saving on the way out), + in the editor resets the layout
 static void edit_holds_locked(void) {
     double t = now_s(); int minus = 0, plus = 0;
@@ -257,10 +291,10 @@ static void edit_holds_locked(void) {
     if (!g_edit_hold_t) { g_edit_hold_t = t; return; }
     if (t - g_edit_hold_t < 2.0) return;
     g_edit_hold_t = 1e18;   // fired: nothing more until the finger lifts
-    if (plus && g_edit) { memset(g_ov, 0, sizeof g_ov); remove(g_lay_path); g_w = g_h = 0; click_locked(); fprintf(stderr, "[touch] layout reset to the default\n"); return; }
+    if (plus && g_edit) { edit_reset_locked(); click_locked(); return; }   // FORK: edit_reset_locked
     if (g_edit) { layout_save(); g_edit = 0; for (int i = 0; i < 10; i++) g_ep[i].id = -1; fprintf(stderr, "[touch] layout saved: %s\n", g_lay_path); }
     else { g_edit = 1; for (int i = 0; i < 10; i++) { if (g_ptr[i].id >= 0) { g_ep[0].id = g_ptr[i].id; g_ep[0].c = C_MINUS; g_ep[0].t0 = t; } g_ptr[i].id = -1; }
-           g_btn = 0; g_lx = g_ly = g_rx = g_ry = 0; dm_input_set(0, 0, 0, 0, 0); fprintf(stderr, "[touch] layout editor on\n"); }
+           g_btn = 0; g_lx = g_ly = g_rx = g_ry = 0; dm_input_set(0, 0, 0, 0, 0); fprintf(stderr, "[touch] layout editor on\n"); front_open_menu(2); }   // FORK: 2 = the editor's bar
     click_locked();
 }
 // Returns the touch buttons and sticks (for the host's touch source) after this event

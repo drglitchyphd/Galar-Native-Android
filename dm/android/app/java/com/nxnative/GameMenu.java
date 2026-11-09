@@ -71,7 +71,8 @@ public final class GameMenu {
                                              { "online", "Online" }, { "system", "System" } };
 
     // android_main.c: what 0 = the menu, 1 = the controller buttons
-    public static void show(Activity a, int what) { a.runOnUiThread(() -> open(a, what == 1 ? "remap" : null)); }
+    public static void show(Activity a, int what) { if (what == 2) { ForkTouch.bar(a); return; }   // FORK: 2 = the touch editor's bar (touch_ui.c)
+        a.runOnUiThread(() -> open(a, what == 1 ? "remap" : null)); }
 
     private static void open(Activity a, String start) {
         if (dlg != null && dlg.isShowing()) { if (start != null) go(start); return; }
@@ -272,8 +273,8 @@ public final class GameMenu {
         heading(a, t(a, "Touch controls"));
         slider(a, t(a, "Opacity"), "DM_TOUCH_OPACITY", 20, 100, 100, v -> v + " %");
         slider(a, t(a, "Fade after"), "DM_TOUCH_FADE", 0, 10, 3, v -> v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));
-        action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + to reset)."), () -> {
-            if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); } catch (UnsatisfiedLinkError e) { } });
+        action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Save, Reset or Cancel on the bar at the top. Each screen and orientation keeps its own layout."), () -> {
+            if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); ForkTouch.bar(a); } catch (UnsatisfiedLinkError e) { } });   // FORK: ForkTouch.bar
     }
     // Remapping (PadMapping.java, DM_PAD_MAPPING): tap a Switch button, then press the controller key for it (the panel takes the key: remapKey)
     private static String capture;

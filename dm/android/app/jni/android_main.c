@@ -219,6 +219,11 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
     return now ? JNI_TRUE : JNI_FALSE;
 }
 JNIEXPORT void JNICALL Java_com_nxnative_GameMenu_nativeEditTouch(JNIEnv *env, jclass c) { (void)env; (void)c; touch_ui_edit(); }   // "Move the touch controls"
+// FORK: the touch editor's Save / Reset / Cancel bar (ForkTouch.java)
+void touch_ui_edit_cmd(int cmd); int touch_ui_editing(void); const char *touch_ui_profile(void);
+JNIEXPORT void JNICALL Java_com_nxnative_ForkTouch_nativeCmd(JNIEnv *env, jclass c, jint cmd) { (void)env; (void)c; touch_ui_edit_cmd((int)cmd); }
+JNIEXPORT jboolean JNICALL Java_com_nxnative_ForkTouch_nativeEditing(JNIEnv *env, jclass c) { (void)env; (void)c; return touch_ui_editing() ? JNI_TRUE : JNI_FALSE; }
+JNIEXPORT jstring JNICALL Java_com_nxnative_ForkTouch_nativeProfile(JNIEnv *env, jclass c) { (void)c; return (*env)->NewStringUTF(env, touch_ui_profile()); }
 // Holding − on a controller for 3 s opens the controller buttons (front_open_menu(1)): a press starts a timer thread that checks the same press is still held
 uint64_t dm_nvn_frame_count(void) __attribute__((weak));   // (nvn: frames presented)
 static _Atomic int g_minus_seq, g_minus_held;
