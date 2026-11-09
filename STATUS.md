@@ -26,7 +26,8 @@
 - Unknown shaders drawn before the first UI shader are kept full size (`ecacdb40…`, `b6ff050a…`). Check for stretched HUD pieces.
 
 ## Next (agreed with Steven, Nov 9)
-1. ~~Portrait on the inner screen~~ (v21, to test).
+1. ~~Portrait on the inner screen~~ (v21: works, Steven Nov 9).
 2. Keep alive in background (foreground-service toggle).
 3. Frame generation 30→60 (research first: lsfg-vk / the player's own Lossless.dll, vs one built into the fork). Steven is collecting documentation.
 - The game's own 60 fps mode changes some animation speeds: not pursued.
+- Later idea: switch the control behaviour in full-screen menus (no 3D composite drawn: `fork_ui.h`) and in battles (detection needs a shader-logging test first). Sword has no `touch_menu` profile.
