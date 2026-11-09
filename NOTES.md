@@ -159,6 +159,10 @@ Paths are relative to `dm/` unless they start with `scripts/` or `docs/`. Line n
   1. Post-processing chain → `149.png`, then `150.png` (the composited scene in `vk 43` / `nvn 0x38`, 1920x1080).
   2. **UI** is drawn into that same 1080p image with vertex `af0ef3ac1bd35ad3` / fragment `5d53d90745ea1f7d`. The bag and X menu are 46 draws, all this pair.
   3. **Final copy**: vertex `389df45bf4d9a0f6` / fragment `f7c8611fd795251a` reads that image (texture 264) plus a 32x32 noise texture into the presented image.
-- The overworld frames have no UI draws (no HUD on screen). **A battle capture is still needed** to confirm the HUD over 3D uses the same shader and target.
+- The overworld frames have no UI draws (no HUD on screen).
+- **Battle capture (confirmed):** 3D composite → `110.png` (1 draw), then **one HUD pass of 58 draws into the same 1080p image** → `111.png`, then the final copy → `112.png`.
+  - The HUD uses at least two shader pairs: `af0ef3ac…/5d53d907…` and `56af7f00aa776d97/431215e1a621c55c`. The capture lists only each pass's first 3 draws.
+  - **Rule to use (by target, not by shader):** every draw into the image the final copy (`389df45b…`) reads, after the 3D composite's pass, is UI.
+- **Inner screen** (log): swapchain **2504x2256** (aspect 1.11). UI squeeze `k = 1.11 / 1.778 ≈ 0.62`.
 - **Plan for fixed UI scaling, in the graphics layer, no game-code patch:** for UI-shader draws into the composite target, scale the viewport and scissor
   vertically by `k = (W/H) / (16/9)`, centred. Present with the `fill` box. `touch_menu.c` tap mapping needs the same inverse transform.
