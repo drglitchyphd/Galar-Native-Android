@@ -268,6 +268,10 @@ public final class GameMenu {
         if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", p[5]) },
             { "30", "30 fps", t(a, "30 fps, as the game is made") }, { "60", "60 fps", GameSettings.paldea(a) ? t(a, "Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)")
                                                                                                : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") } });
+        // FORK: frame pacing slack (nvn_vk.c pace_time, DM_FORK_PACE_MARGIN)
+        choice(a, "DM_FORK_PACE_MARGIN", t(a, "Frame pacing"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: each frame aimed one refresh ahead (least delay)") },
+            { "2", t(a, "Smooth"), t(a, "Smooth: two refreshes ahead, frames a little late still show on time (about 4 ms more delay)") },
+            { "3", t(a, "Smoothest"), t(a, "Smoothest: three refreshes ahead (about 8 ms more delay)") } });
         // FORK: frame generation (gfx/nvn/fork_fg.h, libforklsfg.so) with the player's own Lossless.dll (setup screen: Frame generation)
         heading(a, t(a, "Frame generation (Lossless Scaling)"));
         if (!Fork.lsfgDll(a).isFile()) note(a, t(a, "Choose your Lossless.dll on the setup screen first (System, Setup screen, Frame generation)."));

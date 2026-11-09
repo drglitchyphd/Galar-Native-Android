@@ -3810,6 +3810,11 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
     uint64_t r = g_refresh_ns, now = mono_ns(); const char *e = getenv("DM_FPS_TARGET"); int fps = e && atoi(e) >= 30 ? atoi(e) : 30;
     uint64_t frame = 1000000000ull / (uint64_t)fps, k = (frame + r / 2) / r; if (!k) k = 1;
     uint64_t iv = k * r; int pace = !pace_off() && k >= 2;
+    // FORK: DM_FORK_PACE_MARGIN (1-3 refreshes, 1 = stock): how far ahead of "now" a frame is aimed. Frames a few ms late (the game's own jitter: p95 ~37 ms against
+    //   33.3) miss a 1-refresh target and slip a whole refresh (the uneven feel); 2-3 absorb that, for 4-8 ms more delay. With frame generation on (fork_fg.h),
+    //   the shown frames come every half interval, so "uneven" is judged against that
+    static int pm = -1; if (pm < 0) { const char *me = getenv("DM_FORK_PACE_MARGIN"); pm = me && atoi(me) >= 1 && atoi(me) <= 3 ? atoi(me) : 1; if (pm > 1) VLOG("[FORK] frame pacing margin %d refreshes", pm); }
+    int fork_fg_live(void); uint64_t ivs = fork_fg_live() ? iv / 2 : iv;
     if (p_past) {
         uint32_t n = 0;
         if (!p_past(g_dev, W.sc, &n, NULL) && n) {
@@ -3818,15 +3823,15 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
                 uint64_t a = t[i].actualPresentTime; g_pace.n++;
                 if (g_pace.prev_actual && a > g_pace.prev_actual) { uint64_t d = a - g_pace.prev_actual;
                     if (d > 4 * iv) g_pace.pauses++;
-                    else { g_pace.sum += d; g_pace.nsum++; if (d + r / 2 < iv || d > iv + r / 2) g_pace.uneven++; } }
+                    else { g_pace.sum += d; g_pace.nsum++; if (d + r / 2 < ivs || d > ivs + r / 2) g_pace.uneven++; } }   // FORK: ivs
                 g_pace.prev_actual = a; }
         }
     }
     uint64_t want = 0;
     if (pace) {
-        want = g_pace.next ? g_pace.next + iv : now + r;
-        if (want < now + r / 2) want = now + r;   // late: the next refresh it can make
-        if (want > now + iv) want = now + iv;     // the game ran ahead of the display: back in step
+        want = g_pace.next ? g_pace.next + iv : now + pm * r;   // FORK: pm (stock: 1)
+        if (want + r / 2 < now + pm * r) want = now + pm * r;   // late: the next refresh it can make (FORK: pm refreshes ahead)
+        if (want > now + iv + (pm - 1) * r) want = now + iv + (pm - 1) * r;     // the game ran ahead of the display: back in step
         g_pace.next = want;
     }
     pt->presentID = ++g_pace.id; pt->desiredPresentTime = want;
@@ -3834,7 +3839,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
         if (g_pace.last_log && g_pace.n)
             VLOG("frame timing (pacing %s): %llu frames shown in the last 10 s, %llu uneven, %llu pauses, mean interval %.2f ms (target %.2f ms = %llu refreshes of %.2f ms)",
                  pace ? "on" : "off", (unsigned long long)g_pace.n, (unsigned long long)g_pace.uneven, (unsigned long long)g_pace.pauses,
-                 g_pace.nsum ? g_pace.sum / 1e6 / (double)g_pace.nsum : 0.0, iv / 1e6, (unsigned long long)k, r / 1e6);
+                 g_pace.nsum ? g_pace.sum / 1e6 / (double)g_pace.nsum : 0.0, ivs / 1e6, (unsigned long long)(ivs / r), r / 1e6);   // FORK: ivs
         g_pace.n = g_pace.uneven = g_pace.pauses = g_pace.sum = g_pace.nsum = 0; g_pace.last_log = now;
     }
     return 1;
