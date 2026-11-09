@@ -30,11 +30,12 @@ static void fork_ui_fill(VkCommandBuffer cb) {
 static char g_fk_ck[12][17]; static int g_fk_cn;
 static void fk_census_note(const char *k) { for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], k, 16)) return; if (g_fk_cn < 12) { memcpy(g_fk_ck[g_fk_cn], k, 16); g_fk_ck[g_fk_cn][16] = 0; g_fk_cn++; } }
 // FORK: what kind of screen this is, from the census (for context-aware controls later; for now logged, to check): 0 world, 1 full-screen menu, 2 battle.
-//   Battle: 3D with the battle HUD's shader 56af7f00 (frame captures); menu: no 3D, UI only. Held 10 frames before it changes
+//   Battle: 3D with b6ff050a or ecacdb40 (the census of a battle; 56af7f00 alone is not one: dialogue boxes draw with it too, capture Nov 9); menu: no 3D, UI only.
+//   Held 10 frames before it changes
 _Atomic int dm_fork_screen;
 static void fk_screen_frame(int comp) {
-    int has56 = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) has56 = 1;
-    int k = !comp && g_fk_cn ? 1 : comp && has56 ? 2 : 0; static int cand = -1, held;
+    int bat = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "b6ff050a", 8) || !strncmp(g_fk_ck[i], "ecacdb40", 8)) bat = 1;
+    int k = !comp && g_fk_cn ? 1 : comp && bat ? 2 : 0; static int cand = -1, held;
     if (k != cand) { cand = k; held = 0; return; }
     if (++held == 10 && k != atomic_load(&dm_fork_screen)) { atomic_store(&dm_fork_screen, k); static int lines; if (lines++ < 400) VLOG("[FORK] screen: %s", k == 2 ? "battle" : k == 1 ? "menu" : "world"); }
 }
