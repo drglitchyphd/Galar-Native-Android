@@ -440,6 +440,8 @@ public final class GameMenu {
         String[][] l = new String[T.LANGS.length][]; for (int i = 0; i < l.length; i++) l[i] = new String[] { T.LANGS[i][0], i == 0 ? t(a, "Auto") : T.LANGS[i][1], i == 0 ? t(a, "Auto (the phone's language)") : "" };
         choice(a, "DM_LANG", t(a, "Language"), l);
         heading(a, t(a, "Background"));
+        choice(a, "DM_FORK_KEEPALIVE", t(a, "Keep running in the background"), new String[][] { { "", t(a, "Off"), t(a, "Off: Android may close the game a few minutes after you leave it") },   // FORK: ForkKeepAlive
+            { "on", t(a, "On"), t(a, "On: a quiet notification keeps the game open while you use other apps (it still uses battery unless Leaving the game is set to Pause)") } });
         choice(a, "DM_BACKGROUND", t(a, "Leaving the game"), new String[][] { { "", t(a, "Keep playing"), t(a, "Keep playing: the game and its sound go on in the background") },
             { "off", t(a, "Pause"), t(a, "Pause: the game stops while it is not on screen") } });
         // the replay on its own thread (hle_nvn.c DM_NVN_ASYNC): the game's thread hands each frame's graphics work over instead of translating it itself (about a quarter
@@ -449,6 +451,9 @@ public final class GameMenu {
             { "1", t(a, "On"), t(a, "On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub") } });
         // a frame capture for a bug report (nvn_vk.c, Frame capture): the engine reads capture.req (frames to wait, so the menu can be closed first) and writes the ZIP
         heading(a, t(a, "Bug reports"));
+        action(a, t(a, "Capture the next odd frame"), t(a, "For the Fill, corrected picture: the next time the game switches to a menu, or draws something the fork does not know yet over the 3D, that frame is saved like Capture a frame (Download, a ZIP)."),   // FORK: fork_ui.h
+               () -> { try { nativeSetting("DM_FORK_CAPTURE", "1"); } catch (UnsatisfiedLinkError e) { }
+                       android.widget.Toast.makeText(a, t(a, "Armed: close the menu and open the X menu (or do what shows the problem)."), android.widget.Toast.LENGTH_LONG).show(); });
         action(a, t(a, "Capture a frame"), t(a, "Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue."),
                () -> { try (java.io.FileWriter w = new java.io.FileWriter(new File(GameSettings.dir(a), "capture.req"))) { w.write("90"); } catch (IOException e) { }
                        android.widget.Toast.makeText(a, t(a, "Capturing in 3 seconds: close the menu."), android.widget.Toast.LENGTH_LONG).show(); });

@@ -1,13 +1,17 @@
 # STATUS
 
-**Build:** v21 on branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
+**Build:** v22 built, not sent: waiting to bundle with frame generation (Steven's call). v21 is the last one sent. Branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
 
 ## Works (tested on the Fold, v13–v19)
 - Own setup in the shared folder, launch, battles, 30 fps, fold / unfold in place, upstream merged.
 - Picture "Fill, corrected": the camera is right on both screens, the battle cameras too (v18). Main menu fades are fixed (v19).
 - DLC through in-game menu → System → Setup screen (v19). Layout profiles per screen.
 
-## New in v21 (not tested yet)
+## In v22 (built, not sent)
+- System → Background → **Keep running in the background** (`DM_FORK_KEEPALIVE=on`, default off): the `ForkKeepAlive` foreground service (specialUse) with a quiet notification while the game is open.
+- System → Bug reports → **Capture the next odd frame**: arms `fork_ui.h`'s capture live. It fires on a switch from 3D to UI only, or on an unknown shader drawn full size over the 3D (the X-menu flash suspect).
+
+## New in v21 (portrait works, Steven Nov 9)
 - Display → **Portrait on the inner screen** (`DM_FORK_PORTRAIT=on`, default off):
   - on the inner screen the game turns with the phone (`Fork.orientation`); the outer screen stays landscape;
   - portrait puts the picture at the top (`dm_picture_box`) with its own default layout below it;
@@ -27,7 +31,7 @@
 
 ## Next (agreed with Steven, Nov 9)
 1. ~~Portrait on the inner screen~~ (v21: works, Steven Nov 9).
-2. Keep alive in background (foreground-service toggle).
+2. ~~Keep alive in background~~ (v22).
 3. Frame generation 30→60 (research first: lsfg-vk / the player's own Lossless.dll, vs one built into the fork). Steven is collecting documentation.
 - The game's own 60 fps mode changes some animation speeds: not pursued.
 - Later idea: switch the control behaviour in full-screen menus (no 3D composite drawn: `fork_ui.h`) and in battles (detection needs a shader-logging test first). Sword has no `touch_menu` profile.

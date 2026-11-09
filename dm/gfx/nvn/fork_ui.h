@@ -29,14 +29,17 @@ static int g_fk_uimode;   // this frame: a UI shader was drawn into the image, s
 static int fk_is(const char *k, const char *const *list) { for (; *list; list++) if (!strncmp(k, *list, 16)) return 1; return 0; }
 static const char *const k_fk_scene[] = { "7fa0c6373aca1086", "e0feaaf96d273c2b", "57319aada7d3772b", NULL };   // composites (the image is learnt from them)
 static const char *const k_fk_ui[] = { "af0ef3ac1bd35ad3", "56af7f00aa776d97", NULL };   // UI: the HUD, text boxes, menus
-static int g_fk_inimg, g_fk_prev_comp, g_fk_capped;   // this frame: draws into the image; last frame had the composite; the automatic capture was taken
+static int g_fk_inimg, g_fk_prev_comp, g_fk_capped, g_fk_odd;   // (g_fk_odd: this frame drew an unknown shader full size before any UI)
+volatile int dm_fork_capture_arm;   // android_main.c nativeSetting DM_FORK_CAPTURE (the menu's "Capture the next odd frame"): one more automatic capture   // this frame: draws into the image; last frame had the composite; the automatic capture was taken
 // present_window_locked: a new frame begins. DM_FORK_CAPTURE=1 (env.txt): the frame after the first one that went from 3D to UI only (a transition, a menu opening)
 //   is captured (frame-capture.zip in Download, as the menu's Capture a frame), to see what the game draws there
 static void fork_ui_frame(void) {
     static int want = -1; if (want < 0) { const char *e = getenv("DM_FORK_CAPTURE"); want = e && atoi(e) > 0; }
-    if (want && !g_fk_capped && g_fk_prev_comp && !g_fk_comp && g_fk_inimg && atomic_load(&g_cap) == 0) {
-        g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after a switch from 3D to UI only"); }
-    g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0;
+    if (dm_fork_capture_arm) { dm_fork_capture_arm = 0; want = 1; g_fk_capped = 0; VLOG("[FORK] capture: armed for the next odd frame"); }
+    int sw = g_fk_prev_comp && !g_fk_comp && g_fk_inimg;   // from 3D to UI only (a transition, a menu opening)
+    if (want && !g_fk_capped && (sw || g_fk_odd) && atomic_load(&g_cap) == 0) {   // (and an unknown shader drawn full size: perhaps a menu's opening animation)
+        g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after %s", sw ? "a switch from 3D to UI only" : "an unknown shader drawn full size"); }
+    g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0; g_fk_odd = 0;
 }
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {
     if (!vkey || !img) return;
@@ -48,6 +51,7 @@ static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, 
     if (!g_fk_uimode) {
         if (!fk_is(vkey, k_fk_ui)) {   // before any UI this frame: a scene draw the list does not know, kept full size
             static int said; if (said < 16) { said++; VLOG("[FORK] scene draw kept full size (vertex %.16s)", vkey); }
+            if (g_fk_comp) g_fk_odd = 1;   // (after a composite: something drawn over the 3D before the UI)
             g_fk_comp = 1; return; }
         g_fk_uimode = 1; }
     float kx, ky; dm_fork_ui_scale(&kx, &ky);

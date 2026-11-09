@@ -32,6 +32,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         if (!viaSetup && SetupActivity.pendingWork(GameSettings.dir(this))) { startActivity(new Intent(this, SetupActivity.class).putExtra("game", GameSettings.game(this)[0])); finish(); return; }
         alive = true;
         Fork.orientation(this);   // FORK: portrait on the inner screen when chosen
+        ForkKeepAlive.sync(this);   // FORK: keep running in the background when chosen
         im = getSystemService(InputManager.class);
         if (im != null) im.registerInputDeviceListener(this, null);
         check();
@@ -131,7 +132,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
     }
     // FORK: the screen changed (fold / unfold, turned) or the menu closed (its Display settings): the orientation the game may take (Fork.orientation)
     @Override public void onConfigurationChanged(android.content.res.Configuration c) { super.onConfigurationChanged(c); Fork.orientation(this); }
-    @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) Fork.orientation(this); }
+    @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) { Fork.orientation(this); ForkKeepAlive.sync(this); } }   // FORK: + keep-alive (the menu may have changed it)
     @Override protected void onResume() { super.onResume(); check(); }
     // am start ... --es menu <page>: the settings panel (testing over adb; 1 = the controller buttons)
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); String m = i.getStringExtra("menu"); if (m != null) GameMenu.show(this, m.equals("1") ? 1 : 0); }
@@ -144,7 +145,8 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); getSystemService(android.app.ActivityManager.class).getMemoryInfo(mi);
         return !mi.lowMemory && mi.availMem - mi.threshold > (700L << 20);   // (room for a translator above Android's own low-memory line)
     }
-    @Override protected void onDestroy() { liveOn = false; alive = false; if (im != null) im.unregisterInputDeviceListener(this); super.onDestroy(); }
+    @Override protected void onDestroy() { ForkKeepAlive.stop(this);   // FORK
+        liveOn = false; alive = false; if (im != null) im.unregisterInputDeviceListener(this); super.onDestroy(); }
     @Override public void onInputDeviceAdded(int id) { check(); }
     @Override public void onInputDeviceRemoved(int id) { check(); }
     @Override public void onInputDeviceChanged(int id) { check(); }

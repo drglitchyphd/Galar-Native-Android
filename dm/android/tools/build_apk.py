@@ -100,6 +100,13 @@ def main():
     # resources: the icon; the manifest: the setup screen launches, the native activity plays
     for dpi, sz in (('xxxhdpi', 192), ('xxhdpi', 144), ('xhdpi', 96)):
         os.makedirs(os.path.join(w, 'res', f'mipmap-{dpi}'), exist_ok=True); open(os.path.join(w, 'res', f'mipmap-{dpi}', 'ic_launcher.png'), 'wb').write(png(sz, *icon))
+    # FORK: fork builds (--data-dir) get the keep-alive foreground service (ForkKeepAlive.java)
+    fork_perms = ('\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />'
+                  '\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />'
+                  '\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />') if a.data_dir else ''
+    fork_service = ('\n        <service android:name="com.nxnative.ForkKeepAlive" android:exported="false" android:foregroundServiceType="specialUse">'
+                    '\n            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Keeps the game the player has open running while it is in the background" />'
+                    '\n        </service>') if a.data_dir else ''
     open(os.path.join(w, 'AndroidManifest.xml'), 'w', encoding='utf-8').write(f'''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{a.package}" android:versionCode="{a.version}" android:versionName="0.{a.version}">
     <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="35" />
@@ -108,7 +115,7 @@ def main():
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />{fork_perms}
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
@@ -122,7 +129,7 @@ def main():
                   android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
                   android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|smallestScreenSize|density">
             <meta-data android:name="android.app.lib_name" android:value="nxnative" />
-        </activity>
+        </activity>{fork_service}
     </application>
 </manifest>
 ''')
