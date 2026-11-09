@@ -29,7 +29,17 @@ static void fork_ui_fill(VkCommandBuffer cb) {
 // A frame's set is logged when it differs from the last logged one and has held for 15 frames ([FORK] ui census), at most 400 lines a run
 static char g_fk_ck[12][17]; static int g_fk_cn;
 static void fk_census_note(const char *k) { for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], k, 16)) return; if (g_fk_cn < 12) { memcpy(g_fk_ck[g_fk_cn], k, 16); g_fk_ck[g_fk_cn][16] = 0; g_fk_cn++; } }
+// FORK: what kind of screen this is, from the census (for context-aware controls later; for now logged, to check): 0 world, 1 full-screen menu, 2 battle.
+//   Battle: 3D with the battle HUD's shader 56af7f00 (frame captures); menu: no 3D, UI only. Held 10 frames before it changes
+_Atomic int dm_fork_screen;
+static void fk_screen_frame(int comp) {
+    int has56 = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) has56 = 1;
+    int k = !comp && g_fk_cn ? 1 : comp && has56 ? 2 : 0; static int cand = -1, held;
+    if (k != cand) { cand = k; held = 0; return; }
+    if (++held == 10 && k != atomic_load(&dm_fork_screen)) { atomic_store(&dm_fork_screen, k); static int lines; if (lines++ < 400) VLOG("[FORK] screen: %s", k == 2 ? "battle" : k == 1 ? "menu" : "world"); }
+}
 static void fk_census_frame(int comp) {
+    fk_screen_frame(comp);
     static char last[256], cand[256]; static int held, lines;
     char cur[256]; int n = snprintf(cur, sizeof cur, "3D %s; UI:", comp ? "yes" : "no");
     for (int i = 0; i < g_fk_cn; i++) for (int j = i + 1; j < g_fk_cn; j++) if (strcmp(g_fk_ck[j], g_fk_ck[i]) < 0) { char t[17]; memcpy(t, g_fk_ck[i], 17); memcpy(g_fk_ck[i], g_fk_ck[j], 17); memcpy(g_fk_ck[j], t, 17); }
@@ -58,7 +68,8 @@ static void fork_ui_frame(void) {
 }
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {
     if (!vkey || !img) return;
-    if (!g_fk_uimode && fk_is(vkey, k_fk_scene)) {   // a 3D composite: its image is the one the UI goes into
+    if (fk_is(vkey, k_fk_scene)) {   // a 3D composite: its image is the one the UI goes into. (Never shrunk, even after UI this frame: the Pokémon screen draws its
+        //   menu first, copies the picture, draws the 3D Pokémon into the copy and composites that back; v18-v29 shrank that composite too, the menu twice)
         if (g_fk_img != img) { g_fk_img = img; VLOG("[FORK] UI image found (%ux%u, composite %.16s)", tw, th, vkey); }
         g_fk_comp = 1; return; }
     if (img != g_fk_img || !strncmp(vkey, "389df45bf4d9a0f6", 16)) return;
