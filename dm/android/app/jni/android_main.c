@@ -235,6 +235,8 @@ static void *combo_hold_main(void *p) {
     if (atomic_load(&g_combo_held) && atomic_load(&g_combo_seq) == seq) { atomic_fetch_add(&g_minus_seq, 1); front_open_menu(0); }   // (the − hold's own timer stops)
     return NULL;
 }
+uint64_t dm_fork_fg_frames(void) __attribute__((weak));   // FORK: frames frame generation put on screen (gfx/nvn/fork_fg.h); -1 while it is off
+JNIEXPORT jlong JNICALL Java_com_nxnative_GameActivity_nativeFgFrames(JNIEnv *env, jclass c) { (void)env; (void)c; return dm_fork_fg_frames ? (jlong)dm_fork_fg_frames() : -1; }   // FORK
 JNIEXPORT jlong JNICALL Java_com_nxnative_GameActivity_nativeFrames(JNIEnv *env, jclass c) { (void)env; (void)c; return dm_nvn_frame_count ? (jlong)dm_nvn_frame_count() : -1; }   // the performance overlay's fps
 static void *minus_hold_main(void *p) {
     int seq = (int)(intptr_t)p; usleep(3000000);

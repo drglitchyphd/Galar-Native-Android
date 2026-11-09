@@ -1,6 +1,6 @@
 # STATUS
 
-**Build:** v24 (frame generation on its own thread). v23 test: frame generation ran (7.6 ms per generated frame) but only ~18 frames/s reached the screen, because it waited for the GPU on the game's thread. Branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
+**Build:** v25 (overlay shows on-screen fps; `[FORK] fg timing` log; `DM_FORK_FG_PACE=0` test switch). v24 test: still uneven (39 → 30 on screen per s, game 16 fps at the intro), and grey bars over the picture's top / bottom, cause unknown (the game's own image is black there). v23 test: frame generation ran (7.6 ms per generated frame) but only ~18 frames/s reached the screen, because it waited for the GPU on the game's thread. Branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
 
 ## Works (tested on the Fold, v13–v19)
 - Own setup in the shared folder, launch, battles, 30 fps, fold / unfold in place, upstream merged.

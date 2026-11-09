@@ -13,6 +13,8 @@ import android.view.InputDevice;
 public final class GameActivity extends NativeActivity implements InputManager.InputDeviceListener {
     static { System.loadLibrary("nxnative"); }   // loaded through this class's loader, so the native method below resolves (NativeActivity then opens the same library)
     private static native void nativePadConnected(boolean connected);
+    private static native long nativeFgFrames();   // FORK: frames frame generation put on screen (gfx/nvn/fork_fg.h), -1 while it is off
+    private long fgFrames = -1;   // FORK
     private static native long nativeFrames();   // frames the engine has presented (android_main.c), -1 before it draws
     private InputManager im;
     static volatile boolean alive;   // the game runs in this process (SetupActivity: the app icon goes back to it rather than to the setup screen)
@@ -98,7 +100,10 @@ public final class GameActivity extends NativeActivity implements InputManager.I
     private String gpuName;
     private String perfLine() {
         long f = -1, now = android.os.SystemClock.uptimeMillis(); try { f = nativeFrames(); } catch (UnsatisfiedLinkError e) { }
-        String fps = "–"; if (f >= 0 && perfFrames >= 0 && now > perfT) fps = String.valueOf(Math.round((f - perfFrames) * 1000.0 / (now - perfT))); perfFrames = f; perfT = now;
+        String fps = "–"; if (f >= 0 && perfFrames >= 0 && now > perfT) fps = String.valueOf(Math.round((f - perfFrames) * 1000.0 / (now - perfT)));
+        { long g = -1; try { g = nativeFgFrames(); } catch (UnsatisfiedLinkError e) { }   // FORK: what frame generation puts on screen, next to the game's own
+          if (g >= 0 && fgFrames >= 0 && now > perfT) fps += " fps · " + Math.round((g - fgFrames) * 1000.0 / (now - perfT)) + " " + T.t(this, "on screen") + " ·"; fgFrames = g; }
+        perfFrames = f; perfT = now;
         Intent bat = registerReceiver(null, new android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         float temp = bat != null ? bat.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0) / 10f : 0;
         int level = bat != null ? bat.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) * 100 / Math.max(1, bat.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)) : -1;
@@ -106,7 +111,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         if (gpuName == null || gpuName.isEmpty()) { gpuName = ""; try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(new File(GameSettings.dir(this), "gpu.txt")))) { String l = r.readLine(); if (l != null) gpuName = l.trim(); } catch (java.io.IOException e) { } }
         android.os.PowerManager pm = getSystemService(android.os.PowerManager.class); String heat = "";
         if (pm != null) { int s = pm.getCurrentThermalStatus(); heat = s >= android.os.PowerManager.THERMAL_STATUS_SEVERE ? " " + T.t(this, "hot") : s >= android.os.PowerManager.THERMAL_STATUS_MODERATE ? " " + T.t(this, "warm") : ""; }
-        return String.format(java.util.Locale.ROOT, "%s fps · %.0f °C%s · %s · %s %.1f GB · %d%%", fps, temp, heat, gpuName.isEmpty() ? "GPU" : gpuName, T.t(this, "free"), mi.availMem / 1e9, level);
+        return String.format(java.util.Locale.ROOT, (fps.endsWith("·") ? "%s" : "%s fps ·") + " %.0f °C%s · %s · %s %.1f GB · %d%%", fps, temp, heat, gpuName.isEmpty() ? "GPU" : gpuName, T.t(this, "free"), mi.availMem / 1e9, level);
     }
     // Shaders the game saves while it runs (a mod's new effect, nvn_vk.c mtl_shader_seen): translated now in the background into the folder the engine watches
     // (setup_game.py --captures --live, nvn_vk.c live_check), so they draw a few seconds later instead of after a restart. Kept out of the game's way on every phone, nothing

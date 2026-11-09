@@ -143,6 +143,10 @@ static int fg_show(VkImage src, VkImageLayout sl, int fgi, int32_t sx, int32_t s
 // for the GPU at every frame: 18 frames a second on screen). One frame at a time: the next copy waits until the worker is done with this one (the library reads
 // both inputs). It presents under g_wmu like present_window, both frames from the shared images (the real one from its input copy: the same blit as the other)
 static pthread_mutex_t fg_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t fg_cv = PTHREAD_COND_INITIALIZER;
+// frames put on screen by frame generation (generated + real), for the performance overlay (android_main.c nativeFgFrames); and where the time goes, logged
+static _Atomic uint64_t g_fg_shown; static double g_fg_t[5]; static uint64_t g_fg_tn;   // per frame, ms: the game waiting for the worker, copy wait, generation, 1st, 2nd present
+uint64_t dm_fork_fg_frames(void) { return atomic_load(&FG.state) == 2 ? atomic_load(&g_fg_shown) : (uint64_t)-1; }
+static void fg_time(int i, uint64_t t0) { g_fg_t[i] += (mono_ns() - t0) / 1e6; }
 static struct { int has, busy; uint64_t n; int in, flip; int32_t w, h; uint64_t t, half; uint32_t id; } FJ;
 static void *fg_worker(void *p) {
     (void)p;
@@ -150,18 +154,27 @@ static void *fg_worker(void *p) {
         pthread_mutex_lock(&fg_mu); while (!FJ.has) pthread_cond_wait(&fg_cv, &fg_mu); __typeof__(FJ) j = FJ; FJ.has = 0; pthread_mutex_unlock(&fg_mu);
         uint64_t t0 = mono_ns();
         vk_wait(NULL, FG.fence, UINT64_MAX);   // the copy (and the game's frame before it on the queue) is done
+        fg_time(1, t0); uint64_t t1 = mono_ns();
         int gen = 0;
         if (j.n >= 2 && atomic_load(&FG.state) == 2) {
             if (FG.run(FG.ctx)) { VLOG("[FORK] [RED] fg: %s: off", FG.err()); atomic_store(&FG.state, -1); }
-            else { gen = 1; double ms = (mono_ns() - t0) / 1e6; FG.gen_ms = FG.ngen ? FG.gen_ms * 0.98 + ms * 0.02 : ms;
+            else { gen = 1; fg_time(2, t1); double ms = (mono_ns() - t0) / 1e6; FG.gen_ms = FG.ngen ? FG.gen_ms * 0.98 + ms * 0.02 : ms;
                    if (++FG.ngen == 1 || FG.ngen % 1800 == 0) VLOG("[FORK] fg: %llu frames generated, %.1f ms each (on its own thread)", (unsigned long long)FG.ngen, FG.gen_ms); }
         }
+        static int nopace = -1; if (nopace < 0) { const char *e = getenv("DM_FORK_FG_PACE"); nopace = e && !atoi(e); }   // DM_FORK_FG_PACE=0: no display times (a test)
         pthread_mutex_lock(&g_wmu);
         if (W.sc) {
-            if (gen) fg_show(FG.img[2], VK_IMAGE_LAYOUT_GENERAL, 2, 0, 0, j.w, j.h, j.flip, j.t > j.half ? j.t - j.half : 0, 0);
-            if (W.sc) fg_show(FG.img[j.in], VK_IMAGE_LAYOUT_GENERAL, j.in, 0, 0, j.w, j.h, j.flip, j.t, j.id);
+            uint64_t t2 = mono_ns();
+            if (gen && fg_show(FG.img[2], VK_IMAGE_LAYOUT_GENERAL, 2, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t > j.half ? j.t - j.half : 0, 0)) atomic_fetch_add(&g_fg_shown, 1);
+            fg_time(3, t2); uint64_t t3 = mono_ns();
+            if (W.sc && fg_show(FG.img[j.in], VK_IMAGE_LAYOUT_GENERAL, j.in, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t, j.id)) atomic_fetch_add(&g_fg_shown, 1);
+            fg_time(4, t3);
         }
         pthread_mutex_unlock(&g_wmu);
+        if (++g_fg_tn % 300 == 0) {
+            VLOG("[FORK] fg timing, ms per frame (last 300): game waited for the worker %.1f; worker: copy wait %.1f, generation %.1f, generated frame shown %.1f, real frame shown %.1f",
+                 g_fg_t[0] / 300, g_fg_t[1] / 300, g_fg_t[2] / 300, g_fg_t[3] / 300, g_fg_t[4] / 300);
+            memset(g_fg_t, 0, sizeof g_fg_t); }
         pthread_mutex_lock(&fg_mu); FJ.busy = 0; pthread_cond_broadcast(&fg_cv); pthread_mutex_unlock(&fg_mu);
     }
     return NULL;
@@ -174,9 +187,10 @@ static int fork_fg_present(vtex *x, const int crop[4]) {
     if (st != 2) return 0;
     static int worker; if (!worker) { pthread_t t; if (pthread_create(&t, NULL, fg_worker, NULL)) { atomic_store(&FG.state, -1); return 0; } pthread_detach(t); worker = 1; }
     // the worker done with the last frame (g_wmu let go meanwhile: it presents under it)
-    pthread_mutex_lock(&fg_mu);
+    uint64_t tw = mono_ns(); pthread_mutex_lock(&fg_mu);
     if (FJ.busy) { pthread_mutex_unlock(&g_wmu); while (FJ.busy) pthread_cond_wait(&fg_cv, &fg_mu); pthread_mutex_unlock(&fg_mu); pthread_mutex_lock(&g_wmu); }
     else pthread_mutex_unlock(&fg_mu);
+    fg_time(0, tw);
     if (!W.sc) return 1;   // (the window went while waiting: this frame is dropped)
     int32_t cx = crop ? crop[0] : 0, cy = crop ? crop[1] : 0, cw = crop && crop[2] ? crop[2] : (int32_t)x->w, ch = crop && crop[3] ? crop[3] : (int32_t)x->h;
     if (cw <= 0 || ch <= 0 || !fg_images((uint32_t)cw, (uint32_t)ch)) { if (FG.ctx < 0 && FG.w == 0) atomic_store(&FG.state, -1); return 0; }
