@@ -423,6 +423,11 @@ public final class GameMenu {
         if (!room.isEmpty()) button(a, r, t(a, "Leave room"), false, () -> { GameSettings.set(a, "DM_RELAY_ROOM", ""); RESTART.add("DM_RELAY_ROOM"); go("online"); });
     }
     private static void system(Activity a) {
+        if (Fork.onlyGame(a) != null) {   // FORK: a one-game build opens straight into the game; this is the way to the setup screen (DLC, save data, driver)
+            heading(a, t(a, "App"));
+            action(a, t(a, "Setup screen"), t(a, "Add DLC, export or import save data, change the graphics driver. The game keeps running behind it: after adding DLC, close the app from recent apps and open it again."),
+                   () -> { if (dlg != null) dlg.dismiss(); a.startActivity(new android.content.Intent(a, SetupActivity.class).putExtra("setup", true).putExtra("fork_setup", true)); });
+        }
         heading(a, t(a, "Graphics driver"));
         action(a, t(a, "Graphics driver"), DriverPackages.label(DriverPackages.current(a)), () -> go("driver"));
         heading(a, t(a, "Language"));

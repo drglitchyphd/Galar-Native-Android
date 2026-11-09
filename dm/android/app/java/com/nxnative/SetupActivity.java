@@ -111,7 +111,7 @@ public final class SetupActivity extends Activity {
     }
 
     @Override protected void onCreate(Bundle b) {
-        if (GameActivity.alive) {   // the game is running (in the background): the icon goes back to it
+        if (GameActivity.alive && !getIntent().getBooleanExtra("fork_setup", false)) {   // FORK: && not the in-game menu's Setup screen. The game is running (in the background): the icon goes back to it
             super.onCreate(b); startActivity(new Intent(this, GameActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)); finish(); return; }
         super.onCreate(b);
         if (Fork.gate(this)) return;   // FORK: all-files access first, the files live in shared storage

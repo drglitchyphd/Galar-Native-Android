@@ -1890,6 +1890,7 @@ static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
         }
     }
     VkFormat f = x->fmt; uint8_t fsw[4]; memcpy(fsw, x->fswz, 4);
+    if (!storage) fork_ui_tex(x->w, x->h);   // FORK: the sizes a shrunk UI draw samples (fork_ui.h)
     if (rg.has_v && rg.v.set_format) { uint32_t vf = 0; uint8_t s2[4]; if (nvn_fmt_to_vk(rg.v.format, &vf, s2) && vf) { f = (VkFormat)vf; memcpy(fsw, s2, 4); } }
     if (atomic_load(&g_cap) == 2) { if (storage) cap_printf("  writes image %d: nvn %#x, image vk %d %ux%u, viewed as vk %d\n", tid, rg.t.d.format, x->fmt, x->w, x->h, f);
         else cap_tex(tid, &rg.t, x, rg.has_v && rg.v.set_format && rg.v.format != rg.t.d.format ? (int)rg.v.format : 0, f); }
@@ -3190,7 +3191,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     VkRect2D sc = {{0, 0}, {P.tw, P.th}};
     if (R.has_sc && !tfcap) { long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h; if (x1 > (long)P.tw) x1 = P.tw; if (y1 > (long)P.th) y1 = P.th;
         if (x1 <= x0 || y1 <= y0) return; sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
-    if (!tfcap && dm_aspect() == DM_ASPECT_FIX) fork_ui_draw(pr->sh[0] ? pr->sh[0]->key : NULL, R.rt.color[0] ? (const void *)tex_res(R.rt.color[0]) : NULL, cb, &v, &sc, P.tw, P.th);   // FORK: the UI shrunk (fork_ui.h)
+    g_fk_sq = 0; if (!tfcap && dm_aspect() == DM_ASPECT_FIX) fork_ui_draw(pr->sh[0] ? pr->sh[0]->key : NULL, R.rt.color[0] ? (const void *)tex_res(R.rt.color[0]) : NULL, cb, &v, &sc, P.tw, P.th);   // FORK: the UI shrunk (fork_ui.h)
     vkCmdSetViewport(cb, 0, 1, &v);   // FORK: moved below the scissor, so fork_ui_draw sees both
     vkCmdSetScissor(cb, 0, 1, &sc);
     if (g_eds) {   // (without extended dynamic state these are built into the pipeline: pso_get's sst, the same values)
@@ -3224,6 +3225,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     if (mark) mark[2] = mono_ns();
     VkPipelineLayout pl = prog_layout(pr, 0); g_np = pr->np[0];
     for (int st = 0; st < 5; st++) push_stage(pr->sh[st], st, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
+    fork_ui_fill(cb);   // FORK: a fade (one-colour texture) back to full size (fork_ui.h)
     if (mark) mark[3] = mono_ns();
     if (tfcap) {   // the capture buffers, then the draw, then its writes made visible to what reads them (vertex streams, shaders, copies)
         VkWriteDescriptorSet w_[4]; VkDescriptorBufferInfo bi_[4]; uint32_t nw = 0;
