@@ -49,6 +49,13 @@ final class Fork {
         return d;
     }
 
+    // The game folder as the phone's Files app shows it (GalarFork/0100ABF008968000/<sub>), for the setup screen's and the mods menu's hints; null in a stock build
+    static String shown(Context c, String sub) {
+        if (!shared(c)) return null;
+        String base = Environment.getExternalStorageDirectory().getPath() + "/", p = new File(GameSettings.dir(c), sub).getPath();
+        return p.startsWith(base) ? p.substring(base.length()) : p;
+    }
+
     // GameActivity, before NativeActivity starts the engine: android_main.c host_start reads DM_DATA_ROOT in place of the app's externalDataPath
     static void exportRoot(Context c) {
         if (!shared(c)) return;

@@ -712,7 +712,7 @@ public final class SetupActivity extends Activity {
             }
             if (err != null && offerAnyway) anyway.setVisibility(android.view.View.VISIBLE);
             bar.setProgress(err == null ? 600 : bar.getProgress());
-            status.setText(err == null ? T.t(this, "Ready: tap Play.") : T.t(this, "Setup failed: %s", err) + "\n" + T.t(this, "The setup log is in Android/data/%s/files/setup_work.", getPackageName()));
+            status.setText(err == null ? T.t(this, "Ready: tap Play.") : T.t(this, "Setup failed: %s", err) + "\n" + (Fork.shared(this) ? T.t(this, "The setup log is in %s.", Fork.shown(this, "setup_work")) : T.t(this, "The setup log is in Android/data/%s/files/setup_work.", getPackageName()))   /* FORK */);
             if (err == null) {
                 for (File file : importedGames) file.delete();
                 importedGames.clear();

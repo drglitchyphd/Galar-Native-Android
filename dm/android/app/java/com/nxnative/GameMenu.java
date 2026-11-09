@@ -354,6 +354,9 @@ public final class GameMenu {
         note(a, where(a));
     }
     private static String where(Activity a) {
+        String fm = Fork.shown(a, "mods");   // FORK: the shared folder
+        if (fm != null) return t(a, "Put each mod in its own folder in %s/ — <mod>/romfs for files, <mod>/exefs for .pchtxt code patches (they must be made for %s %s).",
+                                 fm, GameSettings.game(a)[1], GameSettings.version(a));
         return t(a, "Put each mod in its own folder in Android/data/%s/files/mods/ — <mod>/romfs for files, <mod>/exefs for .pchtxt code patches (they must be made for %s %s).",
                  a.getPackageName(), GameSettings.game(a)[1], GameSettings.version(a));
     }
