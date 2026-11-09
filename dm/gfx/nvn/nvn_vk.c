@@ -2924,6 +2924,7 @@ static VkAttachmentStoreOp depth_store(vtex *x, int loads) {
     return VK_ATTACHMENT_STORE_OP_DONT_CARE;
 }
 static int pass_begin(void) {
+    tf_end();
     if (P.open && g_rt_stale) rt_resolve();
     if (P.open) return 1;
     if (!R.has_rt) { RED_ONCE(21, "draw with no render target set"); return 0; }
@@ -3623,7 +3624,7 @@ static void push_stage(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineLay
                             static int snap = -1; if (snap < 0) snap = getenv("DM_VK_SSBO_GPU_COPY") == NULL;   // the CPU snapshot unless DM_VK_SSBO_GPU_COPY (that copy lost the device on an Adreno 830 at Violet's enrollment screen: experimental)
                             if (snap) { uint8_t *d = arena_alloc(g_sub, m, &b, &o); memcpy(d, (const void *)(uintptr_t)addr, m); n = m; } else {
                             (void)arena_alloc(g_sub, m, &b, &o); n = m;
-                            int reopen = P.open && bp == VK_PIPELINE_BIND_POINT_GRAPHICS; VkCommandBuffer ccb = CB(); pass_end();
+                            int reopen = P.open && !P_tf && bp == VK_PIPELINE_BIND_POINT_GRAPHICS; VkCommandBuffer ccb = CB(); pass_end();
                             VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
                             vkCmdPipelineBarrier(ccb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
                             VkBufferCopy bc = { po, o, m }; vkCmdCopyBuffer(ccb, pb, b, 1, &bc);
@@ -3674,7 +3675,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark);
 // the frame capture's draw by draw values (g_cap_dp): after a draw of the chosen pass, the pass is ended (without logging it), colour 0's 12 points copied, and the pass
 //   opened again (loading: its clears were taken when it first began). Only in the one captured frame
 static void cap_draw_values(void) {
-    if (!P.open || g_cap_nd >= CAPD) return;
+    if (!P.open || P_tf || g_cap_nd >= CAPD) return;
     const tex_t *ct = R.rt.color[0]; vtex *x = ct ? tex_res(ct) : NULL; if (!x || !x->img || x->samples > 1) return;
     sk_read(x);
     if (!g_cap_dp) { if (x->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || P.tw < 640) return; g_cap_dp = 1; }
@@ -3853,8 +3854,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof tfpc, tfpc);
         vkCmdDraw(cb, (uint32_t)dw->count, 1, (uint32_t)dw->first, (uint32_t)dw->base_instance);
         vshader *vs = pr->sh[0];
-        for (int b = 0; b < 4; b++) if (tfb[b]) { uint64_t n = (uint64_t)dw->count * vs->tf_stride[b]; wb_note(S.tf[b].addr + S.tf_off[b], n); S.tf_off[b] += n; }
-        pass_end();   // (a capture pass: its end makes the writes visible to what reads them, one barrier)
+        for (int b = 0; b < 4; b++) if (tfb[b]) { uint64_t n = (uint64_t)dw->count * vs->tf_stride[b], at = S.tf[b].addr + S.tf_off[b]; wb_note(at, n); S.tf_off[b] += n;
+            if (g_ntfw < 64) { g_tfw[g_ntfw].lo = at; g_tfw[g_ntfw].hi = at + n; g_ntfw++; } }
+        if (!tf_batch_on()) pass_end();   // (batched: the pass stays open for the next capture; its end makes the writes visible)
         { static int once; if (!once++) VLOG("transform feedback: first capture (vertex %s, %d vertices)", vs->key, dw->count); }
         return;
     }
@@ -4201,7 +4203,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_BUF: { const p_clear_buf *cb = (const p_clear_buf *)a; mtl_sub_fill(cb->addr, cb->size, cb->value); break; }
             case OP_COPY_B2B: { uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); sub_copy(s, d, n); break; }
             case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8); sub_update(a + 16, d, n); break; }
-            case OP_SET_RT: g_stat_passes++; if (P.open && R.has_rt && !getenv_nomerge() && rt_same(&R.rt, (const p_set_rt *)a)) { g_stat_rt_same++; break; }
+            case OP_SET_RT: g_stat_passes++; tf_end(); if (P.open && R.has_rt && !getenv_nomerge() && rt_same(&R.rt, (const p_set_rt *)a)) { g_stat_rt_same++; break; }
                 if (P.open && pass_defer_on() && !getenv_nomerge()) {   // (deferred: rt_resolve at the next draw or clear)
                     int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
                     if (!pend) { R.rt = *(const p_set_rt *)a; g_rt_stale = 1; break; } }
@@ -4209,7 +4211,7 @@ void mtl_exec(const uint8_t *p) {
                 if (P.open) { g_brk[0]++; g_pass_last_by_rt = 1; }
                 sub_split_at_target();
                 pass_flush(); R.rt = *(const p_set_rt *)a; R.has_rt = 1; break;
-            case OP_CLEAR_COLOR: {
+            case OP_CLEAR_COLOR: { tf_end();
                 rt_resolve();
                 const p_clear_color *c = (const p_clear_color *)a;
                 if (c->index < 0 || c->index >= R.rt.n || !R.rt.color[c->index]) { RED_ONCE(53, "colour clear target %d invalid", c->index); break; }
@@ -4222,7 +4224,7 @@ void mtl_exec(const uint8_t *p) {
                     VkClearValue v = { .color = cv }; clear_in_pass(c->index, &v, VK_IMAGE_ASPECT_COLOR_BIT); break; }
                 R.clear_c[c->index] = 1; R.cc[c->index] = cv; break;
             }
-            case OP_CLEAR_DS: {
+            case OP_CLEAR_DS: { tf_end();
                 rt_resolve();
                 const p_clear_ds *c = (const p_clear_ds *)a;
                 if (P.open || (R.rt.depth && !scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview))) {
