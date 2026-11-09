@@ -69,6 +69,7 @@ def main():
     ap.add_argument('--game', default='01008DB008C2C000'); ap.add_argument('--package'); ap.add_argument('--version', type=int, default=12)
     ap.add_argument('--debuggable', action='store_true', help='test builds: adb run-as can reach the private storage of the app')
     ap.add_argument('--data-dir', default='', help='FORK: keep the game, saves and settings in /storage/emulated/0/<this folder> (Fork.java)')   # FORK
+    ap.add_argument('--only-game', default='', help='FORK: the one game the app icon opens (title ID; Fork.onlyGame)')   # FORK
     ap.add_argument('--icon', default='', help='FORK: app icon colours, "top ground" hex, in place of the profile\'s app_icon')   # FORK
     a = ap.parse_args()
     g = _game.load(a.game); fam = _game.family(g)   # the games the engine built for g runs (Pokémon Shield: Shield and Sword, one app)
@@ -156,6 +157,7 @@ def main():
             p = os.path.join(ANDROID, 'app/assets', f)
             if os.path.isfile(p): z.write(p, 'assets/' + f)
         if a.data_dir: z.writestr('assets/data_dir', a.data_dir + '\n')   # FORK: Fork.java
+        if a.only_game: z.writestr('assets/only_game', a.only_game + '\n')   # FORK: Fork.onlyGame
         z.writestr('assets/shader_chain', shader_chain(g) + '\n')   # the launcher sends players back to setup when their shader pack was made for another chain
         z.writestr('assets/games', ''.join(f'{f.id}\t{f.get("name")}\t{_game.file_stem(f)}\t{list(f.builds().values())[-1]["display"]}\t{"heavy" if f.get("android_heavy", "off") == "on" else ""}\n' for f in fam))   # the games this app runs, its own first, with the version they need (GameSettings.games)
         z.writestr('assets/app', f'{a.name}\t{g.get("app_repo", "github.com/simipoB/Galar-Native-Android")}\n')   # the app's name and where its official releases are (SetupActivity)

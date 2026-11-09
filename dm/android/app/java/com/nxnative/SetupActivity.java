@@ -126,6 +126,7 @@ public final class SetupActivity extends Activity {
         boolean asked = getIntent().getBooleanExtra("setup", false);
         // which game: a game's home screen shortcut names it; from the app's icon, with more than one game set up, this screen lets the player choose (the dual launcher)
         String want = getIntent().getStringExtra("game");
+        if (want == null) want = Fork.onlyGame(this);   // FORK: a one-game build goes straight to its game
         if (want != null) GameSettings.choose(this, want);
         // the app's icon with two games: the launcher, once one of them is set up; before that (the first start after installing) the setup screen, which says what to do
         else if (!running && !asked && GameSettings.games(this).size() > 1 && !readyGames().isEmpty()) { launcher(official); return; }
@@ -188,7 +189,7 @@ public final class SetupActivity extends Activity {
         ((LinearLayout.LayoutParams) play.getLayoutParams()).topMargin = px(16);
         // the rest
         more = new LinearLayout(this); more.setOrientation(LinearLayout.VERTICAL); root.addView(more, new LinearLayout.LayoutParams(-1, -2));
-        if (many && !first) {   // the game switcher: each game has its own setup, saves, settings and mods (setup itself goes by what the files are)
+        if (many && !first && Fork.onlyGame(this) == null) {   // FORK: && no one-game build. The game switcher: each game has its own setup, saves, settings and mods (setup itself goes by what the files are)
             LinearLayout cg = card(more, null, T.t(this, "Game"), acc);
             android.widget.RadioGroup gs = new android.widget.RadioGroup(this); gs.setOrientation(LinearLayout.VERTICAL);
             List<String[]> all = GameSettings.games(this); String cur = game()[0];

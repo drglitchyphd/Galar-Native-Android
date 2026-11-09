@@ -1,6 +1,6 @@
 # STATUS
 
-**Build:** v16 (`fork/v15` branch). **Not yet tested on the Fold.**
+**Build:** v17 (`fork/v15` branch): v16, plus the icon opening straight into Sword (`FORK_ONLY_GAME`, `Fork.onlyGame`). **Not yet tested on the Fold.**
 v15 test: "Fill, corrected" looks good in normal play. Transitions flash a squished image, or show the old picture in the bands; some battle camera cuts are squished.
 v16 adds:
 - DLC card on the setup screen ("Add DLC (.nsp)": `ForkDlc.java`, nx_extract `--aoc` into `aoc/`, no new setup).

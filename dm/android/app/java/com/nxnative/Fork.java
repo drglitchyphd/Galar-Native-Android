@@ -37,6 +37,15 @@ final class Fork {
         return name;
     }
     static boolean shared(Context c) { return !dataDirName(c).isEmpty(); }
+    // assets/only_game (build_fork.sh FORK_ONLY_GAME): the one game this build plays. The app icon goes straight to it: no game picker, no other game's setup
+    private static String only;
+    static String onlyGame(Context c) {
+        if (only == null) { String g = "";
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getAssets().open("only_game"), "UTF-8"))) { String l = r.readLine(); if (l != null) g = l.trim(); } catch (IOException e) { }
+            for (String[] x : GameSettings.games(c)) if (x[0].equalsIgnoreCase(g)) { only = x[0]; break; }
+            if (only == null) only = ""; }
+        return only.isEmpty() ? null : only;
+    }
     static boolean canWrite() { return Environment.isExternalStorageManager(); }
 
     // GameSettings.root: the shared folder in a fork build, else Android's own app folder
