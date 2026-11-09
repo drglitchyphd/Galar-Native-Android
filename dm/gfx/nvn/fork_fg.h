@@ -4,9 +4,10 @@
 //   DM_FORK_FG_FLOW=25-100 the flow scale in % (lower: lighter on the GPU, rougher motion), default 75
 //   DM_FORK_FG_PERF=off    the full model instead of the lighter "performance" one (default: performance)
 //   DM_FORK_LSFG_DLL       the player's own Lossless.dll (set by the app: Fork.exportRoot, after the setup screen copied it into private storage)
-// How: each real frame is copied (a blit, which also turns it to 16-bit float) into one of two AHardwareBuffer images the library shares (it runs its own Vulkan
-//   device), the library makes the in-between frame into a third and returns once it is done (no shared semaphores: lsfg-vk's Android path). Then the
-//   in-between frame is presented half a frame interval before the real one (VK_GOOGLE_display_timing, nvn_vk.c pace_time). The real frame comes out about half a
+// How: each real frame is copied (a blit, queued on the GPU, also turning it to 16-bit float) into one of two AHardwareBuffer images the library shares (it
+//   runs its own Vulkan device). A worker thread (fg_worker) waits for the copy, has the library make the in-between frame into a third image (no shared
+//   semaphores: lsfg-vk's Android path, done when it returns), and presents it half a frame interval before the real one (VK_GOOGLE_display_timing,
+//   nvn_vk.c pace_time), both from the shared images. The game's thread goes on with its next frame meanwhile. The real frame comes out about half a
 //   frame later than without it, plus the generation time. The touch controls are drawn on both; the picture box and the Fill, corrected UI are the same.
 // The library loads and the shaders are made from the DLL on a thread of its own at the first present; until it is ready (and if anything fails) frames are
 //   presented as without it. Log lines: [FORK] fg ...
@@ -138,12 +139,45 @@ static int fg_show(VkImage src, VkImageLayout sl, int fgi, int32_t sx, int32_t s
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return 0; }
     return 1;
 }
-// present_window_locked, once the swapchain is ready: 1 when this frame was presented here (the generated frame, then the real one), 0 to present it as usual
+// The worker: everything after the copy runs here, so the game's thread goes straight on with its next frame (v23 did it all on that thread and waited
+// for the GPU at every frame: 18 frames a second on screen). One frame at a time: the next copy waits until the worker is done with this one (the library reads
+// both inputs). It presents under g_wmu like present_window, both frames from the shared images (the real one from its input copy: the same blit as the other)
+static pthread_mutex_t fg_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t fg_cv = PTHREAD_COND_INITIALIZER;
+static struct { int has, busy; uint64_t n; int in, flip; int32_t w, h; uint64_t t, half; uint32_t id; } FJ;
+static void *fg_worker(void *p) {
+    (void)p;
+    for (;;) {
+        pthread_mutex_lock(&fg_mu); while (!FJ.has) pthread_cond_wait(&fg_cv, &fg_mu); __typeof__(FJ) j = FJ; FJ.has = 0; pthread_mutex_unlock(&fg_mu);
+        uint64_t t0 = mono_ns();
+        vk_wait(NULL, FG.fence, UINT64_MAX);   // the copy (and the game's frame before it on the queue) is done
+        int gen = 0;
+        if (j.n >= 2 && atomic_load(&FG.state) == 2) {
+            if (FG.run(FG.ctx)) { VLOG("[FORK] [RED] fg: %s: off", FG.err()); atomic_store(&FG.state, -1); }
+            else { gen = 1; double ms = (mono_ns() - t0) / 1e6; FG.gen_ms = FG.ngen ? FG.gen_ms * 0.98 + ms * 0.02 : ms;
+                   if (++FG.ngen == 1 || FG.ngen % 1800 == 0) VLOG("[FORK] fg: %llu frames generated, %.1f ms each (on its own thread)", (unsigned long long)FG.ngen, FG.gen_ms); }
+        }
+        pthread_mutex_lock(&g_wmu);
+        if (W.sc) {
+            if (gen) fg_show(FG.img[2], VK_IMAGE_LAYOUT_GENERAL, 2, 0, 0, j.w, j.h, j.flip, j.t > j.half ? j.t - j.half : 0, 0);
+            if (W.sc) fg_show(FG.img[j.in], VK_IMAGE_LAYOUT_GENERAL, j.in, 0, 0, j.w, j.h, j.flip, j.t, j.id);
+        }
+        pthread_mutex_unlock(&g_wmu);
+        pthread_mutex_lock(&fg_mu); FJ.busy = 0; pthread_cond_broadcast(&fg_cv); pthread_mutex_unlock(&fg_mu);
+    }
+    return NULL;
+}
+// present_window_locked (g_wmu held), once the swapchain is ready: 1 when this frame went to the worker, 0 to present it as usual
 static int fork_fg_present(vtex *x, const int crop[4]) {
     if (!g_fk_ahb || !fork_fg_want()) return 0;
     int st = atomic_load(&FG.state);
     if (st == 0) { atomic_store(&FG.state, 1); pthread_t t; if (pthread_create(&t, NULL, fg_load, NULL)) atomic_store(&FG.state, -1); else pthread_detach(t); return 0; }
     if (st != 2) return 0;
+    static int worker; if (!worker) { pthread_t t; if (pthread_create(&t, NULL, fg_worker, NULL)) { atomic_store(&FG.state, -1); return 0; } pthread_detach(t); worker = 1; }
+    // the worker done with the last frame (g_wmu let go meanwhile: it presents under it)
+    pthread_mutex_lock(&fg_mu);
+    if (FJ.busy) { pthread_mutex_unlock(&g_wmu); while (FJ.busy) pthread_cond_wait(&fg_cv, &fg_mu); pthread_mutex_unlock(&fg_mu); pthread_mutex_lock(&g_wmu); }
+    else pthread_mutex_unlock(&fg_mu);
+    if (!W.sc) return 1;   // (the window went while waiting: this frame is dropped)
     int32_t cx = crop ? crop[0] : 0, cy = crop ? crop[1] : 0, cw = crop && crop[2] ? crop[2] : (int32_t)x->w, ch = crop && crop[3] ? crop[3] : (int32_t)x->h;
     if (cw <= 0 || ch <= 0 || !fg_images((uint32_t)cw, (uint32_t)ch)) { if (FG.ctx < 0 && FG.w == 0) atomic_store(&FG.state, -1); return 0; }
     if (!FG.pool) {
@@ -153,8 +187,8 @@ static int fork_fg_present(vtex *x, const int crop[4]) {
         if (vkCreateCommandPool(g_dev, &pc, NULL, &FG.pool)) { atomic_store(&FG.state, -1); return 0; }
         ca.commandPool = FG.pool; vkAllocateCommandBuffers(g_dev, &ca, &FG.cb); vkCreateFence(g_dev, &fc, NULL, &FG.fence);
     }
-    // 1. the real frame into the library's input (frame number % 2), as 16-bit float
-    uint64_t t0 = mono_ns(); int in = (int)(FG.n % 2);
+    // the real frame into the library's input (frame number % 2), as 16-bit float: queued, not waited for
+    int in = (int)(FG.n % 2);
     VkCommandBuffer cb = FG.cb; vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT }; vkBeginCommandBuffer(cb, &bi);
     barrier_all(cb);
@@ -167,19 +201,13 @@ static int fork_fg_present(vtex *x, const int crop[4]) {
     vkResetFences(g_dev, 1, &FG.fence);
     pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, FG.fence); pthread_mutex_unlock(&g_qmu);
     if (r) return 0;
-    vk_wait(NULL, FG.fence, UINT64_MAX);
-    if (++FG.n < 2) return 0;   // (the first frame: nothing to go between yet)
-    // 2. the in-between frame
-    if (FG.run(FG.ctx)) { VLOG("[FORK] [RED] fg: %s: off", FG.err()); atomic_store(&FG.state, -1); return 0; }
-    double ms = (mono_ns() - t0) / 1e6; FG.gen_ms = FG.ngen ? FG.gen_ms * 0.98 + ms * 0.02 : ms;
-    if (++FG.ngen == 1 || FG.ngen % 1800 == 0) VLOG("[FORK] fg: %llu frames generated, %.1f ms each (copy + generation)", (unsigned long long)FG.ngen, FG.gen_ms);
-    // 3. shown: the generated frame half an interval before the real one
+    // when the two frames should show: the real one at this frame's paced time, the generated one half an interval before it
     VkPresentTimeGOOGLE pt = { 0, 0 }; uint64_t half = 0;
     if (pace_time(&pt) && pt.desiredPresentTime && g_refresh_ns) {
         const char *e = getenv("DM_FPS_TARGET"); int fps = e && atoi(e) >= 30 ? atoi(e) : 30;
         uint64_t r2 = g_refresh_ns, k = (1000000000ull / (uint64_t)fps + r2 / 2) / r2; half = (k ? k : 1) * r2 / 2; }
-    int flip = atomic_load(&g_origin_ll);
-    if (!fg_show(FG.img[2], VK_IMAGE_LAYOUT_GENERAL, 2, 0, 0, cw, ch, flip, pt.desiredPresentTime > half ? pt.desiredPresentTime - half : 0, 0)) return 1;
-    fg_show(x->img, VK_IMAGE_LAYOUT_GENERAL, -1, cx, cy, cw, ch, flip, pt.desiredPresentTime, pt.presentID);
+    pthread_mutex_lock(&fg_mu);
+    FJ.n = ++FG.n; FJ.in = in; FJ.w = cw; FJ.h = ch; FJ.flip = atomic_load(&g_origin_ll); FJ.t = pt.desiredPresentTime; FJ.half = half; FJ.id = pt.presentID;
+    FJ.has = 1; FJ.busy = 1; pthread_cond_signal(&fg_cv); pthread_mutex_unlock(&fg_mu);
     return 1;
 }
