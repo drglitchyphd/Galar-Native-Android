@@ -377,6 +377,10 @@ void mtl_init(void) {
     { const char *tc = getenv("DM_VK_BC_TRANSCODE"); nvn_fmt_vk_etc(!f2.features.textureCompressionBC && f2.features.textureCompressionETC2 && !(tc && !strcmp(tc, "off")), f2.features.textureCompressionASTC_LDR); }
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_qf, .queueCount = 1, .pQueuePriorities = &prio };
+    { int fork_fg_want(void); extern int g_fk_ahb;   // FORK: frame generation shares images through AHardwareBuffers (fork_fg.h)
+      if (fork_fg_want() && has_ext(de, nde, "VK_ANDROID_external_memory_android_hardware_buffer") && ndext + 2 <= 24) {
+          dext[ndext++] = "VK_ANDROID_external_memory_android_hardware_buffer"; if (has_ext(de, nde, "VK_EXT_queue_family_foreign")) dext[ndext++] = "VK_EXT_queue_family_foreign";
+          g_fk_ahb = 1; VLOG("[FORK] fg: hardware buffer sharing on"); } }
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext };
     VKCHECK(vkCreateDevice(g_pd, &dci, NULL, &g_dev));
     { extern void dm_boot_device_up(void) __attribute__((weak)); if (dm_boot_device_up) dm_boot_device_up(); }   // (android_main.c boot_state: a crash from here on counts as the driver's)
@@ -4085,6 +4089,7 @@ static void present_window_locked(vtex *x, const int crop[4]);
 static void present_window(vtex *x, const int crop[4]) { pthread_mutex_lock(&g_wmu); present_window_locked(x, crop); pthread_mutex_unlock(&g_wmu); }
 // The window is going away (android_main.c APP_CMD_TERM_WINDOW): its swapchain and surface are released before that returns, as Android expects
 void nvn_vk_window_term(void) { if (!g_dev) return; pthread_mutex_lock(&g_wmu); swap_destroy(); pthread_mutex_unlock(&g_wmu); }
+#include "fork_fg.h"   // FORK: frame generation
 static void present_window_locked(vtex *x, const int crop[4]) {
     fork_ui_frame();   // FORK
     void *win = front_metal_layer();
@@ -4092,6 +4097,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
     if (!g_has_swapchain || !x || !x->img || !(x->aspect & VK_IMAGE_ASPECT_COLOR_BIT) || x->samples > 1) return;
     int srgb = x->fmt == VK_FORMAT_R8G8B8A8_SRGB || x->fmt == VK_FORMAT_B8G8R8A8_SRGB;
     if (!swap_ensure(win, srgb)) return;
+    if (fork_fg_present(x, crop)) return;   // FORK: frame generation presented this frame (the generated one, then this one)
     uint32_t sl = W.slot++ % 3;
     vk_wait(NULL, W.fence[sl], UINT64_MAX);
     uint32_t ii; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, UINT64_MAX, W.acq[sl], VK_NULL_HANDLE, &ii);

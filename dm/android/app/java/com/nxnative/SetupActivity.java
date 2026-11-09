@@ -50,7 +50,7 @@ import java.util.zip.ZipInputStream;
 
 public final class SetupActivity extends Activity {
     private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_DRIVER = 3, PICK_SAVE_EXPORT = 4, PICK_SAVE_IMPORT = 5;
-    private static final int PICK_DLC = 6;   // FORK: ForkDlc
+    private static final int PICK_DLC = 6, PICK_LSFG = 7;   // FORK: ForkDlc, the Lossless.dll
     private TextView driverText;
     private final List<String> games = new ArrayList<>();
     private final List<File> importedGames = new ArrayList<>();
@@ -206,6 +206,7 @@ public final class SetupActivity extends Activity {
         shortcut = pill(saveBox, T.t(this, "Add %s to the home screen", gameName()), 0xFF2A2E37, 0xFFF2F3F5, v -> pinShortcut());
         ((LinearLayout.LayoutParams) shortcut.getLayoutParams()).topMargin = px(8);
         forkDlcCard(more, acc);   // FORK: DLC added without setting the game up again (ForkDlc.java)
+        forkLsfgCard(more, acc);   // FORK: frame generation's Lossless.dll
         // the Vulkan driver: the phone's own, or an Adreno driver package (a zip with meta.json and the library, e.g. Mesa Turnip) opened through libadrenotools;
         // most players never need it, so it stays folded away unless a driver package is in use
         LinearLayout cd = card(more, null, T.t(this, "Graphics driver"), acc);
@@ -366,6 +367,31 @@ public final class SetupActivity extends Activity {
             if (!setUp()) { status.setText(T.t(this, "Set the game up first, then add its DLC.")); return; }
             pick(PICK_DLC, true); });
     }
+    // FORK: frame generation: the player's own Lossless.dll (from their Lossless Scaling on Steam), copied into this app's private storage (Fork.lsfgDll).
+    //   The game makes its shaders from it at start (gfx/nvn/fork_fg.h); it is never shared or uploaded
+    private TextView lsfgText;
+    private void forkLsfgCard(LinearLayout more, int acc) {
+        LinearLayout c = card(more, null, T.t(this, "Frame generation"), acc);
+        lsfgText = text(c, "", 14, 0xFFF2F3F5, false); forkLsfgShow();
+        LinearLayout r = hrow(c);
+        pill(r, T.t(this, "Choose Lossless.dll"), 0xFF2A2E37, 0xFFF2F3F5, v -> pick(PICK_LSFG, false));
+        pill(r, T.t(this, "Remove"), 0xFF2A2E37, 0xFFF2F3F5, v -> { Fork.lsfgDll(this).delete(); forkLsfgShow(); });
+    }
+    private void forkLsfgShow() {
+        if (lsfgText == null) return; File f = Fork.lsfgDll(this);
+        lsfgText.setText(f.isFile() ? T.t(this, "Lossless.dll is set (%d MB). Turn frame generation on in the game: menu, Performance.", (int) (f.length() >> 20))
+                                    : T.t(this, "Uses Lossless Scaling's frame generation. Choose Lossless.dll from your own copy (Steam: steamapps/common/Lossless Scaling). It stays in this app only."));
+    }
+    private void forkLsfgAdd(Uri u) {
+        if (u == null) return;
+        File dst = Fork.lsfgDll(this), tmp = new File(dst.getPath() + ".part"); dst.getParentFile().mkdirs();
+        try (InputStream in = getContentResolver().openInputStream(u); OutputStream out = new java.io.FileOutputStream(tmp)) { copy(in, out); }
+        catch (IOException e) { tmp.delete(); status.setText(e.toString()); return; }
+        boolean pe = false; try (java.io.FileInputStream in = new java.io.FileInputStream(tmp)) { pe = in.read() == 'M' && in.read() == 'Z'; } catch (IOException e) { }
+        if (!pe || tmp.length() < (1 << 20)) { tmp.delete(); status.setText(T.t(this, "That is not Lossless.dll (choose the file from your Lossless Scaling folder).")); return; }
+        if (!tmp.renameTo(dst)) { tmp.delete(); status.setText(T.t(this, "Could not keep the file.")); return; }
+        status.setText(T.t(this, "Lossless.dll set.")); forkLsfgShow();
+    }
     private void forkDlcShow() {
         if (dlcText == null) return; List<String> d = ForkDlc.installed(this);
         dlcText.setText(d.isEmpty() ? T.t(this, "None set up. The expansions need their DLC files (small .nsp packages); adding them does not set the game up again.")
@@ -458,6 +484,7 @@ public final class SetupActivity extends Activity {
         if (req == PICK_SAVE_EXPORT) { exportSave(data.getData()); return; }
         if (req == PICK_SAVE_IMPORT) { importSave(data.getData()); return; }
         if (req == PICK_DLC) { forkDlcAdd(data); return; }   // FORK
+        if (req == PICK_LSFG) { forkLsfgAdd(data.getData()); return; }   // FORK
         List<Uri> uris = new ArrayList<>();
         if (data.getClipData() != null) for (int k = 0; k < data.getClipData().getItemCount(); k++) uris.add(data.getClipData().getItemAt(k).getUri()); else if (data.getData() != null) uris.add(data.getData());
         if (uris.isEmpty()) { status.setText(T.t(this, "The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.")); return; }

@@ -259,6 +259,16 @@ public final class GameMenu {
         if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", p[5]) },
             { "30", "30 fps", t(a, "30 fps, as the game is made") }, { "60", "60 fps", GameSettings.paldea(a) ? t(a, "Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)")
                                                                                                : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") } });
+        // FORK: frame generation (gfx/nvn/fork_fg.h, libforklsfg.so) with the player's own Lossless.dll (setup screen: Frame generation)
+        heading(a, t(a, "Frame generation (Lossless Scaling)"));
+        if (!Fork.lsfgDll(a).isFile()) note(a, t(a, "Choose your Lossless.dll on the setup screen first (System, Setup screen, Frame generation)."));
+        else {
+            choice(a, "DM_FORK_FG", t(a, "Frame generation"), new String[][] { { "", t(a, "Off"), "" },
+                { "2x", "2x", t(a, "2x: a generated frame between every two of the game's, 60 on screen while the game keeps its own 30 (its speed untouched). About half a frame more delay; fast motion and menu edges can smear. From the next start") } });
+            slider(a, t(a, "Flow scale"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
+            choice(a, "DM_FORK_FG_PERF", t(a, "Model"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
+                { "off", t(a, "Quality"), t(a, "Quality: the full model, heavier") } });
+        }
         heading(a, t(a, "Memory"));
         choice(a, "DM_VK_TEX_QUALITY", t(a, "Textures"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", t(a, p[3].equals("half") ? "Half" : "Full")) },
             { "full", t(a, "Full"), t(a, "Full: the game's textures as they are") }, { "half", t(a, "Half"), t(a, "Half: large textures at half size, less memory and GPU work") } });

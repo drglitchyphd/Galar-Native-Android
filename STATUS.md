@@ -1,13 +1,25 @@
 # STATUS
 
-**Build:** v22 built, not sent: waiting to bundle with frame generation (Steven's call). v21 is the last one sent. Branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
+**Build:** v23 sent (keep-alive, odd-frame capture, frame generation). Branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
 
 ## Works (tested on the Fold, v13–v19)
 - Own setup in the shared folder, launch, battles, 30 fps, fold / unfold in place, upstream merged.
 - Picture "Fill, corrected": the camera is right on both screens, the battle cameras too (v18). Main menu fades are fixed (v19).
 - DLC through in-game menu → System → Setup screen (v19). Layout profiles per screen.
 
-## In v22 (built, not sent)
+## New in v23 (not tested yet): frame generation
+- Setup screen → **Frame generation: Choose Lossless.dll**: the player's own DLL is copied to `filesDir/lsfg` and never shared.
+- In-game menu → Performance → **Frame generation 2x** (`DM_FORK_FG`), **Flow scale** (`DM_FORK_FG_FLOW`, default 75), **Model** (`DM_FORK_FG_PERF`, default Performance). They apply from the next start.
+- `dm/fork/lsfg` → `libforklsfg.so`:
+  - lsfg-vk-android 3e89e54 framegen and extract (MIT), the exyorha/dxbc translator (zlib), built by `build_fork.sh` (`FORK_LSFG=1`);
+  - `PancakeTAS/dxbc` is gone from GitHub, so its translator was swapped in, with a `.code` adapter.
+- `gfx/nvn/fork_fg.h`:
+  - each frame: blit the real frame into the shared AHB image (frame % 2), `presentContext` + `waitIdle`;
+  - present the generated frame half an interval before the real one;
+  - the AHB device extension is enabled only when frame generation is on.
+- Risks: the library uses the system Vulkan loader. With a custom Turnip / Adreno driver package, use "the phone's own driver" if frame generation fails. Generation blocks the present (logged as `[FORK] fg: … ms each`).
+
+## In v22
 - System → Background → **Keep running in the background** (`DM_FORK_KEEPALIVE=on`, default off): the `ForkKeepAlive` foreground service (specialUse) with a quiet notification while the game is open.
 - System → Bug reports → **Capture the next odd frame**: arms `fork_ui.h`'s capture live. It fires on a switch from 3D to UI only, or on an unknown shader drawn full size over the 3D (the X-menu flash suspect).
 
@@ -32,6 +44,6 @@
 ## Next (agreed with Steven, Nov 9)
 1. ~~Portrait on the inner screen~~ (v21: works, Steven Nov 9).
 2. ~~Keep alive in background~~ (v22).
-3. Frame generation 30→60 (research first: lsfg-vk / the player's own Lossless.dll, vs one built into the fork). Steven is collecting documentation.
+3. ~~Frame generation~~ (v23, first try: test).
 - The game's own 60 fps mode changes some animation speeds: not pursued.
 - Later idea: switch the control behaviour in full-screen menus (no 3D composite drawn: `fork_ui.h`) and in battles (detection needs a shader-logging test first). Sword has no `touch_menu` profile.

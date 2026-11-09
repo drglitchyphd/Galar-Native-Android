@@ -75,8 +75,12 @@ final class Fork {
         if (a.getRequestedOrientation() != want) { a.setRequestedOrientation(want); Log.i(TAG, "[FORK] orientation: " + (want == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER ? "any (inner screen)" : "landscape")); }
     }
 
+    // the player's Lossless.dll, copied in by the setup screen (private storage: never shared, never in the APK); gfx/nvn/fork_fg.h reads it through DM_FORK_LSFG_DLL
+    static File lsfgDll(Context c) { return new File(new File(c.getFilesDir(), "lsfg"), "Lossless.dll"); }
+
     // GameActivity, before NativeActivity starts the engine: android_main.c host_start reads DM_DATA_ROOT in place of the app's externalDataPath
     static void exportRoot(Context c) {
+        if (lsfgDll(c).isFile()) try { android.system.Os.setenv("DM_FORK_LSFG_DLL", lsfgDll(c).getPath(), true); } catch (Exception e) { }   // (frame generation)
         if (!shared(c)) return;
         try { android.system.Os.setenv("DM_DATA_ROOT", root(c).getPath(), true); } catch (Exception e) { Log.w(TAG, "[FORK] setenv DM_DATA_ROOT: " + e); }
     }

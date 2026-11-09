@@ -96,6 +96,7 @@ else   # an earlier build's copies in $LIBS would otherwise still go into the AP
     for so in libadrenotools libhook_impl libmain_hook libfile_redirect_hook libgsl_alloc_hook; do rm -f "$LIBS/$so.so"; done   # build_apk.py OPTIONAL
     echo "skipped (TURNIP=0)"; fi
 
+if [ -n "${PRE_APK_HOOK:-}" ]; then "$PRE_APK_HOOK"; fi   # FORK: scripts/build_fork.sh builds its extra libraries here (the NDK is in place by now)
 step "8/8 the APK"
 OUT="$WORK/$(python3 "$REPO/dm/games/game.py" $GAME app_name | tr -d ' ').apk"   # GalarNative.apk / PaldeaNative.apk
 OUT=${APK_OUT:-$OUT}   # FORK: scripts/build_fork.sh names its own APK
