@@ -1,6 +1,12 @@
 # STATUS
 
-**Build:** v17 (`fork/v15` branch): v16, plus the icon opening straight into Sword (`FORK_ONLY_GAME`, `Fork.onlyGame`). **Not yet tested on the Fold.**
+**Build:** v18 (`fork/v15` branch). v17 tested (log Nov 9):
+- Fill, corrected works on both screens, the layout profiles switch with the screen, and DLC is not added yet.
+- v18 fixes:
+  - The x9 site is the game's second 16:9 constant, and the 4:3 mod has a typo there (0x67aa for 0x3faa). The fork now writes the real ratio.
+  - The x12 site is not a constant, so it is left alone.
+  - Split-screen battles composite with e0feaaf9/57319aad. Draws now count as scene until the first UI shader each frame.
+  - The log lists other places the game builds 16:9 (`[FORK] 16:9 ...`). **Not yet tested on the Fold.**
 v15 test: "Fill, corrected" looks good in normal play. Transitions flash a squished image, or show the old picture in the bands; some battle camera cuts are squished.
 v16 adds:
 - DLC card on the setup screen ("Add DLC (.nsp)": `ForkDlc.java`, nx_extract `--aoc` into `aoc/`, no new setup).

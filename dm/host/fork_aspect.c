@@ -4,9 +4,11 @@
 // written again when the screen changes (fold / unfold), on the game's thread at each present. Original instructions are kept and put back when the option is off.
 //   0x6076c4  b 0x607664               jump into a cave
 //   0x607664  movz w9, #lo / movk w9, #hi, lsl 16 / b 0x6076c8   the ratio as a float, both halves (exact)
-//   0xd93414  movk x12, #hi, lsl 16    the high half of a second copy of the ratio (the low half stays the game's: within 0.4 %)
-//   0x607de8  movk x9, #0xd2ab, lsl 32 / movk x9, #0x67aa, lsl 48   the mod's values, purpose unknown: written for screens narrower than 16:9 (the mod's case),
-//             DM_FORK_ASPECT_X9=1 / 0 forces it on / off
+//   0x6076c4  originally ldr w9, [x1, #0xd4]: the camera's own aspect field, read here
+//   0x607de8  movk x9, #lo, lsl 32 / movk x9, #hi, lsl 48   a second aspect: the game builds 16/9 (0x3fe38e39) in x9's high half here. The mod meant 4/3 but its
+//             second word has a typo (0x67aa for 0x3faa: a huge ratio); the fork writes the screen's ratio. DM_FORK_ASPECT_X9=0 leaves it alone
+//   0xd93414  the mod writes movk x12 here, but the game has ldp x12, x13, [x0, #0xd0] (log, Nov 9): not an aspect constant, always left alone
+// At the first look the game's code is also searched for other places that build 16/9 (movk ..., #0x3fe3) and 16/9 words in its data, logged for finding more sites
 // A site whose original instruction is not what the mod changed, or that the code rewriter turned into a branch, is left alone (logged). With the mod itself switched on,
 // nothing here runs (its jump is already there).
 #include "hle.h"
@@ -56,9 +58,18 @@ static int find(void) {
     g_ok_cave = !(bad & (1 << S_JUMP | 1 << S_CAVE0 | 1 << S_CAVE1 | 1 << S_CAVE2));
     g_ok_x12 = !(bad & 1 << S_X12) && (g_orig[S_X12] & 0xffe0001fu) == 0xf2a0000cu;   // movk x12, #imm, lsl 16
     g_ok_x9 = !(bad & (1 << S_X9A | 1 << S_X9B)) && (g_orig[S_X9A] & 0xffe0001fu) == 0xf2c00009u && (g_orig[S_X9B] & 0xffe0001fu) == 0xf2e00009u;   // movk x9 lsl 32 / 48
-    if (!g_ok_x12) LOG("[FORK] [RED] aspect site x12 is not the expected instruction (%08x): left alone", g_orig[S_X12]);
+    if (!g_ok_x12) LOG("[FORK] aspect site x12 is not an aspect constant (%08x): left alone, as it should be", g_orig[S_X12]);
     if (!g_ok_x9) LOG("[FORK] aspect site x9 is not the expected instruction (%08x %08x): left alone", g_orig[S_X9A], g_orig[S_X9B]);
-    g_state = g_ok_cave || g_ok_x12 ? 0 : -1;
+    // where else the game builds or keeps 16/9: for finding the sites still missing (a camera that stays squashed)
+    { int n = 0; uint32_t *t = (uint32_t *)m->base; uint64_t words = m->text_end / 4;
+      for (uint64_t i = 0; i < words; i++) { uint32_t w = t[i];
+          if ((w & 0x7fffffe0u) == 0x72e7fc60u || (w & 0x7fffffe0u) == 0x72a7fc60u) {   // movk w/x, #0x3fe3, lsl 16 or lsl 48 (16/9's high half)
+              if (n < 40) LOG("[FORK] 16:9 built at main+%#llx: %08x (before it %08x %08x)", (unsigned long long)(i * 4), w, i > 1 ? t[i - 2] : 0, i ? t[i - 1] : 0); n++; } }
+      int k = 0; uint64_t lo = m->ro_off & ~3ull, hi = m->data_off ? m->data_off : m->size;
+      for (uint64_t o = lo; o + 4 <= hi && o + 4 <= m->size; o += 4) { uint32_t w; memcpy(&w, m->base + o, 4);
+          if (w == 0x3fe38e39u) { if (k < 20) LOG("[FORK] 16:9 word at main+%#llx", (unsigned long long)o); k++; } }
+      LOG("[FORK] 16:9 in main: built in %d places, kept as a word in %d", n, k); }
+    g_state = g_ok_cave || g_ok_x9 ? 0 : -1;
     return g_state;
 }
 // one instruction into the game's code while it runs: its page writable and executable for the moment of the store (other threads may be running in it)
@@ -74,13 +85,13 @@ static int put(uint32_t *p, uint32_t w) {
 static void write_ratio(double r) {
     float f = (float)r; uint32_t b; memcpy(&b, &f, sizeof b);
     uint32_t lo = b & 0xffff, hi = b >> 16, hr = (b + 0x8000) >> 16;
-    const char *x9 = getenv("DM_FORK_ASPECT_X9"); int want_x9 = x9 && *x9 ? atoi(x9) != 0 : r < 16.0 / 9.0;
+    const char *x9 = getenv("DM_FORK_ASPECT_X9"); int want_x9 = x9 && *x9 ? atoi(x9) != 0 : 1;
     int ok = 1;
     if (g_ok_cave) {   // the cave before the jump into it
         ok &= put(g_at[S_CAVE0], 0x52800009u | lo << 5); ok &= put(g_at[S_CAVE1], 0x72a00009u | hi << 5); ok &= put(g_at[S_CAVE2], 0x14000017u);
         ok &= put(g_at[S_JUMP], 0x17ffffe8u); }
     if (g_ok_x12) ok &= put(g_at[S_X12], (g_orig[S_X12] & ~(0xffffu << 5)) | hr << 5);
-    if (g_ok_x9) { if (want_x9) { ok &= put(g_at[S_X9A], 0xf2da5569u); ok &= put(g_at[S_X9B], 0xf2ecf549u); }
+    if (g_ok_x9) { if (want_x9) { ok &= put(g_at[S_X9A], (g_orig[S_X9A] & ~(0xffffu << 5)) | lo << 5); ok &= put(g_at[S_X9B], (g_orig[S_X9B] & ~(0xffffu << 5)) | hi << 5); }
                    else { ok &= put(g_at[S_X9A], g_orig[S_X9A]); ok &= put(g_at[S_X9B], g_orig[S_X9B]); } }
     g_x9_on = g_ok_x9 && want_x9;
     LOG("[FORK] aspect: camera %.4f (%08x)%s%s, UI scale for a %s screen%s", r, b, g_ok_cave ? "" : ", cave left alone", g_ok_x12 ? "" : ", x12 left alone",

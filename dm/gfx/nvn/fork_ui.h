@@ -1,7 +1,10 @@
 // FORK: the UI half of Picture "Fill, corrected" (host/fork_aspect.c has the camera half). Included by nvn_vk.c; runs on the replay's thread.
 // Pokémon Sword 1.3.2 ends a frame (frame captures, Adreno 840): the 3D scene is composited into a 1920x1080 image by one draw with vertex shader 7fa0c6373aca1086,
 // the UI (HUD, text boxes, menus) is drawn into that same image after it, and one draw with vertex shader 389df45bf4d9a0f6 copies the image to the one presented.
-// So: every draw into the composite's image that is not the composite itself is UI, and its viewport and scissor are shrunk around the image's centre by the scale
+// Battles with a split screen composite each half with vertex shader e0feaaf96d273c2b instead, then draw one effect (57319aada7d3772b) before the UI (capture, Nov 9).
+// So, in each frame, the draws into the composite's image are the 3D scene until the first draw with a UI shader (af0ef3ac1bd35ad3, 56af7f00aa776d97); from then on
+// they are UI. A composite the list does not know yet stays a full-size scene draw (the 3D is already right through the camera), not a shrunk one.
+// The UI draws' viewport and scissor are shrunk around the image's centre by the scale
 // fork_aspect.c gives (narrower screen: in y; wider: in x). After the picture is stretched over the screen the UI has its own shape again; the 3D behind it still
 // fills the image. A frame with UI but no 3D composite (the bag, the X menu) gets the parts the shrunk UI no longer covers cleared to black first.
 #pragma once
@@ -11,6 +14,10 @@ static const void *g_fk_img;   // the composite's image (its vtex), learnt from 
 static int g_fk_comp, g_fk_clear;   // this frame: the composite was drawn / the bands were cleared
 static uint64_t g_fk_ui;   // UI draws shrunk (logged now and then)
 
+static int g_fk_uimode;   // this frame: a UI shader was drawn into the image, so the rest of its draws there are UI
+static int fk_is(const char *k, const char *const *list) { for (; *list; list++) if (!strncmp(k, *list, 16)) return 1; return 0; }
+static const char *const k_fk_scene[] = { "7fa0c6373aca1086", "e0feaaf96d273c2b", "57319aada7d3772b", NULL };   // composites (the image is learnt from them)
+static const char *const k_fk_ui[] = { "af0ef3ac1bd35ad3", "56af7f00aa776d97", NULL };   // UI: the HUD, text boxes, menus
 static int g_fk_inimg, g_fk_prev_comp, g_fk_capped;   // this frame: draws into the image; last frame had the composite; the automatic capture was taken
 // present_window_locked: a new frame begins. DM_FORK_CAPTURE=1 (env.txt): the frame after the first one that went from 3D to UI only (a transition, a menu opening)
 //   is captured (frame-capture.zip in Download, as the menu's Capture a frame), to see what the game draws there
@@ -18,15 +25,20 @@ static void fork_ui_frame(void) {
     static int want = -1; if (want < 0) { const char *e = getenv("DM_FORK_CAPTURE"); want = e && atoi(e) > 0; }
     if (want && !g_fk_capped && g_fk_prev_comp && !g_fk_comp && g_fk_inimg && atomic_load(&g_cap) == 0) {
         g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after a switch from 3D to UI only"); }
-    g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0;
+    g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0;
 }
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {
     if (!vkey || !img) return;
-    if (!strncmp(vkey, "7fa0c6373aca1086", 16)) {   // the 3D composite: its image is the one the UI goes into
-        if (g_fk_img != img) { g_fk_img = img; VLOG("[FORK] UI image found (%ux%u)", tw, th); }
+    if (!g_fk_uimode && fk_is(vkey, k_fk_scene)) {   // a 3D composite: its image is the one the UI goes into
+        if (g_fk_img != img) { g_fk_img = img; VLOG("[FORK] UI image found (%ux%u, composite %.16s)", tw, th, vkey); }
         g_fk_comp = 1; return; }
     if (img != g_fk_img || !strncmp(vkey, "389df45bf4d9a0f6", 16)) return;
     g_fk_inimg++;
+    if (!g_fk_uimode) {
+        if (!fk_is(vkey, k_fk_ui)) {   // before any UI this frame: a scene draw the list does not know, kept full size
+            static int said; if (said < 16) { said++; VLOG("[FORK] scene draw kept full size (vertex %.16s)", vkey); }
+            g_fk_comp = 1; return; }
+        g_fk_uimode = 1; }
     float kx, ky; dm_fork_ui_scale(&kx, &ky);
     if (kx == 1 && ky == 1) return;
     float cx = tw * 0.5f, cy = th * 0.5f;
