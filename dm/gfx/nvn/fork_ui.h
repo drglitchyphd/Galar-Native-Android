@@ -33,11 +33,13 @@ static void fk_census_note(const char *k) { for (int i = 0; i < g_fk_cn; i++) if
 //   Battle: 3D with b6ff050a or ecacdb40 (the census of a battle; 56af7f00 alone is not one: dialogue boxes draw with it too, capture Nov 9); menu: no 3D, UI only.
 //   Held 10 frames before it changes
 _Atomic int dm_fork_screen;
+volatile int dm_fork_census_want;   // touch_ui.c: the battle controls need the screen kind (else only Fill, corrected runs the census)
 static void fk_screen_frame(int comp) {
     int bat = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "b6ff050a", 8) || !strncmp(g_fk_ck[i], "ecacdb40", 8)) bat = 1;
     int k = !comp && g_fk_cn ? 1 : comp && bat ? 2 : 0; static int cand = -1, held;
     if (k != cand) { cand = k; held = 0; return; }
-    if (++held == 10 && k != atomic_load(&dm_fork_screen)) { atomic_store(&dm_fork_screen, k); static int lines; if (lines++ < 400) VLOG("[FORK] screen: %s", k == 2 ? "battle" : k == 1 ? "menu" : "world"); }
+    int need = atomic_load(&dm_fork_screen) == 2 && k == 0 ? 90 : 10;   // (out of a battle only after 3 s without its HUD: its text phases hide the HUD for a moment)
+    if (++held == need && k != atomic_load(&dm_fork_screen)) { atomic_store(&dm_fork_screen, k); static int lines; if (lines++ < 400) VLOG("[FORK] screen: %s", k == 2 ? "battle" : k == 1 ? "menu" : "world"); }
 }
 static void fk_census_frame(int comp) {
     fk_screen_frame(comp);
@@ -64,7 +66,7 @@ static void fork_ui_frame(void) {
     int sw = g_fk_prev_comp && !g_fk_comp && g_fk_inimg;   // from 3D to UI only (a transition, a menu opening)
     if (want && !g_fk_capped && (sw || g_fk_odd) && atomic_load(&g_cap) == 0) {   // (and an unknown shader drawn full size: perhaps a menu's opening animation)
         g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after %s", sw ? "a switch from 3D to UI only" : "an unknown shader drawn full size"); }
-    if (dm_aspect() == DM_ASPECT_FIX) fk_census_frame(g_fk_comp);
+    if (dm_aspect() == DM_ASPECT_FIX || dm_fork_census_want) fk_census_frame(g_fk_comp);
     g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0; g_fk_odd = 0;
 }
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {

@@ -7,6 +7,7 @@
 // the stick is the finger's speed, back to rest as soon as the finger stops. A quick tap is held at least 80 ms (the game reads its input once a frame, every 33 ms);
 // touch areas are 1.3 times the drawing; a thumb sliding across the face buttons presses the one under it. Hidden while a controller is used, back on the next touch.
 // The layout and drawing parts also build into the Mac Vulkan host (mac_vk_build.sh), whose DM_OVL_SHOT composes them over a game frame to check the look.
+#include <stdatomic.h>   // FORK: dm_fork_screen
 #include "dm.h"
 #include "game_profile.h"   // DM_GAME_TOUCH_ZLZR (the profile key touch_zlzr)
 #if defined(DM_GAME_TOUCH_MENU) && DM_GAME_TOUCH_MENU
@@ -46,6 +47,15 @@ static int g_edit;   // the layout editor is on (touch_ui_event, front_overlay)
 //   A quick tap on either half presses A (a menu item when one of the game's menus shows); two fingers tapping together stay B. DM_FORK_DEADZONE: 0-40 % of the stick
 static int g_float = -1; static float g_dead = 0.12f;
 static int g_fr_on; static float g_fr_x, g_fr_y, g_frk_x, g_frk_y;   // the floating camera stick: on, its base, its knob
+// FORK: "In battle: hide unused buttons" (DM_FORK_BATTLE_HIDE=on): while the graphics layer sees a battle (gfx/nvn/fork_ui.h dm_fork_screen == 2), X, L / R, ZL / ZR,
+//   + / - and the on-screen right stick are neither drawn nor touchable; A, B, Y, the D-pad, the movement stick and the menu button stay
+static int g_bhide;
+extern _Atomic int dm_fork_screen __attribute__((weak)); extern volatile int dm_fork_census_want __attribute__((weak));
+static int battle_hidden(int c) {
+    if (!g_bhide || !&dm_fork_screen || atomic_load(&dm_fork_screen) != 2) return 0;
+    return c == C_X || c == C_L || c == C_R || c == C_ZL || c == C_ZR || c == C_PLUS || c == C_MINUS || c == C_RSTICK;
+}
+static void bhide_set(int on) { g_bhide = on; if (&dm_fork_census_want) dm_fork_census_want = on; }
 static double g_touch_t; static double g_two_t, g_tap_mute;   // two-finger tap: when the second finger landed; single taps ignored until g_tap_mute
 int touch_menu_active(void);   // touch_menu.c: one of the game's menus shows
 #if defined(DM_GAME_TOUCH_MENU) && DM_GAME_TOUCH_MENU
@@ -150,6 +160,7 @@ static void layout(float w, float h) {
     if (!g_stick_on) { g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }
 }
 static int hit(int c, float x, float y, float slack) {
+    if (battle_hidden(c)) return 0;   // FORK
     const ctl *k = &g_c[c]; float dx = x - k->cx, dy = y - k->cy, r = k->r * slack;
     return k->shown && dx * dx + dy * dy <= r * r;
 }
@@ -473,6 +484,7 @@ void touch_ui_setting(const char *key, const char *value) {
     if (!strcmp(key, "DM_TOUCH_OPACITY")) g_opacity = value ? clampf((float)atof(value) / 100.0f, 0.2f, 1.0f) : 1.0f;
     else if (!strcmp(key, "DM_TOUCH_FADE")) g_fade = value ? fmaxf(0.0f, (float)atof(value)) : 3.0f;
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
+    else if (!strcmp(key, "DM_FORK_BATTLE_HIDE")) bhide_set(value && !strcmp(value, "on"));   // FORK
     else if (!strcmp(key, "DM_FORK_DEADZONE")) g_dead = value ? clampf((float)atof(value) / 100.0f, 0.0f, 0.4f) : 0.12f;   // FORK
     g_touch_t = now_s();
     pthread_mutex_unlock(&g_mu);
@@ -490,6 +502,7 @@ static void prefs(void) {
     const char *o = getenv("DM_TOUCH_OPACITY"), *f = getenv("DM_TOUCH_FADE");
     g_opacity = o ? clampf((float)atof(o) / 100.0f, 0.2f, 1.0f) : 1.0f; if (f) g_fade = fmaxf(0.0f, (float)atof(f));
     { const char *ft = getenv("DM_FORK_TOUCH"), *dz = getenv("DM_FORK_DEADZONE"); g_float = ft && !strcmp(ft, "float");   // FORK: the control scheme, the dead zone
+      { const char *bh = getenv("DM_FORK_BATTLE_HIDE"); bhide_set(bh && !strcmp(bh, "on")); }   // FORK
       if (dz && *dz) g_dead = clampf((float)atof(dz) / 100.0f, 0.0f, 0.4f); if (g_float) fprintf(stderr, "[FORK] [touch] floating sticks, tap for A (dead zone %.0f %%)\n", g_dead * 100); }
 }
 int front_overlay(dm_ovl_item *it, int max, int width, int height) {
@@ -508,7 +521,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
         double t = now_s(); int idle = ((g_fade > 0 && t - g_touch_t > g_fade) || touch_menu_active()) && !g_btn && !g_stick_on && !g_rstick_on;   // (in a menu its items are tapped directly)   // nothing touched for 3 s: everything faint
         float ia = idle ? 0.22f : 1.0f;
         int faint = 0; (void)g_inner_t;   // FORK: the D-pad and the right stick fade with the rest (upstream: almost gone 2 s after their last touch)
-        for (int c = C_A; c < NCTL; c++) { if (!g_c[c].shown) continue;
+        for (int c = C_A; c < NCTL; c++) { if (!g_c[c].shown || battle_hidden(c)) continue;   // FORK: battle_hidden
             int on = (g_btn & g_c[c].btn) != 0; float al = c >= C_UP && c <= C_RIGHT && faint && !on ? 0.25f : 1.0f; if (idle) al = fminf(al, ia);
             if (c == C_THROW) { pokeball(it, &n, max, &g_c[c], on, al); continue; }
             if (c == C_MENU) { menu_icon(it, &n, max, &g_c[c], idle ? fmaxf(al, 0.45f) : al); continue; }   // (never quite gone: it is how the settings are found)
@@ -518,7 +531,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
         if (g_float <= 0 || g_stick_on)   // FORK: floating sticks: shown only under the thumb
             compass(it, &n, max, g_stick_on ? 1.0f : idle ? ia : 0.75f, g_stick_x, g_stick_y, g_knob_x, g_knob_y, g_c[C_STICK].r);
         if (g_fr_on) compass(it, &n, max, 1.0f, g_fr_x, g_fr_y, g_frk_x, g_frk_y, g_c[C_STICK].r);   // FORK: the floating camera stick under the finger
-        if (g_c[C_RSTICK].shown && g_float <= 0) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,   // faint while unused: it and the D-pad sit over the dialogue box
+        if (g_c[C_RSTICK].shown && g_float <= 0 && !battle_hidden(C_RSTICK)) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,   // faint while unused: it and the D-pad sit over the dialogue box
              g_c[C_RSTICK].cy, g_rknob_x, g_rknob_y, g_c[C_RSTICK].r);
         for (int i = 0; i < n; i++) { it[i].a *= g_opacity; it[i].galpha *= g_opacity; }
     }

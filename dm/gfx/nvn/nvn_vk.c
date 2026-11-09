@@ -3195,7 +3195,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     VkRect2D sc = {{0, 0}, {P.tw, P.th}};
     if (R.has_sc && !tfcap) { long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h; if (x1 > (long)P.tw) x1 = P.tw; if (y1 > (long)P.th) y1 = P.th;
         if (x1 <= x0 || y1 <= y0) return; sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
-    g_fk_sq = 0; if (!tfcap && dm_aspect() == DM_ASPECT_FIX) fork_ui_draw(pr->sh[0] ? pr->sh[0]->key : NULL, R.rt.color[0] ? (const void *)tex_res(R.rt.color[0]) : NULL, cb, &v, &sc, P.tw, P.th);   // FORK: the UI shrunk (fork_ui.h)
+    g_fk_sq = 0; if (!tfcap && (dm_aspect() == DM_ASPECT_FIX || dm_fork_census_want)) fork_ui_draw(pr->sh[0] ? pr->sh[0]->key : NULL, R.rt.color[0] ? (const void *)tex_res(R.rt.color[0]) : NULL, cb, &v, &sc, P.tw, P.th);   // FORK: the UI shrunk (fork_ui.h)
     vkCmdSetViewport(cb, 0, 1, &v);   // FORK: moved below the scissor, so fork_ui_draw sees both
     vkCmdSetScissor(cb, 0, 1, &sc);
     if (g_eds) {   // (without extended dynamic state these are built into the pipeline: pso_get's sst, the same values)
