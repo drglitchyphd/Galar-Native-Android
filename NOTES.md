@@ -166,3 +166,24 @@ Paths are relative to `dm/` unless they start with `scripts/` or `docs/`. Line n
 - **Inner screen** (log): swapchain **2504x2256** (aspect 1.11). UI squeeze `k = 1.11 / 1.778 ≈ 0.62`.
 - **Plan for fixed UI scaling, in the graphics layer, no game-code patch:** for UI-shader draws into the composite target, scale the viewport and scissor
   vertically by `k = (W/H) / (16/9)`, centred. Present with the `fill` box. `touch_menu.c` tap mapping needs the same inverse transform.
+
+## 11. Frame generation research (Nov 9): lsfg-vk on Android
+- **[FrankBarretta/LSFG-Android](https://github.com/FrankBarretta/LSFG-Android):** a standalone app.
+  - It can't hook another app's swapchain on Android 12+, so it works from a MediaProjection capture plus a system overlay. That adds 50–80 ms latency and needs capture consent every session.
+  - Its app code (`LSFG-Android/`) is **custom-licensed (no commercial use, no store)**. Don't copy from it.
+- **[FrankBarretta/lsfg-vk-android](https://github.com/FrankBarretta/lsfg-vk-android)** (branch `release`): lsfg-vk 1.0.0 with Android patches under `#ifdef __ANDROID__`, **MIT**.
+  - Dependencies: pe-parse (MIT), dxbc (from DXVK, zlib), volk (MIT), toml11 (MIT).
+  - Reported to work on Adreno 7xx+.
+  - **`framegen/public/lsfg_3_1.hpp`** API:
+    - `initialize(deviceUUID, isHdr, flowScale, generationCount, shaderLoader)`;
+    - `createContextFromAHB(in0, in1, outN, extent, format)`;
+    - `presentContext(id, inSem, outSem)`;
+    - `waitIdle()`, `deleteContext()`, `finalize()`.
+  - It runs its own Vulkan device; images are shared as AHardwareBuffers.
+  - **`src/extract/`** pulls the shaders out of the player's own `Lossless.dll` (pe-parse + dxbc → SPIR-V). The DLL must never be shipped; the player picks it, like `prod.keys`.
+- **Fork advantage:** the fork owns the game's swapchain (`nvn_vk.c present_window_locked`). It can feed the last two real frames into framegen directly and present the generated frame between them: no capture, no overlay, only the inherent one-frame (about 33 ms) delay of interpolation.
+- **Rough plan:**
+  1. Build framegen (C++20) for arm64 in `build_apk_pc.sh` as `libframegen.so`.
+  2. Setup screen: "Frame generation: choose Lossless.dll", extracting shaders into private storage.
+  3. `nvn_vk.c`: copy each presented frame into AHB-backed images, call `presentContext`, and present generated + real frames at twice the rate.
+  4. Setting, off by default: multiplier 2x, flow scale.
