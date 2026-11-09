@@ -169,6 +169,7 @@ static void *driver_main(void *a) {
 void touch_menu_tap(float x, float y, float w, float h) {
     int32_t box[4]; dm_picture_box((int32_t)w, (int32_t)h, 1920, 1080, box);
     float lx = (x - box[0]) / box[2] * 1920 - 960, ly = 540 - (y - box[1]) / box[3] * 1080;
+    { void dm_fork_ui_scale(float *kx, float *ky); float kx, ky; dm_fork_ui_scale(&kx, &ky); lx /= kx; ly /= ky; }   // FORK: the UI is drawn shrunk by this (gfx/nvn/fork_ui.h)
     if (lx < -960 || lx > 960 || ly < -540 || ly > 540) return;
     pthread_mutex_lock(&g_mu);
     if (!g_started) { pthread_t t; if (!pthread_create(&t, NULL, driver_main, NULL)) { pthread_detach(t); g_started = 1; } }

@@ -234,7 +234,8 @@ public final class GameMenu {
     private static void display(Activity a) {
         heading(a, t(a, "Screen"));
         choice(a, "DM_ASPECT", t(a, "Picture"), new String[][] { { "", "16:9", t(a, "16:9, as the game is made") }, { "fill", t(a, "Fill"), t(a, "Fill the screen (stretched)") },
-                                                                    { "20:9", "20:9", t(a, "20:9, for a widescreen mod") } });
+                                                                    { "20:9", "20:9", t(a, "20:9, for a widescreen mod") },
+                                                                    { "fix", t(a, "Fill, corrected"), t(a, "Fill the screen with the 3D and the menus kept in shape (experimental; no mod needed)") } });   // FORK
         String rec = GameSettings.profile(a)[6].equals("sgsr") ? "SGSR" : t(a, "Sharp");
         choice(a, "DM_SCALER", t(a, "Upscaling"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", rec) },
             { "sharp", t(a, "Sharp"), t(a, "Sharp: the picture upscaled with sharpening (lighter settings keep their detail)") },

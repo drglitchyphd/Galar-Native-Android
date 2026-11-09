@@ -1392,6 +1392,7 @@ typedef struct vtex {
 } vtex;
 static _Atomic int g_cap;   // the frame capture's state (Frame capture, before pass_end)
 static void cap_tex(int tid, const tex_t *t, const vtex *x, int vfmt, VkFormat f);
+#include "fork_ui.h"   // FORK: Picture "Fill, corrected", the UI half
 static void cap_printf(const char *f, ...);
 static pthread_mutex_t g_smu = PTHREAD_MUTEX_INITIALIZER;   // serial / sharing / CPU-written tables
 static nvn_hmap g_by_serial = {.klen = 8}, g_ghost = {.klen = 8}, g_tex_live = {.klen = 8}, g_cpu_tex = {.klen = 8};
@@ -3186,10 +3187,11 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         if (i == n) { memcpy(seen[n++], k, sizeof k); VLOG("viewport %g,%g %gx%g depth %g..%g on a %ux%u target (scissor %s %d,%d %ux%u)", vx, vy, vw, vh, S.dr[0], S.dr[1], P.tw, P.th, R.has_sc ? "set" : "none", R.sc.x, R.sc.y, R.sc.w, R.sc.h); } } }
     if (!atomic_load(&g_origin_ll)) { v.y = vy + vh; v.height = -vh; }   // NVN upper-left: NDC +1 on the first row (Vulkan puts -1 there)
     if (v.minDepth < 0) v.minDepth = 0; if (v.minDepth > 1) v.minDepth = 1; if (v.maxDepth < 0) v.maxDepth = 0; if (v.maxDepth > 1) v.maxDepth = 1;
-    vkCmdSetViewport(cb, 0, 1, &v);
     VkRect2D sc = {{0, 0}, {P.tw, P.th}};
     if (R.has_sc && !tfcap) { long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h; if (x1 > (long)P.tw) x1 = P.tw; if (y1 > (long)P.th) y1 = P.th;
         if (x1 <= x0 || y1 <= y0) return; sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
+    if (!tfcap && dm_aspect() == DM_ASPECT_FIX) fork_ui_draw(pr->sh[0] ? pr->sh[0]->key : NULL, R.rt.color[0] ? (const void *)tex_res(R.rt.color[0]) : NULL, cb, &v, &sc, P.tw, P.th);   // FORK: the UI shrunk (fork_ui.h)
+    vkCmdSetViewport(cb, 0, 1, &v);   // FORK: moved below the scissor, so fork_ui_draw sees both
     vkCmdSetScissor(cb, 0, 1, &sc);
     if (g_eds) {   // (without extended dynamic state these are built into the pipeline: pso_get's sst, the same values)
     // (points and lines never cull, so none is sent for them: Arm's driver culled them with a dynamic cull mode and those draws vanished, erratum 3786517, r41-r51)
@@ -3776,6 +3778,7 @@ static int swap_ensure_now(void *win, int srgb) {
     W.win = win; W.srgb = srgb;
     VLOG("window: swapchain %ux%u, %u images, format %d, %s%s", W.ext.width, W.ext.height, W.n, W.fmt, pm == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : pm == VK_PRESENT_MODE_FIFO_KHR ? "fifo" : "immediate",
          W.rot ? ", pre-rotated" : "");
+    { void dm_fork_window(uint32_t w, uint32_t h); dm_fork_window(W.lext.width, W.lext.height); }   // FORK: the screen's ratio (host/fork_aspect.c)
     g_refresh_ns = 0;
     if (g_dtiming && p_refresh) { VkRefreshCycleDurationGOOGLE rc = { 0 }; if (!p_refresh(g_dev, W.sc, &rc) && rc.refreshDuration) g_refresh_ns = rc.refreshDuration; }
     VLOG("frame pacing: %s", !g_dtiming ? "off (no VK_GOOGLE_display_timing)" : !g_refresh_ns ? "off (the display's refresh is unknown)"
@@ -4081,6 +4084,7 @@ static void present_window(vtex *x, const int crop[4]) { pthread_mutex_lock(&g_w
 // The window is going away (android_main.c APP_CMD_TERM_WINDOW): its swapchain and surface are released before that returns, as Android expects
 void nvn_vk_window_term(void) { if (!g_dev) return; pthread_mutex_lock(&g_wmu); swap_destroy(); pthread_mutex_unlock(&g_wmu); }
 static void present_window_locked(vtex *x, const int crop[4]) {
+    fork_ui_frame();   // FORK
     void *win = front_metal_layer();
     if (!win) { if (W.sc) swap_destroy(); return; }
     if (!g_has_swapchain || !x || !x->img || !(x->aspect & VK_IMAGE_ASPECT_COLOR_BIT) || x->samples > 1) return;

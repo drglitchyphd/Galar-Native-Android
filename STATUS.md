@@ -1,47 +1,33 @@
 # STATUS
 
-**Milestone:** M1 works on the Fold (v13/v14): setup completed, game launches, loading and caching in the opening area are good.
-`[FORK] data folder:` log line confirmed.
-**M2 fold/unfold already works in place** (log Nov 9): inner 2504x2256 ↔ outer 2520x1080 twice, the swapchain resized, no restart, 1–3 long frames per switch.
-M2 left: an optional pause on fold. Portrait on the inner screen does not rotate (manifest `sensorLandscape`): that is M3.
-**Next:** A, merge upstream; B, small fixes; D, built-in aspect fix for the inner (and outer) screen, no mods.
+**Build:** v15 (`fork/v15`). Upstream merged, fork fixes, and Picture "Fill, corrected" (experimental). **Not yet tested on the Fold.**
 
-## Decision
-- The fork does its **own setup** (no Shizuku, no sharing with the main app).
-- All of its per-game files live in **`/storage/emulated/0/GalarFork/`**, outside scoped storage: game files, saves, settings, mods,
-  shader caches and logs. Sword is in the `0100ABF008968000/` subfolder. Keys stay private (`filesDir/keys`).
+## What works (tested on v13/v14)
+- Own setup in `/storage/emulated/0/GalarFork/` (game, saves, settings, mods, caches, logs). Keys stay private.
+- Launch, loading, battles. 30 fps with about 1 % long frames.
+- **Fold / unfold switches in place** (inner 2504x2256 ↔ outer 2520x1080), no restart.
 
-## Changes
-- `scripts/build_fork.sh` (new) sets the package `com.nxnative.galarfork`, the name "Galar Fork", a blue icon and the data folder.
-  All of these can be changed with environment variables.
-- `Fork.java` (new) resolves the data folder, adds `.nomedia`, and shows the "allow all-files access" screen before setup.
-  It also passes `DM_DATA_ROOT` to the engine.
-- Small `// FORK` edits:
-  - `GameSettings.root`, `SetupActivity.onCreate/onResume`, `GameActivity.onCreate`.
-  - `android_main.c host_start`: reads `DM_DATA_ROOT` and logs `[FORK] data folder: ...`.
-  - `build_apk.py`: `--data-dir`, `--icon`. `build_apk_pc.sh`: `APK_ARGS`, `APK_OUT`.
-- A stock build (`build_apk_pc.sh`) behaves exactly as before.
+## New in v15
+- **Upstream merged** (21 commits; the shader chain is unchanged, so no new setup):
+  - faster setup step 5 (#100), and a finished translation is kept;
+  - leftovers cleanup (#47), now also old `gate.*` lock files;
+  - texture uploads about 25x faster;
+  - frame pacing and a 30 fps guard;
+  - 3D render scale and Graphics "Lowest";
+  - "Faster rendering (experimental)";
+  - crash-record fixes.
+- The mods and setup-log hints show `GalarFork/...`.
+- **Picture → "Fill, corrected"** (`DM_ASPECT=fix`), off unless chosen:
+  - `host/fork_aspect.c`: writes the 4:3 mod's camera sites with the screen's own ratio, and rewrites them on fold / unfold. Skipped when the 4:3 mod is on.
+  - `gfx/nvn/fork_ui.h`: draws into the 3D composite's image after it (UI) get a shrunk viewport and scissor. Menus without 3D get black bands.
+  - `touch_menu.c`: menu taps corrected by the same scale.
+  - `DM_FORK_ASPECT_X9=0/1` in env.txt forces the mod's unexplained x9 sites (default: on for the narrower inner screen only).
 
-## Checked here
-- All app Java compiles against Android 15's framework classes. `build_apk.py` and both scripts pass syntax checks.
-- Full APK built in the cloud: package `com.nxnative.galarfork`, label "Galar Fork", `assets/data_dir`, and the `[FORK]` log line in `libnxnative.so` are all confirmed in the APK.
-
-## Test on the Fold
-1. `bash scripts/build_fork.sh` and install `GalarFork.apk` next to the main app.
-2. Open it, allow all-files access, set up Sword. Check that `GalarFork/0100ABF008968000/` fills up and the main app is untouched.
-3. Play, save, quit and reopen. Then check that the log has `[FORK] data folder:`.
-4. **Watch for loading time or stutter**: shared storage can read slower than `Android/data`. Compare with the main app.
-
-## Fixed in v13
-- Setup hung at "translate the shaders 0%": `dmsh_gate` uses `flock`, which shared storage (FUSE) doesn't support. Fork builds now keep the gate's lock files in the private cache (`DM_GATE_LOCK_DIR`, `setup_game.py gate_dir`).
-- Bump `FORK_VERSION` for every build: the app re-unpacks its setup scripts only when the version changes.
-
-## Added in v14
-- Step 5 (pack the shaders) shows a percentage: `android/tools/fork_progress.py` watches vk_meta/spv_pak from outside (file counts, sizes, `/proc/<pid>/io`), hooked into `setup_game.py` step 5 (`# FORK`). Tested with a simulated 30k-shader set; not yet on the phone.
-
-## Known gaps
-- Two in-app hints still say `Android/data/...` (the mods-folder hint in `GameMenu`, and the setup-log path).
-- Uninstalling leaves `GalarFork/`. That is intended; delete it by hand to start over.
+## Test v15
+1. Picture "16:9": the game as before, faster loading.
+2. Picture "Fill, corrected" on the inner screen: the 3D is not squashed, and the HUD, text boxes and bag are in shape, with bands above / below. Fold to the outer screen and back.
+3. Send the `[FORK] aspect` and `[FORK] UI` log lines, plus a screenshot of each screen.
 
 ## Next
-- After a good test, M2 (fold/unfold).
+- Fix whatever v15 shows. Then portrait on the inner screen and pause on fold (M2/M3).
+- Idea: keep the game alive in the background (foreground service toggle). Save states are not possible.
