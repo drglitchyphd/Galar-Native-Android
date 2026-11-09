@@ -102,7 +102,7 @@ public final class GameMenu {
         w.setWindowAnimations(android.R.style.Animation_InputMethod);   // (slides in from the edge)
         hideBars(w);
         d.setOnKeyListener((x, kc, e) -> remapKey(kc, e));
-        d.setOnDismissListener(x -> { dlg = null; RESTART.clear(); capture = null; });
+        d.setOnDismissListener(x -> { dlg = null; capture = null; });   // FORK: RESTART kept until the app restarts (the banner on top of every page, Restart now)
         dlg = d; d.show(); hideBars(w);
         go(page);
     }
@@ -127,6 +127,15 @@ public final class GameMenu {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = dp(a, 4); rail.addView(r, lp);
         }
         body.removeAllViews();
+        if (!RESTART.isEmpty() && Fork.shared(a)) {   // FORK: changes waiting for the next start: say so on top, with a way to restart now
+            LinearLayout c = new LinearLayout(a); c.setOrientation(LinearLayout.HORIZONTAL); c.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            c.setPadding(dp(a, 14), dp(a, 10), dp(a, 10), dp(a, 10)); c.setBackground(round(0x33FFB74D, dp(a, 14), dp(a, 1), WARN));
+            TextView tx = text(a, t(a, "Some changes apply after a restart."), 14, TEXT, false); c.addView(tx, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView bt = text(a, t(a, "Restart now"), 14, 0xFF000000, true); bt.setPadding(dp(a, 16), dp(a, 8), dp(a, 16), dp(a, 8)); bt.setBackground(round(WARN, dp(a, 12), 0, 0));
+            bt.setOnClickListener(v -> confirm(a, t(a, "Restart the game now? Anything since your last save in the game is lost."), () -> ForkRestartActivity.restart(a)));
+            c.addView(bt);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = dp(a, 12); body.addView(c, lp);
+        }
         switch (p) {
             case "display": display(a); break;
             case "perf": perf(a); break;

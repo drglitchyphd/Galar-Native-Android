@@ -107,7 +107,9 @@ def main():
                   '\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />') if a.data_dir else ''
     fork_service = ('\n        <service android:name="com.nxnative.ForkKeepAlive" android:exported="false" android:foregroundServiceType="specialUse">'
                     '\n            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Keeps the game the player has open running while it is in the background" />'
-                    '\n        </service>') if a.data_dir else ''
+                    '\n        </service>'
+                    '\n        <activity android:name="com.nxnative.ForkRestartActivity" android:process=":restart" android:exported="false" android:excludeFromRecents="true"'
+                    ' android:noHistory="true" android:theme="@android:style/Theme.Translucent.NoTitleBar" />') if a.data_dir else ''   # (the menu's Restart now: ForkRestartActivity.java)
     open(os.path.join(w, 'AndroidManifest.xml'), 'w', encoding='utf-8').write(f'''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{a.package}" android:versionCode="{a.version}" android:versionName="0.{a.version}">
     <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="35" />

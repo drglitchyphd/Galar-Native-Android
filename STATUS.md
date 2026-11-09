@@ -1,6 +1,6 @@
 # STATUS
 
-**Build:** v28: frame generation input order fixed (the library counts its own calls; the fork skipped the first frame, so every generated frame used reversed motion: cutscene ghosting); generated frames get their own present id (the display timing report counts them). v27: the worker sets the display times when it presents (v26: 30–45 shown/s, the times were stale by then, so Android showed only the newer frame). v26: FIFO while frame generation is on (v25 log: the worker takes ~20 ms of 33 and the game never waits, but mailbox dropped the generated frame, so ~30/s on screen); no "unofficial build" notices in fork builds. Grey bars at game load predate frame generation, and the game's image is black there: the cause is outside the game (an Android layer?), to check.
+**Build:** v29: menu banner + **Restart now** for settings that apply next start (`ForkRestartActivity`, `:restart` process); `[FORK] ui census` log (UI shaders per screen, for battle detection). v28: frame generation input order fixed (the library counts its own calls; the fork skipped the first frame, so every generated frame used reversed motion: cutscene ghosting); generated frames get their own present id (the display timing report counts them). v27: the worker sets the display times when it presents (v26: 30–45 shown/s, the times were stale by then, so Android showed only the newer frame). v26: FIFO while frame generation is on (v25 log: the worker takes ~20 ms of 33 and the game never waits, but mailbox dropped the generated frame, so ~30/s on screen); no "unofficial build" notices in fork builds. Grey bars at game load predate frame generation, and the game's image is black there: the cause is outside the game (an Android layer?), to check.
 
 ## Works (tested on the Fold, v13–v19)
 - Own setup in the shared folder, launch, battles, 30 fps, fold / unfold in place, upstream merged.
@@ -47,3 +47,4 @@
 3. ~~Frame generation~~ (v23, first try: test).
 - The game's own 60 fps mode changes some animation speeds: not pursued.
 - Later idea: switch the control behaviour in full-screen menus (no 3D composite drawn: `fork_ui.h`) and in battles (detection needs a shader-logging test first). Sword has no `touch_menu` profile.
+- Battle controls: Steven wants unused buttons hidden in battle plus context-aware controls. Needs battle detection: v29's ui census shows the shader sets; then map hide-lists per screen kind.

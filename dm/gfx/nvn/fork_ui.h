@@ -25,6 +25,20 @@ static void fork_ui_fill(VkCommandBuffer cb) {
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
     if (++g_fk_fills == 1 || g_fk_fills % 1000 == 0) VLOG("[FORK] fill draws kept full size: %llu", (unsigned long long)g_fk_fills);
 }
+// The census (for telling battles, menus and the world apart later): which UI shaders each frame draws into the picture and whether it has 3D under them.
+// A frame's set is logged when it differs from the last logged one and has held for 15 frames ([FORK] ui census), at most 400 lines a run
+static char g_fk_ck[12][17]; static int g_fk_cn;
+static void fk_census_note(const char *k) { for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], k, 16)) return; if (g_fk_cn < 12) { memcpy(g_fk_ck[g_fk_cn], k, 16); g_fk_ck[g_fk_cn][16] = 0; g_fk_cn++; } }
+static void fk_census_frame(int comp) {
+    static char last[256], cand[256]; static int held, lines;
+    char cur[256]; int n = snprintf(cur, sizeof cur, "3D %s; UI:", comp ? "yes" : "no");
+    for (int i = 0; i < g_fk_cn; i++) for (int j = i + 1; j < g_fk_cn; j++) if (strcmp(g_fk_ck[j], g_fk_ck[i]) < 0) { char t[17]; memcpy(t, g_fk_ck[i], 17); memcpy(g_fk_ck[i], g_fk_ck[j], 17); memcpy(g_fk_ck[j], t, 17); }
+    for (int i = 0; i < g_fk_cn && n < (int)sizeof cur - 20; i++) n += snprintf(cur + n, sizeof cur - n, " %.8s", g_fk_ck[i]);
+    if (!g_fk_cn) snprintf(cur + n, sizeof cur - n, " none");
+    g_fk_cn = 0;
+    if (strcmp(cur, cand)) { snprintf(cand, sizeof cand, "%s", cur); held = 0; return; }
+    if (++held == 15 && strcmp(cur, last) && lines < 400) { lines++; snprintf(last, sizeof last, "%s", cur); VLOG("[FORK] ui census: %s", cur); }
+}
 static int g_fk_uimode;   // this frame: a UI shader was drawn into the image, so the rest of its draws there are UI
 static int fk_is(const char *k, const char *const *list) { for (; *list; list++) if (!strncmp(k, *list, 16)) return 1; return 0; }
 static const char *const k_fk_scene[] = { "7fa0c6373aca1086", "e0feaaf96d273c2b", "57319aada7d3772b", NULL };   // composites (the image is learnt from them)
@@ -39,6 +53,7 @@ static void fork_ui_frame(void) {
     int sw = g_fk_prev_comp && !g_fk_comp && g_fk_inimg;   // from 3D to UI only (a transition, a menu opening)
     if (want && !g_fk_capped && (sw || g_fk_odd) && atomic_load(&g_cap) == 0) {   // (and an unknown shader drawn full size: perhaps a menu's opening animation)
         g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after %s", sw ? "a switch from 3D to UI only" : "an unknown shader drawn full size"); }
+    if (dm_aspect() == DM_ASPECT_FIX) fk_census_frame(g_fk_comp);
     g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0; g_fk_odd = 0;
 }
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {
@@ -47,7 +62,7 @@ static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, 
         if (g_fk_img != img) { g_fk_img = img; VLOG("[FORK] UI image found (%ux%u, composite %.16s)", tw, th, vkey); }
         g_fk_comp = 1; return; }
     if (img != g_fk_img || !strncmp(vkey, "389df45bf4d9a0f6", 16)) return;
-    g_fk_inimg++;
+    g_fk_inimg++; fk_census_note(vkey);
     if (!g_fk_uimode) {
         if (!fk_is(vkey, k_fk_ui)) {   // before any UI this frame: a scene draw the list does not know, kept full size
             static int said; if (said < 16) { said++; VLOG("[FORK] scene draw kept full size (vertex %.16s)", vkey); }
