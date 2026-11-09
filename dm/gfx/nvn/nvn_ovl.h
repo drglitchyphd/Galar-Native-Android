@@ -31,8 +31,9 @@ static inline int dm_aspect(void) {
 }
 static inline int dm_aspect_20_9(void) { return dm_aspect() == DM_ASPECT_20_9; }
 static inline void dm_picture_box(int32_t ww, int32_t wh, int32_t sw, int32_t sh, int32_t box[4]) {
-    if ((dm_aspect() == DM_ASPECT_FILL || dm_aspect() == DM_ASPECT_FIX) && ww > 0 && wh > 0)   // FORK: || FIX
+    if ((dm_aspect() == DM_ASPECT_FILL || (dm_aspect() == DM_ASPECT_FIX && ww >= wh)) && ww > 0 && wh > 0)   // FORK: || FIX (landscape only)
         { box[0] = box[1] = 0; box[2] = ww; box[3] = wh; return; }
     double ar = dm_aspect_20_9() ? 20.0 / 9.0 : sh > 0 ? (double)sw / sh : 16.0 / 9.0, bh = fmin((double)wh, ww / ar), bw = bh * ar;
     box[2] = (int32_t)bw > 0 ? (int32_t)bw : 1; box[3] = (int32_t)bh > 0 ? (int32_t)bh : 1; box[0] = (ww - box[2]) / 2; box[1] = (wh - box[3]) / 2;
+    if (wh > ww) box[1] = 0;   // FORK: portrait (the inner screen held upright): the picture at the top, the touch controls below it
 }

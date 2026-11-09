@@ -23,7 +23,7 @@ static double win_ratio(void) { uint32_t p = atomic_load(&g_win), w = p >> 16, h
 // the ratio the picture is corrected for, 0 when it is not (another Picture setting, or a screen within 2 % of 16:9)
 static double fix_ratio(void) {
     if (dm_aspect() != DM_ASPECT_FIX) return 0;
-    double r = win_ratio(); return r > 0 && fabs(r / (16.0 / 9.0) - 1) > 0.02 ? r : 0;
+    double r = win_ratio(); return r >= 1.0 && fabs(r / (16.0 / 9.0) - 1) > 0.02 ? r : 0;   // (portrait: the picture is fitted at the top, nothing to correct)
 }
 // gfx/nvn/fork_ui.h and android/app/jni/touch_menu.c: the UI's scale in x and y (1, 1 = none)
 void dm_fork_ui_scale(float *kx, float *ky) {

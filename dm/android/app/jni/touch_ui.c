@@ -130,6 +130,21 @@ static void layout(float w, float h) {
     g_c[C_MENU] = (ctl){ w * 0.5f - 0.24f * s, 0.06f * s, mr, OVL_G_NONE, 1, 0 };   // ☰ just left of −, at the top centre: the settings (front_open_menu); no Switch button
     // touch-first games (Legends: Arceus): only the movement stick and − / + on screen; everything else is touch on the game itself (touch_ui_event's gestures, touch_menu.c)
     if (GESTURES_ON) for (int c = C_RSTICK; c < NCTL; c++) if (c != C_PLUS && c != C_MINUS && c != C_MENU) g_c[c].shown = 0;
+    if (h > w * 1.05f) {   // FORK: portrait (the inner screen upright): the 16:9 picture fills the top (nvn_ovl.h dm_picture_box), the controls go in the space below it
+        float ph = w * 9.0f / 16.0f, a = h - ph, q = 0.85f * w, cb = 0.072f * q, cg = 0.125f * q, ax0 = 0.78f * w, ay0 = ph + 0.40f * a, lr = 0.06f * q, sm = 0.040f * q;
+        g_c[C_A] = (ctl){ ax0 + cg, ay0, cb, OVL_G_A, 1, DM_BTN_A }; g_c[C_B] = (ctl){ ax0, ay0 + cg, cb, OVL_G_B, 1, DM_BTN_B };
+        g_c[C_X] = (ctl){ ax0, ay0 - cg, cb, OVL_G_X, 1, DM_BTN_X }; g_c[C_Y] = (ctl){ ax0 - cg, ay0, cb, OVL_G_Y, 1, DM_BTN_Y };
+        g_c[C_L] = (ctl){ 0.11f * w, ph + 0.10f * a, lr, OVL_G_L, 1, DM_BTN_L }; g_c[C_R] = (ctl){ 0.89f * w, ph + 0.10f * a, lr, OVL_G_R, 1, DM_BTN_R };
+        g_c[C_ZL].cx = 0.11f * w; g_c[C_ZL].cy = ph + 0.10f * a - 2.4f * lr; g_c[C_ZR].cx = 0.89f * w; g_c[C_ZR].cy = g_c[C_ZL].cy;
+        g_c[C_MENU] = (ctl){ 0.36f * w, ph + 0.08f * a, sm, OVL_G_NONE, 1, 0 };
+        g_c[C_MINUS] = (ctl){ 0.44f * w, ph + 0.08f * a, sm, OVL_G_MINUS, 1, DM_BTN_MINUS }; g_c[C_PLUS] = (ctl){ 0.56f * w, ph + 0.08f * a, sm, OVL_G_PLUS, 1, DM_BTN_PLUS };
+        g_c[C_STICK] = (ctl){ 0.22f * w, ph + 0.40f * a, 0.13f * q, OVL_G_NONE, 1, 0 };
+        float dx = 0.22f * w, dy = h - 0.20f * a, dg = 0.07f * q, dr = 0.042f * q;   // (under the stick; positions checked for overlaps at 2256x2504 and 1080x2520)
+        g_c[C_UP] = (ctl){ dx, dy - dg, dr, OVL_G_NONE, 1, DM_BTN_UP }; g_c[C_DOWN] = (ctl){ dx, dy + dg, dr, OVL_G_NONE, 1, DM_BTN_DOWN };
+        g_c[C_LEFT] = (ctl){ dx - dg, dy, dr, OVL_G_NONE, 1, DM_BTN_LEFT }; g_c[C_RIGHT] = (ctl){ dx + dg, dy, dr, OVL_G_NONE, 1, DM_BTN_RIGHT };
+        g_c[C_RSTICK] = (ctl){ 0.50f * w, h - 0.20f * a, 0.09f * q, OVL_G_NONE, 1, 0 };
+        g_c[C_THROW].shown = 0;
+    }
     if (!g_rstick_on) { g_rknob_x = g_c[C_RSTICK].cx; g_rknob_y = g_c[C_RSTICK].cy; }
     layout_apply(w, h);
     if (!g_stick_on) { g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }

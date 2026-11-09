@@ -65,6 +65,16 @@ final class Fork {
         return p.startsWith(base) ? p.substring(base.length()) : p;
     }
 
+    // Portrait on the inner screen (DM_FORK_PORTRAIT=on, Display menu; default off = landscape only, as the manifest says). On a nearly square screen (the Fold's inner
+    //   one) the game may turn with the phone; on the outer one it stays landscape. Called when the game starts, when the screen changes and when the menu closes
+    static void orientation(Activity a) {
+        android.content.res.Configuration c = a.getResources().getConfiguration();
+        int lo = Math.min(c.screenWidthDp, c.screenHeightDp), hi = Math.max(c.screenWidthDp, c.screenHeightDp);
+        boolean inner = lo > 0 && hi < lo * 1.4f, on = "on".equals(GameSettings.get(a, "DM_FORK_PORTRAIT"));
+        int want = on && inner ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+        if (a.getRequestedOrientation() != want) { a.setRequestedOrientation(want); Log.i(TAG, "[FORK] orientation: " + (want == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER ? "any (inner screen)" : "landscape")); }
+    }
+
     // GameActivity, before NativeActivity starts the engine: android_main.c host_start reads DM_DATA_ROOT in place of the app's externalDataPath
     static void exportRoot(Context c) {
         if (!shared(c)) return;

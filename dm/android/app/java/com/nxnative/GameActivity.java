@@ -31,6 +31,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         //   the game named, so the launcher of two games does not come in between)
         if (!viaSetup && SetupActivity.pendingWork(GameSettings.dir(this))) { startActivity(new Intent(this, SetupActivity.class).putExtra("game", GameSettings.game(this)[0])); finish(); return; }
         alive = true;
+        Fork.orientation(this);   // FORK: portrait on the inner screen when chosen
         im = getSystemService(InputManager.class);
         if (im != null) im.registerInputDeviceListener(this, null);
         check();
@@ -128,6 +129,9 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         }, "live shaders");
         t.setPriority(Thread.MIN_PRIORITY); t.setDaemon(true); t.start();
     }
+    // FORK: the screen changed (fold / unfold, turned) or the menu closed (its Display settings): the orientation the game may take (Fork.orientation)
+    @Override public void onConfigurationChanged(android.content.res.Configuration c) { super.onConfigurationChanged(c); Fork.orientation(this); }
+    @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) Fork.orientation(this); }
     @Override protected void onResume() { super.onResume(); check(); }
     // am start ... --es menu <page>: the settings panel (testing over adb; 1 = the controller buttons)
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); String m = i.getStringExtra("menu"); if (m != null) GameMenu.show(this, m.equals("1") ? 1 : 0); }
