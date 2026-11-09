@@ -3756,9 +3756,11 @@ static int swap_ensure_now(void *win, int srgb) {
     // the GPU mostly idle under FIFO, a steady rate with MAILBOX). DM_VK_PRESENT=fifo|mailbox|immediate to choose
     VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR;
     { const char *e = getenv("DM_VK_PRESENT"); VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
+      { int fork_fg_want(void); extern int g_fk_ahb; if (!e && g_fk_ahb && fork_fg_want()) want = VK_PRESENT_MODE_FIFO_KHR; }   // FORK: frame generation: FIFO keeps the generated frame (mailbox replaced it with the real one queued 1 ms later); its presents run on its own thread
       uint32_t npm = 0; vkGetPhysicalDeviceSurfacePresentModesKHR(g_pd, W.surf, &npm, NULL); VkPresentModeKHR pms[16]; if (npm > 16) npm = 16; vkGetPhysicalDeviceSurfacePresentModesKHR(g_pd, W.surf, &npm, pms);
       for (uint32_t i = 0; i < npm; i++) if (pms[i] == want) pm = want; }
     uint32_t n = caps.minImageCount + (pm == VK_PRESENT_MODE_MAILBOX_KHR ? 2 : 1); if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
+    { int fork_fg_want(void); extern int g_fk_ahb; if (g_fk_ahb && fork_fg_want() && pm == VK_PRESENT_MODE_FIFO_KHR) { n += 2; if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount; } }   // FORK: room for two frames per game frame
     // Pre-rotation (DM_VK_PRETRANSFORM=1, opt-in until checked on phones): the panel's own orientation is portrait and the game landscape, so the compositor turns
     // every frame; with the swapchain made in the panel's orientation (preTransform = currentTransform) the upscaler and the overlay draw the picture already turned
     // and the compositor has nothing to do. Only when the upscaler's pipeline exists: the blit cannot turn the picture

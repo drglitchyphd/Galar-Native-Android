@@ -122,7 +122,7 @@ public final class SetupActivity extends Activity {
         // official release or not (BuildSigner): into env.txt every start, so the game's log says which; an unofficial build is told so before the game starts
         String[] signers = BuildSigner.digests(this); boolean official = BuildSigner.official(signers);
         envSet("DM_BUILD_SIGNER", BuildSigner.label(signers));
-        if (!official) Toast.makeText(this, unofficial(), Toast.LENGTH_LONG).show();
+        if (!official && !Fork.shared(this)) Toast.makeText(this, unofficial(), Toast.LENGTH_LONG).show();   // FORK: not in fork builds (they are never signed with the official key)
         boolean asked = getIntent().getBooleanExtra("setup", false);
         // which game: a game's home screen shortcut names it; from the app's icon, with more than one game set up, this screen lets the player choose (the dual launcher)
         String want = getIntent().getStringExtra("game");
@@ -156,7 +156,7 @@ public final class SetupActivity extends Activity {
         // the first start: the app's name and the games it runs; later, the game this screen sets up
         TextView title = text(root, first && many ? getApplicationInfo().loadLabel(getPackageManager()).toString() : gameName(), 26, 0xFFF2F3F5, true); title.setGravity(Gravity.CENTER);
         title.setPadding(0, px(10), 0, 0);
-        if (!official) { TextView u = text(root, unofficial(), 13, 0xffff5252, false); u.setGravity(Gravity.CENTER); }
+        if (!official && !Fork.shared(this)) { TextView u = text(root, unofficial(), 13, 0xffff5252, false);   /* FORK: && not a fork build */ u.setGravity(Gravity.CENTER); }
         TextView note = text(root, first ? T.t(this, "Welcome! To play, set up %s from your own Switch dump. It takes three steps.", many ? gamesNamed() : gameName())
                                            + "\n" + T.t(this, "No game files or keys come with this app; yours never leave the phone.")
                                          : T.t(this, "Set the game up from your own dump. No game files or keys come with this app; yours never leave the phone."), 14, 0xFFA9AFBA, false);
@@ -289,7 +289,7 @@ public final class SetupActivity extends Activity {
         root.setPadding((int) (24 * dp), (int) (10 * dp), (int) (24 * dp), (int) (10 * dp));
         TextView title = new TextView(this); title.setText(getApplicationInfo().loadLabel(getPackageManager())); title.setTextSize(22); title.setTextColor(0xFFF2F3F5);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); title.setGravity(Gravity.CENTER); root.addView(title);
-        if (!official) { TextView u = new TextView(this); u.setText(unofficial()); u.setTextColor(0xffff5252); u.setTextSize(12); u.setGravity(Gravity.CENTER); root.addView(u); }
+        if (!official && !Fork.shared(this)) { TextView u = new TextView(this); u.setText(unofficial());   /* FORK: && not a fork build */ u.setTextColor(0xffff5252); u.setTextSize(12); u.setGravity(Gravity.CENTER); root.addView(u); }
         // the cards share the screen: as wide as two fit with room around them, the icon as tall as the screen allows under the title and above the link
         int cardW = Math.min((sw - (int) (48 * dp)) / all.size() - (int) (28 * dp), (int) (sh * 0.62f));
         int iconS = Math.min(cardW - (int) (28 * dp), sh - (int) (210 * dp));

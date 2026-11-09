@@ -1,6 +1,6 @@
 # STATUS
 
-**Build:** v25 (overlay shows on-screen fps; `[FORK] fg timing` log; `DM_FORK_FG_PACE=0` test switch). v24 test: still uneven (39 → 30 on screen per s, game 16 fps at the intro), and grey bars over the picture's top / bottom, cause unknown (the game's own image is black there). v23 test: frame generation ran (7.6 ms per generated frame) but only ~18 frames/s reached the screen, because it waited for the GPU on the game's thread. Branch `fork/v20` (v19 is merged into `main`). Sword only; the icon opens the game. Data in `/storage/emulated/0/GalarFork/`.
+**Build:** v26: FIFO while frame generation is on (v25 log: the worker takes ~20 ms of 33 and the game never waits, but mailbox dropped the generated frame, so ~30/s on screen); no "unofficial build" notices in fork builds. Grey bars at game load predate frame generation, and the game's image is black there: the cause is outside the game (an Android layer?), to check.
 
 ## Works (tested on the Fold, v13–v19)
 - Own setup in the shared folder, launch, battles, 30 fps, fold / unfold in place, upstream merged.
