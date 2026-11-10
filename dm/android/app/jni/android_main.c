@@ -204,7 +204,7 @@ static int bg_play(void) { if (g_bg_off < 0) { const char *e = getenv("DM_BACKGR
 JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env, jclass c, jstring jk, jstring jv) {
     (void)c; const char *k = (*env)->GetStringUTFChars(env, jk, NULL), *v0 = (*env)->GetStringUTFChars(env, jv, NULL); const char *v = *v0 ? v0 : NULL; int now = 1;
     if (!strcmp(k, "DM_BACKGROUND")) g_bg_off = v && !strcmp(v, "off");
-    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_FORK_TOUCH") || !strcmp(k, "DM_FORK_DEADZONE") || !strcmp(k, "DM_FORK_BATTLE_HIDE")) touch_ui_setting(k, v);   // FORK: + DM_FORK_TOUCH, DM_FORK_DEADZONE
+    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_FORK_TOUCH") || !strcmp(k, "DM_FORK_DEADZONE") || !strcmp(k, "DM_FORK_BATTLE_HIDE") || !strcmp(k, "DM_FORK_TOUCH_COLOR") || !strcmp(k, "DM_FORK_TOUCH_SIZE")) touch_ui_setting(k, v);   // FORK: + DM_FORK_TOUCH, DM_FORK_DEADZONE
     else if (!strcmp(k, "DM_FORK_CAPTURE")) { extern volatile int dm_fork_capture_arm; dm_fork_capture_arm = 1; }   // FORK: fork_ui.h, the menu's "Capture the next odd frame"
     else if (!strcmp(k, "DM_ASPECT")) __atomic_store_n(&dm_aspect_mode, dm_aspect_parse(v), __ATOMIC_RELAXED);   // FORK: dm_aspect_parse (adds "fix")
     else if (!strcmp(k, "DM_SCALER")) { extern volatile int dm_scaler_mode; if (!v || !*v) v = getenv("DM_AUTO_SCALER"); dm_scaler_mode = v && !strcmp(v, "sgsr") ? 1 : v && !strcmp(v, "smooth") ? 2 : 0; }   // (Auto: the app's pick)
@@ -224,6 +224,10 @@ JNIEXPORT void JNICALL Java_com_nxnative_GameMenu_nativeEditTouch(JNIEnv *env, j
 void touch_ui_edit_cmd(int cmd); int touch_ui_editing(void); const char *touch_ui_profile(void);
 JNIEXPORT void JNICALL Java_com_nxnative_ForkTouch_nativeCmd(JNIEnv *env, jclass c, jint cmd) { (void)env; (void)c; touch_ui_edit_cmd((int)cmd); }
 JNIEXPORT jboolean JNICALL Java_com_nxnative_ForkTouch_nativeEditing(JNIEnv *env, jclass c) { (void)env; (void)c; return touch_ui_editing() ? JNI_TRUE : JNI_FALSE; }
+const char *touch_ui_edit_sel(float *frac); void touch_ui_edit_size(float frac);   // FORK: the bar's size slider
+JNIEXPORT jstring JNICALL Java_com_nxnative_ForkTouch_nativeSel(JNIEnv *env, jclass c) { (void)c; return (*env)->NewStringUTF(env, touch_ui_edit_sel(NULL)); }
+JNIEXPORT jfloat JNICALL Java_com_nxnative_ForkTouch_nativeSelSize(JNIEnv *env, jclass c) { (void)env; (void)c; float f = 0; touch_ui_edit_sel(&f); return f; }
+JNIEXPORT void JNICALL Java_com_nxnative_ForkTouch_nativeSetSize(JNIEnv *env, jclass c, jfloat f) { (void)env; (void)c; touch_ui_edit_size(f); }
 JNIEXPORT jstring JNICALL Java_com_nxnative_ForkTouch_nativeProfile(JNIEnv *env, jclass c) { (void)c; return (*env)->NewStringUTF(env, touch_ui_profile()); }
 // Holding − on a controller for 3 s opens the controller buttons (front_open_menu(1)): a press starts a timer thread that checks the same press is still held
 uint64_t dm_nvn_frame_count(void) __attribute__((weak));   // (nvn: frames presented)

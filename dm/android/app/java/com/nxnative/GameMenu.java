@@ -296,7 +296,11 @@ public final class GameMenu {
         choice(a, "DM_RUMBLE", t(a, "Rumble"), new String[][] { { "", t(a, "On"), t(a, "On: the controller's motor, else the phone's") }, { "pad", t(a, "Controllers only"), "" },
                                                                  { "off", t(a, "Off"), "" } });
         heading(a, t(a, "Touch controls"));
-        slider(a, t(a, "Opacity"), "DM_TOUCH_OPACITY", 20, 100, 100, v -> v + " %");
+        slider(a, t(a, "Opacity"), "DM_TOUCH_OPACITY", 5, 100, 100, v -> v + " %");   // FORK: from 5 % (stock 20)
+        // FORK: the controls' colour and overall size (touch_ui.c tint, g_tsize)
+        choice(a, "DM_FORK_TOUCH_COLOR", t(a, "Colour"), new String[][] { { "", t(a, "Blue"), "" }, { "grey", t(a, "Grey"), "" }, { "white", t(a, "White"), "" },
+            { "dark", t(a, "Dark"), "" }, { "red", t(a, "Red"), "" }, { "green", t(a, "Green"), "" }, { "purple", t(a, "Purple"), "" } });
+        slider(a, t(a, "Size"), "DM_FORK_TOUCH_SIZE", 50, 150, 100, v -> v + " %");
         slider(a, t(a, "Fade after"), "DM_TOUCH_FADE", 0, 10, 3, v -> v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));
         // FORK: the control scheme (touch_ui.c g_float) and the sticks' dead zone
         choice(a, "DM_FORK_TOUCH", t(a, "Control scheme"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the stick on the left, drag on the right turns the camera") },

@@ -19,6 +19,7 @@ final class ForkTouch {
     private static native void nativeCmd(int cmd);   // 0 save and leave, 1 reset, 2 leave without saving
     private static native boolean nativeEditing();
     private static native String nativeProfile();
+    private static native String nativeSel(); private static native float nativeSelSize(); private static native void nativeSetSize(float f);   // the size slider
     private static PopupWindow pw;
 
     static String profileName(Activity a, String p) {
@@ -46,15 +47,27 @@ final class ForkTouch {
             b.setPadding(p * 2, 0, p * 2, 0);
             b.setOnClickListener(v -> { try { nativeCmd(cmd); } catch (UnsatisfiedLinkError e) { } if (cmd != 1) close(); });
             l.addView(b); }
-        pw = new PopupWindow(l, LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, false);
+        // the selected control's size, exactly (pinching works too): 2.5-25 % of the screen height, as the pinch allows
+        LinearLayout col = new LinearLayout(a); col.setOrientation(LinearLayout.VERTICAL); col.setBackground(bg); col.setPadding(0, 0, 0, p / 2);
+        l.setBackground(null); col.addView(l);
+        LinearLayout sz = new LinearLayout(a); sz.setOrientation(LinearLayout.HORIZONTAL); sz.setGravity(Gravity.CENTER_VERTICAL); sz.setPadding(p, 0, p, 0);
+        TextView szl = new TextView(a); szl.setTextColor(0xFFF2F3F5); szl.setTextSize(13); szl.setMinWidth((int) (150 * d)); sz.addView(szl);
+        android.widget.SeekBar sb = new android.widget.SeekBar(a); sb.setMax(225); sz.addView(sb, new LinearLayout.LayoutParams((int) (240 * d), LinearLayout.LayoutParams.WRAP_CONTENT));
+        final boolean[] quiet = { false };
+        sb.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(android.widget.SeekBar s, int v, boolean user) { if (user && !quiet[0]) try { nativeSetSize((v + 25) / 1000f); } catch (UnsatisfiedLinkError e) { } }
+            @Override public void onStartTrackingTouch(android.widget.SeekBar s) { }
+            @Override public void onStopTrackingTouch(android.widget.SeekBar s) { } });
+        col.addView(sz);
+        pw = new PopupWindow(col, LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, false);
         pw.setTouchable(true); pw.setOutsideTouchable(false); pw.setFocusable(false);   // touches outside go on to the editor underneath
         View root = a.getWindow().getDecorView();
         final android.content.SharedPreferences sp = a.getSharedPreferences("fork", 0);
         final String[] prof = { profileNow() };
         final int[] pos = new int[2];
         root.post(() -> { try {
-            l.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
-            int dx = (root.getWidth() - l.getMeasuredWidth()) / 2, dy = (int) (12 * d);
+            col.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+            int dx = (root.getWidth() - col.getMeasuredWidth()) / 2, dy = (int) (12 * d);
             pos[0] = sp.getInt("bar_" + prof[0] + "_x", dx); pos[1] = sp.getInt("bar_" + prof[0] + "_y", dy);
             pw.showAtLocation(root, Gravity.TOP | Gravity.START, pos[0], pos[1]); } catch (RuntimeException e) { pw = null; } });
         final float[] grab = new float[4];
@@ -63,8 +76,8 @@ final class ForkTouch {
             switch (ev.getActionMasked()) {
                 case android.view.MotionEvent.ACTION_DOWN: grab[0] = ev.getRawX(); grab[1] = ev.getRawY(); grab[2] = pos[0]; grab[3] = pos[1]; return true;
                 case android.view.MotionEvent.ACTION_MOVE:
-                    pos[0] = Math.max(0, Math.min(root.getWidth() - l.getWidth(), (int) (grab[2] + ev.getRawX() - grab[0])));
-                    pos[1] = Math.max(0, Math.min(root.getHeight() - l.getHeight(), (int) (grab[3] + ev.getRawY() - grab[1])));
+                    pos[0] = Math.max(0, Math.min(root.getWidth() - col.getWidth(), (int) (grab[2] + ev.getRawX() - grab[0])));
+                    pos[1] = Math.max(0, Math.min(root.getHeight() - col.getHeight(), (int) (grab[3] + ev.getRawY() - grab[1])));
                     pw.update(pos[0], pos[1], -1, -1); return true;
                 case android.view.MotionEvent.ACTION_UP: case android.view.MotionEvent.ACTION_CANCEL:
                     sp.edit().putInt("bar_" + prof[0] + "_x", pos[0]).putInt("bar_" + prof[0] + "_y", pos[1]).apply(); return true;
@@ -77,6 +90,10 @@ final class ForkTouch {
             boolean on; String pf; try { on = nativeEditing(); pf = nativeProfile(); } catch (UnsatisfiedLinkError e) { on = false; pf = ""; }
             if (!on) { close(); return; }
             label.setText("⠿  " + T.t(a, "Layout: %s", profileName(a, pf)));   // (⠿: drag here)
+            String sel = ""; float f = 0; try { sel = nativeSel(); f = nativeSelSize(); } catch (UnsatisfiedLinkError e) { }
+            sb.setEnabled(!sel.isEmpty());
+            szl.setText(sel.isEmpty() ? T.t(a, "Size: touch a control") : T.t(a, "Size: %s", sel.toUpperCase(java.util.Locale.ROOT)));
+            if (!sel.isEmpty() && !sb.isPressed()) { quiet[0] = true; sb.setProgress(Math.round(f * 1000) - 25); quiet[0] = false; }
             h.postDelayed(this, 300); } });
     }
     private static String profileNow() { try { return nativeProfile(); } catch (UnsatisfiedLinkError e) { return ""; } }

@@ -46,6 +46,7 @@ static int g_edit;   // the layout editor is on (touch_ui_event, front_overlay)
 //   movement stick, its base where the finger landed; on the right half the camera stick the same way (tilt from where the finger landed, not the finger's speed).
 //   A quick tap on either half presses A (a menu item when one of the game's menus shows); two fingers tapping together stay B. DM_FORK_DEADZONE: 0-40 % of the stick
 static int g_float = -1; static float g_dead = 0.12f;
+static float g_tsize = 1.0f;   // FORK: the overall size (DM_FORK_TOUCH_SIZE), see tint()
 static int g_fr_on; static float g_fr_x, g_fr_y, g_frk_x, g_frk_y;   // the floating camera stick: on, its base, its knob
 // FORK: "In battle: hide unused buttons" (DM_FORK_BATTLE_HIDE=on): while the graphics layer sees a battle (gfx/nvn/fork_ui.h dm_fork_screen == 2), X, L / R, ZL / ZR,
 //   + / - and the on-screen right stick are neither drawn nor touchable; A, B, Y, the D-pad, the movement stick and the menu button stay
@@ -155,6 +156,7 @@ static void layout(float w, float h) {
         g_c[C_RSTICK] = (ctl){ 0.50f * w, h - 0.20f * a, 0.09f * q, OVL_G_NONE, 1, 0 };
         g_c[C_THROW].shown = 0;
     }
+    if (g_tsize != 1.0f) for (int c = 0; c < NCTL; c++) g_c[c].r *= g_tsize;   // FORK: overall size (before the player's own sizes)
     if (!g_rstick_on) { g_rknob_x = g_c[C_RSTICK].cx; g_rknob_y = g_c[C_RSTICK].cy; }
     layout_apply(w, h);
     if (!g_stick_on) { g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }
@@ -271,6 +273,7 @@ static int edit_hit(float x, float y) {   // the smallest control (shown or not)
         float dx = x - g_c[c].cx, dy = y - g_c[c].cy, r = g_c[c].r * 1.2f; if (dx * dx + dy * dy <= r * r && g_c[c].r < br) { br = g_c[c].r; best = c; } }
     return best;
 }
+static int g_edit_sel = -1;   // FORK: the control last touched in the editor (the bar's size slider: ForkTouch.java)
 static void edit_store(int c) { g_ov[c].set = 1; g_ov[c].fx = g_c[c].cx / g_w; g_ov[c].fy = g_c[c].cy / g_h; g_ov[c].fr = g_c[c].r / g_h; g_ov[c].shown = g_c[c].shown; }
 static void edit_event(const AInputEvent *e) {
     int32_t act = AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK;
@@ -280,6 +283,7 @@ static void edit_event(const AInputEvent *e) {
         size_t k = act == AMOTION_EVENT_ACTION_DOWN ? 0 : idx; float x = AMotionEvent_getX(e, k), y = AMotionEvent_getY(e, k);
         if (act == AMOTION_EVENT_ACTION_DOWN) { for (int i = 0; i < 10; i++) g_ep[i].id = -1; g_pinch.active = 0; }
         int c = edit_hit(x, y);
+        if (c >= 0) g_edit_sel = c;   // FORK
         for (int i = 0; i < 10; i++) if (g_ep[i].id >= 0 && c >= 0 && g_ep[i].c == c) {   // a second finger on the same control: pinch
             float dx = x - g_ep[i].x0, dy = y - g_ep[i].y0; g_pinch.c = c; g_pinch.active = 1; g_pinch.d0 = sqrtf(dx * dx + dy * dy) + 1; g_pinch.r0 = g_c[c].r; break; }
         for (int i = 0; i < 10; i++) if (g_ep[i].id < 0) { g_ep[i].id = AMotionEvent_getPointerId(e, k); g_ep[i].c = c; g_ep[i].x0 = x; g_ep[i].y0 = y; g_ep[i].t0 = now_s();
@@ -321,6 +325,11 @@ void touch_ui_edit_cmd(int cmd) {
     pthread_mutex_unlock(&g_mu);
 }
 int touch_ui_editing(void) { return g_edit; }
+// FORK: the editor bar's size slider: the selected control's name ("" none) and size as a fraction of the screen height, and setting it
+const char *touch_ui_edit_sel(float *frac) { pthread_mutex_lock(&g_mu); int c = g_edit ? g_edit_sel : -1; if (frac) *frac = c >= 0 && g_h > 0 ? g_c[c].r / g_h : 0;
+    pthread_mutex_unlock(&g_mu); return c >= 0 ? CTL_NAME[c] : ""; }
+void touch_ui_edit_size(float frac) { pthread_mutex_lock(&g_mu); int c = g_edit_sel;
+    if (g_edit && c >= 0 && g_h > 0) { g_c[c].r = clampf(frac, 0.025f, 0.25f) * g_h; edit_store(c); } pthread_mutex_unlock(&g_mu); }
 // the 2-second holds, checked once a frame (a finger held still sends no events): − toggles the editor (saving on the way out), + in the editor resets the layout
 static void edit_holds_locked(void) {
     double t = now_s(); int minus = 0, plus = 0;
@@ -478,10 +487,23 @@ static void compass(dm_ovl_item *it, int *n, int max, float a, float g_stick_x, 
 }
 // the player's settings (env.txt, set on the app's settings screen): DM_TOUCH_OPACITY 20-100 (%), DM_TOUCH_FADE seconds untouched before the controls go faint (0 = never)
 static float g_opacity = -1, g_fade = 3.0f;
+// FORK: the controls' colour (DM_FORK_TOUCH_COLOR: "" the stock blue, grey, white, dark, red, green, purple) and overall size (DM_FORK_TOUCH_SIZE 50-150 %, the default
+//   layout's sizes; a control resized in the editor keeps its own). The colour keeps each part's shading: its brightness is carried over to the chosen tint
+static int g_tint;   // (g_tsize: with g_float, above)
+static int tint_of(const char *v) { return !v ? 0 : !strcmp(v, "grey") ? 1 : !strcmp(v, "white") ? 2 : !strcmp(v, "dark") ? 3 : !strcmp(v, "red") ? 4 : !strcmp(v, "green") ? 5 : !strcmp(v, "purple") ? 6 : 0; }
+static void tint(dm_ovl_item *o) {
+    if (!g_tint || o->a <= 0) return;
+    float l = 0.30f * o->r + 0.59f * o->g + 0.11f * o->b;   // (colours are 0-1 here: add())
+    static const float k[7][3] = { {0,0,0}, {1,1,1}, {1,1,1}, {1,1,1}, {1.0f,0.35f,0.35f}, {0.40f,1.0f,0.50f}, {0.75f,0.45f,1.0f} };
+    float m = g_tint == 2 ? 1.5f : g_tint == 3 ? 0.45f : 1.0f;
+    o->r = clampf(l * m * k[g_tint][0], 0, 1); o->g = clampf(l * m * k[g_tint][1], 0, 1); o->b = clampf(l * m * k[g_tint][2], 0, 1);
+}
 // the in-game menu changed one (android_main.c nativeSetting): value NULL = back to the default
 void touch_ui_setting(const char *key, const char *value) {
     pthread_mutex_lock(&g_mu);
-    if (!strcmp(key, "DM_TOUCH_OPACITY")) g_opacity = value ? clampf((float)atof(value) / 100.0f, 0.2f, 1.0f) : 1.0f;
+    if (!strcmp(key, "DM_TOUCH_OPACITY")) g_opacity = value ? clampf((float)atof(value) / 100.0f, 0.05f, 1.0f) : 1.0f;   // FORK: down to 5 % (stock 20)
+    else if (!strcmp(key, "DM_FORK_TOUCH_COLOR")) g_tint = tint_of(value);   // FORK
+    else if (!strcmp(key, "DM_FORK_TOUCH_SIZE")) { g_tsize = value ? clampf((float)atof(value) / 100.0f, 0.5f, 1.5f) : 1.0f; g_w = g_h = 0; }   // FORK (the layout made again)
     else if (!strcmp(key, "DM_TOUCH_FADE")) g_fade = value ? fmaxf(0.0f, (float)atof(value)) : 3.0f;
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE_HIDE")) bhide_set(value && !strcmp(value, "on"));   // FORK
@@ -500,7 +522,8 @@ void touch_ui_edit(void) {
 static void prefs(void) {
     if (g_opacity >= 0) return;
     const char *o = getenv("DM_TOUCH_OPACITY"), *f = getenv("DM_TOUCH_FADE");
-    g_opacity = o ? clampf((float)atof(o) / 100.0f, 0.2f, 1.0f) : 1.0f; if (f) g_fade = fmaxf(0.0f, (float)atof(f));
+    g_opacity = o ? clampf((float)atof(o) / 100.0f, 0.05f, 1.0f) : 1.0f;   // FORK: down to 5 %
+    { const char *tc = getenv("DM_FORK_TOUCH_COLOR"), *ts = getenv("DM_FORK_TOUCH_SIZE"); g_tint = tint_of(tc); if (ts && *ts) { g_tsize = clampf((float)atof(ts) / 100.0f, 0.5f, 1.5f); g_w = g_h = 0; } }   // FORK if (f) g_fade = fmaxf(0.0f, (float)atof(f));
     { const char *ft = getenv("DM_FORK_TOUCH"), *dz = getenv("DM_FORK_DEADZONE"); g_float = ft && !strcmp(ft, "float");   // FORK: the control scheme, the dead zone
       { const char *bh = getenv("DM_FORK_BATTLE_HIDE"); bhide_set(bh && !strcmp(bh, "on")); }   // FORK
       if (dz && *dz) g_dead = clampf((float)atof(dz) / 100.0f, 0.0f, 0.4f); if (g_float) fprintf(stderr, "[FORK] [touch] floating sticks, tap for A (dead zone %.0f %%)\n", g_dead * 100); }
@@ -533,7 +556,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
         if (g_fr_on) compass(it, &n, max, 1.0f, g_fr_x, g_fr_y, g_frk_x, g_frk_y, g_c[C_STICK].r);   // FORK: the floating camera stick under the finger
         if (g_c[C_RSTICK].shown && g_float <= 0 && !battle_hidden(C_RSTICK)) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,   // faint while unused: it and the D-pad sit over the dialogue box
              g_c[C_RSTICK].cy, g_rknob_x, g_rknob_y, g_c[C_RSTICK].r);
-        for (int i = 0; i < n; i++) { it[i].a *= g_opacity; it[i].galpha *= g_opacity; }
+        for (int i = 0; i < n; i++) { it[i].a *= g_opacity; it[i].galpha *= g_opacity; tint(&it[i]); }   // FORK: tint
     }
     pthread_mutex_unlock(&g_mu);
     return n;
