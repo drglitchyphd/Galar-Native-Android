@@ -307,7 +307,7 @@ public final class GameMenu {
             { "float", t(a, "Floating sticks"), t(a, "Floating sticks: the left half is the movement stick and the right half the camera stick, each where your thumb lands; a quick tap anywhere that is not a button presses A, two fingers B") } });
         slider(a, t(a, "Stick dead zone"), "DM_FORK_DEADZONE", 0, 40, 12, v -> v + " %");
         choice(a, "DM_FORK_BATTLE_HIDE", t(a, "In battle"), new String[][] { { "", t(a, "All buttons"), t(a, "All buttons: the same controls everywhere") },   // FORK: touch_ui.c battle_hidden
-            { "on", t(a, "Hide unused"), t(a, "Hide unused: during battles X, L, R, ZL, ZR, + and - and the right stick are hidden (A, B, Y, the D-pad and the stick stay)") } });
+            { "on", t(a, "Hide unused"), t(a, "Hide unused: during battles L, R, ZL, ZR, + and - and the right stick are hidden (A, B, X, Y, the D-pad and the stick stay)") } });
         action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Save, Reset or Cancel on the bar at the top. Each screen and orientation keeps its own layout."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); ForkTouch.bar(a); } catch (UnsatisfiedLinkError e) { } });   // FORK: ForkTouch.bar
     }

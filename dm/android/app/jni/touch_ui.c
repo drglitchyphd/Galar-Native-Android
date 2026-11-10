@@ -48,13 +48,13 @@ static int g_edit;   // the layout editor is on (touch_ui_event, front_overlay)
 static int g_float = -1; static float g_dead = 0.12f;
 static float g_tsize = 1.0f;   // FORK: the overall size (DM_FORK_TOUCH_SIZE), see tint()
 static int g_fr_on; static float g_fr_x, g_fr_y, g_frk_x, g_frk_y;   // the floating camera stick: on, its base, its knob
-// FORK: "In battle: hide unused buttons" (DM_FORK_BATTLE_HIDE=on): while the graphics layer sees a battle (gfx/nvn/fork_ui.h dm_fork_screen == 2), X, L / R, ZL / ZR,
-//   + / - and the on-screen right stick are neither drawn nor touchable; A, B, Y, the D-pad, the movement stick and the menu button stay
+// FORK: "In battle: hide unused buttons" (DM_FORK_BATTLE_HIDE=on): while the graphics layer sees a battle (gfx/nvn/fork_ui.h dm_fork_screen == 2), L / R, ZL / ZR,
+//   + / - and the on-screen right stick are neither drawn nor touchable; A, B, X (the quick Poké Ball), Y, the D-pad, the movement stick and the menu button stay
 static int g_bhide;
 extern _Atomic int dm_fork_screen __attribute__((weak)); extern volatile int dm_fork_census_want __attribute__((weak));
 static int battle_hidden(int c) {
     if (!g_bhide || !&dm_fork_screen || atomic_load(&dm_fork_screen) != 2) return 0;
-    return c == C_X || c == C_L || c == C_R || c == C_ZL || c == C_ZR || c == C_PLUS || c == C_MINUS || c == C_RSTICK;
+    return c == C_L || c == C_R || c == C_ZL || c == C_ZR || c == C_PLUS || c == C_MINUS || c == C_RSTICK;   // (X stays: the quick Poké Ball in wild battles)
 }
 static void bhide_set(int on) { g_bhide = on; if (&dm_fork_census_want) dm_fork_census_want = on; }
 static double g_touch_t; static double g_two_t, g_tap_mute;   // two-finger tap: when the second finger landed; single taps ignored until g_tap_mute
