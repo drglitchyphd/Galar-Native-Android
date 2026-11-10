@@ -10,9 +10,11 @@
 
 ## How it will install
 
-1. Install `PaldeaNative.apk` (or [build it](#building)).
+1. Install `PaldeaNative.apk` from [Releases](https://github.com/simipoB/Paldea-Native-Android/releases) (or [build it](#building)).
 2. Choose your **game files** (`.nsp` / `.xci`: base game, update 4.0.0, any DLC) and **keys**. Keys stay on the phone.
 3. **Set up the game.** Setup detects Scarlet or Violet from your files. One app runs both, each with its own setup, saves, settings and mods, its own name and icon on its home screen shortcut.
+
+- Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`, the same key as Galar Native's. Any other build says "Unofficial build".
 
 ## Requirements (expected)
 

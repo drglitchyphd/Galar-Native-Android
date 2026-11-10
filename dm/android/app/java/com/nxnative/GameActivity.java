@@ -161,6 +161,8 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         } catch (Exception e) { }
         // the app's version code: a safe start level (android_main.c safe_start) belongs to the version that crashed; an update starts at the normal settings again
         try { android.system.Os.setenv("DM_APP_VERSION", String.valueOf(getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode()), true); } catch (Exception e) { }
+        // the app's name and where its official releases are (the profile's app_name / app_repo, assets/app): the log's first lines name them (android_main.c)
+        try { String[] app = GameSettings.app(this); android.system.Os.setenv("DM_APP_NAME", app[0], true); android.system.Os.setenv("DM_APP_REPO", app[1], true); } catch (Exception e) { }
         // The Chinese / Korean shared-font stand-in (hle_sdk16.c, #62: a game set to Chinese drew none of its text) into the game's font/, for setups made before it
         //   shipped; the APK carries it (build_apk.py), copied when missing or of another size
         try {

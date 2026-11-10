@@ -704,9 +704,13 @@ static void host_start(void) {
     if (freopen(p, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
     // the log's first lines: the credits (the app is MIT: its copyright notice stays with every copy; the full text is in the menu, About) and, once env.txt is
     //   read, whether this is an official build (BuildSigner's DM_BUILD_SIGNER), so a log attached to an issue says at once whether it comes from a repack
+    //   The app's name and repository come from the game profile (GameActivity: DM_APP_NAME / DM_APP_REPO, from assets/app): Galar Native, Paldea Native
+    const char *app_name = getenv("DM_APP_NAME"), *app_repo = getenv("DM_APP_REPO");
+    if (!app_name || !*app_name) app_name = "Galar Native";
+    if (!app_repo || !*app_repo) app_repo = "github.com/simipoB/Galar-Native-Android";
     { const char *v = getenv("DM_APP_VERSION");
-      fprintf(stderr, "boot: app version code %s. Copyright (c) 2026 jhaizhou (d2r-mobile, nxnative) and the Galar Native (formerly PKShield Android) contributors. "
-                      "MIT License (menu, About). Official downloads: github.com/simipoB/Galar-Native-Android/releases\n", v && *v ? v : "?"); }
+      fprintf(stderr, "boot: %s, app version code %s. Copyright (c) 2026 jhaizhou (d2r-mobile, nxnative) and the Galar Native (formerly PKShield Android) contributors. "
+                      "MIT License (menu, About). Official downloads: %s/releases\n", app_name, v && *v ? v : "?", app_repo); }
     { char d[256]; snprintf(d, sizeof d, DL "/%s-log-previous.txt", g_stem); copy_file(q, d); }
     snprintf(g_crash_src, sizeof g_crash_src, "%s/log.txt", g_files); snprintf(g_crash_dl, sizeof g_crash_dl, DL "/%s-log.txt", g_stem);
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
@@ -723,7 +727,7 @@ static void host_start(void) {
       } }
     { const char *s = getenv("DM_BUILD_SIGNER");
       if (s && !strcmp(s, "official")) fprintf(stderr, "boot: build: official (signed with the release key)\n");
-      else fprintf(stderr, "boot: build: UNOFFICIAL (%s): not a release from github.com/simipoB/Galar-Native-Android, it may have been changed\n", s && *s ? s : "signer unknown"); }
+      else fprintf(stderr, "boot: build: UNOFFICIAL (%s): not a release from %s, it may have been changed\n", s && *s ? s : "signer unknown", app_repo); }
     g_safe_advanced = safe_start(g_files);   // (after env.txt: the player's settings win; before the phone profile: its defaults do not)
     // why Android ended the previous run (GameActivity, ApplicationExitInfo): reason 2 a signal, 3 low memory, 4 / 5 a crash, 6 not responding, 10 / 11 the player /
     //   the app, 13 other (Samsung's game manager, heat), 14 frozen
