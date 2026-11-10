@@ -3,7 +3,7 @@
 **Pokémon Scarlet and Violet (Switch, update 4.0.0) running natively on Android.** Not emulation: the game's own ARM64 code runs on the phone, and its graphics (NVN) run on Vulkan. Built on the engine of [Galar Native](https://github.com/simipoB/Galar-Native-Android) (Sword and Shield).
 
 > [!WARNING]
-> **Work in progress.** On a Galaxy S25+ (Adreno 830) Violet and Scarlet boot, and Violet plays its opening at about 30 fps: language, look and name selection, the academy application, and the 3D classroom scene. Known issue: the photo on the enrollment application is black. Gameplay past the opening has not been tested yet. No releases yet.
+> **Work in progress.** On a Galaxy S25+ (Adreno 830) Violet and Scarlet boot, and Violet plays its opening at about 30 fps: language, look and name selection, the academy application with its ID photo, and the 3D classroom scene. Gameplay past the opening has not been tested yet. The first release, v0.60, is a **pre-release**: it carries the Galar Native v0.60 engine and has not been run on a phone yet.
 
 > [!NOTE]
 > **No game files, code, shaders or keys are included.** You need your own dump (base game + update 4.0.0) and your console's `prod.keys`.
