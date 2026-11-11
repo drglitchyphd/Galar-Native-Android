@@ -67,7 +67,7 @@ final class ForkTouch {
         final int[] pos = new int[2];
         root.post(() -> { try {
             col.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
-            int dx = (root.getWidth() - col.getMeasuredWidth()) / 2, dy = (int) (12 * d);
+            int dx = (root.getWidth() - col.getMeasuredWidth()) / 2, dy = Math.max(0, root.getHeight() - col.getMeasuredHeight() - (int) (12 * d));   // (bottom centre: at the top it covered the menu button, which then could not be moved)
             pos[0] = sp.getInt("bar_" + prof[0] + "_x", dx); pos[1] = sp.getInt("bar_" + prof[0] + "_y", dy);
             pw.showAtLocation(root, Gravity.TOP | Gravity.START, pos[0], pos[1]); } catch (RuntimeException e) { pw = null; } });
         final float[] grab = new float[4];

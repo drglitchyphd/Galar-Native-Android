@@ -257,7 +257,7 @@ static int32_t on_input(struct android_app *app, AInputEvent *e) {
     (void)app; int32_t src = AInputEvent_getSource(e), type = AInputEvent_getType(e);
     if (type == AINPUT_EVENT_TYPE_KEY) {
         int32_t kc = AKeyEvent_getKeyCode(e); uint64_t b = key_bit(kc);
-        if (kc == AKEYCODE_BACK && !b) { uint64_t m = AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN ? DM_BTN_B : 0; dm_input_set(g_touch_btn | m, g_touch_s[0], g_touch_s[1], g_touch_s[2], g_touch_s[3]); return 1; }   // the system back = B (the game never closes on back)
+        if (kc == AKEYCODE_BACK && !b) { if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN && !AKeyEvent_getRepeatCount(e)) dm_input_press(DM_BTN_B, 80000000ull); return 1; }   // FORK: the system back (button or gesture) = an 80 ms B press: a gesture sends down and up at once, so the held-while-down B (upstream) was often too short for the game to see
         if (!b) return 0;
         int k = pad_slot(AInputEvent_getDeviceId(e));
         if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN) g_pads[k].btn |= b; else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) g_pads[k].btn &= ~b;
