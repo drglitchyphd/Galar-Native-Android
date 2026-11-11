@@ -308,6 +308,21 @@ public final class GameMenu {
         slider(a, t(a, "Stick dead zone"), "DM_FORK_DEADZONE", 0, 40, 12, v -> v + " %");
         choice(a, "DM_FORK_BATTLE_HIDE", t(a, "In battle"), new String[][] { { "", t(a, "All buttons"), t(a, "All buttons: the same controls everywhere") },   // FORK: touch_ui.c battle_hidden
             { "on", t(a, "Hide unused"), t(a, "Hide unused: during battles L, R, ZL, ZR, + and - and the right stick are hidden (A, B, X, Y, the D-pad and the stick stay)") } });
+        // FORK: battle style and layout, fast-forward, turbo A (touch_ui.c, host/fork_ff.c)
+        heading(a, t(a, "Battle"));
+        choice(a, "DM_FORK_BATTLE_ICONS", t(a, "Battle icons"), new String[][] { { "", t(a, "On"), t(a, "On: in battles X shows a Poké Ball (quick ball), B a back arrow, Y info") },
+            { "off", t(a, "Off"), t(a, "Off: the letters everywhere") } });
+        choice(a, "DM_FORK_BATTLE_LAYOUT", t(a, "Battle layout"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
+            { "on", t(a, "Its own"), t(a, "Its own: battles use a layout of their own on each screen. Open Move the touch controls during a battle to arrange it (it starts as a copy of the normal one)") } });
+        slider(a, t(a, "Battle opacity"), "DM_FORK_BATTLE_OPACITY", 0, 100, 0, v -> v == 0 ? t(a, "same as elsewhere") : v + " %");
+        heading(a, t(a, "Fast-forward and turbo"));
+        choice(a, "DM_FORK_FF", t(a, "Fast-forward"), new String[][] { { "", t(a, "Off"), "" },
+            { "battle", t(a, "In battles"), t(a, "In battles: the ⏩ button shows during battles. Tap: on / off. Hold: fast while held") },
+            { "all", t(a, "Anywhere"), t(a, "Anywhere: the ⏩ button is always there (walking, hatching, battles)") } });
+        choice(a, "DM_FORK_FF_SPEED", t(a, "Fast-forward speed"), new String[][] { { "125", "1.25x", "" }, { "", "1.5x", "" }, { "200", "2x", "" }, { "300", "3x", "" } });
+        choice(a, "DM_FORK_TURBO", t(a, "Turbo A"), new String[][] { { "", t(a, "Off"), "" },
+            { "on", t(a, "On"), t(a, "On: hold the ⚡ button to press A again and again (text, buying, hatching)") } });
+        slider(a, t(a, "Turbo speed"), "DM_FORK_TURBO_HZ", 3, 20, 10, v -> t(a, "%d presses a second", v));
         action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Save, Reset or Cancel on the bar at the top. Each screen and orientation keeps its own layout."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); ForkTouch.bar(a); } catch (UnsatisfiedLinkError e) { } });   // FORK: ForkTouch.bar
     }

@@ -11,7 +11,7 @@
 #   FORK_DATA_DIR  folder in /storage/emulated/0    default GalarFork  (setup writes the ~15 GB game here; it survives uninstalling)
 #   FORK_ICON      icon colours "top ground" (hex)  default "2a6fdb 182040"
 #   FORK_ONLY_GAME the one game the icon opens      default 0100ABF008968000 (Pokémon Sword; empty = the game picker as upstream)
-#   FORK_VERSION   versionCode                      default 36 (raise it for each build you install over an older one)
+#   FORK_VERSION   versionCode                      default 37 (raise it for each build you install over an older one)
 #   FORK_LSFG      1 (default) builds libforklsfg.so, frame generation with the player's own Lossless.dll (dm/fork/lsfg); 0 leaves it out
 #
 # Frame generation's sources are fetched once into $WORK/fork-lsfg at pinned commits (MIT / zlib; never copied into this repository):
@@ -22,7 +22,7 @@ FORK_NAME=${FORK_NAME:-Galar Fork}
 FORK_DATA_DIR=${FORK_DATA_DIR:-GalarFork}
 FORK_ICON=${FORK_ICON:-2a6fdb 182040}
 FORK_ONLY_GAME=${FORK_ONLY_GAME-0100ABF008968000}
-FORK_VERSION=${FORK_VERSION:-36}
+FORK_VERSION=${FORK_VERSION:-37}
 FORK_LSFG=${FORK_LSFG:-1}
 fork_lsfg_build() {   # (build_apk_pc.sh calls this before packing the APK: PRE_APK_HOOK)
     rm -f "$LIBS/libforklsfg.so"

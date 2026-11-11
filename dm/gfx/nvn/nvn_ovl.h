@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 enum { OVL_DISC = 0, OVL_RING = 1, OVL_RRECT = 2 };
-enum { OVL_G_A, OVL_G_B, OVL_G_X, OVL_G_Y, OVL_G_L, OVL_G_R, OVL_G_ZL, OVL_G_ZR, OVL_G_PLUS, OVL_G_MINUS, OVL_G_NONE = -1 };
+enum { OVL_G_A, OVL_G_B, OVL_G_X, OVL_G_Y, OVL_G_L, OVL_G_R, OVL_G_ZL, OVL_G_ZR, OVL_G_PLUS, OVL_G_MINUS, OVL_G_FF, OVL_G_BALL, OVL_G_BACK, OVL_G_INFO, OVL_G_TURBO,   /* FORK: atlas cells 10-14 (dm/fork/tools/fork_glyphs.py) */ OVL_G_NONE = -1 };
 typedef struct {
     float x, y, w, h;          // rectangle, pixels
     float r, g, b, a;          // fill colour (straight alpha)
