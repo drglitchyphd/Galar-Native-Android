@@ -57,3 +57,4 @@ v32: Controls → **In battle: Hide unused** (`DM_FORK_BATTLE_HIDE`, default off
 4. Save slots (separate save folders per character), switched on the setup screen. Trading / universal box later (PKHeX.Core is GPL: keep it separate).
 - Skipped: autosave changes; screenshot button.
 - Research: live HUD from game memory (party HP / status, Poké Balls, Pokédex seen / caught, area dex).
+- Queued: the trainer 'spotted you' corner overlay shows only in the middle band (Fill, corrected). Likely a full-screen UI overlay with a texture larger than the 4x4 fade rule (`fork_ui_fill`). Steven may send screenshots (Fill vs 16:9).
