@@ -172,6 +172,45 @@ public final class GameMenu {
         p.setBackground(on ? round(accent(a), dp(a, 14), 0, 0) : round(CHIP, dp(a, 14), 1, CARD_LINE)); return p;
     }
     // a choice: { value, chip label, what it does }; the chosen one's line under the chips. Applied at once when the engine can (nativeSetting), else tagged "Applies next start"
+    // FORK: frame generation, one choice over two settings: the fork's (DM_FORK_FG=2x, Lossless.dll through libforklsfg.so, next start) and upstream's
+    //   (DM_FRAMEGEN on / lsfg, at once). Choosing one clears the other; upstream's Lossless Scaling is imported from the setup screen's Lossless.dll when needed
+    private static void forkFrameGen(Activity a, String[][] up) {
+        boolean dll = Fork.lsfgDll(a).isFile();
+        String cur = "2x".equals(GameSettings.get(a, "DM_FORK_FG")) && dll ? "fork" : GameSettings.get(a, "DM_FRAMEGEN");
+        java.util.List<String[]> o = new java.util.ArrayList<>();
+        o.add(new String[] { "", t(a, "Off"), "" });
+        if (dll) o.add(new String[] { "fork", t(a, "Lossless 2x (fork)"), t(a, "The fork's: your Lossless.dll through lsfg-vk, a generated frame between every two of the game's (60 on screen). From the next start") });
+        o.add(new String[] { "on", t(a, "Built-in"), up[1][2] });
+        if (dll || GameSettings.hasLsfg(a)) o.add(new String[] { "lsfg", t(a, "Lossless (upstream)"), up[2][2] + (GameSettings.hasLsfg(a) ? "" : " " + t(a, "(imported from your Lossless.dll when chosen)")) });
+        LinearLayout c = card(a);
+        titleRow(a, c, t(a, "Frame generation"), RESTART.contains("DM_FORK_FG") || RESTART.contains("DM_FRAMEGEN") ? t(a, "Applies next start") : null);
+        HorizontalScrollView hs = new HorizontalScrollView(a); hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout chips = new LinearLayout(a); chips.setPadding(0, dp(a, 10), 0, dp(a, 6)); hs.addView(chips); c.addView(hs);
+        TextView desc = text(a, "", 13, SUB, false); c.addView(desc);
+        boolean found = false; for (String[] x : o) if (x[0].equals(cur)) found = true;
+        for (String[] x : o) {
+            boolean on = x[0].equals(cur) || (!found && x == o.get(0));
+            TextView ch = text(a, x[1], 14, on ? Color.WHITE : TEXT, on); ch.setPadding(dp(a, 16), dp(a, 8), dp(a, 16), dp(a, 8));
+            ch.setBackground(on ? round(accent(a), dp(a, 18), 0, 0) : round(CHIP, dp(a, 18), 1, CARD_LINE));
+            ch.setOnClickListener(v -> {
+                Runnable apply = () -> {
+                    String f = x[0].equals("fork") ? "2x" : "", u = x[0].equals("on") || x[0].equals("lsfg") ? x[0] : "";
+                    if (!f.equals(GameSettings.get(a, "DM_FORK_FG"))) set(a, "DM_FORK_FG", f);
+                    if (!u.equals(GameSettings.get(a, "DM_FRAMEGEN"))) set(a, "DM_FRAMEGEN", u);
+                    redraw(); };
+                if (x[0].equals("lsfg") && !GameSettings.hasLsfg(a)) {   // upstream's Lossless Scaling: its shaders converted from the setup screen's Lossless.dll first
+                    android.widget.Toast.makeText(a, t(a, "Importing Lossless Scaling…"), android.widget.Toast.LENGTH_SHORT).show();
+                    new Thread(() -> { String why;
+                        try { why = nativeLsfgImport(java.nio.file.Files.readAllBytes(Fork.lsfgDll(a).toPath()), new File(GameSettings.root(a), "lsfg").getPath()); }
+                        catch (Exception | UnsatisfiedLinkError e) { why = String.valueOf(e); }
+                        final String w = why;
+                        a.runOnUiThread(() -> { if (w == null) apply.run();
+                            else android.widget.Toast.makeText(a, t(a, "Could not import Lossless Scaling: %s", w), android.widget.Toast.LENGTH_LONG).show(); }); }).start();
+                } else apply.run(); });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(a, 8); chips.addView(ch, lp);
+            if (on) desc.setText(x.length > 2 ? x[2] : "");
+        }
+    }
     private static void choice(Activity a, String key, String title, String[][] opts) {
         LinearLayout c = card(a); String cur = GameSettings.get(a, key);
         titleRow(a, c, title, RESTART.contains(key) ? t(a, "Applies next start") : null);
@@ -262,14 +301,14 @@ public final class GameMenu {
         String[][] fgc = { { "", t(a, "Off"), "" },
             { "on", t(a, "On"), t(a, "On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Needs a fast GPU; your input shows about 17 ms later") },
             { "lsfg", "Lossless Scaling", t(a, "Lossless Scaling: the in-between picture made by your own copy of Lossless Scaling's frame generation (sharper motion, needs a faster GPU)") } };
-        choice(a, "DM_FRAMEGEN", t(a, "Frame generation (experimental)"), GameSettings.hasLsfg(a) ? fgc : java.util.Arrays.copyOf(fgc, 2));
+        forkFrameGen(a, fgc);   // FORK: one setting for the fork's frame generation and upstream's (only one runs), in place of upstream's DM_FRAMEGEN choice
         if (GameSettings.hasLsfg(a))   // Lossless Scaling's pictures a game frame (nvn_vk.c lsfg_mult); Auto: as many as the display's rate divides evenly
             choice(a, "DM_LSFG_MULT", t(a, "Lossless Scaling pictures"), new String[][] {
                 { "", t(a, "Auto"), t(a, "Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)") },
                 { "2", "2x", t(a, "2x: one picture between each two of the game's frames (30 fps moves like 60)") },
                 { "3", "3x", t(a, "3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)") },
                 { "4", "4x", t(a, "4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)") } });
-        if (!GameSettings.hasLsfg(a)) {   // (the player's own copy: Lossless Scaling is a paid app, nothing of it comes with this one)
+        if (!GameSettings.hasLsfg(a) && !Fork.lsfgDll(a).isFile()) {   // FORK: && no Lossless.dll on the setup screen (that one is imported from there when chosen)   // (the player's own copy: Lossless Scaling is a paid app, nothing of it comes with this one)
             note(a, t(a, "Own Lossless Scaling? Import its Lossless.dll (in the program's folder) to use its frame generation here."));
             LinearLayout lr = new LinearLayout(a); body.addView(lr);
             button(a, lr, t(a, "Import Lossless.dll"), false, () -> pick(a, Intent.ACTION_OPEN_DOCUMENT, null, REQ_LSFG)); }
@@ -302,16 +341,16 @@ public final class GameMenu {
         choice(a, "DM_FORK_PACE_MARGIN", t(a, "Frame pacing"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: each frame aimed one refresh ahead (least delay)") },
             { "2", t(a, "Smooth"), t(a, "Smooth: two refreshes ahead, frames a little late still show on time (about 4 ms more delay)") },
             { "3", t(a, "Smoothest"), t(a, "Smoothest: three refreshes ahead (about 8 ms more delay)") } });
-        // FORK: frame generation (gfx/nvn/fork_fg.h, libforklsfg.so) with the player's own Lossless.dll (setup screen: Frame generation)
-        heading(a, t(a, "Frame generation (Lossless Scaling)"));
-        if (!Fork.lsfgDll(a).isFile()) note(a, t(a, "Choose your Lossless.dll on the setup screen first (System, Setup screen, Frame generation)."));
-        else {
-            choice(a, "DM_FORK_FG", t(a, "Frame generation"), new String[][] { { "", t(a, "Off"), "" },
-                { "2x", "2x", t(a, "2x: a generated frame between every two of the game's, 60 on screen while the game keeps its own 30 (its speed untouched). About half a frame more delay; fast motion and menu edges can smear. From the next start") } });
-            slider(a, t(a, "Flow scale"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
-            choice(a, "DM_FORK_FG_PERF", t(a, "Model"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
+        // FORK: the fork's frame generation's own settings (gfx/nvn/fork_fg.h, libforklsfg.so; chosen above as "Lossless 2x (fork)")
+        if ("2x".equals(GameSettings.get(a, "DM_FORK_FG")) && Fork.lsfgDll(a).isFile()) {
+            slider(a, t(a, "Flow scale (fork)"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
+            choice(a, "DM_FORK_FG_PERF", t(a, "Model (fork)"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
                 { "off", t(a, "Quality"), t(a, "Quality: the full model, heavier") } });
         }
+        // FORK: the refresh the frame pacing counts in (nvn_vk.c fork_refresh): some drivers report a faster one than the screen has (the Fold's 120 Hz screen reported 240)
+        choice(a, "DM_FORK_MAX_HZ", t(a, "Pacing refresh"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the refresh the driver reports") },
+            { "120", "120 Hz", t(a, "120 Hz: frames paced in steps of 120 Hz, even if the driver reports more (from the next start)") },
+            { "60", "60 Hz", t(a, "60 Hz: steps of 60 Hz (from the next start)") } });
         heading(a, t(a, "Memory"));
         choice(a, "DM_VK_TEX_QUALITY", t(a, "Textures"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", t(a, p[3].equals("half") ? "Half" : "Full")) },
             { "full", t(a, "Full"), t(a, "Full: the game's textures as they are") }, { "half", t(a, "Half"), t(a, "Half: large textures at half size, less memory and GPU work") } });
@@ -576,6 +615,9 @@ public final class GameMenu {
         action(a, t(a, "Capture the next odd frame"), t(a, "For the Fill, corrected picture: the next time the game switches to a menu, or draws something the fork does not know yet over the 3D, that frame is saved like Capture a frame (Download, a ZIP)."),   // FORK: fork_ui.h
                () -> { try { nativeSetting("DM_FORK_CAPTURE", "1"); } catch (UnsatisfiedLinkError e) { }
                        android.widget.Toast.makeText(a, t(a, "Armed: close the menu and open the X menu (or do what shows the problem)."), android.widget.Toast.LENGTH_LONG).show(); });
+        action(a, t(a, "Capture the trainer-spotted moment"), t(a, "For the Fill, corrected picture: the first time something new is drawn over the overworld (a trainer spotting you), that frame is saved at once (Download, a ZIP)."),   // FORK v41
+               () -> { try { nativeSetting("DM_FORK_CAPTURE", "trainer"); } catch (UnsatisfiedLinkError e) { }
+                       android.widget.Toast.makeText(a, t(a, "Armed: close the menu and walk into a trainer's view."), android.widget.Toast.LENGTH_LONG).show(); });
         action(a, t(a, "Capture a frame"), t(a, "Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue."),
                () -> { try (java.io.FileWriter w = new java.io.FileWriter(new File(GameSettings.dir(a), "capture.req"))) { w.write("90"); } catch (IOException e) { }
                        android.widget.Toast.makeText(a, t(a, "Capturing in 3 seconds: close the menu."), android.widget.Toast.LENGTH_LONG).show(); });

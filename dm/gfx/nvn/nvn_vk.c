@@ -73,6 +73,15 @@ static int g_dynren = 1, g_eds = 1;
 //   last, so a 30 fps game shows every frame for the same 33.3 ms instead of whatever the timer and the display's refresh happen to line up to. It only asks for a time:
 //   the present mode stays as chosen (mailbox), so nothing here waits on the compositor. DM_VK_PACE=0 turns it off
 static int g_dtiming; static uint64_t g_refresh_ns;
+// FORK: DM_FORK_MAX_HZ (60 / 120; default: stock): the refresh the pacing counts in, at most that rate. The Fold's 120 Hz inner screen reported 4.17 ms (240 Hz),
+//   and frames aimed at quarter-refresh steps landed unevenly. A faster reported refresh is taken in whole multiples (4.17 ms at 120: 8.33 ms)
+static uint64_t fork_refresh(uint64_t r) {
+    static int hz = -1; if (hz < 0) { const char *e = getenv("DM_FORK_MAX_HZ"); hz = e && atoi(e) >= 30 && atoi(e) <= 240 ? atoi(e) : 0; }
+    if (!hz || !r) return r;
+    uint64_t min = 1000000000ull / (uint64_t)hz, k = (min + r - 1 - r / 64) / r; if (k < 1) k = 1;   // (a little slack: 8.33 against 4.167 x 2 = 8.334)
+    if (k > 1) { static int said; if (!said++) VLOG("[FORK] pacing refresh: the driver reports %.3f ms, paced in steps of %.3f ms (at most %d Hz)", r / 1e6, k * r / 1e6, hz); }
+    return k * r;
+}
 static PFN_vkGetRefreshCycleDurationGOOGLE p_refresh; static PFN_vkGetPastPresentationTimingGOOGLE p_past;
 static VkDeviceSize g_host_align = 4096;
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER;
@@ -3875,7 +3884,7 @@ static int swap_ensure_now(void *win, int srgb) {
          W.rot ? ", pre-rotated" : "");
     { void dm_fork_window(uint32_t w, uint32_t h); dm_fork_window(W.lext.width, W.lext.height); }   // FORK: the screen's ratio (host/fork_aspect.c)
     g_refresh_ns = 0;
-    if (g_dtiming && p_refresh) { VkRefreshCycleDurationGOOGLE rc = { 0 }; if (!p_refresh(g_dev, W.sc, &rc) && rc.refreshDuration) g_refresh_ns = rc.refreshDuration; }
+    if (g_dtiming && p_refresh) { VkRefreshCycleDurationGOOGLE rc = { 0 }; if (!p_refresh(g_dev, W.sc, &rc) && rc.refreshDuration) g_refresh_ns = fork_refresh(rc.refreshDuration); }   // FORK: fork_refresh
     VLOG("frame pacing: %s", !g_dtiming ? "off (no VK_GOOGLE_display_timing)" : !g_refresh_ns ? "off (the display's refresh is unknown)"
                              : getenv("DM_VK_PACE") && !atoi(getenv("DM_VK_PACE")) ? "off (DM_VK_PACE=0; frame timing still measured)" : "on");
     if (g_refresh_ns) VLOG("display refresh %.3f ms (%.2f Hz)", g_refresh_ns / 1e6, 1e9 / (double)g_refresh_ns);
@@ -3904,7 +3913,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
     // the display's refresh asked again once a second: Android changes the mode after the swapchain is made (the app's frame rate vote, android_main.c window_rate:
     //   a Galaxy S25+ was at 60 Hz when the swapchain was made and at 120 a moment later, and pictures paced for 60 landed 8 and 25 ms apart)
     { static uint64_t last; uint64_t t = mono_ns(); if (g_dtiming && p_refresh && W.sc && t - last >= 1000000000ull) { last = t; VkRefreshCycleDurationGOOGLE rc = { 0 };
-        if (!p_refresh(g_dev, W.sc, &rc) && rc.refreshDuration && (rc.refreshDuration > g_refresh_ns + g_refresh_ns / 16 || rc.refreshDuration + rc.refreshDuration / 16 < g_refresh_ns)) {
+        if (!p_refresh(g_dev, W.sc, &rc) && rc.refreshDuration && (rc.refreshDuration = fork_refresh(rc.refreshDuration)) && (rc.refreshDuration > g_refresh_ns + g_refresh_ns / 16 || rc.refreshDuration + rc.refreshDuration / 16 < g_refresh_ns)) {   // FORK: fork_refresh
             VLOG("display refresh now %.3f ms (%.2f Hz), was %.3f ms", rc.refreshDuration / 1e6, 1e9 / (double)rc.refreshDuration, g_refresh_ns / 1e6); g_refresh_ns = rc.refreshDuration; g_pace.next = 0; } } }
     if (!g_refresh_ns) return 0;
     uint64_t r = g_refresh_ns, now = mono_ns(); int fps = game_fps();
@@ -4241,6 +4250,7 @@ static struct { fgen g; lsfg ls; int ls_tried, mult_cap; uint64_t ivl, ivl_last;
                 uint64_t n_gen, n_plain, gpu_sum, gpu_n, gpu_max, cpu_sum, lag_sum, lag_n, last_log; } FGE;
 // The real frame that waits behind its in-between picture goes to the display: at its time (fg_thread), or at once when the next frame, a new swapchain or the
 // window's end comes first. Called with the window lock held
+static _Atomic uint64_t g_fork_up_shown;   // FORK: pictures upstream's frame generation put on screen (the overlay's "on screen", fork_fg.h)
 static void fg_flush_one_locked(void) {   // the oldest waiting picture
     if (!FGE.pending) return;
     int h = FGE.phead++; FGE.pending--;
@@ -4248,6 +4258,7 @@ static void fg_flush_one_locked(void) {   // the oldest waiting picture
     VkPresentTimeGOOGLE pt; VkPresentTimesInfoGOOGLE pti = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &pt };
     g_fg_pace = 2; g_fg_mult = FGE.pmult; if (pace_time(&pt)) pi.pNext = &pti; g_fg_pace = 0;
     pthread_mutex_lock(&g_qmu); VkResult r = vkQueuePresentKHR(g_q, &pi); pthread_mutex_unlock(&g_qmu);
+    if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) atomic_fetch_add(&g_fork_up_shown, 1);   // FORK: the performance overlay's count (fork_fg.h dm_fork_fg_frames)
     if (!FGE.pending) { FGE.lag_sum += mono_ns() - FGE.arrived; FGE.lag_n++; }   // (the real frame, last of them)
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { FGE.pending = 0; swap_destroy(); }
 }
@@ -4445,6 +4456,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
     VkResult rs = r = vkQueueSubmit(g_q, 1, &si, W.fence[sl]);
     if (!r) r = vkQueuePresentKHR(g_q, &pi);
     pthread_mutex_unlock(&g_qmu);
+    if (fgm && (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)) atomic_fetch_add(&g_fork_up_shown, 1);   // FORK: the performance overlay's count (fork_fg.h dm_fork_fg_frames)
     if (gen && !rs) {   // the pictures after the first and the real frame: handed over by fg_thread, each an interval / (npic + 1) after the one before
         uint64_t now = mono_ns(), sp = period / (uint64_t)(npic + 1), rf = pace_off() ? 0 : g_refresh_ns, want = pt.desiredPresentTime;
         FGE.pending = npic; FGE.phead = 0; FGE.pmult = npic + 1; FGE.arrived = t_arr; FGE.seq++;

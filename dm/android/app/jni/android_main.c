@@ -216,7 +216,7 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
     }
     else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
     else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3") || !strcmp(k, "DM_FORK_TOUCH") || !strcmp(k, "DM_FORK_DEADZONE") || !strcmp(k, "DM_FORK_BATTLE_HIDE") || !strcmp(k, "DM_FORK_TOUCH_COLOR") || !strcmp(k, "DM_FORK_TOUCH_SIZE") || !strncmp(k, "DM_FORK_FF", 10) || !strncmp(k, "DM_FORK_TURBO", 13) || !strncmp(k, "DM_FORK_BATTLE_", 15)) touch_ui_setting(k, v);   // FORK: + fast-forward, turbo, battle   // FORK: + DM_FORK_TOUCH, DM_FORK_DEADZONE
-    else if (!strcmp(k, "DM_FORK_CAPTURE")) { extern volatile int dm_fork_capture_arm; dm_fork_capture_arm = 1; }   // FORK: fork_ui.h, the menu's "Capture the next odd frame"
+    else if (!strcmp(k, "DM_FORK_CAPTURE")) { extern volatile int dm_fork_capture_arm, dm_fork_capture_trainer; if (v && !strcmp(v, "trainer")) dm_fork_capture_trainer = 1; else dm_fork_capture_arm = 1; }   // FORK: + trainer (v41)   // FORK: fork_ui.h, the menu's "Capture the next odd frame"
     else if (!strcmp(k, "DM_ASPECT")) __atomic_store_n(&dm_aspect_mode, dm_aspect_parse(v), __ATOMIC_RELAXED);   // FORK: dm_aspect_parse (adds "fix")
     else if (!strcmp(k, "DM_SCALER")) { extern volatile int dm_scaler_mode; if (!v || !*v) v = getenv("DM_AUTO_SCALER"); dm_scaler_mode = v && !strcmp(v, "sgsr") ? 1 : v && !strcmp(v, "smooth") ? 2 : 0; }   // (Auto: the app's pick)
     else if (!strcmp(k, "DM_FRAMEGEN")) { extern volatile int dm_framegen_mode; dm_framegen_mode = v && (!strcmp(v, "on") || !strcmp(v, "1")) ? 1 : v && !strcmp(v, "debug") ? 2 : v && !strcmp(v, "lsfg") ? 3 : 0;   // nvn_vk.c present_window_locked
@@ -763,7 +763,8 @@ static void host_start(void) {
     #define SETG(k, sub) do { snprintf(p, sizeof p, "%s/%s", g_game, sub); setenv(k, p, 0); } while (0)
     #define SETP(k, sub) do { snprintf(p, sizeof p, "%s/%s", g_files, sub); setenv(k, p, 0); } while (0)
     SETP("DM_TEX_CACHE", "texcache");
-    { const char *r = g_app->activity->externalDataPath; snprintf(p, sizeof p, "%s/lsfg", r ? r : g_files); setenv("DM_LSFG_DIR", p, 0); }
+    { const char *r = getenv("DM_DATA_ROOT"); if (!r || !*r) r = g_app->activity->externalDataPath;   // FORK: DM_DATA_ROOT first (the fork's shared folder: where the menu's import writes, GameSettings.root)
+      snprintf(p, sizeof p, "%s/lsfg", r ? r : g_files); setenv("DM_LSFG_DIR", p, 0); }
     // (the player's Lossless Scaling shaders, converted from their Lossless.dll by the app's import, one folder for every game: DM_FRAMEGEN=lsfg, nvn_lsfg.h)
     // shaders translated while the game last ran (nvn_vk.c live_check): the pack has them now (setup_game.py merged them first), so the folder starts empty
     // the fast setup's shaders translated after it (setup_game.py --rest): kept across starts while rest.json says some are still to come, cleared once they are all in the pack

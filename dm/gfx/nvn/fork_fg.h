@@ -147,7 +147,8 @@ static pthread_mutex_t fg_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 // frames put on screen by frame generation (generated + real), for the performance overlay (android_main.c nativeFgFrames); and where the time goes, logged
 static _Atomic uint64_t g_fg_shown; static double g_fg_t[5]; static uint64_t g_fg_tn;   // per frame, ms: the game waiting for the worker, copy wait, generation, 1st, 2nd present
 int fork_fg_live(void) { return atomic_load(&FG.state) == 2 && FG.ngen > 0; }   // (nvn_vk.c pace_time: frames shown every half interval)
-uint64_t dm_fork_fg_frames(void) { return atomic_load(&FG.state) == 2 ? atomic_load(&g_fg_shown) : (uint64_t)-1; }
+uint64_t dm_fork_fg_frames(void) { if (framegen_mode() && !FGE.off) return atomic_load(&g_fork_up_shown);   // (upstream's frame generation: its pictures, nvn_vk.c)
+    return atomic_load(&FG.state) == 2 ? atomic_load(&g_fg_shown) : (uint64_t)-1; }
 static void fg_time(int i, uint64_t t0) { g_fg_t[i] += (mono_ns() - t0) / 1e6; }
 static struct { int has, busy; uint64_t n; int in, flip; int32_t w, h; uint64_t t, half; uint32_t id; } FJ;
 static void *fg_worker(void *p) {

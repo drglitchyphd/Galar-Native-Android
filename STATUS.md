@@ -1,6 +1,13 @@
 # STATUS
 
-**Build:** v40 (not tested yet): the trainer "spotted you" corner darkening is shader 438515ea (no texture, drawn only before trainer battles): always kept full size (`fork_ui.h` fork_ui_fill). v38's picture-sized-image rule did not catch it (Steven, v39).
+**Build:** v41 (not tested yet):
+- Frame generation is one setting (Display → Frame generation): Off / Lossless 2x (fork) / Built-in (upstream) / Lossless (upstream, 2x–4x). Choosing one clears the other. Upstream's Lossless is imported from the setup screen's DLL when chosen.
+- Fixed: upstream's Lossless shaders were imported to the shared folder but the engine looked in Android/data (`DM_LSFG_DIR` now follows `DM_DATA_ROOT`).
+- The performance overlay's "on screen" counts upstream's frame generation too (it showed 30 while upstream's ran at 60: v40 log, 600 shown / 10 s, GPU ~3 ms, but 300–500 of 600 uneven).
+- **Pacing refresh** (`DM_FORK_MAX_HZ` stock / 120 / 60): the Fold's 120 Hz screen reports 4.17 ms (240 Hz) to the pacer; 120 paces in 8.33 ms steps. Steven: set 120.
+- Bug reports → **Capture the trainer-spotted moment**: captures at once the first overworld frame with a shrunk UI shader other than 56af7f00 / af0ef3ac / af80749a.
+- Next: A/B fork Lossless vs upstream Lossless (logs: `[FORK] fg timing` vs `frame generation: …`); trainer fade from the capture; split-screen divider (needs screenshots).
+v40 (did not fix it): the trainer "spotted you" corner darkening is shader 438515ea (no texture, drawn only before trainer battles): always kept full size (`fork_ui.h` fork_ui_fill). v38's picture-sized-image rule did not catch it (Steven, v39).
 v39: upstream `main` merged (57 commits, to 8b2c64d). **The app is now GPL-3.0-or-later** (upstream's licence change; older parts keep MIT: LICENSE-MIT, NOTICE).
 - From upstream: Adreno driver-memory fix (command pools without the transient hint; game thread), Sword credits movie freeze fix, swapchain room for 32 images, menus with Pokémon models no longer zoom at a lowered 3D scale, stadium-crowd intro at 30, fast setup (shaders in the background), Vibrate on press, L3 / R3 option, newest update chosen.
 - Upstream's live 30 / 60 frame rate (`DM_FPS_LIVE`, on by default) now owns the step word at 30 too: fast-forward goes through its frame step (`dm_fork_ff_pct`, hle_nvn.c vstep_tick). **Test fast-forward first.**

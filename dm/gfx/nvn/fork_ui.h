@@ -22,6 +22,9 @@ static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_nte
     if (w >= 1280 && h >= 700 && w * 10 >= h * 16 && w * 10 <= h * 20) g_fk_screenish = 1;   // (a 16:9-ish image of the picture's size: the trainer-approach overlay, blurs, wipes)
     if ((int)w > g_fk_texmax) g_fk_texmax = (int)w; if ((int)h > g_fk_texmax) g_fk_texmax = (int)h; }
 static char g_fk_sqkey[17];   // the shrunk draw's vertex shader (the log below)
+extern _Atomic int dm_fork_screen;   // (below)
+volatile int dm_fork_capture_trainer;   // FORK v41: android_main.c DM_FORK_CAPTURE=trainer (the menu's "Capture the trainer-spotted moment"): captures the first frame
+//   in the overworld whose shrunk UI has a shader other than the overworld's usual ones (56af7f00, af0ef3ac, af80749a), at once (no 90-frame wait)
 static void fork_ui_fill(VkCommandBuffer cb) {
     if (!g_fk_sq) return; g_fk_sq = 0;
     { static char seen[96][24]; static int ns;   // FORK diagnostics: each kind of shrunk UI draw once (shader, largest texture side), to tell overlays from icons
@@ -30,6 +33,10 @@ static void fork_ui_fill(VkCommandBuffer cb) {
       if (i == ns && ns < 96) { memcpy(seen[ns++], k, sizeof k); VLOG("[FORK] ui draw kind: vertex %.8s, largest texture side %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); } }
     // FORK v40: 438515ea (no texture: a shaded gradient) is the trainer "spotted you" darkening in the screen's corner (Steven's v37 logs: drawn only just before
     //   trainer battles; shrunk it stopped at the UI band's edge): always kept full size
+    if (dm_fork_capture_trainer && g_fk_comp && atomic_load(&dm_fork_screen) == 0 && strncmp(g_fk_sqkey, "56af7f00", 8) && strncmp(g_fk_sqkey, "af0ef3ac", 8)
+        && strncmp(g_fk_sqkey, "af80749a", 8) && atomic_load(&g_cap) == 0) {
+        dm_fork_capture_trainer = 0; atomic_store(&g_cap, 1);
+        VLOG("[FORK] capture: overworld UI shader %.16s (largest texture side %d, %d textures): this frame", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0, g_fk_ntex); }
     int full = !strncmp(g_fk_sqkey, "438515ea", 8);
     if (!full && (!g_fk_ntex || (g_fk_texmax > 4 && !g_fk_screenish))) return;   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
