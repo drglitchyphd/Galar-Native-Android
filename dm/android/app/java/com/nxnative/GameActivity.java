@@ -123,6 +123,15 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         Thread t = new Thread(() -> {
             while (liveOn) {
                 try { Thread.sleep(10000); } catch (InterruptedException e) { return; }
+                // the fast setup's rest (setup_game.py --rest --yield): the shaders the setup left for later, beside the game in the same way; one run at a time (a run
+                //   the setup screen started, at full speed, makes way by itself once it sees game_running; this one then prints BUSY and is tried again later)
+                if (new File(dir, "rest.json").exists() && liveRoom()) {
+                    try {
+                        Process p = SetupActivity.startTool(this, java.util.Arrays.asList("--rest", "--yield"), GameSettings.memoryGb(this) < 7.5 ? 2 : 4);
+                        if (p != null) { try (java.io.InputStream in = p.getInputStream()) { byte[] b = new byte[4096]; while (in.read(b) >= 0) { } } p.waitFor(); }
+                    } catch (Exception e) { }
+                    continue;
+                }
                 java.util.List<String> todo = SetupActivity.pendingCaptures(dir); todo.removeAll(tried); if (todo.isEmpty()) continue;
                 if (!liveRoom()) continue;
                 tried.addAll(todo);   // (once a run: a failure is left to the setup screen's next start)
@@ -138,7 +147,10 @@ public final class GameActivity extends NativeActivity implements InputManager.I
     // FORK: the screen changed (fold / unfold, turned) or the menu closed (its Display settings): the orientation the game may take (Fork.orientation)
     @Override public void onConfigurationChanged(android.content.res.Configuration c) { super.onConfigurationChanged(c); Fork.orientation(this); }
     @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) { Fork.orientation(this); ForkKeepAlive.sync(this); } }   // FORK: + keep-alive (the menu may have changed it)
-    @Override protected void onResume() { super.onResume(); check(); }
+    @Override protected void onResume() { super.onResume(); check(); gameRunning(true); }
+    @Override protected void onPause() { gameRunning(false); super.onPause(); }
+    // game_running: the game is on screen, so a fast setup's rest that runs at full speed (started from the setup screen) gets out of its way (setup_game.py rest)
+    private void gameRunning(boolean on) { File f = new File(GameSettings.dir(this), "game_running"); try { if (on) f.createNewFile(); else f.delete(); } catch (java.io.IOException e) { } }
     // am start ... --es menu <page>: the settings panel (testing over adb; 1 = the controller buttons)
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); String m = i.getStringExtra("menu"); if (m != null) GameMenu.show(this, m.equals("1") ? 1 : 0); }
     @Override protected void onActivityResult(int req, int res, Intent data) { if (!GameMenu.onResult(this, req, res, data)) super.onActivityResult(req, res, data); }   // the in-game menu's file pickers
@@ -164,6 +176,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
             android.system.Os.setenv("DM_AUTO_GRAPHICS", p[2], true); android.system.Os.setenv("DM_AUTO_TEX", p[3], true);
             android.system.Os.setenv("DM_AUTO_ANISO", p[4], true); android.system.Os.setenv("DM_AUTO_FPS", p[5], true); android.system.Os.setenv("DM_AUTO_WHAT", p[1], true);
             android.system.Os.setenv("DM_AUTO_SCALER", p[6], true); android.system.Os.setenv("DM_AUTO_SHADOWS", p[7], true);
+            android.system.Os.setenv("DM_AUTO_HD", p[8], true);   // (HD texture packs on Auto: android_main.c mod_root)
             // Sword / Shield: no split submissions (nvn_vk.c sub_split): they need none (3-5 ms of work a frame on a Galaxy S25+) and with them Sword flashed white
             //   (v0.40, pulled); Scarlet / Violet keep them, they hold 30 fps with them. env.txt's own DM_VK_SPLIT wins
             if (!GameSettings.paldea(this) && GameSettings.get(this, "DM_VK_SPLIT").isEmpty()) android.system.Os.setenv("DM_VK_SPLIT", "0", true);

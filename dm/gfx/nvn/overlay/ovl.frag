@@ -15,7 +15,8 @@ void main() {
     if (p.glyph.x >= 0.0) {   // the label: a 16x16 cell of a 16-cell-wide atlas, centred, bilinear then sharpened
         vec2 g = (uv / p.glyph.y) * vec2(p.shape.x > 1.5 ? p.shape.w : 1.0, 1.0) * 0.5 + 0.5;
         if (all(greaterThanEqual(g, vec2(0.0))) && all(lessThanEqual(g, vec2(1.0)))) {
-            vec2 t = (vec2(mod(p.glyph.x, 16.0), floor(p.glyph.x / 16.0)) + g) / vec2(16.0, 1.0);
+            float nc = float(textureSize(font, 0).x / textureSize(font, 0).y);   // FORK: the cell count from the atlas's width (the fork's is 32 wide: fork_glyphs.py)
+            vec2 t = vec2(p.glyph.x + g.x, g.y) / vec2(nc, 1.0);
             float s = texture(font, t).r; float ga = smoothstep(0.35, 0.65, s) * p.glyph.z;
             col.rgb = mix(col.rgb, vec3(1.0), ga); col.a = max(col.a, ga);
         }

@@ -72,6 +72,7 @@ def main():
     ap.add_argument('--data-dir', default='', help='FORK: keep the game, saves and settings in /storage/emulated/0/<this folder> (Fork.java)')   # FORK
     ap.add_argument('--only-game', default='', help='FORK: the one game the app icon opens (title ID; Fork.onlyGame)')   # FORK
     ap.add_argument('--icon', default='', help='FORK: app icon colours, "top ground" hex, in place of the profile\'s app_icon')   # FORK
+    ap.add_argument('--profileable', action='store_true', help='test builds: simpleperf over adb can profile the app (<profileable android:shell="true"/>), without making it debuggable')
     a = ap.parse_args()
     g = _game.load(a.game); fam = _game.family(g)   # the games the engine built for g runs (Pokémon Shield: Shield and Sword, one app)
     ic = (a.icon or g.get('app_icon', 'dc2832 182040')).split();   # FORK: --icon
@@ -124,6 +125,7 @@ def main():
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <application android:label="{xml_escape(a.name)}" android:icon="@mipmap/ic_launcher" android:hasCode="true" android:extractNativeLibs="true"
                  android:allowNativeHeapPointerTagging="false" android:isGame="true" android:appCategory="game" android:largeHeap="true" android:hasFragileUserData="true"{' android:debuggable="true"' if a.debuggable else ''}>
+        {'<profileable android:shell="true" />' if a.profileable else ''}
         <activity android:name="com.nxnative.SetupActivity" android:exported="true" android:theme="@android:style/Theme.DeviceDefault"
                   android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|smallestScreenSize|density">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
@@ -172,6 +174,33 @@ def main():
         z.writestr('assets/games', ''.join(f'{f.id}\t{f.get("name")}\t{_game.file_stem(f)}\t{list(f.builds().values())[-1]["display"]}\t{"heavy" if f.get("android_heavy", "off") == "on" else ""}\n' for f in fam))   # the games this app runs, its own first, with the version they need (GameSettings.games)
         z.writestr('assets/app', f'{a.name}\t{g.get("app_repo", "github.com/simipoB/Galar-Native-Android")}\n')   # the app's name and where its official releases are (SetupActivity)
         for t in sorted(glob.glob(os.path.join(ANDROID, 'app/assets/lang/*.tsv'))): z.write(t, 'assets/lang/' + os.path.basename(t))   # the app's text in other languages (T.java)
+        # the licences (GameMenu's About page): the app's own (NOTICE, then the GPL-3.0 text and the MIT notice its older code keeps), whose notice must stay with every
+        #   copy, then the third-party code and fonts the APK carries.
+        #   licenses/index.tsv: file, name, what it is; the app's own first. A build without the app's LICENSE fails: an APK must not go out without its notice
+        T3 = DM + '/third_party/'
+        ROOT = os.path.dirname(DM)
+        lic = [('LICENSE.txt', [os.path.join(ROOT, 'NOTICE'), os.path.join(ROOT, 'LICENSE'), os.path.join(ROOT, 'LICENSE-MIT')], a.name, 'this app'),
+               ('libvpx.txt', [T3 + 'libvpx/LICENSE', T3 + 'libvpx/PATENTS'], 'libvpx', "VP9 video decoder (the games' movies)"),
+               ('stb_vorbis.txt', [T3 + 'stb_vorbis/LICENSE'], 'stb_vorbis', "Ogg Vorbis audio decoder (the movies' sound)"),
+               ('sgsr.txt', [T3 + 'sgsr/LICENSE'], 'Snapdragon Game Super Resolution', 'the sharp upscaler'),
+               ('ryujinx.txt', [T3 + 'ryujinx/LICENSE.txt'], 'Ryujinx shader translator', 'turns the Switch shaders into Vulkan ones'),
+               ('vulkan-headers.txt', [T3 + 'vulkan-headers/LICENSE.md'], 'Vulkan headers', 'the Vulkan interface'),
+               ('dxbc-spirv.txt', [T3 + 'dxbc-spirv/LICENSE', T3 + 'dxbc-spirv/submodules/spirv_headers/LICENSE'], 'dxbc-spirv', "converts your Lossless Scaling's shaders for Vulkan"),
+               ('nvn-header.txt', [DM + '/gfx/nvn/include/nvn.h'], 'NVN header (h1k421)', "the Switch graphics interface's definitions"),
+               ('cjk_fallback.txt', [ANDROID + '/app/assets/cjk_fallback.LICENSE.txt'], 'CJK fallback font', 'the Chinese and Korean text'),
+               ('nintendo_ext.txt', [ANDROID + '/app/assets/nintendo_ext.LICENSE.txt'], 'Button icon font', 'the controller-button icons')]
+        for p_ in lic[0][1]:
+            if not os.path.isfile(p_): sys.exit("build_apk: the app's license file is missing (" + p_ + ")")
+        idx = []
+        for f, srcs, name, what in lic:
+            texts = []
+            for src in srcs:
+                if not os.path.isfile(src): continue
+                t_ = open(src, encoding='utf-8', errors='replace').read()
+                if src.endswith('nvn.h'): t_ = t_[:t_.find('*/') + 2] if '*/' in t_ else ''   # (its notice: the comment it opens with)
+                texts.append(t_.strip() + '\n')
+            if texts: z.writestr('assets/licenses/' + f, '\n'.join(texts)); idx.append(f'{f}\t{name}\t{what}\n')
+        z.writestr('assets/licenses/index.tsv', ''.join(idx))
     if not os.path.isfile(a.ks):
         os.makedirs(os.path.dirname(a.ks), exist_ok=True)
         run('keytool', '-genkeypair', '-keystore', a.ks, '-storepass', 'android', '-keypass', 'android', '-alias', 'debug', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=nxnative debug')

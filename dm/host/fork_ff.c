@@ -3,11 +3,13 @@
 // frame advance more game time: the game runs faster at the same 30 frames a second (animations skip ahead rather than play smoother).
 // dm_fork_ff_req (touch_ui.c: the fast-forward button, tapped = on / off, held = while held; only where the setting allows) asks for it; dm_fork_ff_speed is the
 // speed in % (DM_FORK_FF_SPEED 110-400, default 150). Applied on the game's thread at each present (gfx/nvn/hle_nvn.c); the original word is put back when it
-// ends. Left alone when the 60 fps mode runs (it rewrites that word every frame itself: dm_step_word) or the word is not the expected one.
+// ends. When upstream's frame step rewrites that word every frame itself (dm_step_word: the live 30 / 60 frame rate or the 60 fps mode), its step is scaled
+// instead (dm_fork_ff_pct). Left alone when the word is not the expected one.
 #include "hle.h"
 #include <stdatomic.h>
 
 volatile int dm_fork_ff_req, dm_fork_ff_speed;
+volatile int dm_fork_ff_pct = 100;   // the speed in % while the frame step owns the word (hle_nvn.c vstep_tick multiplies its step by it)
 extern int dm_step_hz __attribute__((weak)); extern uint8_t *dm_step_word __attribute__((weak));   // loader.c (the 60 fps patch)
 
 static const char *const k_sword = "a3b75bcd3311385aeed67fbeeb79cbb7";
@@ -34,7 +36,13 @@ void dm_fork_ff_tick(void) {
     static int on, warned;
     int want = dm_fork_ff_req != 0;
     if (!want && !on) return;
-    if (&dm_step_word && dm_step_word) { if (want && !warned++) LOG("[FORK] fast-forward: not with the 60 fps mode (it sets the step itself): off"); return; }
+    if (&dm_step_word && dm_step_word) {   // upstream's frame step owns the word (the live 30 / 60 frame rate, on by default since upstream's Nov 9 change; or the 60 fps mode):
+        //   it scales its own step by dm_fork_ff_pct (gfx/nvn/hle_nvn.c vstep_tick)
+        int sp = dm_fork_ff_speed; if (sp <= 0) { const char *e = getenv("DM_FORK_FF_SPEED"); sp = e ? atoi(e) : 150; }
+        if (sp < 110) sp = 110; if (sp > 400) sp = 400;
+        int pct = want ? sp : 100;
+        if (dm_fork_ff_pct != pct) { static int lines; if (lines++ < 200) LOG("[FORK] fast-forward %s (%d %%, through the frame step)", want ? "on" : "off", pct); dm_fork_ff_pct = pct; }
+        (void)warned; on = want; return; }
     if (find() != 0) return;
     int sp = dm_fork_ff_speed; if (sp <= 0) { const char *e = getenv("DM_FORK_FF_SPEED"); sp = e ? atoi(e) : 150; }
     if (sp < 110) sp = 110; if (sp > 400) sp = 400;

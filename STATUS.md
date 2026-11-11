@@ -1,11 +1,11 @@
 # STATUS
 
-**Build:** v38 (not tested yet):
-- Touch editor: ☰, ⏩ and ⚡ show and move again (the overlay held 128 items; the editor needs more: now 320 in `nvn_vk.c`).
-- Editor bar **Shape** button: the selected control cycles circle / rounded square / square / pill (6th field in `touch_layout_*.txt`; old files load as circles). Not for sticks, ☰, Poké Ball.
-- Controls → Battle → **Battle: fade after** (`DM_FORK_BATTLE_FADE`, default "same as elsewhere").
-- Back icon redrawn (`fork_glyphs.py`). Fill, corrected: a UI draw that samples a picture-sized (≥1280×700, ~16:9) image keeps full size (trainer-approach overlay, `fork_ui.h`).
-- Open: split-screen battle divider sits too far left (Fill, corrected). Needs a 16:9 vs Fill screenshot of the same moment.
+**Build:** v39 (not tested yet): upstream `main` merged (57 commits, to 8b2c64d). **The app is now GPL-3.0-or-later** (upstream's licence change; older parts keep MIT: LICENSE-MIT, NOTICE).
+- From upstream: Adreno driver-memory fix (command pools without the transient hint; game thread), Sword credits movie freeze fix, swapchain room for 32 images, menus with Pokémon models no longer zoom at a lowered 3D scale, stadium-crowd intro at 30, fast setup (shaders in the background), Vibrate on press, L3 / R3 option, newest update chosen.
+- Upstream's live 30 / 60 frame rate (`DM_FPS_LIVE`, on by default) now owns the step word at 30 too: fast-forward goes through its frame step (`dm_fork_ff_pct`, hle_nvn.c vstep_tick). **Test fast-forward first.**
+- Upstream's own frame generation (`DM_FRAMEGEN`, in the menu) exists beside the fork's: the fork's runs only while upstream's is off. Keep using the fork's (Steven's baseline).
+- Label atlas widened to 32 cells (`ovl.frag` reads the count from the texture width): upstream L3 / R3 in 10–11, fork icons in 12–16 (`fork_glyphs.py`).
+v38: editor shows ☰ / ⏩ / ⚡ (overlay cap 320); Shape button (circle / rounded / square / pill); Battle: fade after; back icon; picture-sized UI draws keep full size. Open: split-screen battle divider too far left (needs a 16:9 vs Fill screenshot).
 v37: Battle icons / layout / opacity; fast-forward (`host/fork_ff.c`, main+0x203eeb8); turbo A; icons in atlas cells 10–14.
 v36: Back (button or gesture) = an 80 ms B press (a gesture's down/up came too close together); the touch-editor bar starts at the bottom centre (it covered ☰). v35: X stays in battle. v34: Controls → Opacity from 5 %, **Colour** (blue / grey / white / dark / red / green / purple), **Size** 50–150 %; editor bar size slider for the selected control. Steven: Frame pacing Smooth plays great (A/B tests still running). v33: Performance → **Frame pacing** Stock / Smooth / Smoothest (`DM_FORK_PACE_MARGIN` 1–3 refreshes ahead, default 1 = stock); "uneven" judged against half the interval with frame generation on.
 v32 log: no shader or texture stalls, no heat; game frames p50 33.4 / p95 37 ms (jitter, ~half miss their 8-refresh slot). "Frame work" is not comparable while Faster rendering (`DM_NVN_ASYNC`) is on. Next: an A/B with Faster rendering off and on.

@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-# FORK: draws the fork's touch-control icons into the free cells (10-14) of the overlay's label atlas, dm/gfx/nvn/overlay/ovl_font.h (made by font_atlas.swift:
-# 16 cells of 64x64, R8 coverage, top row first; cells 0-9 are A B X Y L R ZL ZR + -). Shapes only (no font needed), drawn 4x larger and scaled down for smooth edges.
-#   10 fast-forward (two triangles)   11 Poke Ball (battle X: the quick ball)   12 back arrow (battle B)   13 info (battle Y)   14 turbo (a lightning bolt)
+# FORK: draws the fork's touch-control icons into cells 12-16 of the overlay's label atlas, dm/gfx/nvn/overlay/ovl_font.h (made by font_atlas.swift:
+# 16 cells of 64x64, R8 coverage; cells 0-11 are A B X Y L R ZL ZR + - L3 R3). The atlas is widened to 32 cells here (ovl.frag reads the cell count from its width).
+# Shapes only (no font needed), drawn 4x larger and scaled down for smooth edges.
+#   12 fast-forward (two triangles)   13 Poke Ball (battle X: the quick ball)   14 back arrow (battle B)   15 info (battle Y)   16 turbo (a lightning bolt)
 # Run from the repository root: python3 dm/fork/tools/fork_glyphs.py   (nvn_ovl.h OVL_G_FF ... OVL_G_TURBO name the cells)
 import math, re, sys
 from PIL import Image, ImageDraw
 
 H = 'dm/gfx/nvn/overlay/ovl_font.h'
-CELL, CELLS, S = 64, 16, 4
+CELL, CELLS, S = 64, 32, 4
 src = open(H, encoding='utf-8').read()
 m = re.search(r'static const unsigned char ovl_font\[\] = \{(.*?)\};', src, re.S)
 vals = [int(v) for v in m.group(1).replace('\n', '').split(',') if v.strip()]
 W = CELL * CELLS
-assert len(vals) == W * CELL, len(vals)
+w0 = len(vals) // CELL; assert w0 * CELL == len(vals) and w0 in (CELL * 16, W), len(vals)
+if w0 != W: vals = [v for y in range(CELL) for v in vals[y * w0:(y + 1) * w0] + [0] * (W - w0)]   # 16 cells -> 32, the new ones empty
 
 def cell(draw_fn):
     im = Image.new('L', (CELL * S, CELL * S), 0); d = ImageDraw.Draw(im); draw_fn(d, CELL * S); return im.resize((CELL, CELL), Image.LANCZOS)
@@ -42,14 +44,15 @@ def turbo(d, n):   # a lightning bolt
     p = [(0.58, 0.14), (0.30, 0.54), (0.48, 0.54), (0.40, 0.86), (0.70, 0.42), (0.52, 0.42), (0.62, 0.14)]
     d.polygon([(x * n, y * n) for x, y in p], fill=255)
 
-for idx, fn in ((10, ff), (11, ball), (12, back), (13, info), (14, turbo)):
+for idx, fn in ((12, ff), (13, ball), (14, back), (15, info), (16, turbo)):
     px = cell(fn).load()
     for y in range(CELL):
         for x in range(CELL): vals[y * W + idx * CELL + x] = px[x, y]
 
 body = ',\n'.join(','.join(str(v) for v in vals[r * 100:(r + 1) * 100]) for r in range((len(vals) + 99) // 100))
 out = src[:m.start()] + 'static const unsigned char ovl_font[] = {\n' + body + '\n};' + src[m.end():]
+out = re.sub(r'ovl_font_w = \d+', 'ovl_font_w = %d' % W, out)
 if '// FORK:' not in out.splitlines()[1]:
-    out = out.replace('\n', '\n// FORK: cells 10-14 drawn by dm/fork/tools/fork_glyphs.py (fast-forward, Poke Ball, back, info, turbo)\n', 1)
+    out = out.replace('\n', '\n// FORK: widened to 32 cells; cells 12-16 drawn by dm/fork/tools/fork_glyphs.py (fast-forward, Poke Ball, back, info, turbo)\n', 1)
 open(H, 'w', encoding='utf-8').write(out)
-print('cells 10-14 written to', H)
+print('cells 12-16 written to', H)

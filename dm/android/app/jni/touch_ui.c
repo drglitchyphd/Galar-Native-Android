@@ -29,7 +29,7 @@
 #include <string.h>
 #include <time.h>
 
-enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_FF, C_TURBO, NCTL };   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings)
+enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, NCTL };   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
 typedef struct { float cx, cy, r; int glyph, shown; uint64_t btn; } ctl;
 static ctl g_c[NCTL];
 static float g_w, g_h;
@@ -84,7 +84,7 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 
 // ---------- the player's layout (the in-game editor): position, size and visibility of each control, kept in <files>/touch_layout.txt ----------
 // One line per changed control: "<name> <x / width> <y / height> <radius / height> <shown>"; controls without a line keep the default layout
-static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "ff", "turbo" };
+static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo" };   // FORK: + ff, turbo
 static struct { int set; float fx, fy, fr; int shown, shape; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
 static char g_lay_path[1100]; static int g_lay_loaded;
 // FORK: one layout per screen and orientation: touch_layout_<profile>.txt (outer_landscape, inner_landscape, inner_portrait, outer_portrait), picked from the window's
@@ -124,6 +124,9 @@ static void layout_apply(float w, float h) {
     if (!g_lay_loaded) layout_load();
     for (int c = 0; c < NCTL; c++) if (g_ov[c].set && c != C_CAM) { g_c[c].cx = g_ov[c].fx * w; g_c[c].cy = g_ov[c].fy * h; g_c[c].r = g_ov[c].fr * h; g_c[c].shown = g_ov[c].shown; }
 }
+// L3 / R3 on screen: an option (DM_TOUCH_L3R3=on, Controls → Touch controls), off by default: Sword and Shield hardly use them. -1: not read yet
+static int g_l3r3 = -1;
+static int l3r3_on(void) { if (g_l3r3 < 0) { const char *e = getenv("DM_TOUCH_L3R3"); g_l3r3 = e && !strcmp(e, "on"); } return g_l3r3; }
 static void layout(float w, float h) {
     static int init; if (!init++) for (int i = 0; i < 10; i++) g_ptr[i].id = -1;   // no finger down
     if (w == g_w && h == g_h) return;
@@ -158,6 +161,10 @@ static void layout(float w, float h) {
     g_c[C_THROW] = (ctl){ w - 0.66f * s, h - 0.56f * s, 0.10f * s, OVL_G_NONE, GESTURES_ON, DM_BTN_ZR };
     g_c[C_RSTICK] = (ctl){ w - 0.80f * s, h - 0.19f * s, 0.11f * s, OVL_G_NONE, 1, 0 };
     g_c[C_MENU] = (ctl){ w * 0.5f - 0.24f * s, 0.06f * s, mr, OVL_G_NONE, 1, 0 };   // ☰ just left of −, at the top centre: the settings (front_open_menu); no Switch button
+    // L3 / R3 (pressing a stick in, #108): small buttons just above each stick, outside its touch area (1.3 x its radius) and clear of the D-pad and A B X Y on
+    //   16:9 to 20:9 screens; hide or move them in the layout editor like any other
+    g_c[C_L3] = (ctl){ g_c[C_STICK].cx, g_c[C_STICK].cy - 0.22f * s, 0.05f * s, OVL_G_L3, 1, DM_BTN_LS };
+    g_c[C_R3] = (ctl){ g_c[C_RSTICK].cx, g_c[C_RSTICK].cy - 0.21f * s, 0.05f * s, OVL_G_R3, 1, DM_BTN_RS };
     g_c[C_FF] = (ctl){ w * 0.5f + 0.24f * s, 0.06f * s, mr, OVL_G_FF, 1, 0 };   // FORK: fast-forward, just right of + (fork_hidden: only when Fast-forward is on)
     g_c[C_TURBO] = (ctl){ w - 0.12f * s, h - 0.50f * s, 0.05f * s, OVL_G_TURBO, 1, 0 };   // FORK: turbo A, above-right of A (only when Turbo A is on)
     // touch-first games (Legends: Arceus): only the movement stick and − / + on screen; everything else is touch on the game itself (touch_ui_event's gestures, touch_menu.c)
@@ -181,8 +188,10 @@ static void layout(float w, float h) {
     if (g_tsize != 1.0f) for (int c = 0; c < NCTL; c++) g_c[c].r *= g_tsize;   // FORK: overall size (before the player's own sizes)
     if (!g_rstick_on) { g_rknob_x = g_c[C_RSTICK].cx; g_rknob_y = g_c[C_RSTICK].cy; }
     layout_apply(w, h);
+    if (!l3r3_on()) g_c[C_L3].shown = g_c[C_R3].shown = 0;   // (an option, off by default: the layout editor's own choice only counts while it is on)
     if (!g_stick_on) { g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }
 }
+static int ctl_off(int c) { return (c == C_L3 || c == C_R3) && !l3r3_on(); }   // left out entirely, the layout editor too
 static int hit(int c, float x, float y, float slack) {
     if (fork_hidden(c)) return 0;   // FORK
     const ctl *k = &g_c[c]; float dx = x - k->cx, dy = y - k->cy, r = k->r * slack;
@@ -238,7 +247,18 @@ void touch_ui_init(ANativeActivity *a) {
     static int once; if (once++) return;   // a second GameActivity in the same process (the first handed over to the setup screen): one haptic thread
     pthread_t t; if (!pthread_create(&t, NULL, haptic_main, NULL)) pthread_detach(t);
 }
-static void click_locked(void) { g_hpend = 1; pthread_cond_signal(&g_hcv); }   // callers hold g_mu
+// the click on a press: DM_TOUCH_HAPTIC on / off, or by default as DM_RUMBLE (Off silences it too: the player asked for no vibration, #114). -1: not read yet
+static int g_haptic = -1, g_rumble_off = -1;
+static int haptic_on(void) {
+    if (g_haptic < 0) { const char *h = getenv("DM_TOUCH_HAPTIC"); g_haptic = h && !strcmp(h, "off") ? 0 : h && !strcmp(h, "on") ? 1 : 2; }
+    if (g_rumble_off < 0) { const char *r = getenv("DM_RUMBLE"); g_rumble_off = r && !strcmp(r, "off"); }
+    return g_haptic == 1 || (g_haptic == 2 && !g_rumble_off);
+}
+void touch_ui_haptic_setting(const char *key, const char *value) {   // (touch_ui_setting, under g_mu)
+    if (!strcmp(key, "DM_TOUCH_HAPTIC")) g_haptic = value && !strcmp(value, "off") ? 0 : value && !strcmp(value, "on") ? 1 : 2;
+    else if (!strcmp(key, "DM_RUMBLE")) g_rumble_off = value && !strcmp(value, "off");
+}
+static void click_locked(void) { if (!haptic_on()) return; g_hpend = 1; pthread_cond_signal(&g_hcv); }   // callers hold g_mu
 void dm_rumble(float left, float right) {   // hle_hid.c: the game's two motors; one strength for the one motor Android drives
     float a = left > right ? left : right;
     pthread_mutex_lock(&g_mu);
@@ -294,7 +314,7 @@ static struct { int c, active; float d0, r0; } g_pinch;
 static int g_last_tap_c = -1; static double g_last_tap_t;
 static int edit_hit(float x, float y) {   // the smallest control (shown or not) under the finger
     int best = -1; float br = 1e9f;
-    for (int c = 0; c < NCTL; c++) { if (c == C_CAM || (!g_c[c].shown && !g_ov[c].set && c != C_STICK)) continue;
+    for (int c = 0; c < NCTL; c++) { if (c == C_CAM || ctl_off(c) || (!g_c[c].shown && !g_ov[c].set && c != C_STICK)) continue;
         if (GESTURES_ON && !g_c[c].shown && !g_ov[c].set && c != C_PLUS && c != C_MINUS && c != C_MENU) continue;
         float dx = x - g_c[c].cx, dy = y - g_c[c].cy, r = g_c[c].r * 1.2f; if (dx * dx + dy * dy <= r * r && g_c[c].r < br) { br = g_c[c].r; best = c; } }
     return best;
@@ -561,6 +581,10 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_BATTLE_FADE")) { g_bfade = value && *value && atof(value) >= 0 ? clampf((float)atof(value), 0, 10) : -1; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE_OPACITY")) { g_bopacity = value && atof(value) > 0 ? clampf((float)atof(value) / 100.0f, 0.05f, 1.0f) : 0; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_DEADZONE")) g_dead = value ? clampf((float)atof(value) / 100.0f, 0.0f, 0.4f) : 0.12f;   // FORK
+    else if (!strcmp(key, "DM_TOUCH_L3R3")) { g_l3r3 = value && !strcmp(value, "on"); g_w = g_h = 0; }   // (laid out again on the next frame)
+#ifdef __ANDROID__
+    else { void touch_ui_haptic_setting(const char *, const char *); touch_ui_haptic_setting(key, value); }   // DM_TOUCH_HAPTIC, DM_RUMBLE
+#endif
     g_touch_t = now_s();
     pthread_mutex_unlock(&g_mu);
 }
@@ -590,7 +614,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     frame_input_locked();
     int n = 0;
     if (g_visible && g_edit) {   // the editor: every control at full strength with a yellow ring, the hidden ones as ghosts
-        for (int c = 0; c < NCTL; c++) { if (c == C_CAM) continue; const ctl *k = &g_c[c];
+        for (int c = 0; c < NCTL; c++) { if (c == C_CAM || ctl_off(c)) continue; const ctl *k = &g_c[c];
             if (GESTURES_ON && !k->shown && !g_ov[c].set && c != C_PLUS && c != C_MINUS && c != C_STICK && c != C_MENU) continue;
             float a = k->shown ? 1.0f : 0.3f;
             if (c == C_STICK || c == C_RSTICK) compass(it, &n, max, a, k->cx, k->cy, k->cx, k->cy, k->r);
