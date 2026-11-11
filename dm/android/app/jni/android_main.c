@@ -228,6 +228,8 @@ const char *touch_ui_edit_sel(float *frac); void touch_ui_edit_size(float frac);
 JNIEXPORT jstring JNICALL Java_com_nxnative_ForkTouch_nativeSel(JNIEnv *env, jclass c) { (void)c; return (*env)->NewStringUTF(env, touch_ui_edit_sel(NULL)); }
 JNIEXPORT jfloat JNICALL Java_com_nxnative_ForkTouch_nativeSelSize(JNIEnv *env, jclass c) { (void)env; (void)c; float f = 0; touch_ui_edit_sel(&f); return f; }
 JNIEXPORT void JNICALL Java_com_nxnative_ForkTouch_nativeSetSize(JNIEnv *env, jclass c, jfloat f) { (void)env; (void)c; touch_ui_edit_size(f); }
+int touch_ui_edit_shape(void);   // FORK: the bar's Shape button
+JNIEXPORT jint JNICALL Java_com_nxnative_ForkTouch_nativeShape(JNIEnv *env, jclass c) { (void)env; (void)c; return touch_ui_edit_shape(); }
 JNIEXPORT jstring JNICALL Java_com_nxnative_ForkTouch_nativeProfile(JNIEnv *env, jclass c) { (void)c; return (*env)->NewStringUTF(env, touch_ui_profile()); }
 // Holding − on a controller for 3 s opens the controller buttons (front_open_menu(1)): a press starts a timer thread that checks the same press is still held
 uint64_t dm_nvn_frame_count(void) __attribute__((weak));   // (nvn: frames presented)

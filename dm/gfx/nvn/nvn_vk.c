@@ -3907,7 +3907,7 @@ static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, Vk
 static int ovl_draw(VkCommandBuffer cb, VkImage img, VkImageView view, VkExtent2D ext, VkFormat fmt, VkImageLayout fin) { return ovl_draw_turned(cb, img, view, ext, ext, 0, fmt, fin); }
 // (ext: the image; lext: the window the controls are laid out in; rot: the quarter turns between them)
 static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, VkExtent2D ext, VkExtent2D lext, int rot, VkFormat fmt, VkImageLayout fin) {
-    dm_ovl_item it[128]; int n = front_overlay(it, 128, (int)lext.width, (int)lext.height);
+    dm_ovl_item it[320]; int n = front_overlay(it, 320, (int)lext.width, (int)lext.height);   // FORK: 320 (128: the editor, every control at ~8 items, lost the last ones: menu, fast-forward, turbo)
     if (n <= 0 || !view || !ovl_setup(fmt)) return 0;
     if (!O.font_ready) {   // the label atlas, once, in this same command buffer
         VkImageMemoryBarrier fb = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,

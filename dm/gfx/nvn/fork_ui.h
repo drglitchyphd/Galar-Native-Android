@@ -17,8 +17,10 @@ static uint64_t g_fk_ui;   // UI draws shrunk (logged now and then)
 // Fades and flashes are UI draws too, one quad over the whole picture with a tiny one-colour texture (4x4, capture Nov 9); shrunk, they left the bands unfaded (the
 // flashing bars). So a shrunk draw whose textures are all 4x4 or smaller gets its full viewport and scissor back once its textures are known (fork_ui_fill, after
 // nvn_vk.c's push_stage; fork_ui_tex notes their sizes from tex_view_for)
-static int g_fk_sq, g_fk_texmax, g_fk_ntex; static VkViewport g_fk_v0; static VkRect2D g_fk_sc0; static uint64_t g_fk_fills;
-static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++; if ((int)w > g_fk_texmax) g_fk_texmax = (int)w; if ((int)h > g_fk_texmax) g_fk_texmax = (int)h; }
+static int g_fk_sq, g_fk_texmax, g_fk_ntex, g_fk_screenish; static VkViewport g_fk_v0; static VkRect2D g_fk_sc0; static uint64_t g_fk_fills;   // FORK v38: g_fk_screenish (it samples a picture-sized image: a full-screen effect)
+static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++;
+    if (w >= 1280 && h >= 700 && w * 10 >= h * 16 && w * 10 <= h * 20) g_fk_screenish = 1;   // (a 16:9-ish image of the picture's size: the trainer-approach overlay, blurs, wipes)
+    if ((int)w > g_fk_texmax) g_fk_texmax = (int)w; if ((int)h > g_fk_texmax) g_fk_texmax = (int)h; }
 static char g_fk_sqkey[17];   // the shrunk draw's vertex shader (the log below)
 static void fork_ui_fill(VkCommandBuffer cb) {
     if (!g_fk_sq) return; g_fk_sq = 0;
@@ -26,7 +28,7 @@ static void fork_ui_fill(VkCommandBuffer cb) {
       char k[24]; snprintf(k, sizeof k, "%.8s %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); int i;
       for (i = 0; i < ns && strcmp(seen[i], k); i++) {}
       if (i == ns && ns < 96) { memcpy(seen[ns++], k, sizeof k); VLOG("[FORK] ui draw kind: vertex %.8s, largest texture side %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); } }
-    if (!g_fk_ntex || g_fk_texmax > 4) return;
+    if (!g_fk_ntex || (g_fk_texmax > 4 && !g_fk_screenish)) return;   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
     if (++g_fk_fills == 1 || g_fk_fills % 1000 == 0) VLOG("[FORK] fill draws kept full size: %llu", (unsigned long long)g_fk_fills);
 }
@@ -90,7 +92,7 @@ static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, 
         g_fk_uimode = 1; }
     float kx, ky; dm_fork_ui_scale(&kx, &ky);
     if (kx == 1 && ky == 1) return;
-    g_fk_sq = 1; g_fk_ntex = 0; g_fk_texmax = 0; g_fk_v0 = *v; g_fk_sc0 = *sc; snprintf(g_fk_sqkey, sizeof g_fk_sqkey, "%.16s", vkey);   // (fork_ui_fill may give it back)
+    g_fk_sq = 1; g_fk_ntex = 0; g_fk_texmax = 0; g_fk_screenish = 0; g_fk_v0 = *v; g_fk_sc0 = *sc; snprintf(g_fk_sqkey, sizeof g_fk_sqkey, "%.16s", vkey);   // (fork_ui_fill may give it back)
     float cx = tw * 0.5f, cy = th * 0.5f;
     if (!g_fk_comp && !g_fk_clear) {   // no 3D under the UI this frame: black where the shrunk UI does not reach (else last frame's picture would stay there)
         g_fk_clear = 1;

@@ -59,10 +59,11 @@ static int battle_hidden(int c) {
 // FORK: fast-forward (DM_FORK_FF: "" off, "battle" in battles only, "all" anywhere; the speed: host/fork_ff.c), turbo A (DM_FORK_TURBO=on, DM_FORK_TURBO_HZ presses a
 //   second), battle icons on X / B / Y (DM_FORK_BATTLE_ICONS, default on), a battle layout of its own (DM_FORK_BATTLE_LAYOUT=on) and battle opacity
 //   (DM_FORK_BATTLE_OPACITY 5-100 %, 0 = the same as elsewhere)
+static float g_bfade = -1;   // FORK: DM_FORK_BATTLE_FADE seconds in battles (-1: as elsewhere)
 static int g_ffscope, g_ff_toggle, g_ff_hold, g_turbo_on, g_turbo_held, g_bicons = 1, g_blayout; static float g_turbo_hz = 10, g_bopacity;
 extern volatile int dm_fork_ff_req __attribute__((weak)), dm_fork_ff_speed __attribute__((weak));
 static int in_battle(void) { return &dm_fork_screen && atomic_load(&dm_fork_screen) == 2; }
-static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1; }
+static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0; }
 static void bhide_set(int on) { g_bhide = on; census_sync(); }
 static int fork_hidden(int c) {
     if (c == C_FF) return !g_ffscope || (g_ffscope == 1 && !in_battle());
@@ -84,7 +85,7 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 // ---------- the player's layout (the in-game editor): position, size and visibility of each control, kept in <files>/touch_layout.txt ----------
 // One line per changed control: "<name> <x / width> <y / height> <radius / height> <shown>"; controls without a line keep the default layout
 static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "ff", "turbo" };
-static struct { int set; float fx, fy, fr; int shown; } g_ov[NCTL];
+static struct { int set; float fx, fy, fr; int shown, shape; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
 static char g_lay_path[1100]; static int g_lay_loaded;
 // FORK: one layout per screen and orientation: touch_layout_<profile>.txt (outer_landscape, inner_landscape, inner_portrait, outer_portrait), picked from the window's
 //   shape in layout(). A profile without its own file starts from the old single touch_layout.txt when there is one, else from the default layout
@@ -109,13 +110,14 @@ static void layout_load(void) {
     if (!f && strstr(g_lay_prof, "_battle")) { char base[1100]; snprintf(base, sizeof base, "%s/touch_layout_%.*s.txt", g_lay_dir, (int)(strstr(g_lay_prof, "_battle") - g_lay_prof), g_lay_prof); f = fopen(base, "r"); }   // FORK: the battle layout starts from this screen's own
     if (!f) { char old[1100]; snprintf(old, sizeof old, "%s/touch_layout.txt", g_lay_dir); f = fopen(old, "r"); }   // FORK: the old single layout as a start
     char ln[160], nm[32]; float fx, fy, fr; int sh;
-    while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "%31s %f %f %f %d", nm, &fx, &fy, &fr, &sh) == 5)
-        for (int c = 0; c < NCTL; c++) if (!strcmp(nm, CTL_NAME[c])) { g_ov[c].set = 1; g_ov[c].fx = fx; g_ov[c].fy = fy; g_ov[c].fr = fr; g_ov[c].shown = sh; }
+    int shp;
+    while (f && fgets(ln, sizeof ln, f)) { shp = 0; if (sscanf(ln, "%31s %f %f %f %d %d", nm, &fx, &fy, &fr, &sh, &shp) >= 5)
+        for (int c = 0; c < NCTL; c++) if (!strcmp(nm, CTL_NAME[c])) { g_ov[c].set = 1; g_ov[c].fx = fx; g_ov[c].fy = fy; g_ov[c].fr = fr; g_ov[c].shown = sh; g_ov[c].shape = shp & 3; } }   // FORK: shape
     if (f) fclose(f);
 }
 static void layout_save(void) {
     if (!g_lay_path[0]) return; FILE *f = fopen(g_lay_path, "w"); if (!f) return;
-    for (int c = 0; c < NCTL; c++) if (g_ov[c].set) fprintf(f, "%s %.4f %.4f %.4f %d\n", CTL_NAME[c], g_ov[c].fx, g_ov[c].fy, g_ov[c].fr, g_ov[c].shown);
+    for (int c = 0; c < NCTL; c++) if (g_ov[c].set) fprintf(f, "%s %.4f %.4f %.4f %d %d\n", CTL_NAME[c], g_ov[c].fx, g_ov[c].fy, g_ov[c].fr, g_ov[c].shown, g_ov[c].shape);   // FORK: + shape
     fclose(f);
 }
 static void layout_apply(float w, float h) {
@@ -184,6 +186,7 @@ static void layout(float w, float h) {
 static int hit(int c, float x, float y, float slack) {
     if (fork_hidden(c)) return 0;   // FORK
     const ctl *k = &g_c[c]; float dx = x - k->cx, dy = y - k->cy, r = k->r * slack;
+    if (g_ov[c].set && g_ov[c].shape == 3) dx /= 1.7f;   // FORK: a pill is wider
     return k->shown && dx * dx + dy * dy <= r * r;
 }
 static int target_at(float x, float y) {
@@ -351,6 +354,10 @@ int touch_ui_editing(void) { return g_edit; }
 // FORK: the editor bar's size slider: the selected control's name ("" none) and size as a fraction of the screen height, and setting it
 const char *touch_ui_edit_sel(float *frac) { pthread_mutex_lock(&g_mu); int c = g_edit ? g_edit_sel : -1; if (frac) *frac = c >= 0 && g_h > 0 ? g_c[c].r / g_h : 0;
     pthread_mutex_unlock(&g_mu); return c >= 0 ? CTL_NAME[c] : ""; }
+int touch_ui_edit_shape(void) {   // FORK: the editor bar's Shape button: the selected control's next shape
+    pthread_mutex_lock(&g_mu); int c = g_edit_sel, sh = -1;
+    if (g_edit && c >= 0 && c != C_STICK && c != C_RSTICK && c != C_MENU && c != C_THROW) { edit_store(c); g_ov[c].shape = (g_ov[c].shape + 1) & 3; sh = g_ov[c].shape; click_locked(); }
+    pthread_mutex_unlock(&g_mu); return sh; }
 void touch_ui_edit_size(float frac) { pthread_mutex_lock(&g_mu); int c = g_edit_sel;
     if (g_edit && c >= 0 && g_h > 0) { g_c[c].r = clampf(frac, 0.025f, 0.25f) * g_h; edit_store(c); } pthread_mutex_unlock(&g_mu); }
 // the 2-second holds, checked once a frame (a finger held still sends no events): − toggles the editor (saving on the way out), + in the editor resets the layout
@@ -467,10 +474,23 @@ static dm_ovl_item *add(dm_ovl_item *it, int *n, int max, float cx, float cy, fl
     return o;
 }
 // a glossy bubble: shadow, dark rim, body, glow below, a gloss spot, a bright rim; the label on top
+static int g_bshape;   // FORK: the shape bubble() draws (set around each call: g_ov[].shape)
+static void rr(dm_ovl_item *it, int *n, int max, float x, float y, float w, float h, float rad, int R, int G, int B, float a) {   // FORK: a rounded rectangle
+    dm_ovl_item *o = add(it, n, max, x, y, h / 2, OVL_RRECT, R, G, B, a); if (o) { o->x = x - w / 2; o->y = y - h / 2; o->w = w; o->h = h; o->radius = rad; } }
 static void bubble(dm_ovl_item *it, int *n, int max, const ctl *c, int on, int teal, float a) {
     float r = on ? c->r * 0.95f : c->r, x = c->cx, y = c->cy, th = g_h / 1080.0f;
     int br = teal ? 30 : 38, bg = teal ? 170 : 128, bb = teal ? 150 : 200;
     if (on) { br += 70; bg += 60; bb += 40; }
+    if (g_bshape) {   // FORK: rounded square, square, pill (as the game's battle buttons): the same layers as the round button
+        float w = g_bshape == 3 ? 3.0f * r : 1.8f * r, h = g_bshape == 3 ? 1.6f * r : 1.8f * r, rad = g_bshape == 1 ? 0.28f : g_bshape == 2 ? 0.10f : 0.5f;
+        rr(it, n, max, x, y + r * 0.06f, w * 1.03f, h * 1.03f, rad, 5, 30, 60, 0.35f * a);
+        rr(it, n, max, x, y, w, h, rad, 185, 232, 255, 0.95f * a);
+        rr(it, n, max, x, y, w - 2.8f * th * 2, h - 2.8f * th * 2, rad, br / 2, bg / 2, bb / 2, 0.92f * a);
+        rr(it, n, max, x, y, w * 0.90f, h * 0.86f, rad, br, bg, bb, (on ? 0.95f : 0.72f) * a);
+        rr(it, n, max, x, y - h * 0.22f, w * 0.80f, h * 0.30f, 0.5f, 255, 255, 255, 0.12f * a);
+        dm_ovl_item *o = add(it, n, max, x, y, r, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = c->glyph; o->gscale = c->glyph == OVL_G_ZL || c->glyph == OVL_G_ZR ? 0.62f : 0.55f; o->galpha = a; }
+        return;
+    }
     add(it, n, max, x, y + r * 0.06f, r * 1.02f, OVL_DISC, 5, 30, 60, 0.35f * a);
     add(it, n, max, x, y, r, OVL_DISC, br / 2, bg / 2, bb / 2, 0.80f * a);
     add(it, n, max, x, y, r * 0.90f, OVL_DISC, br, bg, bb, (on ? 0.95f : 0.72f) * a);
@@ -538,6 +558,7 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_TURBO_HZ")) g_turbo_hz = value ? clampf((float)atof(value), 3, 20) : 10;   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE_ICONS")) { g_bicons = !(value && !strcmp(value, "off")); census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE_LAYOUT")) { g_blayout = value && !strcmp(value, "on"); census_sync(); g_w = g_h = 0; }   // FORK
+    else if (!strcmp(key, "DM_FORK_BATTLE_FADE")) { g_bfade = value && *value && atof(value) >= 0 ? clampf((float)atof(value), 0, 10) : -1; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE_OPACITY")) { g_bopacity = value && atof(value) > 0 ? clampf((float)atof(value) / 100.0f, 0.05f, 1.0f) : 0; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_DEADZONE")) g_dead = value ? clampf((float)atof(value) / 100.0f, 0.0f, 0.4f) : 0.12f;   // FORK
     g_touch_t = now_s();
@@ -558,7 +579,7 @@ static void prefs(void) {
     { const char *tc = getenv("DM_FORK_TOUCH_COLOR"), *ts = getenv("DM_FORK_TOUCH_SIZE"); g_tint = tint_of(tc); if (ts && *ts) { g_tsize = clampf((float)atof(ts) / 100.0f, 0.5f, 1.5f); g_w = g_h = 0; } }   // FORK if (f) g_fade = fmaxf(0.0f, (float)atof(f));
     { const char *ft = getenv("DM_FORK_TOUCH"), *dz = getenv("DM_FORK_DEADZONE"); g_float = ft && !strcmp(ft, "float");   // FORK: the control scheme, the dead zone
       { const char *bh = getenv("DM_FORK_BATTLE_HIDE"); bhide_set(bh && !strcmp(bh, "on")); }   // FORK
-      { static const char *const keys[] = { "DM_FORK_FF", "DM_FORK_TURBO", "DM_FORK_TURBO_HZ", "DM_FORK_BATTLE_ICONS", "DM_FORK_BATTLE_LAYOUT", "DM_FORK_BATTLE_OPACITY" };   // FORK: the rest, as the menu sets them
+      { static const char *const keys[] = { "DM_FORK_FF", "DM_FORK_TURBO", "DM_FORK_TURBO_HZ", "DM_FORK_BATTLE_ICONS", "DM_FORK_BATTLE_LAYOUT", "DM_FORK_BATTLE_OPACITY", "DM_FORK_BATTLE_FADE" };   // FORK: the rest, as the menu sets them
         pthread_mutex_unlock(&g_mu); for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++) { const char *v = getenv(keys[i]); if (v && *v) touch_ui_setting(keys[i], v); } pthread_mutex_lock(&g_mu); census_sync(); }
       if (dz && *dz) g_dead = clampf((float)atof(dz) / 100.0f, 0.0f, 0.4f); if (g_float) fprintf(stderr, "[FORK] [touch] floating sticks, tap for A (dead zone %.0f %%)\n", g_dead * 100); }
 }
@@ -573,10 +594,11 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
             if (GESTURES_ON && !k->shown && !g_ov[c].set && c != C_PLUS && c != C_MINUS && c != C_STICK && c != C_MENU) continue;
             float a = k->shown ? 1.0f : 0.3f;
             if (c == C_STICK || c == C_RSTICK) compass(it, &n, max, a, k->cx, k->cy, k->cx, k->cy, k->r);
-            else if (c == C_THROW) pokeball(it, &n, max, k, 0, a); else if (c == C_MENU) menu_icon(it, &n, max, k, a); else bubble(it, &n, max, k, 0, 0, a);
+            else if (c == C_THROW) pokeball(it, &n, max, k, 0, a); else if (c == C_MENU) menu_icon(it, &n, max, k, a); else { g_bshape = g_ov[c].set ? g_ov[c].shape : 0; bubble(it, &n, max, k, 0, 0, a); g_bshape = 0; }   // FORK: shape
             dm_ovl_item *o = add(it, &n, max, k->cx, k->cy, k->r * 1.12f, OVL_RING, 255, 210, 60, 0.95f * a); if (o) o->ring = clampf(4.0f * (g_h / 1080.0f) / (k->r * 1.12f), 0.02f, 0.3f); }
     } else if (g_visible) {
-        double t = now_s(); int idle = ((g_fade > 0 && t - g_touch_t > g_fade) || touch_menu_active()) && !g_btn && !g_stick_on && !g_rstick_on;   // (in a menu its items are tapped directly)   // nothing touched for 3 s: everything faint
+        double t = now_s(); float fade = g_bfade >= 0 && in_battle() ? g_bfade : g_fade;   // FORK: battle fade
+        int idle = ((fade > 0 && t - g_touch_t > fade) || touch_menu_active()) && !g_btn && !g_stick_on && !g_rstick_on;   // (in a menu its items are tapped directly)   // nothing touched for 3 s: everything faint
         float ia = idle ? 0.22f : 1.0f;
         int faint = 0; (void)g_inner_t;   // FORK: the D-pad and the right stick fade with the rest (upstream: almost gone 2 s after their last touch)
         for (int c = C_A; c < NCTL; c++) { if (!g_c[c].shown || fork_hidden(c)) continue;   // FORK: battle_hidden
@@ -586,7 +608,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
             if (c == C_MENU) { menu_icon(it, &n, max, &g_c[c], idle ? fmaxf(al, 0.45f) : al); continue; }   // (never quite gone: it is how the settings are found)
             { ctl k = g_c[c];   // FORK: battle icons (Poké Ball on X: the quick ball; back on B; info on Y)
               if (g_bicons && in_battle()) k.glyph = c == C_X ? OVL_G_BALL : c == C_B ? OVL_G_BACK : c == C_Y ? OVL_G_INFO : k.glyph;
-              bubble(it, &n, max, &k, on, 0, al); }
+              g_bshape = g_ov[c].set ? g_ov[c].shape : 0; bubble(it, &n, max, &k, on, 0, al); g_bshape = 0; }   // FORK: shape
             if (c >= C_UP && c <= C_RIGHT && al == 1.0f) {   // FORK: <= C_RIGHT (the controls after the D-pad have no direction dot)
                 float r = g_c[c].r, ox = c == C_LEFT ? -0.42f : c == C_RIGHT ? 0.42f : 0, oy = c == C_UP ? -0.42f : c == C_DOWN ? 0.42f : 0;
                 add(it, &n, max, g_c[c].cx + ox * r, g_c[c].cy + oy * r, r * 0.22f, OVL_DISC, 255, 255, 255, 0.9f); } }

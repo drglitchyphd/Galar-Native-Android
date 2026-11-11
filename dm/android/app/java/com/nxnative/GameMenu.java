@@ -315,6 +315,7 @@ public final class GameMenu {
         choice(a, "DM_FORK_BATTLE_LAYOUT", t(a, "Battle layout"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
             { "on", t(a, "Its own"), t(a, "Its own: battles use a layout of their own on each screen. Open Move the touch controls during a battle to arrange it (it starts as a copy of the normal one)") } });
         slider(a, t(a, "Battle opacity"), "DM_FORK_BATTLE_OPACITY", 0, 100, 0, v -> v == 0 ? t(a, "same as elsewhere") : v + " %");
+        slider(a, t(a, "Battle: fade after"), "DM_FORK_BATTLE_FADE", -1, 10, -1, v -> v < 0 ? t(a, "same as elsewhere") : v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));   // FORK v38
         heading(a, t(a, "Fast-forward and turbo"));
         choice(a, "DM_FORK_FF", t(a, "Fast-forward"), new String[][] { { "", t(a, "Off"), "" },
             { "battle", t(a, "In battles"), t(a, "In battles: the ⏩ button shows during battles. Tap: on / off. Hold: fast while held") },

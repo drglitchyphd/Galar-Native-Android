@@ -20,6 +20,7 @@ final class ForkTouch {
     private static native boolean nativeEditing();
     private static native String nativeProfile();
     private static native String nativeSel(); private static native float nativeSelSize(); private static native void nativeSetSize(float f);   // the size slider
+    private static native int nativeShape();   // the Shape button: the selected control's next shape (-1: none selected)
     private static PopupWindow pw;
 
     static String profileName(Activity a, String p) {
@@ -58,6 +59,13 @@ final class ForkTouch {
             @Override public void onProgressChanged(android.widget.SeekBar s, int v, boolean user) { if (user && !quiet[0]) try { nativeSetSize((v + 25) / 1000f); } catch (UnsatisfiedLinkError e) { } }
             @Override public void onStartTrackingTouch(android.widget.SeekBar s) { }
             @Override public void onStopTrackingTouch(android.widget.SeekBar s) { } });
+        { Button shb = new Button(a); shb.setText(T.t(a, "Shape")); shb.setAllCaps(false); shb.setTextColor(0xFFFFFFFF);   // circle / rounded square / square / pill
+          GradientDrawable sbg = new GradientDrawable(); sbg.setColor(0xFF3A3F4A); sbg.setCornerRadius(14 * d); shb.setBackground(sbg); shb.setPadding(p, 0, p, 0);
+          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (int) (36 * d)); lp.leftMargin = p / 2; shb.setLayoutParams(lp);
+          final String[] shapes = { T.t(a, "Circle"), T.t(a, "Rounded"), T.t(a, "Square"), T.t(a, "Pill") };
+          shb.setOnClickListener(v -> { int r = -1; try { r = nativeShape(); } catch (UnsatisfiedLinkError e) { }
+              shb.setText(r >= 0 && r < 4 ? T.t(a, "Shape") + ": " + shapes[r] : T.t(a, "Shape")); });
+          sz.addView(shb); }
         col.addView(sz);
         pw = new PopupWindow(col, LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, false);
         pw.setTouchable(true); pw.setOutsideTouchable(false); pw.setFocusable(false);   // touches outside go on to the editor underneath

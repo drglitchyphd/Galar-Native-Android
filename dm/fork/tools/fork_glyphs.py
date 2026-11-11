@@ -27,12 +27,12 @@ def ball(d, n):   # a Poke Ball in outline: ring, band, centre button
     d.rectangle([c - r, c - w / 2, c + r, c + w / 2], fill=255)
     d.ellipse([c - r * 0.36, c - r * 0.36, c + r * 0.36, c + r * 0.36], fill=255)
     d.ellipse([c - r * 0.18, c - r * 0.18, c + r * 0.18, c + r * 0.18], fill=0)
-def back(d, n):   # a U-turn arrow pointing left (back / cancel)
-    w = n * 0.08; cx, cy, r = n * 0.56, n * 0.52, n * 0.20
-    d.arc([cx - r, cy - r, cx + r, cy + r], start=-90, end=90, fill=255, width=int(w))
-    d.line([(cx, cy + r), (n * 0.30, cy + r)], fill=255, width=int(w))
-    d.line([(cx, cy - r - w / 2 + w / 2), (n * 0.40, cy - r)], fill=255, width=int(w))
-    tip = (n * 0.20, cy - r); d.polygon([tip, (n * 0.40, cy - r - n * 0.13), (n * 0.40, cy - r + n * 0.13)], fill=255)
+def back(d, n):   # a U-turn arrow pointing left (back / cancel): an even stroke, the arrowhead on the upper arm
+    w = int(n * 0.085); r = n * 0.19; cx, cy = n * 0.58, n * 0.54
+    d.arc([cx - r, cy - r, cx + r, cy + r], start=-90, end=90, fill=255, width=w)   # the bend, on the right
+    d.rectangle([n * 0.30, cy + r - w, cx, cy + r], fill=255)                        # the lower arm, out to the left
+    d.rectangle([n * 0.36, cy - r, cx, cy - r + w], fill=255)                        # the upper arm, to the arrowhead
+    ty = cy - r + w / 2; d.polygon([(n * 0.16, ty), (n * 0.38, ty - n * 0.15), (n * 0.38, ty + n * 0.15)], fill=255)
 def info(d, n):   # an "i" in a ring
     c = n / 2; r = n * 0.34; w = n * 0.065
     d.ellipse([c - r, c - r, c + r, c + r], outline=255, width=int(w))
