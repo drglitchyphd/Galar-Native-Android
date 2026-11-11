@@ -1,6 +1,7 @@
 # STATUS
 
-**Build:** v39 (not tested yet): upstream `main` merged (57 commits, to 8b2c64d). **The app is now GPL-3.0-or-later** (upstream's licence change; older parts keep MIT: LICENSE-MIT, NOTICE).
+**Build:** v40 (not tested yet): the trainer "spotted you" corner darkening is shader 438515ea (no texture, drawn only before trainer battles): always kept full size (`fork_ui.h` fork_ui_fill). v38's picture-sized-image rule did not catch it (Steven, v39).
+v39: upstream `main` merged (57 commits, to 8b2c64d). **The app is now GPL-3.0-or-later** (upstream's licence change; older parts keep MIT: LICENSE-MIT, NOTICE).
 - From upstream: Adreno driver-memory fix (command pools without the transient hint; game thread), Sword credits movie freeze fix, swapchain room for 32 images, menus with Pokémon models no longer zoom at a lowered 3D scale, stadium-crowd intro at 30, fast setup (shaders in the background), Vibrate on press, L3 / R3 option, newest update chosen.
 - Upstream's live 30 / 60 frame rate (`DM_FPS_LIVE`, on by default) now owns the step word at 30 too: fast-forward goes through its frame step (`dm_fork_ff_pct`, hle_nvn.c vstep_tick). **Test fast-forward first.**
 - Upstream's own frame generation (`DM_FRAMEGEN`, in the menu) exists beside the fork's: the fork's runs only while upstream's is off. Keep using the fork's (Steven's baseline).

@@ -28,7 +28,10 @@ static void fork_ui_fill(VkCommandBuffer cb) {
       char k[24]; snprintf(k, sizeof k, "%.8s %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); int i;
       for (i = 0; i < ns && strcmp(seen[i], k); i++) {}
       if (i == ns && ns < 96) { memcpy(seen[ns++], k, sizeof k); VLOG("[FORK] ui draw kind: vertex %.8s, largest texture side %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); } }
-    if (!g_fk_ntex || (g_fk_texmax > 4 && !g_fk_screenish)) return;   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
+    // FORK v40: 438515ea (no texture: a shaded gradient) is the trainer "spotted you" darkening in the screen's corner (Steven's v37 logs: drawn only just before
+    //   trainer battles; shrunk it stopped at the UI band's edge): always kept full size
+    int full = !strncmp(g_fk_sqkey, "438515ea", 8);
+    if (!full && (!g_fk_ntex || (g_fk_texmax > 4 && !g_fk_screenish))) return;   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
     if (++g_fk_fills == 1 || g_fk_fills % 1000 == 0) VLOG("[FORK] fill draws kept full size: %llu", (unsigned long long)g_fk_fills);
 }
