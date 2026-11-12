@@ -38,7 +38,7 @@ static void fork_ui_fill(VkCommandBuffer cb) {
         dm_fork_capture_trainer = 0; atomic_store(&g_cap, 1);
         VLOG("[FORK] capture: overworld UI shader %.16s (largest texture side %d, %d textures): this frame", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0, g_fk_ntex); }
     int full = !strncmp(g_fk_sqkey, "438515ea", 8);
-    if (!full && (!g_fk_ntex || (g_fk_texmax > 4 && !g_fk_screenish))) return;   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
+    if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
     if (++g_fk_fills == 1 || g_fk_fills % 1000 == 0) VLOG("[FORK] fill draws kept full size: %llu", (unsigned long long)g_fk_fills);
 }

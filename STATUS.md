@@ -1,6 +1,7 @@
 # STATUS
 
-**Build:** v41 (not tested yet):
+**Build:** v42 (not tested yet): v38's "screenish" full-size rule removed: the party list's Pokémon icons (one large icon sheet) were kept full size, off their rows (Steven, v41 screenshot). Everything else as v41.
+v41:
 - Frame generation is one setting (Display → Frame generation): Off / Lossless 2x (fork) / Built-in (upstream) / Lossless (upstream, 2x–4x). Choosing one clears the other. Upstream's Lossless is imported from the setup screen's DLL when chosen.
 - Fixed: upstream's Lossless shaders were imported to the shared folder but the engine looked in Android/data (`DM_LSFG_DIR` now follows `DM_DATA_ROOT`).
 - The performance overlay's "on screen" counts upstream's frame generation too (it showed 30 while upstream's ran at 60: v40 log, 600 shown / 10 s, GPU ~3 ms, but 300–500 of 600 uneven).
