@@ -1,6 +1,9 @@
 # STATUS
 
-**Build:** v42 (not tested yet): v38's "screenish" full-size rule removed: the party list's Pokémon icons (one large icon sheet) were kept full size, off their rows (Steven, v41 screenshot). Everything else as v41.
+**Build:** v43 (not tested yet): trainer battle intro kept full size in Fill, corrected: fa0b9117 (black bars sliding in top / bottom = the "spotted" fade) and 63b6f752 (the diagonal divider; likely the "divider too far left" too). From the v42 trainer capture. v40's 438515ea guess dropped.
+- Frame generation (Steven Nov 12): fork Lossless 2x looks good; upstream built-in works but not smooth; upstream Lossless no visible change. Menu: Off / Lossless 2x (fork) / Built-in.
+- 60 fps mode + fork frame generation: the frame step held 2 slots (30) for 1769 of 1800 frames, so nothing changes. Use 30 + frame generation. Pacing refresh must be 120 (60 turns pacing off with frame generation).
+v42: v38's "screenish" full-size rule removed: the party list's Pokémon icons (one large icon sheet) were kept full size, off their rows (Steven, v41 screenshot). Everything else as v41.
 v41:
 - Frame generation is one setting (Display → Frame generation): Off / Lossless 2x (fork) / Built-in (upstream) / Lossless (upstream, 2x–4x). Choosing one clears the other. Upstream's Lossless is imported from the setup screen's DLL when chosen.
 - Fixed: upstream's Lossless shaders were imported to the shared folder but the engine looked in Android/data (`DM_LSFG_DIR` now follows `DM_DATA_ROOT`).

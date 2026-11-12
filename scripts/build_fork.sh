@@ -22,7 +22,7 @@ FORK_NAME=${FORK_NAME:-Galar Fork}
 FORK_DATA_DIR=${FORK_DATA_DIR:-GalarFork}
 FORK_ICON=${FORK_ICON:-2a6fdb 182040}
 FORK_ONLY_GAME=${FORK_ONLY_GAME-0100ABF008968000}
-FORK_VERSION=${FORK_VERSION:-42}
+FORK_VERSION=${FORK_VERSION:-43}
 FORK_LSFG=${FORK_LSFG:-1}
 fork_lsfg_build() {   # (build_apk_pc.sh calls this before packing the APK: PRE_APK_HOOK)
     rm -f "$LIBS/libforklsfg.so"

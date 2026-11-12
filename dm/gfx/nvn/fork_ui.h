@@ -31,13 +31,14 @@ static void fork_ui_fill(VkCommandBuffer cb) {
       char k[24]; snprintf(k, sizeof k, "%.8s %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); int i;
       for (i = 0; i < ns && strcmp(seen[i], k); i++) {}
       if (i == ns && ns < 96) { memcpy(seen[ns++], k, sizeof k); VLOG("[FORK] ui draw kind: vertex %.8s, largest texture side %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); } }
-    // FORK v40: 438515ea (no texture: a shaded gradient) is the trainer "spotted you" darkening in the screen's corner (Steven's v37 logs: drawn only just before
-    //   trainer battles; shrunk it stopped at the UI band's edge): always kept full size
+    // FORK v43: the trainer battle intro (capture Nov 12): fa0b9117 draws the black bars that slide in at the top and bottom, 63b6f752 the diagonal divider between
+    //   the two sides. Shrunk, the bars stopped at the UI band's edges (the "spotted" fade) and the divider no longer met the split 3D behind it: always full size.
+    //   (v40's 438515ea guess dropped: not part of it)
     if (dm_fork_capture_trainer && g_fk_comp && atomic_load(&dm_fork_screen) == 0 && strncmp(g_fk_sqkey, "56af7f00", 8) && strncmp(g_fk_sqkey, "af0ef3ac", 8)
         && strncmp(g_fk_sqkey, "af80749a", 8) && atomic_load(&g_cap) == 0) {
         dm_fork_capture_trainer = 0; atomic_store(&g_cap, 1);
         VLOG("[FORK] capture: overworld UI shader %.16s (largest texture side %d, %d textures): this frame", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0, g_fk_ntex); }
-    int full = !strncmp(g_fk_sqkey, "438515ea", 8);
+    int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8);
     if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
     if (++g_fk_fills == 1 || g_fk_fills % 1000 == 0) VLOG("[FORK] fill draws kept full size: %llu", (unsigned long long)g_fk_fills);

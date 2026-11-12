@@ -181,7 +181,8 @@ public final class GameMenu {
         o.add(new String[] { "", t(a, "Off"), "" });
         if (dll) o.add(new String[] { "fork", t(a, "Lossless 2x (fork)"), t(a, "The fork's: your Lossless.dll through lsfg-vk, a generated frame between every two of the game's (60 on screen). From the next start") });
         o.add(new String[] { "on", t(a, "Built-in"), up[1][2] });
-        if (dll || GameSettings.hasLsfg(a)) o.add(new String[] { "lsfg", t(a, "Lossless (upstream)"), up[2][2] + (GameSettings.hasLsfg(a) ? "" : " " + t(a, "(imported from your Lossless.dll when chosen)")) });
+        // FORK v43: upstream's Lossless only while already chosen (Steven Nov 12: no visible difference; the fork's looks good)
+        if ("lsfg".equals(cur)) o.add(new String[] { "lsfg", t(a, "Lossless (upstream)"), up[2][2] + (GameSettings.hasLsfg(a) ? "" : " " + t(a, "(imported from your Lossless.dll when chosen)")) });
         LinearLayout c = card(a);
         titleRow(a, c, t(a, "Frame generation"), RESTART.contains("DM_FORK_FG") || RESTART.contains("DM_FRAMEGEN") ? t(a, "Applies next start") : null);
         HorizontalScrollView hs = new HorizontalScrollView(a); hs.setHorizontalScrollBarEnabled(false);
