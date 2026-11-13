@@ -42,6 +42,11 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 
 - v49: the spotted fades swapped edges (the first draw is the top-left one). Now both kept full size, no anchoring (fork_ui.h; not built). Banner still anchored to the bottom.
 
+## Queued for v50 (in the tree, compiles, not built for Steven)
+- Spotted fades full size (above).
+- Frame generation paused on still screens (DM_FORK_FG_STILL=pause, default keep): menus / dialogue present without generation, screen asked for 60 Hz (window_rate), first 2 generated frames after resuming not shown. Log `[FORK] fg: paused / resumed`.
+- Power readout (ForkPower.java): `[FORK] power: W, mA, V, battery °C, level, charging, fg paused` every minute; watts in the performance overlay.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).

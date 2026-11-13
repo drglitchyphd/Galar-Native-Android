@@ -80,7 +80,8 @@ static void fk_census_note(const char *k) { for (int i = 0; i < g_fk_cn; i++) if
 //   Battle: 3D with b6ff050a or ecacdb40 (the census of a battle; 56af7f00 alone is not one: dialogue boxes draw with it too, capture Nov 9); menu: no 3D, UI only.
 //   Held 10 frames before it changes
 _Atomic int dm_fork_screen;
-volatile int dm_fork_census_want;   // touch_ui.c: the battle controls need the screen kind (else only Fill, corrected runs the census)
+volatile int dm_fork_census_want;
+static int g_fk_census_fg;   // FORK v50: fork_fg.h wants the screen kind (frame generation paused on still screens)   // touch_ui.c: the battle controls need the screen kind (else only Fill, corrected runs the census)
 static void fk_screen_frame(int comp) {
     // (FORK v49: b6ff050a also draws the trainer "spotted" banner: a frame where that was its draw is not a battle, unless ecacdb40 is there too; Steven Nov 13:
     //   the battle buttons came up as soon as a trainer saw him)
@@ -120,7 +121,7 @@ static void fork_ui_frame(void) {
     int sw = g_fk_prev_comp && !g_fk_comp && g_fk_inimg;   // from 3D to UI only (a transition, a menu opening)
     if (want && !g_fk_capped && (sw || g_fk_odd) && atomic_load(&g_cap) == 0) {   // (and an unknown shader drawn full size: perhaps a menu's opening animation)
         g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after %s", sw ? "a switch from 3D to UI only" : "an unknown shader drawn full size"); }
-    if (dm_aspect() == DM_ASPECT_FIX || dm_fork_census_want) fk_census_frame(g_fk_comp);
+    if (dm_aspect() == DM_ASPECT_FIX || dm_fork_census_want || g_fk_census_fg) fk_census_frame(g_fk_comp);   // (FORK v50: + g_fk_census_fg)
     g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0; g_fk_odd = 0;
     g_fk_shade_n = 0; g_fk_spot = 0;   // FORK v49 (after the census used them)
 }

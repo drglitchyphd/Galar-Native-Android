@@ -158,7 +158,14 @@ int fork_fg_live(void) { return atomic_load(&FG.state) == 2 && FG.ngen > 0 ? for
 uint64_t dm_fork_fg_frames(void) { if (framegen_mode() && !FGE.off) return atomic_load(&g_fork_up_shown);   // (upstream's frame generation: its pictures, nvn_vk.c)
     return atomic_load(&FG.state) == 2 ? atomic_load(&g_fg_shown) : (uint64_t)-1; }
 static void fg_time(int i, uint64_t t0) { g_fg_t[i] += (mono_ns() - t0) / 1e6; }
-static struct { int has, busy; uint64_t n; int in, flip; int32_t w, h; uint64_t t, half; uint32_t id; } FJ;
+static struct { int has, busy; uint64_t n; int in, flip; int32_t w, h; uint64_t t, half; uint32_t id; int noshow; } FJ;   // (v50: noshow, the first frames after a pause)
+// FORK v50: frame generation paused on still screens (DM_FORK_FG_STILL=pause, default keep): in full-screen menus and dialogue (gfx/nvn/fork_ui.h dm_fork_screen 1 / 3)
+//   nothing moves, so the in-between frames cost GPU time (about 5 ms a frame) for nothing; there the frame is presented as without frame generation and the screen is
+//   asked for 60 Hz (android_main.c window_rate, dm_fork_rate_update). Back in the field or a battle the first two generated frames are not shown (their frame before
+//   is the one from before the pause). Log: [FORK] fg: paused / resumed
+volatile int dm_fork_fg_paused;
+static int fg_still_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FORK_FG_STILL"); v = e && !strcmp(e, "pause"); } return v; }
+static int g_fg_skip;
 static void *fg_worker(void *p) {
     (void)p;
     for (;;) {
@@ -188,7 +195,7 @@ static void *fg_worker(void *p) {
             uint64_t t2 = mono_ns();
             for (int k = 0; gen && k < ng && W.sc; k++) {   // the generated frames in order (lsfg-vk's outputs: the first is the earliest), each a step before the next
                 uint64_t back = j.half * (uint64_t)(ng - k), at = nopace ? 0 : j.t > back ? j.t - back : 0;
-                if (fg_show(FG.img[2 + k], VK_IMAGE_LAYOUT_GENERAL, 2 + k, 0, 0, j.w, j.h, j.flip, at, (j.id | 0x80000000u) + (uint32_t)k * 0x10000000u)) atomic_fetch_add(&g_fg_shown, 1); }   // (ids of their own: the display's timing report lists them too)
+                if (!j.noshow && fg_show(FG.img[2 + k], VK_IMAGE_LAYOUT_GENERAL, 2 + k, 0, 0, j.w, j.h, j.flip, at, (j.id | 0x80000000u) + (uint32_t)k * 0x10000000u)) atomic_fetch_add(&g_fg_shown, 1); }   // (ids of their own: the display's timing report lists them too)
             fg_time(3, t2); uint64_t t3 = mono_ns();
             if (W.sc && fg_show(FG.img[j.in], VK_IMAGE_LAYOUT_GENERAL, j.in, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t, j.id)) atomic_fetch_add(&g_fg_shown, 1);
             fg_time(4, t3);
@@ -208,6 +215,14 @@ static int fork_fg_present(vtex *x, const int crop[4]) {
     int st = atomic_load(&FG.state);
     if (st == 0) { atomic_store(&FG.state, 1); pthread_t t; if (pthread_create(&t, NULL, fg_load, NULL)) atomic_store(&FG.state, -1); else pthread_detach(t); return 0; }
     if (st != 2) return 0;
+    g_fk_census_fg = fg_still_on();   // v50: the screen kind is needed
+    { int k = atomic_load(&dm_fork_screen), still = fg_still_on() && (k == 1 || k == 3);
+      if (still != dm_fork_fg_paused) { dm_fork_fg_paused = still; if (!still) g_fg_skip = 2;
+          static int lines; if (lines++ < 200) VLOG("[FORK] fg: %s (%s)", still ? "paused on a still screen" : "resumed", k == 1 ? "menu" : k == 3 ? "dialogue" : k == 2 ? "battle" : "field");
+          extern void dm_fork_rate_update(void) __attribute__((weak)); if (dm_fork_rate_update) dm_fork_rate_update(); }
+      if (still) {   // the worker's last frames out first (it presents under g_wmu, which this thread holds), then this frame as without frame generation
+          pthread_mutex_lock(&fg_mu); if (FJ.busy) { pthread_mutex_unlock(&g_wmu); while (FJ.busy) pthread_cond_wait(&fg_cv, &fg_mu); pthread_mutex_unlock(&fg_mu); pthread_mutex_lock(&g_wmu); } else pthread_mutex_unlock(&fg_mu);
+          atomic_fetch_add(&g_fg_shown, 1); return 0; } }
     static int worker; if (!worker) { pthread_t t; if (pthread_create(&t, NULL, fg_worker, NULL)) { atomic_store(&FG.state, -1); return 0; } pthread_detach(t); worker = 1; }
     // the worker done with the last frame (g_wmu let go meanwhile: it presents under it)
     uint64_t tw = mono_ns(); pthread_mutex_lock(&fg_mu);
@@ -245,6 +260,7 @@ static int fork_fg_present(vtex *x, const int crop[4]) {
         uint64_t r2 = g_refresh_ns, k = (1000000000ull / (uint64_t)fps + r2 / 2) / r2; half = (k ? k : 1) * r2 / (uint64_t)fork_fg_mult(); }   // (v46: interval / multiplier)
     pthread_mutex_lock(&fg_mu);
     FJ.n = ++FG.n; FJ.in = in; FJ.w = cw; FJ.h = ch; FJ.flip = atomic_load(&g_origin_ll); FJ.t = pt.desiredPresentTime; FJ.half = half; FJ.id = pt.presentID;
+    FJ.noshow = g_fg_skip > 0; if (g_fg_skip > 0) g_fg_skip--;   // v50
     FJ.has = 1; FJ.busy = 1; pthread_cond_signal(&fg_cv); pthread_mutex_unlock(&fg_mu);
     return 1;
 }

@@ -155,6 +155,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         if (gpuName == null || gpuName.isEmpty()) { gpuName = ""; try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(new File(GameSettings.dir(this), "gpu.txt")))) { String l = r.readLine(); if (l != null) gpuName = l.trim(); } catch (java.io.IOException e) { } }
         android.os.PowerManager pm = getSystemService(android.os.PowerManager.class); String heat = "";
         if (pm != null) { int s = pm.getCurrentThermalStatus(); heat = s >= android.os.PowerManager.THERMAL_STATUS_SEVERE ? " " + T.t(this, "hot") : s >= android.os.PowerManager.THERMAL_STATUS_MODERATE ? " " + T.t(this, "warm") : ""; }
+        { double w = ForkPower.watts(); if (w > 0) heat += String.format(java.util.Locale.ROOT, " · %.1f W", w); }   // FORK v50: the power draw (ForkPower)
         return String.format(java.util.Locale.ROOT, (fps.endsWith("·") ? "%s" : "%s fps ·") + " %.0f °C%s · %s · %s %.1f GB · %d%%", fps, temp, heat, gpuName.isEmpty() ? "GPU" : gpuName, T.t(this, "free"), mi.availMem / 1e9, level);
     }
     // Shaders the game saves while it runs (a mod's new effect, nvn_vk.c mtl_shader_seen): translated now in the background into the folder the engine watches

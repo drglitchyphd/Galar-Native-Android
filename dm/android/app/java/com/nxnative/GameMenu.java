@@ -319,6 +319,8 @@ public final class GameMenu {
         String fgv = GameSettings.get(a, "DM_FORK_FG");
         if (dll && fgv.equals("2x")) {   // the fork's frame generation's own settings
             slider(a, t(a, "Frame generation: flow scale"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
+            choice(a, "DM_FORK_FG_STILL", t(a, "Frame generation on still screens"), new String[][] { { "", t(a, "Keep"), t(a, "Keep: frame generation runs everywhere") },   // FORK v50 (fork_fg.h)
+                { "pause", t(a, "Pause"), t(a, "Pause: in menus and dialogue (nothing moves) it stops and the screen drops to 60 Hz: less battery and heat (from the next start)") } });
             choice(a, "DM_FORK_FG_PERF", t(a, "Frame generation: model"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
                 { "off", t(a, "Quality"), t(a, "Quality: the full model, heavier") } });
         }

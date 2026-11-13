@@ -266,6 +266,9 @@ static void *combo_hold_main(void *p) {
 }
 uint64_t dm_fork_fg_frames(void) __attribute__((weak));   // FORK: frames frame generation put on screen (gfx/nvn/fork_fg.h); -1 while it is off
 JNIEXPORT jlong JNICALL Java_com_nxnative_GameActivity_nativeFgFrames(JNIEnv *env, jclass c) { (void)env; (void)c; return dm_fork_fg_frames ? (jlong)dm_fork_fg_frames() : -1; }   // FORK
+// FORK v50: ForkPower.java: a line into the game's log; frame generation paused on a still screen
+JNIEXPORT void JNICALL Java_com_nxnative_ForkPower_nativeForkLog(JNIEnv *env, jclass c, jstring js) { (void)c; const char *s = (*env)->GetStringUTFChars(env, js, NULL); if (s) { fprintf(stderr, "%s\n", s); (*env)->ReleaseStringUTFChars(env, js, s); } }
+JNIEXPORT jint JNICALL Java_com_nxnative_ForkPower_nativeFgPaused(JNIEnv *env, jclass c) { (void)env; (void)c; extern volatile int dm_fork_fg_paused __attribute__((weak)); return &dm_fork_fg_paused && dm_fork_fg_paused ? 1 : 0; }
 JNIEXPORT jlong JNICALL Java_com_nxnative_GameActivity_nativeFrames(JNIEnv *env, jclass c) { (void)env; (void)c; return dm_nvn_frame_count ? (jlong)dm_nvn_frame_count() : -1; }   // the performance overlay's fps
 static void *minus_hold_main(void *p) {
     int seq = (int)(intptr_t)p; usleep(3000000);
@@ -399,7 +402,8 @@ static void window_rate(ANativeWindow *w) {
     { extern volatile int dm_framegen_mode; int fg = dm_framegen_mode; const char *f = getenv("DM_FRAMEGEN");
       if (fg < 0) fg = f && (!strcmp(f, "on") || !strcmp(f, "1") || !strcmp(f, "debug") || !strcmp(f, "lsfg"));
       if (fg) rate = 120.0f; }
-    { const char *ff = getenv("DM_FORK_FG"); if (ff && (!strcmp(ff, "2x") || !strcmp(ff, "3x"))) rate = 120.0f; }   // FORK: the fork's frame generation too (2x: 60, 3x: 90 on screen; the screen at 120 has slots for both)   // (not the doubled rate itself: at 60 Hz every picture must make its own refresh with no slack, and a tenth of them missed it; at 120 each has a timed slot)
+    { const char *ff = getenv("DM_FORK_FG"); if (ff && (!strcmp(ff, "2x") || !strcmp(ff, "3x"))) rate = 120.0f;
+      extern volatile int dm_fork_fg_paused __attribute__((weak)); if (rate == 120.0f && &dm_fork_fg_paused && dm_fork_fg_paused) rate = 60.0f; }   // FORK v50: 60 Hz while frame generation is paused on a still screen   // FORK: the fork's frame generation too (2x: 60, 3x: 90 on screen; the screen at 120 has slots for both)   // (not the doubled rate itself: at 60 Hz every picture must make its own refresh with no slack, and a tenth of them missed it; at 120 each has a timed slot)
     // libnativewindow: setFrameRateWithChangeStrategy (Android 12+, ALWAYS: the display switches modes even when the switch is not seamless, so a 144 Hz screen goes
     // to 120 for 30 / 60 fps), else setFrameRate (Android 11); looked up, so a system without them only skips this
     typedef int32_t (*set_rate_fn)(ANativeWindow *, float, int8_t); typedef int32_t (*set_rate2_fn)(ANativeWindow *, float, int8_t, int8_t);
@@ -408,6 +412,7 @@ static void window_rate(ANativeWindow *w) {
     int r = r2 ? r2(w, rate, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE, 1 /* ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS */) : r1 ? r1(w, rate, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) : -1;
     fprintf(stderr, "boot: window frame rate %.0f fps (fixed source)%s\n", rate, r ? " refused by the system" : "");
 }
+void dm_fork_rate_update(void) { window_rate(atomic_load(&g_window)); }   // FORK v50: fork_fg.h, when frame generation pauses / resumes on a still screen
 // RomFS mods: every <mods>/<mod>/romfs folder (and <mods>/romfs) as a RomFS overlay root (hle_fs.c rom_overlay_path: the first root that has a file wins), in the load
 // order of <mods>/order.txt (the in-game menu's: one name a line, first wins), then by name; a mod's exefs/*.pchtxt code patches are found by the loader (loader.c
 // pchtxt_dir). A mod folder named with a leading "-" or "." is switched off
