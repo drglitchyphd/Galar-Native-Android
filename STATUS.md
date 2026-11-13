@@ -22,6 +22,9 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 ## Steven's v47 notes (fixes in the tree, not built)
 - Battle → Bag: the menu layout came ~3 s late (the battle-exit hold applied to menus too). Fixed in fork_ui.h: 10 frames to a menu, 90 only to world / dialogue.
 
+- Trainer spotted (v47): the bottom-right fade is right now; the top-left one (the 2nd af0ef3ac shading draw) sat far down: now anchored to the TOP edge (fork_ui.h).
+- Encounter probe works (v47 log): trainer "Eris" TID 61230 / SID 50863, party slot 1 species 816 (Sobble), checksum ok. Heap offsets hold on this host: the overlay can be built.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).

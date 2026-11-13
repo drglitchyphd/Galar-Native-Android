@@ -49,7 +49,9 @@ static void fork_ui_fill(VkCommandBuffer cb) {
     after_shade = shade;
     if (((g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) || shade || shade2) && g_fk_th > 0) {
         VkViewport v = g_fk_v0; VkRect2D sc = g_fk_sc0; float k = g_fk_ky, H = (float)g_fk_th; int ll = atomic_load(&g_origin_ll);
-        float a = ll ? 0.0f : H;   // the screen's bottom edge, in the image
+        // the screen's bottom edge, in the image; v48: the second shading draw is the TOP-LEFT fade (Steven Nov 13: anchored to the bottom it sat far down the
+        //   screen; the first is the bottom-right one): its anchor is the top edge
+        int top = shade2; float a = (ll != 0) != (top != 0) ? 0.0f : H;
         v.y = a + (v.y - a) * k; v.height *= k;
         { float cx = g_fk_tw * 0.5f, kx = g_fk_kx; v.x = cx + (v.x - cx) * kx; v.width *= kx;   // (x as every UI draw: around the centre)
           float x0 = cx + ((float)sc.offset.x - cx) * kx, x1 = cx + ((float)sc.offset.x + (float)sc.extent.width - cx) * kx; if (x0 < 0) x0 = 0; if (x1 > g_fk_tw) x1 = (float)g_fk_tw;
@@ -57,7 +59,7 @@ static void fork_ui_fill(VkCommandBuffer cb) {
         float y0 = a + ((float)sc.offset.y - a) * k, y1 = a + ((float)sc.offset.y + (float)sc.extent.height - a) * k; if (y0 < 0) y0 = 0; if (y1 > H) y1 = H;
         sc.offset.y = (int32_t)floorf(y0); sc.extent.height = (uint32_t)(ceilf(y1) > floorf(y0) ? ceilf(y1) - floorf(y0) : 0);
         vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
-        static int said[3]; int wh = shade ? 1 : shade2 ? 2 : 0; if (!said[wh]++) VLOG("[FORK] spotted %s: kept on the screen's bottom edge (scale %.3f, origin %s)", wh == 1 ? "shading" : wh == 2 ? "shading (2nd draw)" : "banner", k, ll ? "lower left" : "upper left");
+        static int said[3]; int wh = shade ? 1 : shade2 ? 2 : 0; if (!said[wh]++) VLOG("[FORK] spotted %s: kept on the screen's %s edge (scale %.3f, origin %s)", wh == 1 ? "shading" : wh == 2 ? "shading (2nd draw, top left)" : "banner", top ? "top" : "bottom", k, ll ? "lower left" : "upper left");
         return; }
     int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8);
     if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
