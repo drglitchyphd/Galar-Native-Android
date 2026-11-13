@@ -19,6 +19,9 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 - Trainer shading fix; dialogue detection accuracy; the `[FORK] enc` lines (trainer name must match the save, checksum ok).
 - Opponent trainer parties: no known offset (research doc).
 
+## Steven's v47 notes (fixes in the tree, not built)
+- Battle → Bag: the menu layout came ~3 s late (the battle-exit hold applied to menus too). Fixed in fork_ui.h: 10 frames to a menu, 90 only to world / dialogue.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).

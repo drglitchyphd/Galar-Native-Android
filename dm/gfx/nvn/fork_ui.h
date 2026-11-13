@@ -80,7 +80,9 @@ static void fk_screen_frame(int comp) {
     int dlg = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) dlg = 1;
     int k = !comp && g_fk_cn ? 1 : comp && bat ? 2 : comp && dlg ? 3 : 0; static int cand = -1, held;
     if (k != cand) { cand = k; held = 0; return; }
-    int need = atomic_load(&dm_fork_screen) == 2 && k != 2 ? 90 : 10;   // (out of a battle only after 3 s without its HUD: its text phases hide the HUD for a moment)
+    // (out of a battle only after 3 s without its HUD, to the world or dialogue: its text phases hide the HUD for a moment. To a full-screen menu (the Bag in a
+    //   battle) at the usual 10 frames: v47 waited 3 s there too, and the menu's layout came late, Steven Nov 13)
+    int need = atomic_load(&dm_fork_screen) == 2 && (k == 0 || k == 3) ? 90 : 10;
     if (++held == need && k != atomic_load(&dm_fork_screen)) { atomic_store(&dm_fork_screen, k); static int lines; if (lines++ < 400) VLOG("[FORK] screen: %s", k == 3 ? "dialogue" : k == 2 ? "battle" : k == 1 ? "menu" : "world"); }
 }
 static void fk_census_frame(int comp) {
