@@ -3704,7 +3704,23 @@ static void cap_draw_values(void) {
 static int ds_src_ok(int f) { return f == 1 || f == 2 || (f >= 3 && f <= 6) || (f >= 0x61 && f <= 0x64); }   // ZERO, ONE, SRC_*, CONSTANT_*: not the target, not output 1
 static int ds_dst_map(int f) { return f == 1 ? 1 : f == 2 ? 2 : f == 0x10 ? 3 : f == 0x11 ? 4 : f == 0x12 ? 5 : f == 0x13 ? 6 : -1; }   // SRC1_x as SRC_x; ZERO / ONE kept
 static void draw_one(const p_draw *dw, const p_draw_idx *di);
+// DM_SHADOWS=off (Scarlet / Violet 4.0.0 only, loader.c dm_shadow_off): the sun's shadow map is the one square DEPTH32F target drawn with no colour attachment
+//   (about 19 passes and 160 draws a frame docked, a quarter of the frame's draws). Its draws are dropped, so the map keeps the far depth it is cleared to and
+//   nothing comes out shadowed: the whole pass is replay and GPU work that never happens. Clears still run. The first target taken for it is logged with its size
+__attribute__((weak)) int dm_shadow_off;
+static int shadow_target(const p_set_rt *rt) {
+    static const tex_t *last; static int last_is, logged;
+    const tex_t *t = rt->depth;
+    if (!t) return 0;
+    for (int i = 0; i < rt->n && i < 8; i++) if (rt->color[i]) return 0;
+    if (t == last) return last_is;
+    last = t;
+    last_is = t->d.format == NVN_FORMAT_DEPTH32F && t->d.width == t->d.height && t->d.width >= 512;
+    if (last_is && !logged) { logged = 1; LOG("[nvn] shadows off: draws to the %ux%u depth-only target (target %d, %u layers) are dropped (DM_SHADOWS=off)", t->d.width, t->d.height, t->d.target, t->d.depth); }
+    return last_is;
+}
 static void draw(const p_draw *dw, const p_draw_idx *di) {
+    if (&dm_shadow_off && dm_shadow_off && R.has_rt && shadow_target(&R.rt)) return;
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_DUALSRC"); on = !(e && (!strcmp(e, "off") || !strcmp(e, "keep"))); }
     const blend_st b = S.blend[0];
     int ds = on && !S.rast_discard && (S.color.blend_en & 1) && (b.dst_rgb >= 0x10 && b.dst_rgb <= 0x13 || b.dst_a >= 0x10 && b.dst_a <= 0x13);

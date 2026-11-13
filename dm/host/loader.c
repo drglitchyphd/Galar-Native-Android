@@ -499,8 +499,12 @@ static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1);
 static int bmod_wanted(const char *name) {
     if (!strcmp(name, "dynamic_fps")) { const char *e = getenv("DM_FPS_TARGET"); return e && atoi(e) >= 60; }
     if (!strcmp(name, "shadows_2k")) { const char *e = getenv("DM_SHADOWS"); return e && !strcasecmp(e, "2k"); }   // (test only: not offered in the menu)
+    // DM_SHADOWS=low: the same site as 2K, 512×512 instead of the game's 1024 (a quarter of the shadow map's pixels; a smaller map also leaves the game's GPU
+    //   pool more room, where a bigger one takes it from streaming). Not offered in the menu until seen on a phone
+    if (!strcmp(name, "shadows_low")) { const char *e = getenv("DM_SHADOWS"); return e && !strcasecmp(e, "low"); }
     return 0;
 }
+int dm_shadow_off;   // nvn_vk.c draw: DM_SHADOWS=off on Scarlet / Violet 4.0.0's main, the sun shadow pass's draws dropped
 static int g_bmod_fps;   // the frame rate came from a built-in mod: the Sword / Shield patch below is not this game's
 int dm_dynfps;   // hle_nvn.c dyn_tick: Scarlet / Violet's Dynamic FPS is in, presentation is paced in steps of 30 / 60
 static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
@@ -508,6 +512,8 @@ static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     for (unsigned i = 0; i < sizeof BUILTIN_MODS / sizeof *BUILTIN_MODS; i++) {
         const bmod *b = &BUILTIN_MODS[i]; int hit = 0;
         for (int k = 0; b->builds[k]; k++) if (!strncasecmp(m->build_id, b->builds[k], 32)) hit = 1;
+        if (hit && !strcmp(b->name, "shadows_2k") && !dm_shadow_off) { const char *e = getenv("DM_SHADOWS");   // (the 2K mod's builds are Scarlet / Violet 4.0.0)
+            if (e && !strcasecmp(e, "off")) { dm_shadow_off = 1; LOG("%s: shadows off (DM_SHADOWS=off): the sun shadow pass's draws are dropped", m->name); } }
         if (!hit || !bmod_wanted(b->name)) continue;
         int bad = -1;
         for (int s = 0; s < b->n && bad < 0; s++) { const bmod_site *t = &b->sites[s];
