@@ -18,6 +18,7 @@ static uint64_t g_fk_ui;   // UI draws shrunk (logged now and then)
 // flashing bars). So a shrunk draw whose textures are all 4x4 or smaller gets its full viewport and scissor back once its textures are known (fork_ui_fill, after
 // nvn_vk.c's push_stage; fork_ui_tex notes their sizes from tex_view_for)
 static int g_fk_sq, g_fk_texmax, g_fk_ntex, g_fk_screenish; static VkViewport g_fk_v0; static VkRect2D g_fk_sc0; static uint64_t g_fk_fills;   // FORK v38: g_fk_screenish (it samples a picture-sized image: a full-screen effect)
+static int g_fk_shade_n, g_fk_spot;   // FORK v49: shading draws this frame; the spotted banner was drawn this frame
 static int g_fk_banner, g_fk_tw, g_fk_th; static float g_fk_ky, g_fk_kx;   // FORK v44: this draw samples the 1200x180 "spotted" banner; the image's size; the y scale
 static _Atomic int g_origin_ll;   // (nvn_vk.c, below: the game draws with a lower-left origin, so the screen's bottom is the image's row 0)
 static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++; if (w == 1200 && h == 180) g_fk_banner = 1; if (w == 128 && h == 4) g_fk_banner = 2;
@@ -44,9 +45,11 @@ static void fork_ui_fill(VkCommandBuffer cb) {
     //   centre it floated above the bottom with nothing under it; it keeps its shape (the y scale) but sits on the screen's real bottom edge
     // v47: the visible part is the shading before the banner (capture Nov 13): af0ef3ac stretching a 128x4 gradient over the bottom-right, then af0ef3ac again with
     //   no new texture (the same one still bound); shrunk, it stopped in a hard line at the band's lower edge. Both anchored like the banner
-    static int after_shade;   // the last draw was that shading: an af0ef3ac draw with no texture of its own right after it belongs to it
-    int shade = g_fk_banner == 2 && !strncmp(g_fk_sqkey, "af0ef3ac", 8), shade2 = after_shade && !g_fk_ntex && !strncmp(g_fk_sqkey, "af0ef3ac", 8);
-    after_shade = shade;
+    // v49: both shading draws sample the 128x4 gradient (v48 expected the second without a texture of its own, so it took the first's bottom anchor and sat 38 % down,
+    //   Steven Nov 13): the first in a frame is the bottom-right fade, the next the top-left one
+    int shading = g_fk_banner == 2 && !strncmp(g_fk_sqkey, "af0ef3ac", 8), shade = shading && g_fk_shade_n == 0, shade2 = shading && g_fk_shade_n > 0;
+    if (shading) g_fk_shade_n++;
+    if (g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) g_fk_spot = 1;   // v49: the banner's frame is not a battle (fk_screen_frame)
     if (((g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) || shade || shade2) && g_fk_th > 0) {
         VkViewport v = g_fk_v0; VkRect2D sc = g_fk_sc0; float k = g_fk_ky, H = (float)g_fk_th; int ll = atomic_load(&g_origin_ll);
         // the screen's bottom edge, in the image; v48: the second shading draw is the TOP-LEFT fade (Steven Nov 13: anchored to the bottom it sat far down the
@@ -76,7 +79,9 @@ static void fk_census_note(const char *k) { for (int i = 0; i < g_fk_cn; i++) if
 _Atomic int dm_fork_screen;
 volatile int dm_fork_census_want;   // touch_ui.c: the battle controls need the screen kind (else only Fill, corrected runs the census)
 static void fk_screen_frame(int comp) {
-    int bat = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "b6ff050a", 8) || !strncmp(g_fk_ck[i], "ecacdb40", 8)) bat = 1;
+    // (FORK v49: b6ff050a also draws the trainer "spotted" banner: a frame where that was its draw is not a battle, unless ecacdb40 is there too; Steven Nov 13:
+    //   the battle buttons came up as soon as a trainer saw him)
+    int bat = 0; for (int i = 0; i < g_fk_cn; i++) if ((!strncmp(g_fk_ck[i], "b6ff050a", 8) && !g_fk_spot) || !strncmp(g_fk_ck[i], "ecacdb40", 8)) bat = 1;
     // FORK v47: 3 = dialogue: 3D with the text-box shader 56af7f00 and no battle HUD (an NPC talking in the field). A guess: logged, and touch_ui.c has an
     //   "all buttons" override for when it is wrong
     int dlg = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) dlg = 1;
@@ -114,6 +119,7 @@ static void fork_ui_frame(void) {
         g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after %s", sw ? "a switch from 3D to UI only" : "an unknown shader drawn full size"); }
     if (dm_aspect() == DM_ASPECT_FIX || dm_fork_census_want) fk_census_frame(g_fk_comp);
     g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0; g_fk_odd = 0;
+    g_fk_shade_n = 0; g_fk_spot = 0;   // FORK v49 (after the census used them)
 }
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {
     if (!vkey || !img) return;
