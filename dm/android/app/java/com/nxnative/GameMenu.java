@@ -309,6 +309,9 @@ public final class GameMenu {
         if (dll) sm.add(new String[] { t(a, "60 on screen (Lossless 2x)"), t(a, "The game at 30, a generated frame between every two: 60 on screen. Animations keep their speed. From the next start"), "30", "2x", "" });
         combo(a, t(a, "Smoothness"), new String[] { "DM_FPS_TARGET", "DM_FORK_FG", "DM_FRAMEGEN" }, sm.toArray(new String[0][]));
         if (!dll) note(a, t(a, "Lossless frame generation: choose your Lossless.dll on the setup screen (System, Setup screen, Frame generation)."));
+        // FORK v49: how far the heat / frame-rate guard may lower the 3D resolution (hle_resscale.c scale_floor)
+        choice(a, "DM_FORK_SCALE_FLOOR", t(a, "Lowest resolution when hot"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the picture may get much softer when the phone is hot or slow (down to about half)") },
+            { "85", "85 %", t(a, "85 %: stays sharp; a hot phone shows fewer frames instead (from the next start)") }, { "70", "70 %", t(a, "70 %: a middle way (from the next start)") } });
         // FORK: frame pacing slack (nvn_vk.c pace_time, DM_FORK_PACE_MARGIN); the pacer counts in the screen's own top rate (v46: automatic, nvn_vk.c fork_refresh)
         choice(a, "DM_FORK_PACE_MARGIN", t(a, "Frame pacing"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: each frame aimed one refresh ahead (least delay)") },
             { "2", t(a, "Smooth"), t(a, "Smooth: two refreshes ahead, frames a little late still show on time (about 4 ms more delay)") },

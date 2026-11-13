@@ -72,7 +72,10 @@ void dm_res_factor_set(float f) {
     uint32_t b; memcpy(&b, &f, sizeof b); uint32_t old = atomic_exchange(&g_factor_bits, b); float o; memcpy(&o, &old, sizeof o);
     if (o != f) LOG("render scale factor %.2f → %.2f", o, f);
 }
-static float factor_now(void) { uint32_t b = g_factor_bits; float f; memcpy(&f, &b, sizeof f); return f; }
+// FORK v49: DM_FORK_SCALE_FLOOR (50-100 %, default: none = stock): the guard's factor never goes below this (Steven, Nov 13: a hot phone drew at 0.56 and looked blurry;
+//   the cost: fewer frames when hot instead of a softer picture). The game's own request and the cap are untouched
+static float scale_floor(void) { static float v = -1; if (v < 0) { const char *e = getenv("DM_FORK_SCALE_FLOOR"); int p = e ? atoi(e) : 0; v = p >= 50 && p <= 100 ? p / 100.0f : 0; if (v > 0) LOG("[FORK] render scale: the heat / frame-rate guard stops at %.0f %%", v * 100); } return v; }
+static float factor_now(void) { uint32_t b = g_factor_bits; float f; memcpy(&f, &b, sizeof f); float fl = scale_floor(); return fl > 0 && f < fl ? fl : f; }   // FORK v49: the floor
 
 // The game's dynamic-resolution mode, by the controller's own rule (Shield main+0xf6acb0): the override while it is 3 or less, else the scene's mode; -1 while the
 // controller cannot be read (not created yet)
