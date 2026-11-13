@@ -28,6 +28,8 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 - The faded Poké Ball in the layout editor was upstream's Legends: Arceus throw button (off in Sword): left out of the editor now (touch_ui.c ctl_off).
 - Encounter overlay design (Steven): a floating panel he can drag anywhere; a tap collapses it to a Poké Ball icon (tap again to open).
 
+- Area view (Steven): out of battle the panel shows the area's spawns (rates) with party-style icons: black silhouette = not seen, faded = seen, full colour = caught. Needs: encounter tables (PKHeX data, GPL), current area + weather in memory (research), Pokédex block in RAM (research), icons copied from the player's own romfs at setup (never in the APK / repo), image drawing in the overlay. Order: battle panel first, research meanwhile.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).
