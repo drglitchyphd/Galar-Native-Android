@@ -188,11 +188,19 @@ static uint64_t key_bit(int32_t kc) {
     static int init; if (!init || atomic_exchange(&g_padset_dirty, 0)) { init = 1; pad_map_init(); }   // (the input thread only)
     return kc > 0 && kc < KC_MAX ? g_kc_map[kc] : 0;
 }
-static int32_t axis(float v) { if (fabsf(v) < 0.12f) return 0; float s = (fabsf(v) - 0.12f) / 0.88f; if (s > 1) s = 1; return (int32_t)(copysignf(s, v) * DM_STICK_MAX); }
+// A controller stick: the dead zone on its tilt, not on each axis. Each axis on its own (as before) shortened every diagonal: a full push at 45 degrees came out at
+//   0.94 of full on a perfect stick and about 0.85 on a round-gate one, whose axes stop near 0.65 there (Arceus-Native-Android#16: no running on diagonals with a
+//   GameSir X5 Lite). Under 12 % of the tilt nothing; from 92 % full (few sticks reach their rim at every angle); the direction kept
+static void stick(float x, float y, int32_t *ox, int32_t *oy) {
+    float m = sqrtf(x * x + y * y); if (!(m >= 0.12f)) { *ox = *oy = 0; return; }
+    float s = (m - 0.12f) / (0.92f - 0.12f); if (s > 1) s = 1;
+    *ox = (int32_t)(x / m * s * DM_STICK_MAX); *oy = (int32_t)(y / m * s * DM_STICK_MAX);
+}
 // Touch: the on-screen controls (touch_ui.c)
 void touch_ui_init(ANativeActivity *a);
 void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32_t s[4]);
 void touch_ui_hide(void);
+void touch_ui_release(void);   // every finger let go (focus lost: a lift Android may never send)
 void touch_ui_pad(int connected);
 #include <jni.h>
 JNIEXPORT void JNICALL Java_com_nxnative_GameActivity_nativePadConnected(JNIEnv *env, jclass c, jboolean on) { (void)env; (void)c; touch_ui_pad(on); }   // GameActivity.java
@@ -215,9 +223,13 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
         } else now = 0;
     }
     else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3")) touch_ui_setting(k, v);
-    else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
+    else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }
+    else if (!strcmp(k, "DM_RSTICK_SENS")) { extern _Atomic int dm_rstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 25 || p > 400) p = 100; if (&dm_rstick_pct) atomic_store(&dm_rstick_pct, p); else now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
     else if (!strcmp(k, "DM_ASPECT")) __atomic_store_n(&dm_aspect_mode, !v ? DM_ASPECT_FIT : !strcmp(v, "20:9") ? DM_ASPECT_20_9 : !strcmp(v, "fill") ? DM_ASPECT_FILL : DM_ASPECT_FIT, __ATOMIC_RELAXED);
     else if (!strcmp(k, "DM_SCALER")) { extern volatile int dm_scaler_mode; if (!v || !*v) v = getenv("DM_AUTO_SCALER"); dm_scaler_mode = v && !strcmp(v, "sgsr") ? 1 : v && !strcmp(v, "smooth") ? 2 : 0; }   // (Auto: the app's pick)
+    else if (!strcmp(k, "DM_FRAMEGEN")) { extern volatile int dm_framegen_mode; dm_framegen_mode = v && (!strcmp(v, "on") || !strcmp(v, "1")) ? 1 : v && !strcmp(v, "debug") ? 2 : v && !strcmp(v, "lsfg") ? 3 : 0; window_rate(atomic_load(&g_window));   // nvn_vk.c present_window_locked
+        window_rate(atomic_load(&g_window)); }   // (Android is told the doubled rate, or the game's own again)
+    else if (!strcmp(k, "DM_LSFG_MULT")) { extern volatile int dm_lsfg_mult; int m = v ? atoi(v) : 0; dm_lsfg_mult = m >= 2 && m <= 4 ? m : 0; }   // nvn_vk.c lsfg_mult: 0 auto
     else if (!strcmp(k, "DM_SCALER_SHARPNESS")) { extern volatile float dm_scaler_sharpness; dm_scaler_sharpness = !v || !strcmp(v, "sharp") ? 0.7f : !strcmp(v, "smooth") ? -1.0f : (float)atof(v); }   // nvn_vk.c scale_draw
     else if (!strcmp(k, "DM_PAD_LAYOUT") || !strcmp(k, "DM_PAD_MAPPING")) {
         pthread_mutex_lock(&g_padset_mu);
@@ -277,8 +289,8 @@ static int32_t on_input(struct android_app *app, AInputEvent *e) {
         int k = pad_slot(AInputEvent_getDeviceId(e));
         float rx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_Z, 0), ry = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RZ, 0);
         if (rx == 0 && ry == 0) { rx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RX, 0); ry = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RY, 0); }   // right stick as RX / RY on some drivers
-        g_pads[k].lx = axis(AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0)); g_pads[k].ly = axis(-AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_Y, 0));
-        g_pads[k].rx = axis(rx); g_pads[k].ry = axis(-ry);
+        stick(AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0), -AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_Y, 0), &g_pads[k].lx, &g_pads[k].ly);
+        stick(rx, -ry, &g_pads[k].rx, &g_pads[k].ry);
         float hx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0), hy = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_Y, 0);
         float lt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_LTRIGGER, 0), rt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RTRIGGER, 0);
         if (lt == 0) lt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_BRAKE, 0); if (rt == 0) rt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_GAS, 0);
@@ -368,6 +380,11 @@ static void window_rate(ANativeWindow *w) {
     if (!w) return;
     const char *e = getenv("DM_FPS_TARGET"); int fps = e ? atoi(e) : 0; float rate = fps >= 60 && fps <= 120 ? (float)fps : 30.0f;
     { int lf = &dm_fps_live ? __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED) : 0; if (lf) rate = (float)lf; }   // (the live target, once the game is loaded)
+    // frame generation (DM_FRAMEGEN, nvn_vk.c) shows two pictures a game frame: told as 30, Android showed this app only every other one (measured on a Galaxy S25+:
+    //   300 of 600 pictures in 10 s, 33.4 ms apart)
+    { extern volatile int dm_framegen_mode; int fg = dm_framegen_mode; const char *f = getenv("DM_FRAMEGEN");
+      if (fg < 0) fg = f && (!strcmp(f, "on") || !strcmp(f, "1") || !strcmp(f, "debug") || !strcmp(f, "lsfg"));
+      if (fg) rate = 120.0f; }   // (not the doubled rate itself: at 60 Hz every picture must make its own refresh with no slack, and a tenth of them missed it; at 120 each has a timed slot)
     // libnativewindow: setFrameRateWithChangeStrategy (Android 12+, ALWAYS: the display switches modes even when the switch is not seamless, so a 144 Hz screen goes
     // to 120 for 30 / 60 fps), else setFrameRate (Android 11); looked up, so a system without them only skips this
     typedef int32_t (*set_rate_fn)(ANativeWindow *, float, int8_t); typedef int32_t (*set_rate2_fn)(ANativeWindow *, float, int8_t, int8_t);
@@ -520,10 +537,86 @@ static void *host_thread(void *a) {
 // run's log (the one that ended in a crash, if one did) goes to Download/<game>-log-previous.txt (PokemonShield-…); while playing, Download/<game>-log.txt is refreshed every
 // 5 seconds, with a memory line (a run the system ends for memory leaves no crash report, only memory that kept rising)
 #define DL "/storage/emulated/0/Download"
+// A name in Download this install may write. Android lets an app overwrite only files it created itself: after the game was uninstalled and installed again (or a file
+//   came from another app), opening the old <game>-log.txt for writing fails, and the logs players attach stayed days old (#155). The first of <game>-<what>.txt,
+//   <game>-<what>-2.txt … -9.txt that opens for writing: this install's own file, or a new one
+static char g_dl_note[160];
+static void dl_name(char *out, size_t n, const char *what) {
+    for (int k = 1; k <= 9; k++) {
+        if (k == 1) snprintf(out, n, DL "/%s-%s.txt", g_stem, what); else snprintf(out, n, DL "/%s-%s-%d.txt", g_stem, what, k);
+        int f = open(out, O_WRONLY | O_CREAT, 0644);
+        if (f >= 0) { close(f); if (k > 1) snprintf(g_dl_note, sizeof g_dl_note, "log: Download's %s-%s.txt belongs to an earlier install: written as %s", g_stem, what, out); return; }
+    }
+    snprintf(out, n, DL "/%s-%s.txt", g_stem, what);
+}
 static void copy_file(const char *a, const char *b) {
     int i = open(a, O_RDONLY), o = i < 0 ? -1 : open(b, O_WRONLY | O_CREAT | O_TRUNC, 0644); char buf[65536]; ssize_t n;
     if (o >= 0) while ((n = read(i, buf, sizeof buf)) > 0) if (write(o, buf, (size_t)n) != n) break;
     if (i >= 0) close(i); if (o >= 0) close(o);
+}
+// ---------- Save folder (the menu's Saves -> Save folder, DM_SAVE_SHARED=1; Arceus-Native-Android#8) ----------
+// The save can live in Documents/Galar Native/<title id>/save instead of the app's own folder, where a sync tool (Syncthing) or a file manager can reach it while the game is
+// closed. Which of the two holds the save now is written in <files>/save_place.txt ("app" / "shared"). A switch takes effect at the next start, before the game mounts
+// its save (a game running writes it at any moment): the save is copied to the other place, and whatever was there first is renamed to save.backup-<date>, never
+// deleted; the old place keeps its copy as it was. Shared needs "All files access" (the menu asks for it): when the folder cannot be written, the save stays in the
+// app's folder and the log says why. Only plain files and folders are copied
+static int cp_file(const char *a, const char *b) {
+    int i = open(a, O_RDONLY); if (i < 0) return 0;
+    int o = open(b, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (o < 0) { close(i); return 0; }
+    char buf[65536]; ssize_t n; int ok = 1;
+    while ((n = read(i, buf, sizeof buf)) > 0) if (write(o, buf, (size_t)n) != n) { ok = 0; break; }
+    if (n < 0) ok = 0;
+    close(i); if (close(o)) ok = 0; return ok;
+}
+static int cp_tree(const char *a, const char *b, int *files) {
+    if (mkdir(b, 0770) && errno != EEXIST) return 0;
+    DIR *d = opendir(a); if (!d) return 0; struct dirent *e; int ok = 1;
+    while (ok && (e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char pa[1400], pb[1400]; struct stat st; snprintf(pa, sizeof pa, "%s/%s", a, e->d_name); snprintf(pb, sizeof pb, "%s/%s", b, e->d_name);
+        if (stat(pa, &st)) { ok = 0; break; }
+        if (S_ISDIR(st.st_mode)) ok = cp_tree(pa, pb, files); else if (S_ISREG(st.st_mode)) { ok = cp_file(pa, pb); if (ok) (*files)++; } }
+    closedir(d); return ok;
+}
+static int dir_has_files(const char *p) { DIR *d = opendir(p); if (!d) return 0; struct dirent *e; int n = 0; while ((e = readdir(d))) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) { n = 1; break; } closedir(d); return n; }
+static void move_aside(const char *p) {   // an existing save folder becomes save.backup-<date> next to it
+    if (!dir_has_files(p)) { rmdir(p); return; }
+    char b[1400]; time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm);
+    snprintf(b, sizeof b, "%s.backup-%04d%02d%02d-%02d%02d%02d", p, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    if (rename(p, b)) fprintf(stderr, "boot: [RED] save folder: could not keep %s as a backup (errno %d)\n", p, errno); else fprintf(stderr, "boot: save folder: the earlier save there kept as %s\n", b);
+}
+static int g_save_imported;   // a save archive was installed into the app's folder at this start: with the save in Documents, it is copied there
+static void save_place(void) {
+    char app[1100], shared[1100], par[1100], st[1200], cur[16] = "app"; const char *e = getenv("DM_SAVE_SHARED"); int want = e && atoi(e) == 1;
+    snprintf(app, sizeof app, "%s/save", g_files); snprintf(st, sizeof st, "%s/save_place.txt", g_files);
+    { const char *pid = getenv("DM_PROGRAM_ID"); char up[20] = ""; if (pid) for (int k = 0; pid[k] && k < 16; k++) up[k] = (char)toupper((unsigned char)pid[k]);   // (Galar: the running game, Sword or Shield)
+      if (up[0]) snprintf(par, sizeof par, "/storage/emulated/0/Documents/Galar Native/%s", up); else snprintf(par, sizeof par, "/storage/emulated/0/Documents/Galar Native/%016llX", (unsigned long long)DM_GAME_PROGRAM_ID); } snprintf(shared, sizeof shared, "%s/save", par);
+    { FILE *f = fopen(st, "r"); if (f) { if (fscanf(f, "%15s", cur) != 1) strcpy(cur, "app"); fclose(f); } }
+    int in_shared = !strcmp(cur, "shared");
+    if (want && !in_shared) {   // to Documents
+        mkdir("/storage/emulated/0/Documents", 0770); mkdir("/storage/emulated/0/Documents/Galar Native", 0770); mkdir(par, 0770);
+        char probe[1200]; snprintf(probe, sizeof probe, "%s/.write-test", par); int fd = open(probe, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) { fprintf(stderr, "boot: [RED] save folder: %s cannot be written (errno %d: All files access not given?): the save stays in the app's folder\n", par, errno); return; }
+        close(fd); unlink(probe);
+        move_aside(shared); int n = 0;
+        if (dir_has_files(app) && !cp_tree(app, shared, &n)) { fprintf(stderr, "boot: [RED] save folder: copying the save to %s failed (errno %d): it stays in the app's folder\n", shared, errno); return; }
+        if (!dir_has_files(app)) mkdir(shared, 0770);
+        FILE *f = fopen(st, "w"); if (f) { fputs("shared\n", f); fclose(f); } in_shared = 1;
+        fprintf(stderr, "boot: save folder: the save copied to %s (%d files); the app's folder keeps its copy as it was\n", shared, n);
+    } else if (!want && in_shared) {   // back to the app's folder
+        int n = 0;
+        if (dir_has_files(shared)) { move_aside(app); if (!cp_tree(shared, app, &n)) { fprintf(stderr, "boot: [RED] save folder: copying the save back from %s failed (errno %d): it stays there\n", shared, errno); setenv("DM_SAVE", shared, 1); return; } }
+        FILE *f = fopen(st, "w"); if (f) { fputs("app\n", f); fclose(f); } in_shared = 0;
+        fprintf(stderr, "boot: save folder: the save copied back to the app's folder (%d files); %s keeps its copy\n", n, shared);
+    }
+    if (in_shared && g_save_imported && dir_has_files(app)) {   // an import landed in the app's folder: it becomes the save in Documents too
+        int n = 0; move_aside(shared);
+        if (cp_tree(app, shared, &n)) fprintf(stderr, "boot: save folder: the imported save copied to %s (%d files)\n", shared, n);
+        else fprintf(stderr, "boot: [RED] save folder: copying the imported save to %s failed (errno %d)\n", shared, errno);
+    }
+    if (in_shared) {
+        if (!dir_has_files(shared) && dir_has_files(app)) fprintf(stderr, "boot: [RED] save folder: %s is empty or gone: the app's folder is used\n", shared);
+        else { setenv("DM_SAVE", shared, 1); fprintf(stderr, "boot: save folder %s\n", shared); }
+    }
 }
 static long kb_of(const char *path, const char *key) {
     FILE *f = fopen(path, "r"); char ln[256]; long v = -1; size_t kl = strlen(key);
@@ -556,9 +649,12 @@ void dm_set_opmode(int m);   // host/hle_oe.c: tells the game the console mode c
 //   checked 10 s later, as a lower scale does not always help: on a strong GPU its governor lowers the clock with the load and frames can get longer (Galaxy S25+: 43
 //   against 36 ms walking at 60 %, hle_resscale.c). A step for a short frame rate that gained under 1 fps (the slowdown is not the GPU's: the CPU, a clock cap while
 //   charging or warm, the replay's own work), or a step for heat that cost over 1 fps, is taken back, and that reason steps nothing for 5 minutes
-int dm_res_scale_ready(void); void dm_res_factor_set(float f);   // host/hle_resscale.c
+// A scene that keeps the game's full size (the menus showing Pokémon models: the game's own mode, hle_resscale.c) is drawn at full size whatever the step: no step is
+//   taken or judged there. A step on trial when one opens is kept without a verdict, and the short-frame count starts again
+int dm_res_scale_ready(void), dm_res_scale_applies(void); void dm_res_factor_set(float f);   // host/hle_resscale.c
 static const float k_res_steps[] = { 1.0f, 0.85f, 0.7f, 0.6f };
 #define NRES ((int)(sizeof k_res_steps / sizeof k_res_steps[0]))
+#define RES_HOT 2   // the step heat goes straight to: 70 %, about 720p from 1080p (the upscaler brings it back to the screen's size)
 static int g_fps_guard;   // set at start (fps_guard_init): the target, 0 off
 static void fps_guard_init(void) {
     const char *t = getenv("DM_FPS_TARGET"), *off = getenv("DM_FPS_GUARD"), *g = getenv("DM_GRAPHICS");
@@ -573,7 +669,8 @@ static void graphics_auto(void) {
     if (!(g && !strcmp(g, "auto") && g_th_mgr && g_th_st) && !g_fps_guard) return;
     int hot = 0, calm = 1;
     if (g_th_mgr && g_th_st) { int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
-        hot = st >= 3 || hr >= 0.95f; calm = st <= 1 && (hr < 0 || hr < 0.75f); }
+        // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate
+        hot = st >= 2 || hr >= 0.9f; calm = st <= 1 && (hr < 0 || hr < 0.75f); }
     double fps = -1;
     // (the first minute of frames does not count: a save loading in runs slow while the game reads the world, Legends: Arceus at 22.6 fps for its first 20 s; that
     //   dropped TV mode for two minutes on a phone that then held 30 in it, Galaxy S25+ 2026-11-09)
@@ -591,6 +688,7 @@ static void graphics_auto(void) {
         since++;
         if (nogain > 0) nogain--;
         if (noheat > 0) noheat--;
+        if (!dm_res_scale_applies()) { probe = 0; slow = 0; return; }   // (a scene at the game's full size: see above)
         // a step is tried for 15 s, then kept only if the average gained clearly (1.5 fps, or 6 %): a lower resolution only helps a GPU that is behind, not a CPU
         double gain_need = fps_was * 0.06 > 1.5 ? fps_was * 0.06 : 1.5;
         if (probe && !--probe && fps_avg > 1 && fps_was > 1 && lv > 0 && (probe_hot ? fps_avg < fps_was - 1.0 : fps_avg < fps_was + gain_need)) {   // the step did not help
@@ -607,8 +705,9 @@ static void graphics_auto(void) {
         if ((for_heat || for_rate) && lv < NRES - 1) {
             if (!for_heat && held < 24 && wait < 192) wait *= 2;   // short again soon after a step up: wait twice as long next time
             probe = 3; probe_hot = for_heat; fps_was = fps_avg > 1 ? fps_avg : fps;
-            lv++; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0;
-            if (for_heat) fprintf(stderr, "graphics auto: the phone is hot: 3D render scale %d %%\n", (int)(k_res_steps[lv] * 100 + 0.5f));
+            lv++; if (for_heat && lv < RES_HOT) lv = RES_HOT;   // hot: straight to about 720p (70 % of 1080p), not one step every 30 s while the phone keeps heating up
+            dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0;
+            if (for_heat) fprintf(stderr, "graphics auto: the phone is hot: 3D render scale %d %% (about %dp)\n", (int)(k_res_steps[lv] * 100 + 0.5f), (int)(1080 * k_res_steps[lv] + 0.5f));
             else fprintf(stderr, "fps guard: %.1f fps, short of %d: 3D render scale %d %%; a step up after %d s steady\n", fps, g_fps_guard, (int)(k_res_steps[lv] * 100 + 0.5f), wait * 5);
         } else if (lv > 0 && cool >= wait) {
             lv--; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
@@ -640,7 +739,7 @@ static void *log_mirror(void *p) {
         graphics_auto(); pin_update();
         if (n % 6 == 0) fprintf(stderr, "[mem] app %ld MB resident (%ld MB swapped), phone %ld MB available of %ld MB; heat %s\n", kb_of("/proc/self/status", "VmRSS:") / 1024,
                                 kb_of("/proc/self/status", "VmSwap:") / 1024, kb_of("/proc/meminfo", "MemAvailable:") / 1024, kb_of("/proc/meminfo", "MemTotal:") / 1024, thermal_text(th, sizeof th));
-        { char d[256]; snprintf(d, sizeof d, DL "/%s-log.txt", g_stem); copy_file(src, d); }
+        { static char d[256]; if (!d[0]) dl_name(d, sizeof d, "log"); copy_file(src, d); }
     }
     return NULL;
 }
@@ -704,7 +803,7 @@ static void host_start(void) {
     char p[1200], q[1200];
     snprintf(p, sizeof p, "%s/log.txt", g_files); snprintf(q, sizeof q, "%s/log.prev.txt", g_files); rename(p, q);
     if (freopen(p, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
-    // the log's first lines: the credits (the app is MIT: its copyright notice stays with every copy; the full text is in the menu, About) and, once env.txt is
+    // the log's first lines: the credits (the app is GPL-3.0-or-later, its older code also MIT: its copyright notice stays with every copy; the full text is in the menu, About) and, once env.txt is
     //   read, whether this is an official build (BuildSigner's DM_BUILD_SIGNER), so a log attached to an issue says at once whether it comes from a repack
     //   The app's name and repository come from the game profile (GameActivity: DM_APP_NAME / DM_APP_REPO, from assets/app): Galar Native, Paldea Native
     const char *app_name = getenv("DM_APP_NAME"), *app_repo = getenv("DM_APP_REPO");
@@ -712,9 +811,10 @@ static void host_start(void) {
     if (!app_repo || !*app_repo) app_repo = "github.com/simipoB/Galar-Native-Android";
     { const char *v = getenv("DM_APP_VERSION");
       fprintf(stderr, "boot: %s, app version code %s. Copyright (c) 2026 jhaizhou (d2r-mobile, nxnative) and the Galar Native (formerly PKShield Android) contributors. "
-                      "MIT License (menu, About). Official downloads: %s/releases\n", app_name, v && *v ? v : "?", app_repo); }
-    { char d[256]; snprintf(d, sizeof d, DL "/%s-log-previous.txt", g_stem); copy_file(q, d); }
-    snprintf(g_crash_src, sizeof g_crash_src, "%s/log.txt", g_files); snprintf(g_crash_dl, sizeof g_crash_dl, DL "/%s-log.txt", g_stem);
+                      "GPL-3.0-or-later, older parts also MIT (menu, About). Source and official downloads: %s/releases\n", app_name, v && *v ? v : "?", app_repo); }
+    { char d[256]; dl_name(d, sizeof d, "log-previous"); copy_file(q, d); if (g_dl_note[0]) fprintf(stderr, "%s\n", g_dl_note); }
+    snprintf(g_crash_src, sizeof g_crash_src, "%s/log.txt", g_files); dl_name(g_crash_dl, sizeof g_crash_dl, "log");
+    if (g_dl_note[0]) fprintf(stderr, "%s\n", g_dl_note);
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
     snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p);
@@ -742,6 +842,8 @@ static void host_start(void) {
     #define SETG(k, sub) do { snprintf(p, sizeof p, "%s/%s", g_game, sub); setenv(k, p, 0); } while (0)
     #define SETP(k, sub) do { snprintf(p, sizeof p, "%s/%s", g_files, sub); setenv(k, p, 0); } while (0)
     SETP("DM_TEX_CACHE", "texcache");
+    { const char *r = g_app->activity->externalDataPath; snprintf(p, sizeof p, "%s/lsfg", r ? r : g_files); setenv("DM_LSFG_DIR", p, 0); }
+    // (the player's Lossless Scaling shaders, converted from their Lossless.dll by the app's import, one folder for every game: DM_FRAMEGEN=lsfg, nvn_lsfg.h)
     // shaders translated while the game last ran (nvn_vk.c live_check): the pack has them now (setup_game.py merged them first), so the folder starts empty
     SETP("DM_LIVE_SPV", "live");
     { DIR *ld = opendir(getenv("DM_LIVE_SPV")); struct dirent *e; char f[1200];
@@ -750,8 +852,21 @@ static void host_start(void) {
     // graphics (the app's settings screen): high = the console's TV mode (1080p, full effects), low = handheld mode (720p, the game's own lighter settings),
     // auto = TV mode, made lighter while the phone is hot or slow (graphics_auto below), lowest = handheld mode with the game's 3D render scale capped at 75 % (960x540 in
     // Pokémon Sword / Shield, hle_resscale.c; other games: as low). DM_OPMODE and DM_RES_CAP in env.txt still win
-    { const char *g = getenv("DM_GRAPHICS"); if (g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) setenv("DM_OPMODE", "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0);
-      if (g && !strcmp(g, "lowest")) setenv("DM_RES_CAP", "0.75", 0); }
+    // Frame generation (DM_FRAMEGEN, Lossless Scaling's too) and Faster rendering (DM_NVN_ASYNC) are locked off for now, whatever env.txt says: first a solid frame
+    //   rate without them on every phone, then they come back (the owner's call, 2026-11-12). DM_UNLOCK_EXPERIMENTS=1 in env.txt lifts the lock (development)
+    { const char *u = getenv("DM_UNLOCK_EXPERIMENTS"); if (!(u && !strcmp(u, "1"))) {
+        const char *fg = getenv("DM_FRAMEGEN"), *as = getenv("DM_NVN_ASYNC");
+        if ((fg && *fg && strcmp(fg, "0") && strcmp(fg, "off")) || (as && *as && strcmp(as, "0") && strcmp(as, "off")))
+            fprintf(stderr, "boot: frame generation and Faster rendering are locked off for now (env.txt had DM_FRAMEGEN=%s DM_NVN_ASYNC=%s)\n", fg ? fg : "", as ? as : "");
+        setenv("DM_FRAMEGEN", "0", 1); setenv("DM_NVN_ASYNC", "0", 1); } }
+    // Pokémon Sword / Shield: low and lowest stay in TV mode, the 3D lowered by the engine's cap instead (hle_resscale.c): 0.55 of 1080p ≈ 594p (handheld drew 576p),
+    //   0.50 = 960x540 (as lowest drew before). In handheld mode a Dynamax (the Poké Ball growing) crashed: the game's file loader got a null buffer from one of its
+    //   own sub-heaps and unpacked an LZ4 entry into it (main+0x5dd7b8 alloc, no null check → main+0x1865410; #211 Adreno 613 on lowest, #115 Xclipse 530 on low,
+    //   both "handheld set, TV flag 0"; no crash reported in TV mode). DM_OPMODE=0 in env.txt still gives handheld
+    { const char *g = getenv("DM_GRAPHICS"); int galar = !strcmp(DM_GAME_ID, "01008DB008C2C000");
+      if (g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) setenv("DM_OPMODE", galar ? "1" : "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0);
+      if (g && !strcmp(g, "lowest")) setenv("DM_RES_CAP", galar ? "0.50" : "0.75", 0);
+      else if (g && !strcmp(g, "low") && galar) setenv("DM_RES_CAP", "0.55", 0); }
 #if defined(DM_GAME_ANDROID_OPMODE) && DM_GAME_ANDROID_OPMODE >= 0
     { char m[4]; snprintf(m, sizeof m, "%d", DM_GAME_ANDROID_OPMODE); setenv("DM_OPMODE", m, 0); }   // the profile's android_op_mode (env.txt DM_OPMODE wins)
 #endif   // real sound output (AAudio, compat/aaudio_unit.c); env.txt can set 0
@@ -782,13 +897,14 @@ static void host_start(void) {
               fprintf(stderr, "[RED] save import: could not inspect the current save: %s\n", strerror(errno)); can_install = 0;
           }
           if (can_install && !rename(imp, p)) {
-              fprintf(stderr, "boot: imported save archive; previous save backup: %s\n", moved_old ? old : "none");
+              fprintf(stderr, "boot: imported save archive; previous save backup: %s\n", moved_old ? old : "none"); g_save_imported = 1;
           } else {
               if (moved_old) rename(old, p);
               fprintf(stderr, "[RED] save import: could not install imported save; it remains in %s\n", imp);
           }
       } }
     snprintf(p, sizeof p, "%s/save", g_files); mkdir(p, 0755); snprintf(p, sizeof p, "%s/temp", g_files); mkdir(p, 0755);
+    save_place();   // (DM_SAVE_SHARED: the save in Documents, copied over at this start when the choice changed; after an import, which lands in the app's folder)
     snprintf(p, sizeof p, "%s/RomFS", g_game);
     if (stat(p, &st)) { fprintf(stderr, "boot: game files not found: %s (install the bundle, or copy RomFS, patched, shaders.pak, shader_map.tsv and font there)\n", p); ALOG("game files missing in %s", g_files); return; }
     chdir(g_files);
@@ -810,19 +926,55 @@ static void pin_update(void) {
     if (!top) return;
     if (top == low) { if (!g_pin_top) return; for (int c = 0; c < 32; c++) if (f[c]) { CPU_SET(c, &set); n++; } }   // all alike now: every core
     else for (int c = 0; c < 32; c++) if (f[c] == top) { CPU_SET(c, &set); n++; }
+    // never fewer cores than pinned threads: a hot Galaxy Z Flip5 capped its prime core to 1.71 GHz with the middle ones at 1.56, and both threads a frame waits on
+    //   shared that one core (41-48 ms of CPU work a frame) while three nearly as fast cores sat idle. The next fastest cores join until each thread has one
+    long floor_ = top;
+    while (n < g_pin_n && top != low) {
+        long next = 0; for (int c = 0; c < 32; c++) if (f[c] && f[c] < floor_ && f[c] > next) next = f[c];
+        if (!next) break;
+        for (int c = 0; c < 32; c++) if (f[c] == next) { CPU_SET(c, &set); n++; }
+        floor_ = next; }
     if (top == g_pin_top && !(top == low)) { static cpu_set_t last; if (CPU_EQUAL(&last, &set)) return; last = set; }
     g_pin_top = top;
     for (int i = 0; i < g_pin_n; i++) sched_setaffinity(g_pin_tid[i], sizeof set, &set);
-    fprintf(stderr, "[cpu] main threads on %d core%s limited to %.2f GHz\n", n, n == 1 ? "" : "s", top / 1e6);
+    if (floor_ < top) fprintf(stderr, "[cpu] main threads on %d cores limited to %.2f-%.2f GHz (the fastest alone was fewer cores than threads)\n", n, floor_ / 1e6, top / 1e6);
+    else fprintf(stderr, "[cpu] main threads on %d core%s limited to %.2f GHz\n", n, n == 1 ? "" : "s", top / 1e6);
 }
 // ---------- Performance hints (Android 13+): one session for the game's main thread and the presenting thread, told every frame how long the presenting thread
 // worked against the frame's period (nvn_vk.c mtl_present). That is what brings the fastest cores and higher clocks when the game needs them, and lower ones
 // when it does not (LAS Recomp's Android port: the prime core otherwise stays parked). The presenting thread also gets the most urgent priority an app may set
 static void *g_hint; static int g_hint_failed; static int64_t g_hint_target;
+// A/B in one run (DM_AB=<frames>:<key>): the switch named <key> alternates every <frames> presented frames, on (1) in the odd stretches, so both sides run in the
+//   same heat: a phone that warms up throttles its cores (a Galaxy S25+ from 4.47 to 1.4 GHz in a long session, 2026-11-09), and two runs one after the other
+//   differed by more than most changes (the A/B idea from another Android port of a Switch game). Returns -1 when <key> is not under test, else 0 or 1. The present line (nvn_vk.c)
+//   names the side each window was on
+int dm_ab(const char *key) {
+    static int init; static long every; static char k[32];
+    if (!init) { init = 1; const char *e = getenv("DM_AB"), *c = e ? strchr(e, ':') : NULL;
+        if (c && (every = atol(e)) > 0) { snprintf(k, sizeof k, "%s", c + 1); fprintf(stderr, "[ab] %s alternates every %ld frames (on in the odd stretches)\n", k, every); } }
+    if (every <= 0 || strcmp(key, k)) return -1;
+    extern uint64_t dm_nvn_frame_count(void) __attribute__((weak));
+    uint64_t f = dm_nvn_frame_count ? dm_nvn_frame_count() : 0; return (int)((f / (uint64_t)every) & 1);
+}
+int dm_ab_side(void) {   // the side of the frame just presented (-1: no DM_AB); the timing lines name it (hle_nvn.c)
+    static int has = -1; if (has < 0) { const char *e = getenv("DM_AB"); has = e && strchr(e, ':') != NULL; }
+    if (!has) return -1;
+    extern uint64_t dm_nvn_frame_count(void) __attribute__((weak)); const char *e = getenv("DM_AB"); long every = e ? atol(e) : 0; if (every <= 0) return -1;
+    uint64_t f = dm_nvn_frame_count ? dm_nvn_frame_count() : 0; return f ? (int)(((f - 1) / (uint64_t)every) & 1) : 0;
+}
+// The target the hint session is given: three quarters of the frame, not all of it (DM_HINT_TARGET=<percent>, 100: the whole frame as before). With the whole frame
+//   the governor lowers the clocks until the work just fits it, and frames that weigh near 33 ms then go over every few frames, each a refresh late: 17-20 fps at
+//   settings that held 30 on a Mali-G925 in another Android port of a Switch game, which moved to 25 ms of 33 for its 30 fps. DM_AB=<n>:hint compares the two
+static int64_t hint_target(uint64_t period_ns) {
+    static int pct = -1; if (pct < 0) { const char *e = getenv("DM_HINT_TARGET"); pct = e ? atoi(e) : 75; if (pct < 30 || pct > 100) pct = 75; }
+    int ab = dm_ab("hint"); int p = ab < 0 ? pct : ab ? 75 : 100;
+    return (int64_t)period_ns * p / 100;
+}
 static void *(*p_hint_mgr)(void); static void *(*p_hint_create)(void *, const int32_t *, size_t, int64_t);
 static int (*p_hint_target)(void *, int64_t); static int (*p_hint_report)(void *, int64_t);
-void front_frame_work(uint64_t busy_ns, uint64_t target_ns) {
+void front_frame_work(uint64_t busy_ns, uint64_t period_ns) {
     if (g_hint_failed) return;
+    uint64_t target_ns = (uint64_t)hint_target(period_ns);
     if (!g_hint) {
         static int tried; if (tried++) return;
         setpriority(PRIO_PROCESS, (id_t)gettid(), -10);
@@ -840,10 +992,30 @@ void front_frame_work(uint64_t busy_ns, uint64_t target_ns) {
         if (!g_hint && n > pinned && m && p_hint_create) g_hint = p_hint_create(m, t, n = pinned, (int64_t)target_ns);   // (refused with the workers: the two threads as before)
         if (!g_hint || !p_hint_report) { g_hint_failed = 1; fprintf(stderr, "[cpu] no performance hint session\n"); return; }
         g_hint_target = (int64_t)target_ns; for (size_t i = 0; i < pinned; i++) g_pin_tid[i] = t[i]; g_pin_n = (int)pinned; pin_update();
-        fprintf(stderr, "[cpu] performance hint session: %zu threads (%zu of them the game's frame workers), target %.1f ms; presenting thread at priority -10\n", n, n - pinned, target_ns / 1e6);
+        fprintf(stderr, "[cpu] performance hint session: %zu threads (%zu of them the game's frame workers), target %.1f ms of the %.1f ms frame; presenting thread at priority -10\n", n, n - pinned, target_ns / 1e6, period_ns / 1e6);
     }
     if ((int64_t)target_ns != g_hint_target && p_hint_target) p_hint_target(g_hint, g_hint_target = (int64_t)target_ns);
     if (busy_ns) p_hint_report(g_hint, (int64_t)busy_ns);
+}
+// Loading (GameActivity polls this every 500 ms and tells Android 13+ through GameManager.setGameState, so the system can raise the clocks and the storage
+//   speed for it): the game reading its files at 8 MB/s or more; over once it reads under 1 MB/s for 2 s. A load also tells the hint session (Android 16:
+//   APerformanceHint_notifyWorkloadSpike) that this frame's CPU work jumps, before the governor sees the late frames. DM_LOAD_HINT=0: neither
+JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env, jclass c) {
+    (void)env; (void)c;
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_LOAD_HINT"); off = e && !strcmp(e, "0"); } if (off) return 0;
+    extern _Atomic uint64_t dm_fs_read_bytes __attribute__((weak)); if (!&dm_fs_read_bytes) return 0;
+    static uint64_t last_b, last_t, quiet_since; static int loading;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t t = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, b = atomic_load(&dm_fs_read_bytes);
+    if (last_t && t > last_t) {
+        double mbs = (double)(b - last_b) / 1048576.0 / ((double)(t - last_t) / 1e9);
+        if (!loading && mbs >= 8.0) { loading = 1; quiet_since = 0; fprintf(stderr, "[cpu] loading (%.0f MB/s of game files): the system is told\n", mbs);
+            typedef int (*spike_fn)(void *, int, int, const char *); static spike_fn sp; static int looked;
+            if (!looked) { looked = 1; void *lib = dlopen("libandroid.so", RTLD_NOW); sp = lib ? (spike_fn)dlsym(lib, "APerformanceHint_notifyWorkloadSpike") : NULL; }
+            if (sp && g_hint) sp(g_hint, 1, 0, "load"); }
+        else if (loading && mbs < 1.0) { if (!quiet_since) quiet_since = t; else if (t - quiet_since >= 2000000000ull) { loading = 0; fprintf(stderr, "[cpu] loading over\n"); } }
+        else if (loading) quiet_since = 0;
+    }
+    last_b = b; last_t = t; return loading;
 }
 // The host's front_run (main.c): the guest already runs on our big-stack host thread
 void front_run(void (*guest)(void)) { guest(); }
@@ -886,8 +1058,8 @@ static void on_cmd(struct android_app *app, int32_t cmd) {
         case APP_CMD_GAINED_FOCUS: immersive(); if (g_started) { dm_focus_set(1); dm_audio_suspend(0); } break;
         // In the background (recents, home, another app) the game keeps running with its sound, as a Switch game does under the HOME menu with a suspend-free
         //   setting: it is not told it lost focus (it would pause itself), and frames are simply not shown while there is no window. DM_BACKGROUND=off pauses it as before
-        case APP_CMD_LOST_FOCUS: if (g_started && !bg_play()) { dm_focus_set(2); } break;
-        case APP_CMD_PAUSE: if (g_started && nvn_vk_heap_alive) nvn_vk_heap_alive(); if (g_started) { if (!bg_play()) { dm_focus_set(3); dm_audio_suspend(1); } if (nvn_vk_cache_save) nvn_vk_cache_save(); } break;
+        case APP_CMD_LOST_FOCUS: touch_ui_release(); if (g_started && !bg_play()) { dm_focus_set(2); } break;
+        case APP_CMD_PAUSE: touch_ui_release(); if (g_started && nvn_vk_heap_alive) nvn_vk_heap_alive(); if (g_started) { if (!bg_play()) { dm_focus_set(3); dm_audio_suspend(1); } if (nvn_vk_cache_save) nvn_vk_cache_save(); } break;
         case APP_CMD_RESUME: if (g_started) { dm_focus_set(1); dm_audio_suspend(0); swapin_start(); } break;
     }
 }

@@ -7,13 +7,15 @@ NDK = os.path.expanduser("~/android-ndk/android-ndk-r27c")
 TC = NDK + "/toolchains/llvm/prebuilt/windows-x86_64/bin"
 CC = [TC + "/clang.exe", "--target=aarch64-linux-android33"]
 HOST, GFXD = "../host", "../gfx"
-OUT = f"out/host-{GAME}-vulkan"
+LTO = os.environ.get("DM_LTO") == "1"   # (an experiment: ThinLTO across the engine, measured against the plain build on a phone before it is ever the default)
+OUT = f"out/host-{GAME}-vulkan" + ("-lto" if LTO else "")
 GAME_DIR = f"../games/{GAME}"
 GAME_DIRS = subprocess.run([sys.executable, "../games/game.py", "dirs", GAME], capture_output=True, text=True, check=True).stdout.split()   # and tables_from (dmsh_chain.h)
 GLUE = NDK + "/sources/android/native_app_glue"
 CFLAGS = ("-O2 -g -fPIC -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-format -fno-omit-frame-pointer "
           "-include compat/darwin.h -Icompat").split() + [f"-I{d}" for d in (HOST, GFXD + "/nvn", GFXD + "/nvn/include", "../third_party/vulkan-headers/include",
           OUT + "/gen", *GAME_DIRS, "../third_party/libvpx", "../third_party/stb_vorbis")]
+if LTO: CFLAGS.append("-flto=thin")
 
 def run(cmd):
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -58,6 +60,16 @@ for s in sorted(vpx):
     o = OUT + "/vpx/" + s[len(VPX) + 1:-2] + ".o"; vpx_obj.append(o)
     jobs.append((CC + ["-O2", "-fPIC", "-I" + VPX, "-I" + VPX + "/config", "-c", s, "-o", o], s, o))
 
+# the Lossless.dll import (app/jni/lsfg_import.cpp) and dxbc-spirv, the converter it uses (C++17, its C++ library linked in statically)
+CXX = [TC + "/clang++.exe", "--target=aarch64-linux-android33"]
+DXS = "../third_party/dxbc-spirv"
+CXXFLAGS = ["-std=c++17", "-O2", "-fPIC", "-fno-exceptions", "-fvisibility=hidden", "-DDXBC_SPV_ENABLE_SM5", "-DDXBC_SPV_ENABLE_SPIRV", "-I" + DXS]
+dxs_obj = []
+for s in sorted(g(DXS + "/dxbc/*.cpp") + g(DXS + "/ir/*.cpp") + g(DXS + "/ir/passes/*.cpp") + g(DXS + "/spirv/*.cpp") + g(DXS + "/util/*.cpp")):
+    s = s.replace("\\", "/"); o = OUT + "/dxs/" + s[len(DXS) + 1:-4] + ".o"; dxs_obj.append(o)
+    jobs.append((CXX + CXXFLAGS + ["-c", s, "-o", o], s, o))
+jobs.append((CXX + CXXFLAGS + ["-c", "app/jni/lsfg_import.cpp", "-o", OUT + "/objl/lsfg_import.o"], "app/jni/lsfg_import.cpp", OUT + "/objl/lsfg_import.o"))
+
 def build(j):
     cmd, s, o = j
     if not newer(s, o):
@@ -72,10 +84,13 @@ print(f"compiled {len(jobs)} units")
 lib = OUT + "/libvpx.a"
 if os.path.exists(lib): os.remove(lib)
 run([TC + "/llvm-ar.exe", "rcs", lib] + vpx_obj)
-objs = [o for _, _, o in jobs if o not in vpx_obj]
+dlib = OUT + "/libdxbcspv.a"
+if os.path.exists(dlib): os.remove(dlib)
+run([TC + "/llvm-ar.exe", "rcs", dlib] + dxs_obj)
+objs = [o for _, _, o in jobs if o not in vpx_obj and o not in dxs_obj]
 os.makedirs(OUT + "/lib", exist_ok=True)
 rsp = OUT + "/link.rsp"
 open(rsp, "w").write("\n".join(objs))
-run(CC + ["-shared", "-o", OUT + "/lib/libnxnative.so", "@" + rsp, lib, "-lm", "-ldl", "-llog", "-lz", "-laaudio", "-lmediandk", "-lvulkan", "-landroid",
+run(CXX + (["-flto=thin", "-O2"] if LTO else []) + ["-shared", "-static-libstdc++", "-o", OUT + "/lib/libnxnative.so", "@" + rsp, lib, dlib, "-lm", "-ldl", "-llog", "-lz", "-laaudio", "-lmediandk", "-lvulkan", "-landroid",
           "-Wl,-Bsymbolic", "-Wl,--no-undefined", "-Wl,-z,max-page-size=16384", "-u", "ANativeActivity_onCreate"])
 print("built", OUT + "/lib/libnxnative.so")

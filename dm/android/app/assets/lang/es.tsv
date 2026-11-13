@@ -283,17 +283,54 @@ Signed with the %s release key.	Firmada con la clave de publicación de %s.
 This copy was not signed by the %s project (signer %s). It may have been changed.	Esta copia no fue firmada por el proyecto %s (firmante %s). Puede haber sido modificada.
 Official downloads: %s	Descargas oficiales: %s
 Credits	Créditos
-Free software under the MIT License. This notice must stay with every copy.	Software libre con la licencia MIT. Este aviso debe acompañar a cada copia.
+Free software under the GNU GPL, version 3 or later (older parts also MIT). This notice must stay with every copy, and the source of every release is public.	Software libre con la licencia GNU GPL, versión 3 o posterior (las partes más antiguas también MIT). Este aviso debe acompañar a cada copia, y el código fuente de cada versión es público.
 Show the license	Ver la licencia
 Third-party code	Código de terceros
 Vibrate on press	Vibrar al pulsar
 Like rumble	Como la vibración
 Like rumble: off when Rumble is Off	Como la vibración: desactivado si la vibración está desactivada
-L3 / R3 buttons	Botones L3 / R3
-Off: no L3 / R3 on screen (a controller's stick buttons still work)	Desactivado: sin L3 / R3 en pantalla (los botones de los sticks de un mando siguen funcionando)
-On: L3 and R3 above the sticks (move them with Move the touch controls)	Activado: L3 y R3 sobre los sticks (muévelos con Mover los controles táctiles)
 HD textures	Texturas HD
 Auto: on for this phone	Auto: activado en este teléfono
 Auto: off for this phone (HD texture mods need 12 GB of memory)	Auto: desactivado en este teléfono (los mods de texturas HD necesitan 12 GB de memoria)
 On: your HD texture mods load (more memory, slower area loads)	Activado: se cargan tus mods de texturas HD (más memoria, cargas de zona más lentas)
 Off: the game's own textures (your HD texture mods stay installed)	Desactivado: las texturas originales del juego (tus mods de texturas HD siguen instalados)
+L3 / R3 buttons	Botones L3 / R3
+Off: no L3 / R3 on screen (a controller's stick buttons still work)	Desactivado: sin L3 / R3 en pantalla (los botones de los sticks de un mando siguen funcionando)
+On: L3 and R3 above the sticks (move them with Move the touch controls)	Activado: L3 y R3 sobre los sticks (muévelos con Mover los controles táctiles)
+Frame generation (experimental)	Generación de fotogramas (experimental)
+On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Needs a fast GPU; your input shows about 17 ms later	Activada: se crea una imagen entre cada dos fotogramas del juego, así 30 fps se mueven como 60. Requiere una GPU rápida; tus acciones se ven unos 17 ms más tarde
+Lossless Scaling: the in-between picture made by your own copy of Lossless Scaling's frame generation (sharper motion, needs a faster GPU)	Lossless Scaling: la imagen intermedia la crea tu propia copia de la generación de fotogramas de Lossless Scaling (movimiento más nítido, requiere una GPU más rápida)
+Own Lossless Scaling? Import its Lossless.dll (in the program's folder) to use its frame generation here.	¿Tienes Lossless Scaling? Importa su Lossless.dll (en la carpeta del programa) para usar aquí su generación de fotogramas.
+Import Lossless.dll	Importar Lossless.dll
+Lossless Scaling imported. Choose it under Frame generation.	Lossless Scaling importado. Elígelo en Generación de fotogramas.
+Could not import Lossless Scaling: %s	No se pudo importar Lossless Scaling: %s
+Lossless Scaling pictures	Imágenes de Lossless Scaling
+Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)	Auto: 4x en una pantalla de 120 Hz, 3x en 90 Hz, si no 2x (a 30 fps)
+2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: una imagen entre cada dos fotogramas del juego (30 fps se mueven como 60)
+3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: dos imágenes entre cada dos fotogramas (como 90 fps; uniforme solo en una pantalla de 90 Hz)
+4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: tres imágenes entre cada dos fotogramas (como 120 fps; requiere una pantalla de 120 Hz y una GPU rápida)
+Sustained performance	Rendimiento sostenido
+Off: the phone's full speed, which drops when it gets hot	No: toda la velocidad del teléfono, que baja cuando se calienta
+On: a speed the phone can hold for hours, fewer slowdowns when hot	Sí: una velocidad que el teléfono aguanta durante horas, menos bajones al calentarse
+Camera sensitivity	Sensibilidad de la cámara
+Slower camera: the right stick and the touch camera turn less	Cámara más lenta: el stick derecho y la cámara táctil giran menos
+As on the Switch	Como en Switch
+Faster camera: full speed with less of the stick	Cámara más rápida: velocidad máxima con menos recorrido del stick
+Off: plain multiplies, as before v0.74	Desactivado: multiplicaciones normales, como antes de la v0.74
+Auto: on with PanVK (black patches), off with the phone's own Mali driver	Auto: activado con PanVK (manchas negras), desactivado con el controlador Mali del teléfono
+White-screen probe	Prueba de pantalla blanca
+Inputs	Entradas
+Divisions	Divisiones
+Textures: every texture read is limited to a sane range. If the white goes away, tell us: a texture is read wrong	Texturas: cada lectura de textura se limita a un rango razonable. Si el blanco desaparece, avísanos: una textura se lee mal
+Inputs: every value the vertex shader hands over is limited. If the white goes away, tell us	Entradas: cada valor que entrega el sombreador de vértices se limita. Si el blanco desaparece, avísanos
+Divisions: every division is limited. If the white goes away, tell us	Divisiones: cada división se limita. Si el blanco desaparece, avísanos
+Low: 3D at about 600p, lighter	Bajo: 3D a unos 600p, más ligero
+Lowest: 3D at 960x540, coolest	Mínimo: 3D a 960x540, el más fresco
+Locked for now	Bloqueado por ahora
+Off for every phone until the game holds a solid frame rate without it. It comes back after that.	Desactivado en todos los teléfonos hasta que el juego mantenga una tasa de fotogramas estable sin esto. Volverá después.
+Save folder	Carpeta de guardado
+App folder	Carpeta de la app
+App folder: Android/data, as before	Carpeta de la app: Android/data, como antes
+Documents	Documentos
+Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/Galar Native/%s/save, para herramientas de sincronización como Syncthing. Tu partida se copia allí en el próximo inicio; lo que ya hubiera se guarda como copia de seguridad. Requiere acceso a todos los archivos
+The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	La última configuración tradujo solo una parte de los shaders del juego, por eso partes del juego no se dibujaban. Toca Configurar una vez más: las termina (las ya hechas se conservan).
