@@ -1,6 +1,9 @@
 # STATUS
 
-**Build:** v44 (not tested yet): the trainer "spotted you" fade is b6ff050a drawing a 1200x180 dark banner at the screen's bottom-right (v43 trainer capture, Nov 13). It keeps the UI's y scale but is anchored to the screen's real bottom edge (`fork_ui.h` fork_ui_fill; origin from g_origin_ll). Log: `[FORK] spotted banner`. v43's intro bars / divider full size stay.
+**Build:** v45 (not tested yet): upstream main merged again (to 4e0814b). Useful here: Sword's step follows real time (no slow motion when frames run late; upstream: "not yet run on a phone"; `DM_GAME_STEP=fixed` = old), Adreno pass-defer + background pipeline builds on by default (`DM_VK_ASYNC_PSO=0` / `DM_VK_PASS_DEFER=0` if objects pop in), relaxed barriers on Adreno (`DM_VK_BARRIER=full`), bloom dual-source blend fix, grey boxes over a battle effect fixed, swapchain fallbacks, camera sensitivity (☰ → Controller), Sustained performance option, texture upload worker, fps-guard first minute ignored.
+- Fast-forward now also scales upstream's real-time step table (hle_nvn.c vstep_tick). **Test fast-forward.**
+- Process: check `git fetch upstream main` before every build (Steven, Nov 13).
+v44: the trainer "spotted you" fade is b6ff050a drawing a 1200x180 dark banner at the screen's bottom-right (v43 trainer capture, Nov 13). It keeps the UI's y scale but is anchored to the screen's real bottom edge (`fork_ui.h` fork_ui_fill; origin from g_origin_ll). Log: `[FORK] spotted banner`. v43's intro bars / divider full size stay.
 - Offered, not built: fork frame generation 4x (30 → 120; lsfg-vk takes several outputs), ~15 ms GPU a game frame. 3x / 90 cannot pace evenly (display modes 120 / 60 only).
 v43: trainer battle intro kept full size in Fill, corrected: fa0b9117 (black bars sliding in top / bottom = the "spotted" fade) and 63b6f752 (the diagonal divider; likely the "divider too far left" too). From the v42 trainer capture. v40's 438515ea guess dropped.
 - Frame generation (Steven Nov 12): fork Lossless 2x looks good; upstream built-in works but not smooth; upstream Lossless no visible change. Menu: Off / Lossless 2x (fork) / Built-in.

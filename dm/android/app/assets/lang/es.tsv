@@ -309,3 +309,18 @@ Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)	Auto: 4x en una pa
 2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: una imagen entre cada dos fotogramas del juego (30 fps se mueven como 60)
 3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: dos imágenes entre cada dos fotogramas (como 90 fps; uniforme solo en una pantalla de 90 Hz)
 4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: tres imágenes entre cada dos fotogramas (como 120 fps; requiere una pantalla de 120 Hz y una GPU rápida)
+Sustained performance	Rendimiento sostenido
+Off: the phone's full speed, which drops when it gets hot	No: toda la velocidad del teléfono, que baja cuando se calienta
+On: a speed the phone can hold for hours, fewer slowdowns when hot	Sí: una velocidad que el teléfono aguanta durante horas, menos bajones al calentarse
+Camera sensitivity	Sensibilidad de la cámara
+Slower camera: the right stick and the touch camera turn less	Cámara más lenta: el stick derecho y la cámara táctil giran menos
+As on the Switch	Como en Switch
+Faster camera: full speed with less of the stick	Cámara más rápida: velocidad máxima con menos recorrido del stick
+Off: plain multiplies, as before v0.74	Desactivado: multiplicaciones normales, como antes de la v0.74
+Auto: on with PanVK (black patches), off with the phone's own Mali driver	Auto: activado con PanVK (manchas negras), desactivado con el controlador Mali del teléfono
+White-screen probe	Prueba de pantalla blanca
+Inputs	Entradas
+Divisions	Divisiones
+Textures: every texture read is limited to a sane range. If the white goes away, tell us: a texture is read wrong	Texturas: cada lectura de textura se limita a un rango razonable. Si el blanco desaparece, avísanos: una textura se lee mal
+Inputs: every value the vertex shader hands over is limited. If the white goes away, tell us	Entradas: cada valor que entrega el sombreador de vértices se limita. Si el blanco desaparece, avísanos
+Divisions: every division is limited. If the white goes away, tell us	Divisiones: cada división se limita. Si el blanco desaparece, avísanos

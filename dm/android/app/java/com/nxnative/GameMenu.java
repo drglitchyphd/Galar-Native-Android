@@ -275,7 +275,9 @@ public final class GameMenu {
         String was = GameSettings.get(a, key);
         GameSettings.set(a, key, value);
         boolean now;
+        if (a instanceof GameActivity && (key.equals("DM_FRAMEGEN") || key.equals("DM_FPS_TARGET"))) ((GameActivity) a).displayMode();   // (the screen's rate follows the pictures shown)
         if (key.equals("DM_PERF_OVERLAY")) { if (a instanceof GameActivity) ((GameActivity) a).perfOverlay(value.equals("on")); now = true; }
+        else if (key.equals("DM_SUSTAINED")) { if (a instanceof GameActivity) ((GameActivity) a).sustained(); now = true; }
         else if (key.equals("DM_LANG")) now = true;
         else if (key.equals("DM_RUMBLE")) {   // (controller / phone: at once; off and back on: the game's motors, from the next start)
             now = !value.equals("off") && !was.equals("off");
@@ -352,6 +354,8 @@ public final class GameMenu {
         choice(a, "DM_FORK_MAX_HZ", t(a, "Pacing refresh"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the refresh the driver reports") },
             { "120", "120 Hz", t(a, "120 Hz: frames paced in steps of 120 Hz, even if the driver reports more (from the next start)") },
             { "60", "60 Hz", t(a, "60 Hz: steps of 60 Hz (from the next start)") } });
+        if (GameActivity.sustainedSupported(a)) choice(a, "DM_SUSTAINED", t(a, "Sustained performance"), new String[][] {
+            { "", t(a, "Off"), t(a, "Off: the phone's full speed, which drops when it gets hot") }, { "on", t(a, "On"), t(a, "On: a speed the phone can hold for hours, fewer slowdowns when hot") } });
         heading(a, t(a, "Memory"));
         choice(a, "DM_VK_TEX_QUALITY", t(a, "Textures"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", t(a, p[3].equals("half") ? "Half" : "Full")) },
             { "full", t(a, "Full"), t(a, "Full: the game's textures as they are") }, { "half", t(a, "Half"), t(a, "Half: large textures at half size, less memory and GPU work") } });
@@ -365,6 +369,9 @@ public final class GameMenu {
         action(a, t(a, "Remap controller buttons"), t(a, "Or hold − for 3 s on a controller. Hold − and + together for 1 s to open this menu."), () -> go("remap"));
         choice(a, "DM_RUMBLE", t(a, "Rumble"), new String[][] { { "", t(a, "On"), t(a, "On: the controller's motor, else the phone's") }, { "pad", t(a, "Controllers only"), "" },
                                                                  { "off", t(a, "Off"), "" } });
+        // the right stick / camera, touch and controller alike (hle_hid.c rsens)
+        choice(a, "DM_RSTICK_SENS", t(a, "Camera sensitivity"), new String[][] { { "50", "50 %", t(a, "Slower camera: the right stick and the touch camera turn less") }, { "75", "75 %", "" },
+            { "", "100 %", t(a, "As on the Switch") }, { "125", "125 %", "" }, { "150", "150 %", t(a, "Faster camera: full speed with less of the stick") }, { "200", "200 %", "" } });
         heading(a, t(a, "Touch controls"));
         // L3 / R3 (pressing the sticks, touch_ui.c): off by default, Sword and Shield hardly use them (the left stick whistles in the Wild Area)
         choice(a, "DM_TOUCH_L3R3", t(a, "L3 / R3 buttons"), new String[][] { { "", t(a, "Off"), t(a, "Off: no L3 / R3 on screen (a controller's stick buttons still work)") },
@@ -633,6 +640,16 @@ public final class GameMenu {
                 { "0", t(a, "Off"), t(a, "Off: the shaders as before v0.52") } });
             choice(a, "DM_VK_NAN_MINMAX", t(a, "Min / max as on the Switch"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on with ARM's driver (v0.57)") },
                 { "0", t(a, "Off"), t(a, "Off: the shaders as before v0.57") } });
+            choice(a, "DM_VK_FMZ", t(a, "Multiply by zero as on the Switch"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on with PanVK (black patches), off with the phone's own Mali driver") },
+                { "1", t(a, "On"), t(a, "On: a multiply with a zero gives zero even when the other value is infinite, as the Switch's GPU does (a test for white or glowing surfaces; a little slower)") },
+                { "0", t(a, "Off"), t(a, "Off: plain multiplies, as before v0.74") } });
+            // the white-screen probe (nvn_spv.c spv_probe, #215): one kind of value clamped in every fragment shader; the run where the white goes names the kind
+            choice(a, "DM_VK_PROBE", t(a, "White-screen probe"), new String[][] { { "", t(a, "Off"), "" },
+                { "samples", t(a, "Textures"), t(a, "Textures: every texture read is limited to a sane range. If the white goes away, tell us: a texture is read wrong") },
+                { "inputs", t(a, "Inputs"), t(a, "Inputs: every value the vertex shader hands over is limited. If the white goes away, tell us") },
+                { "div", t(a, "Divisions"), t(a, "Divisions: every division is limited. If the white goes away, tell us") } });
+            choice(a, "DM_VK_DEPTH_DISCARD", t(a, "Keep unused depth in tile memory"), new String[][] { { "", t(a, "Off"), "" },
+                { "1", t(a, "On"), t(a, "On: depth that nothing reads afterwards is not written back to memory (faster on Mali; a test: tell us if anything flickers)") } });
             choice(a, "DM_VK_NO_PASS_MERGE", t(a, "Merge render passes"), new String[][] { { "", t(a, "On"), "" },
                 { "1", t(a, "Off"), t(a, "Off: every render target change starts a new pass") } });
         }

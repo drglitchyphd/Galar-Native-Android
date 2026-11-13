@@ -187,6 +187,24 @@ uint32_t *spv_drop_inputs(const uint32_t *code, size_t words, uint64_t drop, siz
     return o;
 }
 
+// Dual-source blending without dualSrcBlend (nvn_vk.c draw): a copy whose outputs at locations 0 and 1 trade places, so the second output reaches the colour
+//   target and the blend can use it as the source. NULL: not a SPIR-V module or no output at location 1
+uint32_t *spv_swap_out01(const uint32_t *code, size_t words, size_t *out_words) {
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint8_t *out = calloc(bound, 1); int has1 = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) break; const uint32_t *x = code + i;
+        if (op == OpVariable && n >= 4 && x[2] < bound && x[3] == SC_Output) out[x[2]] = 1;
+        i += n; }
+    uint32_t *o = malloc(sizeof(uint32_t) * words); memcpy(o, code, sizeof(uint32_t) * words);
+    for (size_t i = 5; i < words;) { uint32_t n = o[i] >> 16, op = o[i] & 0xffff; if (!n || i + n > words) break; uint32_t *x = o + i;
+        if (op == OpDecorate && n >= 4 && x[1] < bound && out[x[1]] && x[2] == DecLocation && x[3] <= 1) { if (x[3] == 1) has1 = 1; x[3] ^= 1; }
+        i += n; }
+    free(out);
+    if (!has1) { free(o); return NULL; }
+    *out_words = words; return o;
+}
+
 uint32_t *spv_init_outputs(const uint32_t *code, size_t words, size_t *out_words) {
     if (words < 5 || code[0] != 0x07230203u) return NULL;
     uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
@@ -600,6 +618,64 @@ uint32_t *spv_nan_select(const uint32_t *code, size_t words, size_t *out_words) 
     free(nc); o[3] = next; *out_words = w; return o;
 }
 
+// Maxwell's FMZ ("FMUL.FMZ", "FFMA.FMZ"): a product with a zero operand is 0, whatever the other operand is, infinity and NaN included. Switch shaders count on it (a
+// light at the eye's own position, a length of zero normalised: 0 x inf), but the shader translator does not carry the flag over, and SPIR-V's OpFMul / Fma give NaN
+// there, which reaches the picture as a white or glowing surface (Mali shows it; Galaxy-Android's Mali-G68 "glowing white" characters were the same divide by zero).
+// A copy in which every 32-bit float multiply (OpFMul, scalar or vector) and GLSL.std.450 Fma has the rule written out: a == 0 or b == 0 -> 0 (Fma: c), else the op's
+// own result, as OpFOrdEqual + OpLogicalOr + OpSelect (an operand that is NaN is not equal to 0, so 0 x NaN still gives 0). Every multiply, not only the ones the game's
+// shader marked FMZ (the SPIR-V no longer says which): a test of the theory a switch away (DM_VK_FMZ), before the translator gets it per instruction and with it a new
+// shader chain. The op keeps its place under a new id and the select takes its old id; bool / bvecN types and the zero constants are added before the first function.
+// NULL when the module has no such op
+uint32_t *spv_fmz(const uint32_t *code, size_t words, size_t *out_words) {
+    enum { OpExtInstImport = 11, OpExtInst = 12, OpTypeBool = 20, OpTypeFloat = 22, OpTypeVector = 23, OpConstant = 43, OpConstantComposite = 44, OpFunction = 54,
+           OpFMul = 133, OpLogicalOr = 166, OpSelect = 169, OpFOrdEqual = 180, Fma = 50 };
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3], glsl = 0, tbool = 0, bvec[5] = { 0 }; size_t hits = 0, extra = 0, first_fn = 0; int need[5] = { 0 };
+    if (!bound || bound > (1u << 22)) return NULL;
+    uint8_t *nc = calloc(bound, 1), *used = calloc(bound, 1); uint32_t *comp = calloc(bound, 4), *zid = calloc(bound, 4);   // per type id: 1 a 32-bit float, 2..4 a vector of them
+    if (!nc || !used || !comp || !zid) { free(nc); free(used); free(comp); free(zid); return NULL; }
+    // (the length first: x[1] of a one-word instruction is the next instruction's, or past the module for its last, OpFunctionEnd. Android's allocator puts a large
+    //   block right before a guard page, so a big shader's read past its end crashed the game at load with FMZ on: Galar #172 #181, spv_fmz+0x1d8 on a page start)
+    #define FMZ_OP(x, op, n) ((n) >= 5 && (x)[1] < bound && nc[(x)[1]] && (((op) == OpFMul && (n) == 5) || ((op) == OpExtInst && (n) == 8 && glsl && (x)[3] == glsl && (x)[4] == Fma)))
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) goto none; const uint32_t *x = code + i;
+        if (op == OpExtInstImport && n >= 3 && !strncmp((const char *)(x + 2), "GLSL.std.450", 4 * (n - 2))) glsl = x[1];
+        else if (op == OpTypeBool && n == 2) tbool = x[1];
+        else if (op == OpTypeFloat && n >= 3 && x[2] == 32 && x[1] < bound) nc[x[1]] = 1;
+        else if (op == OpTypeVector && n == 4 && x[1] < bound && x[2] < bound && x[3] >= 2 && x[3] <= 4) { if (nc[x[2]] == 1) { nc[x[1]] = (uint8_t)x[3]; comp[x[1]] = x[2]; } else if (tbool && x[2] == tbool) bvec[x[3]] = x[1]; }
+        else if (op == OpFunction && !first_fn) first_fn = i;
+        else if (first_fn && FMZ_OP(x, op, n)) { hits++; need[nc[x[1]]] = 1; used[x[1]] = 1; if (comp[x[1]]) used[comp[x[1]]] = 1; extra += 21; }
+        i += n; }
+    if (!hits || !first_fn) goto none;
+    size_t ntypes = 0; for (uint32_t t = 0; t < bound; t++) ntypes += used[t];
+    uint32_t *o = malloc(4 * (words + extra + 2 + 3 * 4 + ntypes * 8)); if (!o) goto none;
+    uint32_t next = bound; size_t w = 0;
+    for (size_t i = 0; i < words;) {
+        size_t n = i < 5 ? 5 : code[i] >> 16; const uint32_t *x = code + i;
+        if (i == first_fn) {   // the types and zeros the selects need
+            if (!tbool) { tbool = next++; o[w++] = 2u << 16 | OpTypeBool; o[w++] = tbool; }
+            for (uint32_t k = 2; k <= 4; k++) if (need[k] && !bvec[k]) { bvec[k] = next++; o[w++] = 4u << 16 | OpTypeVector; o[w++] = bvec[k]; o[w++] = tbool; o[w++] = k; }
+            for (uint32_t t = 0; t < bound; t++) if (used[t] && nc[t] == 1) { zid[t] = next++; o[w++] = 4u << 16 | OpConstant; o[w++] = t; o[w++] = zid[t]; o[w++] = 0; }
+            for (uint32_t t = 0; t < bound; t++) if (used[t] && nc[t] >= 2) { uint32_t k = nc[t]; zid[t] = next++; o[w++] = (3u + k) << 16 | OpConstantComposite; o[w++] = t; o[w++] = zid[t];
+                for (uint32_t j = 0; j < k; j++) o[w++] = zid[comp[t]]; }
+        }
+        memcpy(o + w, x, 4 * n);
+        uint32_t op = x[0] & 0xffff;
+        if (i >= first_fn && first_fn && FMZ_OP(x, op, n)) {
+            uint32_t T = x[1], res = x[2], k = nc[T], B = k == 1 ? tbool : bvec[k], m = next++, za = next++, zb = next++, z = next++, Z = zid[T];
+            uint32_t a = op == OpFMul ? x[3] : x[5], b = op == OpFMul ? x[4] : x[6], other = op == OpFMul ? Z : x[7];   // (Fma: a, b, c)
+            o[w + 2] = m; w += n;
+            o[w++] = 5u << 16 | OpFOrdEqual; o[w++] = B; o[w++] = za; o[w++] = a; o[w++] = Z;
+            o[w++] = 5u << 16 | OpFOrdEqual; o[w++] = B; o[w++] = zb; o[w++] = b; o[w++] = Z;
+            o[w++] = 5u << 16 | OpLogicalOr; o[w++] = B; o[w++] = z; o[w++] = za; o[w++] = zb;
+            o[w++] = 6u << 16 | OpSelect; o[w++] = T; o[w++] = res; o[w++] = z; o[w++] = other; o[w++] = m;
+        } else w += n;
+        i += n; }
+    #undef FMZ_OP
+    free(nc); free(used); free(comp); free(zid); o[3] = next; *out_words = w; return o;
+none:
+    free(nc); free(used); free(comp); free(zid); return NULL;
+}
+
 // Arm erratum 3779215 (Mali, Arm's own driver r38p1 to r49p0 and r50p0 to r51p0; fixed in r49p1 and r52p0): a min / max / clamp whose limit is a constant zero, of a value
 // selected at run time between compile-time constants, is compiled as a plain min or max: the value is no longer clamped. A copy in which that zero is one the compiler cannot
 // see as a constant: a Private variable per type, stored with the zero at the top of every entry point and loaded at the top of each function that uses it. Written from the
@@ -689,4 +765,61 @@ uint32_t *spv_clamp_zero(const uint32_t *code, size_t words, size_t *out_words) 
   none:
     free(k); free(fw); free(pp); free(h);
     return NULL;
+}
+
+// A diagnostic for the white 3D on Arm's own Mali driver (#215 and the issues it lists): every value of one kind in a fragment shader passed through NClamp, so a
+// run with each kind tells which one carries the overflow (a picture that stops being white names it). The kinds (mask): PROBE_SAMPLES every texture sample and fetch
+// (clamped to [-1024, 1024]), PROBE_INPUTS every float the previous stage hands over (Input loads, [-16384, 16384]), PROBE_DIV every float division ([-16384, 16384]).
+// NClamp also turns a NaN into the low bound. The result keeps its id: each op is emitted under a new one and the clamp takes the old. NULL when nothing matched
+uint32_t *spv_probe(const uint32_t *code, size_t words, size_t *out_words, unsigned mask) {
+    enum { OpExtInstImport = 11, OpExtInst = 12, OpTypeFloat = 22, OpTypeVector = 23, OpTypePointer = 32, OpConstant = 43, OpConstantComposite = 44, OpFunction = 54,
+           OpVariable = 59, OpLoad = 61, OpFDiv = 136, NClamp = 81, Input = 1 };
+    if (words < 5 || code[0] != 0x07230203u || !mask) return NULL;
+    uint32_t bound = code[3], glsl = 0, tf32 = 0; size_t first_fn = 0, hits = 0;
+    if (!bound || bound > (1u << 22)) return NULL;
+    uint8_t *width = calloc(bound, 1), *inptr = calloc(bound, 1), *invar = calloc(bound, 1);   // float types by id (1 scalar, 2-4 vectors); Input pointers; Input variables
+    if (!width || !inptr || !invar) { free(width); free(inptr); free(invar); return NULL; }
+    #define KIND(x, n, op) ( \
+        ((mask & PROBE_SAMPLES) && (op) >= 87 && (op) <= 96 && (n) >= 5 && (x)[1] < bound && width[(x)[1]]) ? 1 : \
+        ((mask & PROBE_INPUTS) && (op) == OpLoad && (n) >= 4 && (x)[1] < bound && width[(x)[1]] && (x)[3] < bound && invar[(x)[3]]) ? 2 : \
+        ((mask & PROBE_DIV) && (op) == OpFDiv && (n) == 5 && (x)[1] < bound && width[(x)[1]]) ? 3 : 0)
+    for (int pass = 0; pass < 2; pass++)
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) goto none; const uint32_t *x = code + i;
+        if (!pass) {
+            if (op == OpExtInstImport && n >= 3 && !strncmp((const char *)(x + 2), "GLSL.std.450", 4 * (n - 2))) glsl = x[1];
+            else if (op == OpTypeFloat && n >= 3 && x[2] == 32 && x[1] < bound) { if (!tf32) tf32 = x[1]; if (x[1] == tf32) width[x[1]] = 1; }
+            else if (op == OpTypeVector && n == 4 && x[1] < bound && tf32 && x[2] == tf32 && x[3] >= 2 && x[3] <= 4) width[x[1]] = (uint8_t)x[3];
+            else if (op == OpTypePointer && n == 4 && x[1] < bound && x[2] == Input) inptr[x[1]] = 1;
+            else if (op == OpVariable && n >= 4 && x[2] < bound && x[1] < bound && inptr[x[1]]) invar[x[2]] = 1;
+            else if ((op == 65 || op == 66) && n >= 4 && x[2] < bound && x[3] < bound && invar[x[3]]) invar[x[2]] = 1;   // OpAccessChain / OpInBoundsAccessChain into an input
+            else if (op == OpFunction && !first_fn) first_fn = i;
+        } else if (KIND(x, n, op)) hits++;
+        i += n; }
+    if (!hits || !glsl || !tf32 || !first_fn) goto none;
+    {   // constants: lo / hi per kind and width
+        static const uint32_t lo_bits[4] = { 0, 0xc4800000u, 0xc6800000u, 0xc6800000u }, hi_bits[4] = { 0, 0x44800000u, 0x46800000u, 0x46800000u };   // ±1024, ±16384
+        uint32_t *o = malloc(4 * (words + hits * 24 + 64)); if (!o) goto none;   // (each: 8 words of clamp, up to 14 of vector bounds)
+        uint32_t next = bound, cs[4][5][2]; memset(cs, 0, sizeof cs); size_t w = 0;
+        for (size_t i = 0; i < words;) {
+            size_t n = i < 5 ? 5 : code[i] >> 16; const uint32_t *x = code + i; uint32_t op = i < 5 ? 0 : x[0] & 0xffff;
+            if (i == first_fn) for (int k = 1; k <= 3; k++) {
+                uint32_t sl = next++, sh = next++; o[w++] = 4u << 16 | OpConstant; o[w++] = tf32; o[w++] = sl; o[w++] = lo_bits[k]; o[w++] = 4u << 16 | OpConstant; o[w++] = tf32; o[w++] = sh; o[w++] = hi_bits[k];
+                cs[k][1][0] = sl; cs[k][1][1] = sh; }
+            int k = i >= 5 ? KIND(x, n, op) : 0;
+            if (k) {
+                uint32_t ty = x[1], res = x[2], m = next++, wd = width[ty]; memcpy(o + w, x, 4 * n); o[w + 2] = m; w += n;
+                uint32_t lo = cs[k][1][0], hi = cs[k][1][1];
+                if (wd > 1) {   // vector bounds: composites built where the result is (after the type exists), once per type and kind would need the globals section; built in place
+                    uint32_t vl = next++, vh = next++;
+                    o[w++] = (3u + wd) << 16 | 80 /* OpCompositeConstruct */; o[w++] = ty; o[w++] = vl; for (uint32_t c = 0; c < wd; c++) o[w++] = cs[k][1][0];
+                    o[w++] = (3u + wd) << 16 | 80; o[w++] = ty; o[w++] = vh; for (uint32_t c = 0; c < wd; c++) o[w++] = cs[k][1][1];
+                    lo = vl; hi = vh; }
+                o[w++] = 8u << 16 | OpExtInst; o[w++] = ty; o[w++] = res; o[w++] = glsl; o[w++] = NClamp; o[w++] = m; o[w++] = lo; o[w++] = hi;
+            } else { memcpy(o + w, x, 4 * n); w += n; }
+            i += n; }
+        free(width); free(inptr); free(invar); o[3] = next; *out_words = w; return o;
+    }
+none:
+    free(width); free(inptr); free(invar); return NULL;
+    #undef KIND
 }

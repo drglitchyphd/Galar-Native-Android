@@ -309,3 +309,18 @@ Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)	Auto: 4x numa tela
 2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: uma imagem entre cada dois quadros do jogo (30 fps se movem como 60)
 3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: duas imagens entre cada dois quadros (como 90 fps; uniforme só numa tela de 90 Hz)
 4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: três imagens entre cada dois quadros (como 120 fps; precisa de uma tela de 120 Hz e uma GPU rápida)
+Sustained performance	Desempenho sustentado
+Off: the phone's full speed, which drops when it gets hot	Não: toda a velocidade do telefone, que cai quando esquenta
+On: a speed the phone can hold for hours, fewer slowdowns when hot	Sim: uma velocidade que o telefone mantém por horas, menos quedas quando esquenta
+Camera sensitivity	Sensibilidade da câmera
+Slower camera: the right stick and the touch camera turn less	Câmera mais lenta: o analógico direito e a câmera por toque giram menos
+As on the Switch	Como no Switch
+Faster camera: full speed with less of the stick	Câmera mais rápida: velocidade máxima com menos curso do analógico
+Off: plain multiplies, as before v0.74	Desligado: multiplicações normais, como antes da v0.74
+Auto: on with PanVK (black patches), off with the phone's own Mali driver	Auto: ligado com PanVK (manchas pretas), desligado com o driver Mali do próprio celular
+White-screen probe	Teste de tela branca
+Inputs	Entradas
+Divisions	Divisões
+Textures: every texture read is limited to a sane range. If the white goes away, tell us: a texture is read wrong	Texturas: cada leitura de textura é limitada a um intervalo razoável. Se o branco sumir, avise-nos: uma textura é lida errado
+Inputs: every value the vertex shader hands over is limited. If the white goes away, tell us	Entradas: cada valor passado pelo shader de vértices é limitado. Se o branco sumir, avise-nos
+Divisions: every division is limited. If the white goes away, tell us	Divisões: cada divisão é limitada. Se o branco sumir, avise-nos
