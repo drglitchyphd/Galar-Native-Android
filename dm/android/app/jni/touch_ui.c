@@ -65,6 +65,9 @@ extern volatile int dm_fork_ff_req __attribute__((weak)), dm_fork_ff_speed __att
 static int in_battle(void) { return &dm_fork_screen && atomic_load(&dm_fork_screen) == 2; }
 static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0; }
 static void bhide_set(int on) { g_bhide = on; census_sync(); }
+// FORK v46: one switch, "Battle controls: Battle mode" (DM_FORK_BATTLE=on): unused buttons hidden, battle icons, the battle's own layout. Set before v46 (no
+//   DM_FORK_BATTLE yet), the old DM_FORK_BATTLE_HIDE / _LAYOUT still turn it on, so a player's battle setup carries over
+static void battle_mode(int on) { bhide_set(on); g_bicons = on; g_blayout = on; g_w = g_h = 0; census_sync(); }
 static int fork_hidden(int c) {
     if (c == C_FF) return !g_ffscope || (g_ffscope == 1 && !in_battle());
     if (c == C_TURBO) return !g_turbo_on;
@@ -571,13 +574,11 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_TOUCH_SIZE")) { g_tsize = value ? clampf((float)atof(value) / 100.0f, 0.5f, 1.5f) : 1.0f; g_w = g_h = 0; }   // FORK (the layout made again)
     else if (!strcmp(key, "DM_TOUCH_FADE")) g_fade = value ? fmaxf(0.0f, (float)atof(value)) : 3.0f;
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
-    else if (!strcmp(key, "DM_FORK_BATTLE_HIDE")) bhide_set(value && !strcmp(value, "on"));   // FORK
+    else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
     else if (!strcmp(key, "DM_FORK_FF")) { g_ffscope = !value ? 0 : !strcmp(value, "battle") ? 1 : !strcmp(value, "all") ? 2 : 0; if (!g_ffscope) g_ff_toggle = 0; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_FF_SPEED")) { if (&dm_fork_ff_speed) dm_fork_ff_speed = value ? atoi(value) : 0; }   // FORK (host/fork_ff.c)
     else if (!strcmp(key, "DM_FORK_TURBO")) g_turbo_on = value && !strcmp(value, "on");   // FORK
     else if (!strcmp(key, "DM_FORK_TURBO_HZ")) g_turbo_hz = value ? clampf((float)atof(value), 3, 20) : 10;   // FORK
-    else if (!strcmp(key, "DM_FORK_BATTLE_ICONS")) { g_bicons = !(value && !strcmp(value, "off")); census_sync(); }   // FORK
-    else if (!strcmp(key, "DM_FORK_BATTLE_LAYOUT")) { g_blayout = value && !strcmp(value, "on"); census_sync(); g_w = g_h = 0; }   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE_FADE")) { g_bfade = value && *value && atof(value) >= 0 ? clampf((float)atof(value), 0, 10) : -1; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE_OPACITY")) { g_bopacity = value && atof(value) > 0 ? clampf((float)atof(value) / 100.0f, 0.05f, 1.0f) : 0; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_DEADZONE")) g_dead = value ? clampf((float)atof(value) / 100.0f, 0.0f, 0.4f) : 0.12f;   // FORK
@@ -602,8 +603,9 @@ static void prefs(void) {
     g_opacity = o ? clampf((float)atof(o) / 100.0f, 0.05f, 1.0f) : 1.0f;   // FORK: down to 5 %
     { const char *tc = getenv("DM_FORK_TOUCH_COLOR"), *ts = getenv("DM_FORK_TOUCH_SIZE"); g_tint = tint_of(tc); if (ts && *ts) { g_tsize = clampf((float)atof(ts) / 100.0f, 0.5f, 1.5f); g_w = g_h = 0; } }   // FORK if (f) g_fade = fmaxf(0.0f, (float)atof(f));
     { const char *ft = getenv("DM_FORK_TOUCH"), *dz = getenv("DM_FORK_DEADZONE"); g_float = ft && !strcmp(ft, "float");   // FORK: the control scheme, the dead zone
-      { const char *bh = getenv("DM_FORK_BATTLE_HIDE"); bhide_set(bh && !strcmp(bh, "on")); }   // FORK
-      { static const char *const keys[] = { "DM_FORK_FF", "DM_FORK_TURBO", "DM_FORK_TURBO_HZ", "DM_FORK_BATTLE_ICONS", "DM_FORK_BATTLE_LAYOUT", "DM_FORK_BATTLE_OPACITY", "DM_FORK_BATTLE_FADE" };   // FORK: the rest, as the menu sets them
+      { const char *b = getenv("DM_FORK_BATTLE"), *bh = getenv("DM_FORK_BATTLE_HIDE"), *bl = getenv("DM_FORK_BATTLE_LAYOUT");   // FORK v46: battle mode (the old keys: before v46)
+        battle_mode(b && *b ? !strcmp(b, "on") : (bh && !strcmp(bh, "on")) || (bl && !strcmp(bl, "on"))); }
+      { static const char *const keys[] = { "DM_FORK_FF", "DM_FORK_TURBO", "DM_FORK_TURBO_HZ", "DM_FORK_BATTLE_OPACITY", "DM_FORK_BATTLE_FADE" };   // FORK: the rest, as the menu sets them
         pthread_mutex_unlock(&g_mu); for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++) { const char *v = getenv(keys[i]); if (v && *v) touch_ui_setting(keys[i], v); } pthread_mutex_lock(&g_mu); census_sync(); }
       if (dz && *dz) g_dead = clampf((float)atof(dz) / 100.0f, 0.0f, 0.4f); if (g_float) fprintf(stderr, "[FORK] [touch] floating sticks, tap for A (dead zone %.0f %%)\n", g_dead * 100); }
 }

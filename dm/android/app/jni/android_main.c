@@ -215,7 +215,7 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
         } else now = 0;
     }
     else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
-    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3") || !strcmp(k, "DM_FORK_TOUCH") || !strcmp(k, "DM_FORK_DEADZONE") || !strcmp(k, "DM_FORK_BATTLE_HIDE") || !strcmp(k, "DM_FORK_TOUCH_COLOR") || !strcmp(k, "DM_FORK_TOUCH_SIZE") || !strncmp(k, "DM_FORK_FF", 10) || !strncmp(k, "DM_FORK_TURBO", 13) || !strncmp(k, "DM_FORK_BATTLE_", 15)) touch_ui_setting(k, v);   // FORK: + fast-forward, turbo, battle   // FORK: + DM_FORK_TOUCH, DM_FORK_DEADZONE
+    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3") || !strcmp(k, "DM_FORK_TOUCH") || !strcmp(k, "DM_FORK_DEADZONE") || !strcmp(k, "DM_FORK_BATTLE_HIDE") || !strcmp(k, "DM_FORK_TOUCH_COLOR") || !strcmp(k, "DM_FORK_TOUCH_SIZE") || !strncmp(k, "DM_FORK_FF", 10) || !strncmp(k, "DM_FORK_TURBO", 13) || !strncmp(k, "DM_FORK_BATTLE", 14)) touch_ui_setting(k, v);   // FORK: + fast-forward, turbo, battle   // FORK: + DM_FORK_TOUCH, DM_FORK_DEADZONE
     else if (!strcmp(k, "DM_FORK_CAPTURE")) { extern volatile int dm_fork_capture_arm, dm_fork_capture_trainer; if (v && !strcmp(v, "trainer")) dm_fork_capture_trainer = 1; else dm_fork_capture_arm = 1; }   // FORK: + trainer (v41)   // FORK: fork_ui.h, the menu's "Capture the next odd frame"
     else if (!strcmp(k, "DM_ASPECT")) __atomic_store_n(&dm_aspect_mode, dm_aspect_parse(v), __ATOMIC_RELAXED);   // FORK: dm_aspect_parse (adds "fix")
     else if (!strcmp(k, "DM_RSTICK_SENS")) { extern _Atomic int dm_rstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 25 || p > 400) p = 100; if (&dm_rstick_pct) atomic_store(&dm_rstick_pct, p); else now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
@@ -390,7 +390,8 @@ static void window_rate(ANativeWindow *w) {
     //   300 of 600 pictures in 10 s, 33.4 ms apart)
     { extern volatile int dm_framegen_mode; int fg = dm_framegen_mode; const char *f = getenv("DM_FRAMEGEN");
       if (fg < 0) fg = f && (!strcmp(f, "on") || !strcmp(f, "1") || !strcmp(f, "debug") || !strcmp(f, "lsfg"));
-      if (fg) rate = 120.0f; }   // (not the doubled rate itself: at 60 Hz every picture must make its own refresh with no slack, and a tenth of them missed it; at 120 each has a timed slot)
+      if (fg) rate = 120.0f; }
+    { const char *ff = getenv("DM_FORK_FG"); if (ff && (!strcmp(ff, "2x") || !strcmp(ff, "3x"))) rate = 120.0f; }   // FORK: the fork's frame generation too (2x: 60, 3x: 90 on screen; the screen at 120 has slots for both)   // (not the doubled rate itself: at 60 Hz every picture must make its own refresh with no slack, and a tenth of them missed it; at 120 each has a timed slot)
     // libnativewindow: setFrameRateWithChangeStrategy (Android 12+, ALWAYS: the display switches modes even when the switch is not seamless, so a 144 Hz screen goes
     // to 120 for 30 / 60 fps), else setFrameRate (Android 11); looked up, so a system without them only skips this
     typedef int32_t (*set_rate_fn)(ANativeWindow *, float, int8_t); typedef int32_t (*set_rate2_fn)(ANativeWindow *, float, int8_t, int8_t);

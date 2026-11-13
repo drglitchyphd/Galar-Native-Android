@@ -119,7 +119,8 @@ static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, 
         g_fk_uimode = 1; }
     float kx, ky; dm_fork_ui_scale(&kx, &ky);
     if (kx == 1 && ky == 1) return;
-    g_fk_sq = 1; g_fk_ntex = 0; g_fk_texmax = 0; g_fk_screenish = 0; g_fk_banner = 0; g_fk_tw = (int)tw; g_fk_th = (int)th; g_fk_ky = ky; g_fk_kx = kx;   // FORK v44: + banner g_fk_v0 = *v; g_fk_sc0 = *sc; snprintf(g_fk_sqkey, sizeof g_fk_sqkey, "%.16s", vkey);   // (fork_ui_fill may give it back)
+    g_fk_sq = 1; g_fk_ntex = 0; g_fk_texmax = 0; g_fk_screenish = 0; g_fk_banner = 0; g_fk_tw = (int)tw; g_fk_th = (int)th; g_fk_ky = ky; g_fk_kx = kx;   // FORK v44: + banner (v46: the rest of this line had gone into the comment: no shader name, a stale viewport)
+    g_fk_v0 = *v; g_fk_sc0 = *sc; snprintf(g_fk_sqkey, sizeof g_fk_sqkey, "%.16s", vkey);   // (fork_ui_fill may give it back)
     float cx = tw * 0.5f, cy = th * 0.5f;
     if (!g_fk_comp && !g_fk_clear) {   // no 3D under the UI this frame: black where the shrunk UI does not reach (else last frame's picture would stay there)
         g_fk_clear = 1;

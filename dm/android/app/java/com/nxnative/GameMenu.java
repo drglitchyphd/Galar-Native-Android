@@ -172,44 +172,22 @@ public final class GameMenu {
         p.setBackground(on ? round(accent(a), dp(a, 14), 0, 0) : round(CHIP, dp(a, 14), 1, CARD_LINE)); return p;
     }
     // a choice: { value, chip label, what it does }; the chosen one's line under the chips. Applied at once when the engine can (nativeSetting), else tagged "Applies next start"
-    // FORK: frame generation, one choice over two settings: the fork's (DM_FORK_FG=2x, Lossless.dll through libforklsfg.so, next start) and upstream's
-    //   (DM_FRAMEGEN on / lsfg, at once). Choosing one clears the other; upstream's Lossless Scaling is imported from the setup screen's Lossless.dll when needed
-    private static void forkFrameGen(Activity a, String[][] up) {
-        boolean dll = Fork.lsfgDll(a).isFile();
-        String cur = "2x".equals(GameSettings.get(a, "DM_FORK_FG")) && dll ? "fork" : GameSettings.get(a, "DM_FRAMEGEN");
-        java.util.List<String[]> o = new java.util.ArrayList<>();
-        o.add(new String[] { "", t(a, "Off"), "" });
-        if (dll) o.add(new String[] { "fork", t(a, "Lossless 2x (fork)"), t(a, "The fork's: your Lossless.dll through lsfg-vk, a generated frame between every two of the game's (60 on screen). From the next start") });
-        o.add(new String[] { "on", t(a, "Built-in"), up[1][2] });
-        // FORK v43: upstream's Lossless only while already chosen (Steven Nov 12: no visible difference; the fork's looks good)
-        if ("lsfg".equals(cur)) o.add(new String[] { "lsfg", t(a, "Lossless (upstream)"), up[2][2] + (GameSettings.hasLsfg(a) ? "" : " " + t(a, "(imported from your Lossless.dll when chosen)")) });
-        LinearLayout c = card(a);
-        titleRow(a, c, t(a, "Frame generation"), RESTART.contains("DM_FORK_FG") || RESTART.contains("DM_FRAMEGEN") ? t(a, "Applies next start") : null);
+    // FORK v46: one choice that sets several settings at once (Smoothness, Leaving the game). keys: the settings; each option: { label, description, value per key }.
+    //   The chip shown as chosen is the first option whose values all match; none matching: the first
+    private static void combo(Activity a, String title, String[] keys, String[][] opts) {
+        int cur = 0; for (int i = 0; i < opts.length && cur == 0; i++) { boolean m = true; for (int k = 0; k < keys.length; k++) if (!opts[i][2 + k].equals(GameSettings.get(a, keys[k]))) m = false; if (m) cur = i; }
+        boolean restart = false; for (String k : keys) restart |= RESTART.contains(k);
+        LinearLayout c = card(a); titleRow(a, c, title, restart ? t(a, "Applies next start") : null);
         HorizontalScrollView hs = new HorizontalScrollView(a); hs.setHorizontalScrollBarEnabled(false);
         LinearLayout chips = new LinearLayout(a); chips.setPadding(0, dp(a, 10), 0, dp(a, 6)); hs.addView(chips); c.addView(hs);
         TextView desc = text(a, "", 13, SUB, false); c.addView(desc);
-        boolean found = false; for (String[] x : o) if (x[0].equals(cur)) found = true;
-        for (String[] x : o) {
-            boolean on = x[0].equals(cur) || (!found && x == o.get(0));
-            TextView ch = text(a, x[1], 14, on ? Color.WHITE : TEXT, on); ch.setPadding(dp(a, 16), dp(a, 8), dp(a, 16), dp(a, 8));
+        for (int i = 0; i < opts.length; i++) {
+            String[] o = opts[i]; boolean on = i == cur;
+            TextView ch = text(a, o[0], 14, on ? Color.WHITE : TEXT, on); ch.setPadding(dp(a, 16), dp(a, 8), dp(a, 16), dp(a, 8));
             ch.setBackground(on ? round(accent(a), dp(a, 18), 0, 0) : round(CHIP, dp(a, 18), 1, CARD_LINE));
-            ch.setOnClickListener(v -> {
-                Runnable apply = () -> {
-                    String f = x[0].equals("fork") ? "2x" : "", u = x[0].equals("on") || x[0].equals("lsfg") ? x[0] : "";
-                    if (!f.equals(GameSettings.get(a, "DM_FORK_FG"))) set(a, "DM_FORK_FG", f);
-                    if (!u.equals(GameSettings.get(a, "DM_FRAMEGEN"))) set(a, "DM_FRAMEGEN", u);
-                    redraw(); };
-                if (x[0].equals("lsfg") && !GameSettings.hasLsfg(a)) {   // upstream's Lossless Scaling: its shaders converted from the setup screen's Lossless.dll first
-                    android.widget.Toast.makeText(a, t(a, "Importing Lossless Scaling…"), android.widget.Toast.LENGTH_SHORT).show();
-                    new Thread(() -> { String why;
-                        try { why = nativeLsfgImport(java.nio.file.Files.readAllBytes(Fork.lsfgDll(a).toPath()), new File(GameSettings.root(a), "lsfg").getPath()); }
-                        catch (Exception | UnsatisfiedLinkError e) { why = String.valueOf(e); }
-                        final String w = why;
-                        a.runOnUiThread(() -> { if (w == null) apply.run();
-                            else android.widget.Toast.makeText(a, t(a, "Could not import Lossless Scaling: %s", w), android.widget.Toast.LENGTH_LONG).show(); }); }).start();
-                } else apply.run(); });
+            ch.setOnClickListener(v -> { for (int k = 0; k < keys.length; k++) if (!o[2 + k].equals(GameSettings.get(a, keys[k]))) set(a, keys[k], o[2 + k]); redraw(); });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.rightMargin = dp(a, 8); chips.addView(ch, lp);
-            if (on) desc.setText(x.length > 2 ? x[2] : "");
+            if (on) desc.setText(o[1]);
         }
     }
     private static void choice(Activity a, String key, String title, String[][] opts) {
@@ -299,22 +277,7 @@ public final class GameMenu {
         choice(a, "DM_SCALER", t(a, "Upscaling"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", rec) },
             { "sharp", t(a, "Sharp"), t(a, "Sharp: the picture upscaled with sharpening (lighter settings keep their detail)") },
             { "sgsr", "SGSR", t(a, "Snapdragon Game Super Resolution (Qualcomm's upscaler)") }, { "smooth", t(a, "Smooth"), t(a, "Smooth: a plain stretch") } });
-        // Frame generation (nvn_vk.c, nvn_fgen.h): off unless the player turns it on, on any GPU; takes effect at once
-        //   Lossless Scaling's (nvn_lsfg.h): offered once the player has imported their own Lossless.dll (its shaders, converted, in files/lsfg)
-        String[][] fgc = { { "", t(a, "Off"), "" },
-            { "on", t(a, "On"), t(a, "On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Needs a fast GPU; your input shows about 17 ms later") },
-            { "lsfg", "Lossless Scaling", t(a, "Lossless Scaling: the in-between picture made by your own copy of Lossless Scaling's frame generation (sharper motion, needs a faster GPU)") } };
-        forkFrameGen(a, fgc);   // FORK: one setting for the fork's frame generation and upstream's (only one runs), in place of upstream's DM_FRAMEGEN choice
-        if (GameSettings.hasLsfg(a))   // Lossless Scaling's pictures a game frame (nvn_vk.c lsfg_mult); Auto: as many as the display's rate divides evenly
-            choice(a, "DM_LSFG_MULT", t(a, "Lossless Scaling pictures"), new String[][] {
-                { "", t(a, "Auto"), t(a, "Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)") },
-                { "2", "2x", t(a, "2x: one picture between each two of the game's frames (30 fps moves like 60)") },
-                { "3", "3x", t(a, "3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)") },
-                { "4", "4x", t(a, "4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)") } });
-        if (!GameSettings.hasLsfg(a) && !Fork.lsfgDll(a).isFile()) {   // FORK: && no Lossless.dll on the setup screen (that one is imported from there when chosen)   // (the player's own copy: Lossless Scaling is a paid app, nothing of it comes with this one)
-            note(a, t(a, "Own Lossless Scaling? Import its Lossless.dll (in the program's folder) to use its frame generation here."));
-            LinearLayout lr = new LinearLayout(a); body.addView(lr);
-            button(a, lr, t(a, "Import Lossless.dll"), false, () -> pick(a, Intent.ACTION_OPEN_DOCUMENT, null, REQ_LSFG)); }
+        // FORK v46: frame generation moved into Speed → Smoothness (with the frame rate); upstream's own frame generation and its Lossless.dll import are not offered
         // HD textures: the player's own retexture mods (Mods), on Auto only on phones with the memory for them (GameSettings.profile, android_main.c mod_root);
         //   offered once such a mod is in the mods folder
         if (GameSettings.hasTexturePack(a)) {
@@ -337,23 +300,28 @@ public final class GameMenu {
             // Lowest: handheld mode with the game's 3D render scale capped (Pokémon Sword / Shield: the engine's hle_resscale.c; Scarlet / Violet have no such scale)
             { "lowest", t(a, "Lowest"), t(a, "Lowest: handheld mode, 3D at 960x540, coolest") } };
         choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);
-        if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", p[5]) },
-            { "30", "30 fps", t(a, "30 fps, as the game is made") }, { "60", "60 fps", GameSettings.paldea(a) ? t(a, "Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)")
-                                                                                               : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") } });
-        // FORK: frame pacing slack (nvn_vk.c pace_time, DM_FORK_PACE_MARGIN)
+        // FORK v46: Smoothness: the frame rate and frame generation as one choice (60 fps mode and frame generation do not go together: with both the game held 30).
+        //   Writes DM_FPS_TARGET, DM_FORK_FG (gfx/nvn/fork_fg.h, the player's Lossless.dll) and clears upstream's DM_FRAMEGEN
+        boolean dll = Fork.lsfgDll(a).isFile();
+        java.util.List<String[]> sm = new java.util.ArrayList<>();
+        sm.add(new String[] { t(a, "Auto"), t(a, "Auto: this phone gets %s fps (stock)", p[5]), "", "", "" });
+        sm.add(new String[] { "30 fps", t(a, "30 fps, as the game is made"), "30", "", "" });
+        if (dll) {
+            sm.add(new String[] { t(a, "60 (Lossless 2x)"), t(a, "The game at 30, a generated frame between every two: 60 on screen. Animations keep their speed. From the next start"), "30", "2x", "" });
+            sm.add(new String[] { t(a, "90 (Lossless 3x)"), t(a, "The game at 30, two generated frames between every two: 90 on screen. On a 120 Hz screen frames cannot be evenly spaced; heavier on the GPU. From the next start"), "30", "3x", "" }); }
+        if (GameSettings.has60(a)) sm.add(new String[] { t(a, "60 fps mode"), t(a, "The game itself at 60: some animations play at the wrong speed; drops to 720p when needed"), "60", "", "" });
+        combo(a, t(a, "Smoothness"), new String[] { "DM_FPS_TARGET", "DM_FORK_FG", "DM_FRAMEGEN" }, sm.toArray(new String[0][]));
+        if (!dll) note(a, t(a, "Lossless frame generation: choose your Lossless.dll on the setup screen (System, Setup screen, Frame generation)."));
+        // FORK: frame pacing slack (nvn_vk.c pace_time, DM_FORK_PACE_MARGIN); the pacer counts in the screen's own top rate (v46: automatic, nvn_vk.c fork_refresh)
         choice(a, "DM_FORK_PACE_MARGIN", t(a, "Frame pacing"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: each frame aimed one refresh ahead (least delay)") },
             { "2", t(a, "Smooth"), t(a, "Smooth: two refreshes ahead, frames a little late still show on time (about 4 ms more delay)") },
             { "3", t(a, "Smoothest"), t(a, "Smoothest: three refreshes ahead (about 8 ms more delay)") } });
-        // FORK: the fork's frame generation's own settings (gfx/nvn/fork_fg.h, libforklsfg.so; chosen above as "Lossless 2x (fork)")
-        if ("2x".equals(GameSettings.get(a, "DM_FORK_FG")) && Fork.lsfgDll(a).isFile()) {
-            slider(a, t(a, "Flow scale (fork)"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
-            choice(a, "DM_FORK_FG_PERF", t(a, "Model (fork)"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
+        String fgv = GameSettings.get(a, "DM_FORK_FG");
+        if (dll && (fgv.equals("2x") || fgv.equals("3x"))) {   // the fork's frame generation's own settings
+            slider(a, t(a, "Frame generation: flow scale"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
+            choice(a, "DM_FORK_FG_PERF", t(a, "Frame generation: model"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
                 { "off", t(a, "Quality"), t(a, "Quality: the full model, heavier") } });
         }
-        // FORK: the refresh the frame pacing counts in (nvn_vk.c fork_refresh): some drivers report a faster one than the screen has (the Fold's 120 Hz screen reported 240)
-        choice(a, "DM_FORK_MAX_HZ", t(a, "Pacing refresh"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the refresh the driver reports") },
-            { "120", "120 Hz", t(a, "120 Hz: frames paced in steps of 120 Hz, even if the driver reports more (from the next start)") },
-            { "60", "60 Hz", t(a, "60 Hz: steps of 60 Hz (from the next start)") } });
         if (GameActivity.sustainedSupported(a)) choice(a, "DM_SUSTAINED", t(a, "Sustained performance"), new String[][] {
             { "", t(a, "Off"), t(a, "Off: the phone's full speed, which drops when it gets hot") }, { "on", t(a, "On"), t(a, "On: a speed the phone can hold for hours, fewer slowdowns when hot") } });
         heading(a, t(a, "Memory"));
@@ -380,26 +348,17 @@ public final class GameMenu {
         choice(a, "DM_TOUCH_HAPTIC", t(a, "Vibrate on press"), new String[][] { { "", t(a, "Like rumble"), t(a, "Like rumble: off when Rumble is Off") },
                                                                                 { "on", t(a, "On"), "" }, { "off", t(a, "Off"), "" } });
         slider(a, t(a, "Opacity"), "DM_TOUCH_OPACITY", 5, 100, 100, v -> v + " %");   // FORK: from 5 % (stock 20)
-        // FORK: the controls' colour and overall size (touch_ui.c tint, g_tsize)
-        choice(a, "DM_FORK_TOUCH_COLOR", t(a, "Colour"), new String[][] { { "", t(a, "Blue"), "" }, { "grey", t(a, "Grey"), "" }, { "white", t(a, "White"), "" },
-            { "dark", t(a, "Dark"), "" }, { "red", t(a, "Red"), "" }, { "green", t(a, "Green"), "" }, { "purple", t(a, "Purple"), "" } });
-        slider(a, t(a, "Size"), "DM_FORK_TOUCH_SIZE", 50, 150, 100, v -> v + " %");
         slider(a, t(a, "Fade after"), "DM_TOUCH_FADE", 0, 10, 3, v -> v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));
+        // FORK v46: the fork's touch extras together (touch_ui.c, host/fork_ff.c)
+        heading(a, t(a, "Fork extras"));
         // FORK: the control scheme (touch_ui.c g_float) and the sticks' dead zone
         choice(a, "DM_FORK_TOUCH", t(a, "Control scheme"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the stick on the left, drag on the right turns the camera") },
             { "float", t(a, "Floating sticks"), t(a, "Floating sticks: the left half is the movement stick and the right half the camera stick, each where your thumb lands; a quick tap anywhere that is not a button presses A, two fingers B") } });
         slider(a, t(a, "Stick dead zone"), "DM_FORK_DEADZONE", 0, 40, 12, v -> v + " %");
-        choice(a, "DM_FORK_BATTLE_HIDE", t(a, "In battle"), new String[][] { { "", t(a, "All buttons"), t(a, "All buttons: the same controls everywhere") },   // FORK: touch_ui.c battle_hidden
-            { "on", t(a, "Hide unused"), t(a, "Hide unused: during battles L, R, ZL, ZR, + and - and the right stick are hidden (A, B, X, Y, the D-pad and the stick stay)") } });
-        // FORK: battle style and layout, fast-forward, turbo A (touch_ui.c, host/fork_ff.c)
-        heading(a, t(a, "Battle"));
-        choice(a, "DM_FORK_BATTLE_ICONS", t(a, "Battle icons"), new String[][] { { "", t(a, "On"), t(a, "On: in battles X shows a Poké Ball (quick ball), B a back arrow, Y info") },
-            { "off", t(a, "Off"), t(a, "Off: the letters everywhere") } });
-        choice(a, "DM_FORK_BATTLE_LAYOUT", t(a, "Battle layout"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
-            { "on", t(a, "Its own"), t(a, "Its own: battles use a layout of their own on each screen. Open Move the touch controls during a battle to arrange it (it starts as a copy of the normal one)") } });
-        slider(a, t(a, "Battle opacity"), "DM_FORK_BATTLE_OPACITY", 0, 100, 0, v -> v == 0 ? t(a, "same as elsewhere") : v + " %");
-        slider(a, t(a, "Battle: fade after"), "DM_FORK_BATTLE_FADE", -1, 10, -1, v -> v < 0 ? t(a, "same as elsewhere") : v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));   // FORK v38
-        heading(a, t(a, "Fast-forward and turbo"));
+        // FORK: the controls' colour and overall size (touch_ui.c tint, g_tsize)
+        choice(a, "DM_FORK_TOUCH_COLOR", t(a, "Colour"), new String[][] { { "", t(a, "Blue"), "" }, { "grey", t(a, "Grey"), "" }, { "white", t(a, "White"), "" },
+            { "dark", t(a, "Dark"), "" }, { "red", t(a, "Red"), "" }, { "green", t(a, "Green"), "" }, { "purple", t(a, "Purple"), "" } });
+        slider(a, t(a, "Size"), "DM_FORK_TOUCH_SIZE", 50, 150, 100, v -> v + " %");
         choice(a, "DM_FORK_FF", t(a, "Fast-forward"), new String[][] { { "", t(a, "Off"), "" },
             { "battle", t(a, "In battles"), t(a, "In battles: the ⏩ button shows during battles. Tap: on / off. Hold: fast while held") },
             { "all", t(a, "Anywhere"), t(a, "Anywhere: the ⏩ button is always there (walking, hatching, battles)") } });
@@ -407,6 +366,16 @@ public final class GameMenu {
         choice(a, "DM_FORK_TURBO", t(a, "Turbo A"), new String[][] { { "", t(a, "Off"), "" },
             { "on", t(a, "On"), t(a, "On: hold the ⚡ button to press A again and again (text, buying, hatching)") } });
         slider(a, t(a, "Turbo speed"), "DM_FORK_TURBO_HZ", 3, 20, 10, v -> t(a, "%d presses a second", v));
+        // FORK v46: battle controls as one switch (touch_ui.c battle_mode: unused buttons hidden, battle icons, the battle's own layout) and its two sliders.
+        //   Set before v46 with the old separate settings: carried over once (the old keys cleared, so Same as elsewhere is off for good)
+        if (GameSettings.get(a, "DM_FORK_BATTLE").isEmpty() && ("on".equals(GameSettings.get(a, "DM_FORK_BATTLE_HIDE")) || "on".equals(GameSettings.get(a, "DM_FORK_BATTLE_LAYOUT")))) {
+            GameSettings.set(a, "DM_FORK_BATTLE", "on"); GameSettings.set(a, "DM_FORK_BATTLE_HIDE", ""); GameSettings.set(a, "DM_FORK_BATTLE_LAYOUT", ""); GameSettings.set(a, "DM_FORK_BATTLE_ICONS", ""); }
+        heading(a, t(a, "Battle"));
+        choice(a, "DM_FORK_BATTLE", t(a, "Battle controls"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
+            { "on", t(a, "Battle mode"), t(a, "Battle mode: in battles the unused buttons hide (L, R, ZL, ZR, +, −, right stick), X shows a Poké Ball, B a back arrow, Y info, and battles keep a layout of their own on each screen (arrange it with Move the touch controls during a battle)") } });
+        if ("on".equals(GameSettings.get(a, "DM_FORK_BATTLE"))) {
+            slider(a, t(a, "Battle opacity"), "DM_FORK_BATTLE_OPACITY", 0, 100, 0, v -> v == 0 ? t(a, "same as elsewhere") : v + " %");
+            slider(a, t(a, "Battle: fade after"), "DM_FORK_BATTLE_FADE", -1, 10, -1, v -> v < 0 ? t(a, "same as elsewhere") : v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v)); }
         action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Save, Reset or Cancel on the bar at the top. Each screen and orientation keeps its own layout."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); ForkTouch.bar(a); } catch (UnsatisfiedLinkError e) { } });   // FORK: ForkTouch.bar
     }
@@ -609,10 +578,12 @@ public final class GameMenu {
         String[][] l = new String[T.LANGS.length][]; for (int i = 0; i < l.length; i++) l[i] = new String[] { T.LANGS[i][0], i == 0 ? t(a, "Auto") : T.LANGS[i][1], i == 0 ? t(a, "Auto (the phone's language)") : "" };
         choice(a, "DM_LANG", t(a, "Language"), l);
         heading(a, t(a, "Background"));
-        choice(a, "DM_FORK_KEEPALIVE", t(a, "Keep running in the background"), new String[][] { { "", t(a, "Off"), t(a, "Off: Android may close the game a few minutes after you leave it") },   // FORK: ForkKeepAlive
-            { "on", t(a, "On"), t(a, "On: a quiet notification keeps the game open while you use other apps (it still uses battery unless Leaving the game is set to Pause)") } });
-        choice(a, "DM_BACKGROUND", t(a, "Leaving the game"), new String[][] { { "", t(a, "Keep playing"), t(a, "Keep playing: the game and its sound go on in the background") },
-            { "off", t(a, "Pause"), t(a, "Pause: the game stops while it is not on screen") } });
+        // FORK v46: upstream's "Leaving the game" (DM_BACKGROUND) and the fork's keep-alive service (DM_FORK_KEEPALIVE, ForkKeepAlive) as one choice
+        combo(a, t(a, "Leaving the game"), new String[] { "DM_BACKGROUND", "DM_FORK_KEEPALIVE" }, new String[][] {
+            { t(a, "Keep playing"), t(a, "Keep playing: the game and its sound go on in the background (Android may close it after a few minutes)"), "", "" },
+            { t(a, "Pause"), t(a, "Pause: the game stops while it is not on screen (Android may close it after a few minutes)"), "off", "" },
+            { t(a, "Pause, stay open"), t(a, "Pause, and a quiet notification keeps the game open while you use other apps"), "off", "on" },
+            { t(a, "Keep playing, stay open"), t(a, "Keep playing, and a quiet notification keeps the game open (uses battery)"), "", "on" } });
         // the replay on its own thread (hle_nvn.c DM_NVN_ASYNC): the game's thread hands each frame's graphics work over instead of translating it itself (about a quarter
         //   of a frame on a slow CPU, #99). Off by default until players have run it on many phones
         heading(a, t(a, "Performance"));
@@ -620,9 +591,6 @@ public final class GameMenu {
             { "1", t(a, "On"), t(a, "On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub") } });
         // a frame capture for a bug report (nvn_vk.c, Frame capture): the engine reads capture.req (frames to wait, so the menu can be closed first) and writes the ZIP
         heading(a, t(a, "Bug reports"));
-        action(a, t(a, "Capture the next odd frame"), t(a, "For the Fill, corrected picture: the next time the game switches to a menu, or draws something the fork does not know yet over the 3D, that frame is saved like Capture a frame (Download, a ZIP)."),   // FORK: fork_ui.h
-               () -> { try { nativeSetting("DM_FORK_CAPTURE", "1"); } catch (UnsatisfiedLinkError e) { }
-                       android.widget.Toast.makeText(a, t(a, "Armed: close the menu and open the X menu (or do what shows the problem)."), android.widget.Toast.LENGTH_LONG).show(); });
         action(a, t(a, "Capture the trainer-spotted moment"), t(a, "For the Fill, corrected picture: the first time something new is drawn over the overworld (a trainer spotting you), that frame is saved at once (Download, a ZIP)."),   // FORK v41
                () -> { try { nativeSetting("DM_FORK_CAPTURE", "trainer"); } catch (UnsatisfiedLinkError e) { }
                        android.widget.Toast.makeText(a, t(a, "Armed: close the menu and walk into a trainer's view."), android.widget.Toast.LENGTH_LONG).show(); });

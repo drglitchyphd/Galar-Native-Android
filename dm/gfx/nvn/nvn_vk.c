@@ -88,10 +88,12 @@ static int arceus_pass_default(const char *name, const char *off_value, const ch
 //   last, so a 30 fps game shows every frame for the same 33.3 ms instead of whatever the timer and the display's refresh happen to line up to. It only asks for a time:
 //   the present mode stays as chosen (mailbox), so nothing here waits on the compositor. DM_VK_PACE=0 turns it off
 static int g_dtiming; static uint64_t g_refresh_ns;
-// FORK: DM_FORK_MAX_HZ (60 / 120; default: stock): the refresh the pacing counts in, at most that rate. The Fold's 120 Hz inner screen reported 4.17 ms (240 Hz),
+// FORK: the refresh the pacing counts in, at most the screen's top display mode. The Fold's 120 Hz inner screen reported 4.17 ms (240 Hz),
 //   and frames aimed at quarter-refresh steps landed unevenly. A faster reported refresh is taken in whole multiples (4.17 ms at 120: 8.33 ms)
 static uint64_t fork_refresh(uint64_t r) {
-    static int hz = -1; if (hz < 0) { const char *e = getenv("DM_FORK_MAX_HZ"); hz = e && atoi(e) >= 30 && atoi(e) <= 240 ? atoi(e) : 0; }
+    // v46: the screen's own top rate, from its display modes (GameActivity: DM_DISPLAY_HZ, e.g. "120,60"), not a setting any more (Steven Nov 13; DM_FORK_MAX_HZ is ignored)
+    static int hz = -1; if (hz < 0) { hz = 0; const char *e = getenv("DM_DISPLAY_HZ"); for (const char *q = e; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : NULL) { int v = atoi(q); if (v > hz && v <= 240) hz = v; }
+        if (hz < 30) hz = 0; }
     if (!hz || !r) return r;
     uint64_t min = 1000000000ull / (uint64_t)hz, k = (min + r - 1 - r / 64) / r; if (k < 1) k = 1;   // (a little slack: 8.33 against 4.167 x 2 = 8.334)
     if (k > 1) { static int said; if (!said++) VLOG("[FORK] pacing refresh: the driver reports %.3f ms, paced in steps of %.3f ms (at most %d Hz)", r / 1e6, k * r / 1e6, hz); }
@@ -4390,7 +4392,7 @@ static int swap_ensure_now(void *win, int srgb) {
       for (uint32_t i = 0; i < npm; i++) if (pms[i] == want) pm = want; }
     uint32_t n = caps.minImageCount + (framegen_mode() == 3 ? 4 : pm == VK_PRESENT_MODE_MAILBOX_KHR || framegen_mode() ? 2 : 1);   // (frame generation holds two images at once: the in-between picture and the real frame; Lossless Scaling's up to four, 4x)
     if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;   // FORK: on its own line (upstream's comment had swallowed it)
-    { int fork_fg_want(void); extern int g_fk_ahb; if (g_fk_ahb && fork_fg_want() && pm == VK_PRESENT_MODE_FIFO_KHR) { n += 2; if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount; } }   // FORK: room for two frames per game frame
+    { int fork_fg_want(void); extern int g_fk_ahb; if (g_fk_ahb && fork_fg_want() && pm == VK_PRESENT_MODE_FIFO_KHR) { int fork_fg_mult(void); n += (uint32_t)fork_fg_mult(); if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount; } }   // FORK: room for two frames per game frame
     // Pre-rotation (DM_VK_PRETRANSFORM=1, opt-in until checked on phones): the panel's own orientation is portrait and the game landscape, so the compositor turns
     // every frame; with the swapchain made in the panel's orientation (preTransform = currentTransform) the upscaler and the overlay draw the picture already turned
     // and the compositor has nothing to do. Only when the upscaler's pipeline exists: the blit cannot turn the picture
@@ -4488,7 +4490,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
     //   the shown frames come every half interval, so "uneven" is judged against that. Not used with upstream's own frame generation (g_fg_pace)
     static int pm0 = -1; if (pm0 < 0) { const char *me = getenv("DM_FORK_PACE_MARGIN"); pm0 = me && atoi(me) >= 1 && atoi(me) <= 3 ? atoi(me) : 1; if (pm0 > 1) VLOG("[FORK] frame pacing margin %d refreshes", pm0); }
     int pm = g_fg_pace ? 1 : pm0;
-    int fork_fg_live(void); uint64_t ivs = fork_fg_live() ? iv / 2 : iv;
+    int fork_fg_live(void); uint64_t ivs = fork_fg_live() ? iv / (uint64_t)fork_fg_live() : iv;   // (v46: 2x or 3x)
     if (p_past) {
         uint32_t n = 0;
         if (!p_past(g_dev, W.sc, &n, NULL) && n) {

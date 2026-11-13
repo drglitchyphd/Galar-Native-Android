@@ -1,6 +1,7 @@
 // FORK: frame generation (Lossless Scaling's LSFG 3.1 through libforklsfg.so, dm/fork/lsfg). Included by nvn_vk.c just above present_window_locked.
 // Settings (env.txt, the in-game menu's Performance page; all off by default):
 //   DM_FORK_FG=2x          one generated frame between every two real ones: the game keeps its own 30 fps (its timing and animations untouched), the screen shows 60
+//   DM_FORK_FG=3x          two generated frames between every two real ones: 90 on screen (v46; on a 120 Hz screen they cannot be evenly spaced: 1 and 2 refreshes in turn)
 //   DM_FORK_FG_FLOW=25-100 the flow scale in % (lower: lighter on the GPU, rougher motion), default 75
 //   DM_FORK_FG_PERF=off    the full model instead of the lighter "performance" one (default: performance)
 //   DM_FORK_LSFG_DLL       the player's own Lossless.dll (set by the app: Fork.exportRoot, after the setup screen copied it into private storage)
@@ -15,11 +16,17 @@
 #include <android/hardware_buffer.h>
 
 int fork_fg_live(void);
-int g_fk_ahb;   // the device was made with VK_ANDROID_external_memory_android_hardware_buffer (nvn_vk.c device creation, when fork_fg_want)
+int g_fk_ahb;   // (below)
+// the multiplier: 2 or 3 (frames on screen per game frame), 0 when off
+int fork_fg_mult(void) {
+    static int m = -1;
+    if (m < 0) { const char *e = getenv("DM_FORK_FG"); m = e && !strcmp(e, "2x") ? 2 : e && !strcmp(e, "3x") ? 3 : 0; }
+    return m;
+}   // the device was made with VK_ANDROID_external_memory_android_hardware_buffer (nvn_vk.c device creation, when fork_fg_want)
 int fork_fg_want(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_FORK_FG"), *d = getenv("DM_FORK_LSFG_DLL"); struct stat st;
-        v = e && !strcmp(e, "2x") && d && *d && !stat(d, &st) && st.st_size > 0;
+        v = fork_fg_mult() && d && *d && !stat(d, &st) && st.st_size > 0;
         if (e && *e && !v) VLOG("[FORK] fg: DM_FORK_FG=%s but no Lossless.dll (%s): off", e, d && *d ? d : "not chosen on the setup screen"); }
     return v;
 }
@@ -27,7 +34,7 @@ static struct {
     _Atomic int state;   // 0 not started, 1 loading, 2 ready, -1 off
     int (*init)(const char *, uint64_t, int, float, int); int (*mkctx)(struct AHardwareBuffer *, struct AHardwareBuffer *, struct AHardwareBuffer *const *, int, uint32_t, uint32_t, int);
     int (*run)(int); void (*del)(int); const char *(*err)(void);
-    int ctx; uint32_t w, h; AHardwareBuffer *ahb[3]; VkImage img[3]; VkDeviceMemory mem[3]; int used[3];   // 0, 1: the inputs; 2: the generated frame
+    int ctx; uint32_t w, h; AHardwareBuffer *ahb[4]; VkImage img[4]; VkDeviceMemory mem[4]; int used[4];   // 0, 1: the inputs; 2, 3: the generated frames (3x: both)
     uint64_t n, ngen; double gen_ms; VkCommandPool pool; VkCommandBuffer cb; VkFence fence;
 } FG = { .ctx = -1 };
 static const VkFormat FG_FMT = VK_FORMAT_R16G16B16A16_SFLOAT;   // (lsfg-vk's own choice for SDR frames)
@@ -43,8 +50,8 @@ static void *fg_load(void *p) {
     const char *fl = getenv("DM_FORK_FG_FLOW"), *pf = getenv("DM_FORK_FG_PERF");
     float flow = fl && atoi(fl) >= 25 && atoi(fl) <= 100 ? atoi(fl) / 100.0f : 0.75f; int perf = !(pf && !strcmp(pf, "off"));
     uint64_t dev = (uint64_t)g_props.vendorID << 32 | g_props.deviceID, t0 = mono_ns();
-    if (FG.init(dll, dev, perf, flow, 1)) { VLOG("[FORK] [RED] fg: %s: off", FG.err()); atomic_store(&FG.state, -1); return NULL; }
-    VLOG("[FORK] fg: ready in %.1f s (LSFG 3.1%s, flow scale %.2f, 2x)", (mono_ns() - t0) / 1e9, perf ? " performance" : "", flow);
+    if (FG.init(dll, dev, perf, flow, fork_fg_mult() - 1)) { VLOG("[FORK] [RED] fg: %s: off", FG.err()); atomic_store(&FG.state, -1); return NULL; }
+    VLOG("[FORK] fg: ready in %.1f s (LSFG 3.1%s, flow scale %.2f, %dx)", (mono_ns() - t0) / 1e9, perf ? " performance" : "", flow, fork_fg_mult());
     atomic_store(&FG.state, 2); return NULL;
 }
 static int fg_mem_type(uint32_t bits) {
@@ -54,7 +61,7 @@ static int fg_mem_type(uint32_t bits) {
 }
 static void fg_free_images(void) {
     if (FG.ctx >= 0) { FG.del(FG.ctx); FG.ctx = -1; }
-    for (int i = 0; i < 3; i++) { if (FG.img[i]) vkDestroyImage(g_dev, FG.img[i], NULL); if (FG.mem[i]) vkFreeMemory(g_dev, FG.mem[i], NULL); if (FG.ahb[i]) AHardwareBuffer_release(FG.ahb[i]);
+    for (int i = 0; i < 4; i++) { if (FG.img[i]) vkDestroyImage(g_dev, FG.img[i], NULL); if (FG.mem[i]) vkFreeMemory(g_dev, FG.mem[i], NULL); if (FG.ahb[i]) AHardwareBuffer_release(FG.ahb[i]);
         FG.img[i] = VK_NULL_HANDLE; FG.mem[i] = VK_NULL_HANDLE; FG.ahb[i] = NULL; FG.used[i] = 0; }
     FG.w = FG.h = 0; FG.n = 0;
 }
@@ -66,7 +73,8 @@ static int fg_images(uint32_t w, uint32_t h) {
     static PFN_vkGetAndroidHardwareBufferPropertiesANDROID props_of;
     if (!props_of) props_of = (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)vkGetDeviceProcAddr(g_dev, "vkGetAndroidHardwareBufferPropertiesANDROID");
     if (!props_of) { VLOG("[FORK] [RED] fg: vkGetAndroidHardwareBufferPropertiesANDROID missing: off"); return 0; }
-    for (int i = 0; i < 3; i++) {
+    int nimg = 1 + fork_fg_mult();   // the two inputs and the generated frames
+    for (int i = 0; i < nimg; i++) {
         AHardwareBuffer_Desc d = { .width = w, .height = h, .layers = 1, .format = AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT,
                                    .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT };
         if (AHardwareBuffer_allocate(&d, &FG.ahb[i])) { VLOG("[FORK] [RED] fg: AHardwareBuffer_allocate %ux%u failed: off", w, h); fg_free_images(); return 0; }
@@ -84,10 +92,10 @@ static int fg_images(uint32_t w, uint32_t h) {
         VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ii, .allocationSize = bp.allocationSize, .memoryTypeIndex = (uint32_t)(mt < 0 ? 0 : mt) };
         if (mt < 0 || vkAllocateMemory(g_dev, &ai, NULL, &FG.mem[i]) || vkBindImageMemory(g_dev, FG.img[i], FG.mem[i], 0)) { VLOG("[FORK] [RED] fg: importing the hardware buffer failed: off"); fg_free_images(); return 0; }
     }
-    AHardwareBuffer *out[1] = { FG.ahb[2] };
-    FG.ctx = FG.mkctx(FG.ahb[0], FG.ahb[1], out, 1, w, h, (int)FG_FMT);
+    AHardwareBuffer *out[2] = { FG.ahb[2], FG.ahb[3] };
+    FG.ctx = FG.mkctx(FG.ahb[0], FG.ahb[1], out, nimg - 2, w, h, (int)FG_FMT);
     if (FG.ctx < 0) { VLOG("[FORK] [RED] fg: %s: off", FG.err()); fg_free_images(); return 0; }
-    FG.w = w; FG.h = h; FG.n = 0; FG.used[2] = 1;   // (the generated frame is the library's from the start: taken over from it, contents kept)
+    FG.w = w; FG.h = h; FG.n = 0; for (int i = 2; i < nimg; i++) FG.used[i] = 1;   // (the generated frames are the library's from the start: taken over from it, contents kept)
     VLOG("[FORK] fg: images %ux%u shared with the library", w, h);
     return 1;
 }
@@ -146,7 +154,7 @@ static int fg_show(VkImage src, VkImageLayout sl, int fgi, int32_t sx, int32_t s
 static pthread_mutex_t fg_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t fg_cv = PTHREAD_COND_INITIALIZER;
 // frames put on screen by frame generation (generated + real), for the performance overlay (android_main.c nativeFgFrames); and where the time goes, logged
 static _Atomic uint64_t g_fg_shown; static double g_fg_t[5]; static uint64_t g_fg_tn;   // per frame, ms: the game waiting for the worker, copy wait, generation, 1st, 2nd present
-int fork_fg_live(void) { return atomic_load(&FG.state) == 2 && FG.ngen > 0; }   // (nvn_vk.c pace_time: frames shown every half interval)
+int fork_fg_live(void) { return atomic_load(&FG.state) == 2 && FG.ngen > 0 ? fork_fg_mult() : 0; }   // (nvn_vk.c pace_time: frames shown every interval / this)
 uint64_t dm_fork_fg_frames(void) { if (framegen_mode() && !FGE.off) return atomic_load(&g_fork_up_shown);   // (upstream's frame generation: its pictures, nvn_vk.c)
     return atomic_load(&FG.state) == 2 ? atomic_load(&g_fg_shown) : (uint64_t)-1; }
 static void fg_time(int i, uint64_t t0) { g_fg_t[i] += (mono_ns() - t0) / 1e6; }
@@ -169,15 +177,18 @@ static void *fg_worker(void *p) {
         static int nopace = -1; if (nopace < 0) { const char *e = getenv("DM_FORK_FG_PACE"); nopace = e && !atoi(e); }   // DM_FORK_FG_PACE=0: no display times (a test)
         // the times, now that both frames are ready (v26 used the ones worked out ~20 ms earlier on the game's thread: often past by now, and of two frames both
         //   past due Android shows only the newer, the real one): the generated frame no earlier than the next refresh, the real one half an interval after it
-        if (j.t && g_refresh_ns && !nopace) {
-            uint64_t now = mono_ns(), gt = j.t > j.half ? j.t - j.half : 0;
+        int ng = fork_fg_mult() - 1;   // generated frames this game frame (1 at 2x, 2 at 3x)
+        if (j.t && g_refresh_ns && !nopace) {   // (j.half: the step between two shown frames, interval / multiplier)
+            uint64_t now = mono_ns(), span = j.half * (uint64_t)ng, gt = j.t > span ? j.t - span : 0;
             if (gt < now + g_refresh_ns) gt = now + g_refresh_ns;
-            if (j.t < gt + j.half) j.t = gt + j.half;
-            j.half = j.t - gt; }
+            if (j.t < gt + span) j.t = gt + span;
+            j.half = (j.t - gt) / (uint64_t)ng; }
         pthread_mutex_lock(&g_wmu);
         if (W.sc) {
             uint64_t t2 = mono_ns();
-            if (gen && fg_show(FG.img[2], VK_IMAGE_LAYOUT_GENERAL, 2, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t > j.half ? j.t - j.half : 0, j.id | 0x80000000u)) atomic_fetch_add(&g_fg_shown, 1);   // (an id of its own: the display's timing report lists it too)
+            for (int k = 0; gen && k < ng && W.sc; k++) {   // the generated frames in order (lsfg-vk's outputs: the first is the earliest), each a step before the next
+                uint64_t back = j.half * (uint64_t)(ng - k), at = nopace ? 0 : j.t > back ? j.t - back : 0;
+                if (fg_show(FG.img[2 + k], VK_IMAGE_LAYOUT_GENERAL, 2 + k, 0, 0, j.w, j.h, j.flip, at, (j.id | 0x80000000u) + (uint32_t)k * 0x10000000u)) atomic_fetch_add(&g_fg_shown, 1); }   // (ids of their own: the display's timing report lists them too)
             fg_time(3, t2); uint64_t t3 = mono_ns();
             if (W.sc && fg_show(FG.img[j.in], VK_IMAGE_LAYOUT_GENERAL, j.in, 0, 0, j.w, j.h, j.flip, nopace ? 0 : j.t, j.id)) atomic_fetch_add(&g_fg_shown, 1);
             fg_time(4, t3);
@@ -231,7 +242,7 @@ static int fork_fg_present(vtex *x, const int crop[4]) {
     VkPresentTimeGOOGLE pt = { 0, 0 }; uint64_t half = 0;
     if (pace_time(&pt) && pt.desiredPresentTime && g_refresh_ns) {
         const char *e = getenv("DM_FPS_TARGET"); int fps = e && atoi(e) >= 30 ? atoi(e) : 30;
-        uint64_t r2 = g_refresh_ns, k = (1000000000ull / (uint64_t)fps + r2 / 2) / r2; half = (k ? k : 1) * r2 / 2; }
+        uint64_t r2 = g_refresh_ns, k = (1000000000ull / (uint64_t)fps + r2 / 2) / r2; half = (k ? k : 1) * r2 / (uint64_t)fork_fg_mult(); }   // (v46: interval / multiplier)
     pthread_mutex_lock(&fg_mu);
     FJ.n = ++FG.n; FJ.in = in; FJ.w = cw; FJ.h = ch; FJ.flip = atomic_load(&g_origin_ll); FJ.t = pt.desiredPresentTime; FJ.half = half; FJ.id = pt.presentID;
     FJ.has = 1; FJ.busy = 1; pthread_cond_signal(&fg_cv); pthread_mutex_unlock(&fg_mu);
