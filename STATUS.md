@@ -1,6 +1,7 @@
 # STATUS
 
-**Build:** v49 (not tested yet): v48 + spotted banner frame not a battle (g_fk_spot), spotted fades by draw order (bottom-right, then top-left on the top edge), encounter probe only with Encounter info on, **Lowest resolution when hot** (DM_FORK_SCALE_FLOOR stock / 85 / 70; hle_resscale.c factor_now). Upstream: nothing new.
+**Build:** v50 (not tested yet): v49 + spotted fades full size + frame generation paused on still screens (setting, default keep; 60 Hz there) + power readout (log / overlay). Upstream: nothing new.
+- v49: v48 + spotted banner frame not a battle (g_fk_spot), spotted fades by draw order (bottom-right, then top-left on the top edge), encounter probe only with Encounter info on, **Lowest resolution when hot** (DM_FORK_SCALE_FLOOR stock / 85 / 70; hle_resscale.c factor_now). Upstream: nothing new.
 - Heat (Steven's cool run on v48, Performance model): heat none, generation 4.4-6.2 ms, full resolution. The Quality model (15-24 ms) made frames miss and the guard drop to 0.70: keep Performance.
 - v48:
 - **Encounter info** (Controls → Encounter info, DM_FORK_ENC, off by default): in wild battles a panel (species, ★ shiny, nature, ability, IVs, EVs) from host/fork_enc.c. C_ENC control: drag = move (saved as "enc" in this screen's layout), tap = fold to a Poké Ball (gold ★ badge on a shiny). A battle is wild when the wild slot's EC is new (trainer battles keep the last wild one: no panel). Drawn after the controls at full strength.
@@ -42,7 +43,7 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 
 - v49: the spotted fades swapped edges (the first draw is the top-left one). Now both kept full size, no anchoring (fork_ui.h; not built). Banner still anchored to the bottom.
 
-## Queued for v50 (in the tree, compiles, not built for Steven)
+## In v50
 - Spotted fades full size (above).
 - Frame generation paused on still screens (DM_FORK_FG_STILL=pause, default keep): menus / dialogue present without generation, screen asked for 60 Hz (window_rate), first 2 generated frames after resuming not shown. Log `[FORK] fg: paused / resumed`.
 - Power readout (ForkPower.java): `[FORK] power: W, mA, V, battery °C, level, charging, fg paused` every minute; watts in the performance overlay.
