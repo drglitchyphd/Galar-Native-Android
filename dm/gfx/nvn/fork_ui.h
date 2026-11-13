@@ -18,7 +18,9 @@ static uint64_t g_fk_ui;   // UI draws shrunk (logged now and then)
 // flashing bars). So a shrunk draw whose textures are all 4x4 or smaller gets its full viewport and scissor back once its textures are known (fork_ui_fill, after
 // nvn_vk.c's push_stage; fork_ui_tex notes their sizes from tex_view_for)
 static int g_fk_sq, g_fk_texmax, g_fk_ntex, g_fk_screenish; static VkViewport g_fk_v0; static VkRect2D g_fk_sc0; static uint64_t g_fk_fills;   // FORK v38: g_fk_screenish (it samples a picture-sized image: a full-screen effect)
-static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++;
+static int g_fk_banner, g_fk_tw, g_fk_th; static float g_fk_ky, g_fk_kx;   // FORK v44: this draw samples the 1200x180 "spotted" banner; the image's size; the y scale
+static _Atomic int g_origin_ll;   // (nvn_vk.c, below: the game draws with a lower-left origin, so the screen's bottom is the image's row 0)
+static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++; if (w == 1200 && h == 180) g_fk_banner = 1;
     if (w >= 1280 && h >= 700 && w * 10 >= h * 16 && w * 10 <= h * 20) g_fk_screenish = 1;   // (a 16:9-ish image of the picture's size: the trainer-approach overlay, blurs, wipes)
     if ((int)w > g_fk_texmax) g_fk_texmax = (int)w; if ((int)h > g_fk_texmax) g_fk_texmax = (int)h; }
 static char g_fk_sqkey[17];   // the shrunk draw's vertex shader (the log below)
@@ -38,6 +40,20 @@ static void fork_ui_fill(VkCommandBuffer cb) {
         && strncmp(g_fk_sqkey, "af80749a", 8) && atomic_load(&g_cap) == 0) {
         dm_fork_capture_trainer = 0; atomic_store(&g_cap, 1);
         VLOG("[FORK] capture: overworld UI shader %.16s (largest texture side %d, %d textures): this frame", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0, g_fk_ntex); }
+    // FORK v44: the trainer "spotted you" banner (capture Nov 13): b6ff050a with its 1200x180 texture, a dark strip in the screen's bottom-right corner. Shrunk around the
+    //   centre it floated above the bottom with nothing under it; it keeps its shape (the y scale) but sits on the screen's real bottom edge
+    if (g_fk_banner && !strncmp(g_fk_sqkey, "b6ff050a", 8) && g_fk_th > 0) {
+        VkViewport v = g_fk_v0; VkRect2D sc = g_fk_sc0; float k = g_fk_ky, H = (float)g_fk_th; int ll = atomic_load(&g_origin_ll);
+        float a = ll ? 0.0f : H;   // the screen's bottom edge, in the image
+        v.y = a + (v.y - a) * k; v.height *= k;
+        { float cx = g_fk_tw * 0.5f, kx = g_fk_kx; v.x = cx + (v.x - cx) * kx; v.width *= kx;   // (x as every UI draw: around the centre)
+          float x0 = cx + ((float)sc.offset.x - cx) * kx, x1 = cx + ((float)sc.offset.x + (float)sc.extent.width - cx) * kx; if (x0 < 0) x0 = 0; if (x1 > g_fk_tw) x1 = (float)g_fk_tw;
+          sc.offset.x = (int32_t)floorf(x0); sc.extent.width = (uint32_t)(ceilf(x1) > floorf(x0) ? ceilf(x1) - floorf(x0) : 0); }
+        float y0 = a + ((float)sc.offset.y - a) * k, y1 = a + ((float)sc.offset.y + (float)sc.extent.height - a) * k; if (y0 < 0) y0 = 0; if (y1 > H) y1 = H;
+        sc.offset.y = (int32_t)floorf(y0); sc.extent.height = (uint32_t)(ceilf(y1) > floorf(y0) ? ceilf(y1) - floorf(y0) : 0);
+        vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
+        static int said; if (!said++) VLOG("[FORK] spotted banner: kept on the screen's bottom edge (scale %.3f, origin %s)", k, ll ? "lower left" : "upper left");
+        return; }
     int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8);
     if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
@@ -103,7 +119,7 @@ static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, 
         g_fk_uimode = 1; }
     float kx, ky; dm_fork_ui_scale(&kx, &ky);
     if (kx == 1 && ky == 1) return;
-    g_fk_sq = 1; g_fk_ntex = 0; g_fk_texmax = 0; g_fk_screenish = 0; g_fk_v0 = *v; g_fk_sc0 = *sc; snprintf(g_fk_sqkey, sizeof g_fk_sqkey, "%.16s", vkey);   // (fork_ui_fill may give it back)
+    g_fk_sq = 1; g_fk_ntex = 0; g_fk_texmax = 0; g_fk_screenish = 0; g_fk_banner = 0; g_fk_tw = (int)tw; g_fk_th = (int)th; g_fk_ky = ky; g_fk_kx = kx;   // FORK v44: + banner g_fk_v0 = *v; g_fk_sc0 = *sc; snprintf(g_fk_sqkey, sizeof g_fk_sqkey, "%.16s", vkey);   // (fork_ui_fill may give it back)
     float cx = tw * 0.5f, cy = th * 0.5f;
     if (!g_fk_comp && !g_fk_clear) {   // no 3D under the UI this frame: black where the shrunk UI does not reach (else last frame's picture would stay there)
         g_fk_clear = 1;
