@@ -1,6 +1,7 @@
 # STATUS
 
 **Build:** v46 (not tested yet). Branch `fork/v20`, upstream merged to 4e0814b (check `git fetch upstream main` before every build).
+Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed; no unmerged upstream branches or other forks. Watch: upstream branch `ultrawide-camera` patches the same addresses as Fill, corrected (fork_aspect.c); if it reaches main, keep ours.
 
 ## New in v46
 - Fixed: since v44 a comment swallowed the line in `fork_ui.h` that saved the shrunk draw's shader and viewport (logs showed `ui draw kind: vertex ,`). So v44's spotted banner, v43's intro bars / divider never matched. First build where they run.
