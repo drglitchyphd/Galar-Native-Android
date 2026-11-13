@@ -29,7 +29,7 @@
 #include <string.h>
 #include <time.h>
 
-enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, C_ALL, NCTL };   /* FORK v47: C_ALL, the context controls' "all buttons" override */   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
+enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, C_ALL, C_ENC, NCTL };   /* FORK v48: C_ENC, the encounter panel (drag to move, tap to collapse) */   /* FORK v47: C_ALL, the context controls' "all buttons" override */   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
 typedef struct { float cx, cy, r; int glyph, shown; uint64_t btn; } ctl;
 static ctl g_c[NCTL];
 static float g_w, g_h;
@@ -86,7 +86,16 @@ static void bhide_set(int on) { g_bhide = on; census_sync(); }
 // FORK v46: one switch, "Battle controls: Battle mode" (DM_FORK_BATTLE=on): unused buttons hidden, battle icons, the battle's own layout. Set before v46 (no
 //   DM_FORK_BATTLE yet), the old DM_FORK_BATTLE_HIDE / _LAYOUT still turn it on, so a player's battle setup carries over
 static void battle_mode(int on) { g_bmode = on; bhide_set(on); g_bicons = on; g_blayout = on; g_w = g_h = 0; census_sync(); }
+// FORK v48: the encounter panel (DM_FORK_ENC=on, default off): the wild Pokémon of this battle from host/fork_enc.c (species, shiny, nature, ability, IVs, EVs).
+//   A control of its own (C_ENC: its place in the layout file as "enc"): dragged, it moves (saved in this screen's layout); tapped, it folds to a Poké Ball and back
+typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6]; } dm_fork_enc_info;
+int dm_fork_enc_get(dm_fork_enc_info *o) __attribute__((weak));
+static int g_enc_on = -1, g_enc_open = 1, g_enc_drag; static float g_enc_ox, g_enc_oy; static dm_fork_enc_info g_enc_now;
+static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); } return g_enc_on; }
+static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.active; }
+static void enc_rect(float r4[4]);   // (below, with the drawing)
 static int fork_hidden(int c) {
+    if (c == C_ENC) return !enc_live();
     if (c == C_FF) return !g_ffscope || (g_ffscope == 1 && !in_battle());
     if (c == C_TURBO) return !g_turbo_on;
     if (c == C_ALL) { int k = screen_kind(); return !ctx_on(k); }   // FORK v47: only where a context mode applies (lit while its override is on)
@@ -106,7 +115,7 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 
 // ---------- the player's layout (the in-game editor): position, size and visibility of each control, kept in <files>/touch_layout.txt ----------
 // One line per changed control: "<name> <x / width> <y / height> <radius / height> <shown>"; controls without a line keep the default layout
-static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all" };   // FORK: + ff, turbo
+static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all", "enc" };   // FORK: + ff, turbo
 static struct { int set; float fx, fy, fr; int shown, shape; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
 static char g_lay_path[1100]; static int g_lay_loaded;
 // FORK: one layout per screen and orientation: touch_layout_<profile>.txt (outer_landscape, inner_landscape, inner_portrait, outer_portrait), picked from the window's
@@ -190,7 +199,8 @@ static void layout(float w, float h) {
     g_c[C_L3] = (ctl){ g_c[C_STICK].cx, g_c[C_STICK].cy - 0.22f * s, 0.05f * s, OVL_G_L3, 1, DM_BTN_LS };
     g_c[C_R3] = (ctl){ g_c[C_RSTICK].cx, g_c[C_RSTICK].cy - 0.21f * s, 0.05f * s, OVL_G_R3, 1, DM_BTN_RS };
     g_c[C_FF] = (ctl){ w * 0.5f + 0.24f * s, 0.06f * s, mr, OVL_G_FF, 1, 0 };
-    g_c[C_ALL] = (ctl){ w * 0.5f + 0.36f * s, 0.06f * s, mr * 0.85f, OVL_G_ALL, 1, 0 };   // FORK v47: ⊞ all buttons, right of fast-forward   // FORK: fast-forward, just right of + (fork_hidden: only when Fast-forward is on)
+    g_c[C_ALL] = (ctl){ w * 0.5f + 0.36f * s, 0.06f * s, mr * 0.85f, OVL_G_ALL, 1, 0 };
+    g_c[C_ENC] = (ctl){ 0.06f * w + mr, 0.20f * h, mr, OVL_G_BALL, 1, 0 };   // FORK v48: the encounter panel's corner (its Poké Ball when folded), left side under ☰   // FORK v47: ⊞ all buttons, right of fast-forward   // FORK: fast-forward, just right of + (fork_hidden: only when Fast-forward is on)
     g_c[C_TURBO] = (ctl){ w - 0.12f * s, h - 0.50f * s, 0.05f * s, OVL_G_TURBO, 1, 0 };   // FORK: turbo A, above-right of A (only when Turbo A is on)
     // touch-first games (Legends: Arceus): only the movement stick and − / + on screen; everything else is touch on the game itself (touch_ui_event's gestures, touch_menu.c)
     if (GESTURES_ON) for (int c = C_RSTICK; c < NCTL; c++) if (c != C_PLUS && c != C_MINUS && c != C_MENU) g_c[c].shown = 0;
@@ -223,11 +233,12 @@ static int g_cam_pct = -1, g_cam_stick = -1, g_rs_off = -1;
 static int cam_pct(void) { if (g_cam_pct < 0) { const char *e = getenv("DM_TOUCH_CAM_SENS"); int v = e ? atoi(e) : 100; g_cam_pct = v < 25 || v > 300 ? 100 : v; } return g_cam_pct; }
 static int cam_stick(void) { if (g_cam_stick < 0) { const char *e = getenv("DM_TOUCH_CAMERA"); g_cam_stick = e && !strcmp(e, "stick"); } return g_cam_stick; }
 static int rs_off(void) { if (g_rs_off < 0) { const char *e = getenv("DM_TOUCH_RSTICK"); g_rs_off = e && !strcmp(e, "off"); } return g_rs_off; }
-static int ctl_off(int c) { return ((c == C_L3 || c == C_R3) && !l3r3_on()) || ((c == C_RSTICK || c == C_R3) && rs_off()) || (c == C_THROW && !GESTURES_ON); }   // FORK v48: + the throw button (Legends: Arceus only) out of Sword's editor   // left out entirely, the layout editor too (FORK v47: + rs_off)
+static int ctl_off(int c) { return ((c == C_L3 || c == C_R3) && !l3r3_on()) || ((c == C_RSTICK || c == C_R3) && rs_off()) || (c == C_THROW && !GESTURES_ON) || (c == C_ENC && !enc_on()); }   // FORK v48: + the encounter panel only when it is on   // FORK v48: + the throw button (Legends: Arceus only) out of Sword's editor   // left out entirely, the layout editor too (FORK v47: + rs_off)
 static int hit(int c, float x, float y, float slack) {
     if (fork_hidden(c)) return 0;   // FORK
     const ctl *k = &g_c[c]; float dx = x - k->cx, dy = y - k->cy, r = k->r * slack;
     if (g_ov[c].set && g_ov[c].shape == 3) dx /= 1.7f;   // FORK: a pill is wider
+    if (c == C_ENC && g_enc_open && !g_edit) { float r4[4]; enc_rect(r4); return x >= r4[0] && x <= r4[2] && y >= r4[1] && y <= r4[3]; }   // FORK v48: the open panel's rectangle
     return k->shown && dx * dx + dy * dy <= r * r;
 }
 static int target_at(float x, float y) {
@@ -496,6 +507,9 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (sb) { dm_input_press(sb, 80000000ull); click_locked(); g_cam_vx = g_cam_vy = 0; }
         }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_MENU && hit(C_MENU, g_ptr[i].x, g_ptr[i].y, 1.5f)) { click_locked(); front_open_menu(0); }
+        for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_ENC) {   // FORK v48: dropped: kept in this screen's layout; tapped: folds / opens
+            if (g_enc_drag) { edit_store(C_ENC); layout_save(); } else { g_enc_open = !g_enc_open; click_locked(); }
+            g_enc_drag = 0; }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_ALL && hit(C_ALL, g_ptr[i].x, g_ptr[i].y, 1.5f)) {   // FORK v47: ⊞ all buttons, until the screen changes
             int k = screen_kind(); g_ctx_over = g_ctx_over == k ? -1 : k; g_w = g_h = 0; click_locked();
             fprintf(stderr, "[FORK] [touch] all buttons %s (screen %d)\n", g_ctx_over >= 0 ? "on" : "off", k); }
@@ -524,6 +538,9 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
                         g_cam_vx = g_cam_vx * 0.5f + vx * 0.5f; g_cam_vy = g_cam_vy * 0.5f + vy * 0.5f; g_cam_t = t;
                         g_ptr[i].lx = g_ptr[i].x; g_ptr[i].ly = g_ptr[i].y; g_ptr[i].lt = t; }
                 }
+                if (g_ptr[i].target == C_ENC && act == AMOTION_EVENT_ACTION_MOVE) {   // FORK v48: the encounter panel follows the finger once it has moved
+                    if (!g_enc_drag && (fabsf(g_ptr[i].x - g_ptr[i].x0) > g_h * 0.02f || fabsf(g_ptr[i].y - g_ptr[i].y0) > g_h * 0.02f)) { g_enc_drag = 1; g_enc_ox = g_c[C_ENC].cx - g_ptr[i].x0; g_enc_oy = g_c[C_ENC].cy - g_ptr[i].y0; }
+                    if (g_enc_drag) { g_c[C_ENC].cx = clampf(g_ptr[i].x + g_enc_ox, g_c[C_ENC].r, g_w - g_c[C_ENC].r); g_c[C_ENC].cy = clampf(g_ptr[i].y + g_enc_oy, g_c[C_ENC].r, g_h - g_c[C_ENC].r); } }
                 if (g_ptr[i].target >= C_A && g_ptr[i].target <= C_Y)   // sliding across the face buttons
                     for (int c = C_A; c <= C_Y; c++) if (c != g_ptr[i].target && hit(c, g_ptr[i].x, g_ptr[i].y, 1.0f)) { g_ptr[i].target = c; g_held_until[c] = now_s() + 0.08; break; }
             }
@@ -652,6 +669,7 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
     else if (!strcmp(key, "DM_FORK_GESTURES")) g_gest = value && !strcmp(value, "on");   // FORK v47
+    else if (!strcmp(key, "DM_FORK_ENC")) g_enc_on = value && !strcmp(value, "on");   // FORK v48
     else if (!strncmp(key, "DM_FORK_CTX_", 12)) { int on = value && !strcmp(value, "on");   // FORK v47: the context switches
         if (!strcmp(key, "DM_FORK_CTX_DIALOGUE")) g_ctx_dlg = on; else if (!strcmp(key, "DM_FORK_CTX_MENU")) g_ctx_menu = on; else if (!strcmp(key, "DM_FORK_CTX_WORLD")) g_ctx_world = on;
         g_ctx_any = g_ctx_dlg || g_ctx_menu || g_ctx_world; g_ctx_over = -1; g_w = g_h = 0; census_sync(); }
@@ -692,6 +710,44 @@ static void prefs(void) {
         pthread_mutex_unlock(&g_mu); for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++) { const char *v = getenv(keys[i]); if (v && *v) touch_ui_setting(keys[i], v); } pthread_mutex_lock(&g_mu); census_sync(); }
       if (dz && *dz) g_dead = clampf((float)atof(dz) / 100.0f, 0.0f, 0.4f); if (g_float) fprintf(stderr, "[FORK] [touch] floating sticks, tap for A (dead zone %.0f %%)\n", g_dead * 100); }
 }
+// FORK v48: text from the label atlas: ASCII 33-95 at their own cells (overlay/ovl_font.h), upper case, monospace (advance 0.6 of the height)
+#include "fork_enc_names.h"
+static const char *const k_enc_nature[25] = { "HARDY","LONELY","BRAVE","ADAMANT","NAUGHTY","BOLD","DOCILE","RELAXED","IMPISH","LAX","TIMID","HASTY","SERIOUS","JOLLY",
+    "NAIVE","MODEST","MILD","QUIET","BASHFUL","RASH","CALM","GENTLE","SASSY","CAREFUL","QUIRKY" };
+static void otext(dm_ovl_item *it, int *n, int max, float x, float y, float ch, const char *s, float a) {   // (x, y: the first character's left edge and the line's centre)
+    float cw = ch * 0.6f;
+    for (int i = 0; s[i]; i++) { int c = (unsigned char)s[i]; if (c >= 'a' && c <= 'z') c -= 32; if (c == ' ') continue; if (c < 33 || c > 95) c = '?';
+        dm_ovl_item *o = add(it, n, max, x + cw * (i + 0.5f), y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = c; o->gscale = 0.92f; o->galpha = a; } }
+}
+#define ENC_COLS 20
+#define ENC_LINES 5
+static float enc_ch(void) { return g_h * 0.030f; }
+// the open panel: x0, y0, x1, y1, its top-left corner at the control's (folded) Poké Ball, kept on screen
+static void enc_rect(float r4[4]) {
+    float ch = enc_ch(), pad = ch * 0.5f, w = ENC_COLS * ch * 0.6f + 2 * pad, h = ENC_LINES * ch * 1.3f + 2 * pad;
+    float x0 = clampf(g_c[C_ENC].cx - g_c[C_ENC].r, 0, g_w - w), y0 = clampf(g_c[C_ENC].cy - g_c[C_ENC].r, 0, g_h - h);
+    r4[0] = x0; r4[1] = y0; r4[2] = x0 + w; r4[3] = y0 + h;
+}
+static void enc_draw(dm_ovl_item *it, int *n, int max) {
+    const dm_fork_enc_info *e = &g_enc_now;
+    if (!g_enc_open) {   // folded: the Poké Ball, a gold star badge on a shiny
+        pokeball(it, n, max, &g_c[C_ENC], 0, 1.0f);
+        if (e->shiny) { const ctl *k = &g_c[C_ENC]; float br = k->r * 0.42f, bx = k->cx + k->r * 0.72f, by = k->cy - k->r * 0.72f;
+            add(it, n, max, bx, by, br, OVL_DISC, 240, 190, 40, 1.0f);
+            dm_ovl_item *o = add(it, n, max, bx, by, br, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_STAR; o->gscale = 0.8f; o->galpha = 1.0f; } }
+        return; }
+    float r4[4]; enc_rect(r4); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, x = r4[0] + pad, y = r4[1] + pad + lh * 0.5f;
+    dm_ovl_item *o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.82f); if (o) { o->x = r4[0]; o->y = r4[1]; o->w = r4[2] - r4[0]; o->h = r4[3] - r4[1]; o->radius = 0.12f; }
+    if (e->shiny) { o = add(it, n, max, 0, 0, 1, OVL_RRECT, 240, 190, 40, 0.95f); if (o) { o->x = r4[0]; o->y = r4[1]; o->w = r4[2] - r4[0]; o->h = ch * 0.18f; o->radius = 0.5f; } }   // a gold edge on a shiny
+    char ln[64];
+    snprintf(ln, sizeof ln, "%.17s", e->species >= 0 && e->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[e->species] : "?"); otext(it, n, max, x, y, ch, ln, 1.0f);
+    if (e->shiny) { float sx = x + (ENC_COLS - 1.5f) * ch * 0.6f; add(it, n, max, sx, y, ch * 0.62f, OVL_DISC, 240, 190, 40, 1.0f);
+        o = add(it, n, max, sx, y, ch * 0.62f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_STAR; o->gscale = 0.8f; o->galpha = 1.0f; } }
+    y += lh; snprintf(ln, sizeof ln, "%-8s %.11s", k_enc_nature[e->nature % 25], e->ability >= 0 && e->ability < (int)(sizeof k_enc_ability / sizeof *k_enc_ability) ? k_enc_ability[e->ability] : "?"); otext(it, n, max, x, y, ch, ln, 0.92f);
+    y += lh; otext(it, n, max, x, y, ch, "   HP AT DF SA SD SP", 0.6f);
+    y += lh; snprintf(ln, sizeof ln, "IV %2d %2d %2d %2d %2d %2d", e->iv[0], e->iv[1], e->iv[2], e->iv[3], e->iv[4], e->iv[5]); otext(it, n, max, x, y, ch, ln, 1.0f);
+    y += lh; snprintf(ln, sizeof ln, "EV%3d%3d%3d%3d%3d%3d", e->ev[0], e->ev[1], e->ev[2], e->ev[3], e->ev[4], e->ev[5]); otext(it, n, max, x, y, ch, ln, 0.75f);
+}
 int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     pthread_mutex_lock(&g_mu); prefs();
     { static int was = -1; int b = g_blayout && in_battle(); if (b != was) { was = b; if (!g_edit) g_w = g_h = 0; } ff_publish(); }   // FORK: battle layout in / out; FF scope
@@ -729,6 +785,10 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
         float op = g_bopacity > 0 && in_battle() ? g_bopacity : g_opacity;   // FORK: battle opacity
         for (int i = 0; i < n; i++) { it[i].a *= op; it[i].galpha *= op; tint(&it[i]); }   // FORK: tint
     }
+    if (!g_edit && enc_on() && dm_fork_enc_get) {   // FORK v48: the encounter panel, over the controls and at full strength (also while a controller hides them)
+        int was = g_enc_now.active; dm_fork_enc_get(&g_enc_now);
+        if (g_enc_now.active && !was) fprintf(stderr, "[FORK] [touch] encounter panel: species %d%s\n", g_enc_now.species, g_enc_now.shiny ? " (shiny)" : "");
+        if (g_enc_now.active) enc_draw(it, &n, max); }
     pthread_mutex_unlock(&g_mu);
     return n;
 }

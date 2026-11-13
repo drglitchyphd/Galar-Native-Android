@@ -47,10 +47,23 @@ static int is_sword(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") && g_mod[i].build_id[0]) { v = !strcasecmp(g_mod[i].build_id, "a3b75bcd3311385aeed67fbeeb79cbb7"); return v; }
     return 0;
 }
+// v48: what the encounter panel shows (android/app/jni/touch_ui.c dm_fork_enc_get): the wild Pokémon of this battle. A battle counts as wild when the wild slot
+//   holds a new Pokémon (another encryption constant than the last battle's): in a trainer battle it still holds the last wild one, so nothing is shown
+typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6]; } dm_fork_enc_info;   // iv / ev: HP, Atk, Def, SpA, SpD, Spe
+static pthread_mutex_t g_enc_mu = PTHREAD_MUTEX_INITIALIZER; static dm_fork_enc_info g_enc;
+int dm_fork_enc_get(dm_fork_enc_info *o) { pthread_mutex_lock(&g_enc_mu); *o = g_enc; pthread_mutex_unlock(&g_enc_mu); return o->active; }
+static void enc_set(const uint8_t *d, int active) {
+    dm_fork_enc_info e = { 0 };
+    if (active) { uint32_t pid = rd32(d + 0x1C), x = rd32(d + 0x0C) ^ pid, xr = (x ^ (x >> 16)) & 0xFFFF, iv = rd32(d + 0x8C);
+        e.active = 1; e.species = rd16(d + 8); e.shiny = xr < 16 ? (xr == 0 ? 2 : 1) : 0; e.nature = d[0x20] < 25 ? d[0x20] : 0; e.ability = rd16(d + 0x14);
+        int sh[6] = { 0, 5, 10, 20, 25, 15 }; for (int i = 0; i < 6; i++) e.iv[i] = (iv >> sh[i]) & 31;
+        int eo[6] = { 0x26, 0x27, 0x28, 0x2A, 0x2B, 0x29 }; for (int i = 0; i < 6; i++) e.ev[i] = d[eo[i]]; }
+    pthread_mutex_lock(&g_enc_mu); g_enc = e; pthread_mutex_unlock(&g_enc_mu);
+}
 void dm_fork_enc_tick(void) {
-    static uint64_t n; static int said, lines; static uint32_t last_ec;
-    if (++n % 30 || !is_sword() || lines > 60) return;
-    if (!said && n >= 30 * 60) {   // after about a minute: the save is loaded
+    static uint64_t n; static int said, lines, was_in; static uint32_t last_ec, battle_ec;
+    if (++n % 15 || !is_sword()) return;
+    if (!said && n >= 30 * 60 && lines < 60) {   // after about a minute: the save is loaded
         said = 1; uint8_t ms[0x110]; LOG("[FORK] enc: heap base %#llx", (unsigned long long)dm_fork_heap_base());
         if (read_heap(O_MYSTATUS, ms, sizeof ms)) {
             char name[13] = { 0 }; for (int i = 0; i < 12; i++) { uint16_t c = rd16(ms + 0xB0 + 2 * i); if (!c) break; name[i] = c < 128 ? (char)c : '?'; }
@@ -58,8 +71,13 @@ void dm_fork_enc_tick(void) {
         else LOG("[FORK] enc trainer: not readable at heap + %#x", O_MYSTATUS);
         uint8_t p[0x148]; int ok = read_pk8(O_PARTY, p); if (ok >= 0) log_pk8("party slot 1", p, ok); else LOG("[FORK] enc party: not readable"); lines++;
     }
-    uint8_t fl; if (!read_heap(O_INBATTLE, &fl, 1) || !fl) return;
+    uint8_t fl; int in = read_heap(O_INBATTLE, &fl, 1) && fl;
+    if (!in) { if (was_in) enc_set(NULL, 0); was_in = 0; return; }
     uint8_t w[0x148]; int ok = read_pk8(O_WILD, w); if (ok < 0) return;
-    uint32_t ec = rd32(w); if (ec == last_ec) return; last_ec = ec;
+    uint32_t ec = rd32(w);
+    if (!was_in) { was_in = 1; int wild = ok > 0 && ec != battle_ec; battle_ec = ec; enc_set(w, wild);   // a new battle: wild when the slot holds a new Pokémon
+        if (!wild && lines < 60) { lines++; LOG("[FORK] enc: a battle without a new wild Pokémon (a trainer battle?): no panel"); } }
+    else if (ok > 0 && ec != battle_ec) { battle_ec = ec; enc_set(w, 1); }   // (the slot written after the flag: the wild one after all)
+    if (ec == last_ec || lines >= 60) return; last_ec = ec;
     log_pk8("wild", w, ok); lines++;
 }

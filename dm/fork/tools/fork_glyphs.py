@@ -8,13 +8,13 @@ import math, re, sys
 from PIL import Image, ImageDraw
 
 H = 'dm/gfx/nvn/overlay/ovl_font.h'
-CELL, CELLS, S = 64, 32, 4
+CELL, CELLS, S = 64, 96, 4   # v48: 96 cells (ASCII 32-95 at cells 32-95, the encounter panel's text)
 src = open(H, encoding='utf-8').read()
 m = re.search(r'static const unsigned char ovl_font\[\] = \{(.*?)\};', src, re.S)
 vals = [int(v) for v in m.group(1).replace('\n', '').split(',') if v.strip()]
 W = CELL * CELLS
-w0 = len(vals) // CELL; assert w0 * CELL == len(vals) and w0 in (CELL * 16, W), len(vals)
-if w0 != W: vals = [v for y in range(CELL) for v in vals[y * w0:(y + 1) * w0] + [0] * (W - w0)]   # 16 cells -> 32, the new ones empty
+w0 = len(vals) // CELL; assert w0 * CELL == len(vals) and w0 in (CELL * 16, CELL * 32, W), len(vals)
+if w0 != W: vals = [v for y in range(CELL) for v in vals[y * w0:(y + 1) * w0] + [0] * (W - w0)]   # 16 or 32 cells -> 96, the new ones empty
 
 def cell(draw_fn):
     im = Image.new('L', (CELL * S, CELL * S), 0); d = ImageDraw.Draw(im); draw_fn(d, CELL * S); return im.resize((CELL, CELL), Image.LANCZOS)
@@ -45,11 +45,23 @@ def allbtn(d, n):   # four rounded squares: "all buttons" (the context controls'
     for i in range(2):
         for j in range(2):
             x, y = x0 + i * (w + g), y0 + j * (w + g); d.rounded_rectangle([x, y, x + w, y + w], radius=n * 0.05, fill=255)
+def star(d, n):   # a five-pointed star (shiny, the encounter panel)
+    import math
+    c = n / 2; ro = n * 0.40; ri = ro * 0.42
+    pts = [(c + (ro if i % 2 == 0 else ri) * math.sin(i * math.pi / 5), c - (ro if i % 2 == 0 else ri) * math.cos(i * math.pi / 5)) for i in range(10)]
+    d.polygon(pts, fill=255)
 def turbo(d, n):   # a lightning bolt
     p = [(0.58, 0.14), (0.30, 0.54), (0.48, 0.54), (0.40, 0.86), (0.70, 0.42), (0.52, 0.42), (0.62, 0.14)]
     d.polygon([(x * n, y * n) for x, y in p], fill=255)
 
-for idx, fn in ((12, ff), (13, ball), (14, back), (15, info), (16, turbo), (17, allbtn)):
+from PIL import ImageFont
+FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf'   # DejaVu fonts: free licence (Bitstream Vera / public domain changes)
+def char(ch):
+    def f(d, n):
+        ft = ImageFont.truetype(FONT, int(n * 0.78)); b = d.textbbox((0, 0), ch, font=ft)
+        d.text(((n - (b[2] - b[0])) / 2 - b[0], (n - (b[3] - b[1])) / 2 - b[1]), ch, font=ft, fill=255)
+    return f
+for idx, fn in [(12, ff), (13, ball), (14, back), (15, info), (16, turbo), (17, allbtn), (18, star)] + [(c, char(chr(c))) for c in range(33, 96)]:
     px = cell(fn).load()
     for y in range(CELL):
         for x in range(CELL): vals[y * W + idx * CELL + x] = px[x, y]
@@ -58,6 +70,6 @@ body = ',\n'.join(','.join(str(v) for v in vals[r * 100:(r + 1) * 100]) for r in
 out = src[:m.start()] + 'static const unsigned char ovl_font[] = {\n' + body + '\n};' + src[m.end():]
 out = re.sub(r'ovl_font_w = \d+', 'ovl_font_w = %d' % W, out)
 if '// FORK:' not in out.splitlines()[1]:
-    out = out.replace('\n', '\n// FORK: widened to 32 cells; cells 12-17 drawn by dm/fork/tools/fork_glyphs.py (fast-forward, Poke Ball, back, info, turbo)\n', 1)
+    out = out.replace('\n', '\n// FORK: widened to 96 cells; cells 12-18 and the ASCII 33-95 drawn by dm/fork/tools/fork_glyphs.py (fast-forward, Poke Ball, back, info, turbo)\n', 1)
 open(H, 'w', encoding='utf-8').write(out)
-print('cells 12-17 written to', H)
+print('cells 12-18 and ASCII 33-95 written to', H)

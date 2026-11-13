@@ -378,6 +378,9 @@ public final class GameMenu {
         //   The ⊞ button brings every button back until the screen changes (the screen is a guess from what the game draws)
         choice(a, "DM_FORK_GESTURES", t(a, "Gesture shortcuts"), new String[][] { { "", t(a, "Off"), "" },   // FORK v47 (touch_ui.c gestures_event)
             { "on", t(a, "On"), t(a, "A quick three-finger tap opens this menu; two fingers swiped down together press X (the game's menu)") } });
+        // FORK v48: the encounter panel (touch_ui.c enc_draw, host/fork_enc.c)
+        choice(a, "DM_FORK_ENC", t(a, "Encounter info"), new String[][] { { "", t(a, "Off"), "" },
+            { "on", t(a, "On"), t(a, "In wild battles: a panel with the Pokémon's species, shiny, nature, ability, IVs and EVs. Drag it to move it; tap it to fold it to a Poké Ball (gold star = shiny)") } });
         heading(a, t(a, "Context controls"));
         note(a, t(a, "The fork guesses the screen from what the game draws. If buttons you need are hidden, tap ⊞ (top centre) for every button until the screen changes. Arrange a screen's own layout with Move the touch controls while on it."));
         choice(a, "DM_FORK_CTX_DIALOGUE", t(a, "Dialogue"), new String[][] { { "", t(a, "Same as elsewhere"), "" },

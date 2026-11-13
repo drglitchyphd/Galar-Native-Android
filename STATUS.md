@@ -1,6 +1,9 @@
 # STATUS
 
-**Build:** v47 (not tested yet). Branch `fork/v20`, upstream main at 4e0814b (checked before the build: nothing new).
+**Build:** v48 (not tested yet). v47 + Steven's v47 notes (below) + the encounter panel:
+- **Encounter info** (Controls → Encounter info, DM_FORK_ENC, off by default): in wild battles a panel (species, ★ shiny, nature, ability, IVs, EVs) from host/fork_enc.c. C_ENC control: drag = move (saved as "enc" in this screen's layout), tap = fold to a Poké Ball (gold ★ badge on a shiny). A battle is wild when the wild slot's EC is new (trainer battles keep the last wild one: no panel). Drawn after the controls at full strength.
+- Label atlas 96 cells: ASCII 33-95 at their codes (DejaVu Sans Mono Bold), ★ at 18 (`fork_glyphs.py`); names from PKHeX (`fork_enc_names.h`, `fork_enc_names.py`). Overlay cap 512 items.
+v47 (tested by Steven, notes below):
 Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. Watch: upstream branch `ultrawide-camera` patches the same addresses as Fill, corrected (fork_aspect.c); keep ours.
 
 ## New in v47
@@ -19,7 +22,7 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 - Trainer shading fix; dialogue detection accuracy; the `[FORK] enc` lines (trainer name must match the save, checksum ok).
 - Opponent trainer parties: no known offset (research doc).
 
-## Steven's v47 notes (fixes in the tree, not built)
+## Steven's v47 notes (fixed in v48)
 - Battle → Bag: the menu layout came ~3 s late (the battle-exit hold applied to menus too). Fixed in fork_ui.h: 10 frames to a menu, 90 only to world / dialogue.
 
 - Trainer spotted (v47): the bottom-right fade is right now; the top-left one (the 2nd af0ef3ac shading draw) sat far down: now anchored to the TOP edge (fork_ui.h).
