@@ -133,7 +133,7 @@ public final class GameMenu {
             c.setPadding(dp(a, 14), dp(a, 10), dp(a, 10), dp(a, 10)); c.setBackground(round(0x33FFB74D, dp(a, 14), dp(a, 1), WARN));
             TextView tx = text(a, t(a, "Some changes apply after a restart."), 14, TEXT, false); c.addView(tx, new LinearLayout.LayoutParams(0, -2, 1));
             TextView bt = text(a, t(a, "Restart now"), 14, 0xFF000000, true); bt.setPadding(dp(a, 16), dp(a, 8), dp(a, 16), dp(a, 8)); bt.setBackground(round(WARN, dp(a, 12), 0, 0));
-            bt.setOnClickListener(v -> confirm(a, t(a, "Restart the game now? Anything since your last save in the game is lost."), () -> ForkRestartActivity.restart(a)));
+            bt.setOnClickListener(v -> confirm(a, t(a, "Restart the game now? Anything since your last save in the game is lost."), t(a, "OK"), () -> ForkRestartActivity.restart(a)));
             c.addView(bt);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = dp(a, 12); body.addView(c, lp);
         }
@@ -304,12 +304,9 @@ public final class GameMenu {
         //   Writes DM_FPS_TARGET, DM_FORK_FG (gfx/nvn/fork_fg.h, the player's Lossless.dll) and clears upstream's DM_FRAMEGEN
         boolean dll = Fork.lsfgDll(a).isFile();
         java.util.List<String[]> sm = new java.util.ArrayList<>();
-        sm.add(new String[] { t(a, "Auto"), t(a, "Auto: this phone gets %s fps (stock)", p[5]), "", "", "" });
+        // v47 (Steven Nov 13): 60 fps scrapped (the Fold held 30 for 1569 of 1800 frames at 60), Lossless 3x scrapped ("runs weird"): 30, with or without Lossless 2x
         sm.add(new String[] { "30 fps", t(a, "30 fps, as the game is made"), "30", "", "" });
-        if (dll) {
-            sm.add(new String[] { t(a, "60 (Lossless 2x)"), t(a, "The game at 30, a generated frame between every two: 60 on screen. Animations keep their speed. From the next start"), "30", "2x", "" });
-            sm.add(new String[] { t(a, "90 (Lossless 3x)"), t(a, "The game at 30, two generated frames between every two: 90 on screen. On a 120 Hz screen frames cannot be evenly spaced; heavier on the GPU. From the next start"), "30", "3x", "" }); }
-        if (GameSettings.has60(a)) sm.add(new String[] { t(a, "60 fps mode"), t(a, "The game itself at 60: some animations play at the wrong speed; drops to 720p when needed"), "60", "", "" });
+        if (dll) sm.add(new String[] { t(a, "60 on screen (Lossless 2x)"), t(a, "The game at 30, a generated frame between every two: 60 on screen. Animations keep their speed. From the next start"), "30", "2x", "" });
         combo(a, t(a, "Smoothness"), new String[] { "DM_FPS_TARGET", "DM_FORK_FG", "DM_FRAMEGEN" }, sm.toArray(new String[0][]));
         if (!dll) note(a, t(a, "Lossless frame generation: choose your Lossless.dll on the setup screen (System, Setup screen, Frame generation)."));
         // FORK: frame pacing slack (nvn_vk.c pace_time, DM_FORK_PACE_MARGIN); the pacer counts in the screen's own top rate (v46: automatic, nvn_vk.c fork_refresh)
@@ -317,7 +314,7 @@ public final class GameMenu {
             { "2", t(a, "Smooth"), t(a, "Smooth: two refreshes ahead, frames a little late still show on time (about 4 ms more delay)") },
             { "3", t(a, "Smoothest"), t(a, "Smoothest: three refreshes ahead (about 8 ms more delay)") } });
         String fgv = GameSettings.get(a, "DM_FORK_FG");
-        if (dll && (fgv.equals("2x") || fgv.equals("3x"))) {   // the fork's frame generation's own settings
+        if (dll && fgv.equals("2x")) {   // the fork's frame generation's own settings
             slider(a, t(a, "Frame generation: flow scale"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
             choice(a, "DM_FORK_FG_PERF", t(a, "Frame generation: model"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
                 { "off", t(a, "Quality"), t(a, "Quality: the full model, heavier") } });
@@ -340,6 +337,13 @@ public final class GameMenu {
         // the right stick / camera, touch and controller alike (hle_hid.c rsens)
         choice(a, "DM_RSTICK_SENS", t(a, "Camera sensitivity"), new String[][] { { "50", "50 %", t(a, "Slower camera: the right stick and the touch camera turn less") }, { "75", "75 %", "" },
             { "", "100 %", t(a, "As on the Switch") }, { "125", "125 %", "" }, { "150", "150 %", t(a, "Faster camera: full speed with less of the stick") }, { "200", "200 %", "" } });
+        // FORK v47 (from Arceus Native): movement stick sensitivity (hle_hid.c lsens) and the touch camera's own settings (touch_ui.c cam_pct / cam_stick / rs_off)
+        slider(a, t(a, "Movement stick sensitivity"), "DM_LSTICK_SENS", 100, 200, 100, v -> v == 100 ? t(a, "100 % (as on the Switch)") : v + " %");
+        slider(a, t(a, "Touch camera sensitivity"), "DM_TOUCH_CAM_SENS", 25, 300, 100, v -> v + " %");
+        if (!"float".equals(GameSettings.get(a, "DM_FORK_TOUCH")))
+            choice(a, "DM_TOUCH_CAMERA", t(a, "Touch camera"), new String[][] { { "", t(a, "Drag"), t(a, "Drag: the camera follows the finger's movement and stops when it stops") },
+                { "stick", t(a, "Stick"), t(a, "Stick: where the finger lands is the centre; hold it away to keep turning, faster the further (hold-to-lock-on is off)") } });
+        choice(a, "DM_TOUCH_RSTICK", t(a, "Right stick on screen"), new String[][] { { "", t(a, "Show"), "" }, { "off", t(a, "Hide"), t(a, "Hide: the camera is turned with a finger only") } });
         heading(a, t(a, "Touch controls"));
         // L3 / R3 (pressing the sticks, touch_ui.c): off by default, Sword and Shield hardly use them (the left stick whistles in the Wild Area)
         choice(a, "DM_TOUCH_L3R3", t(a, "L3 / R3 buttons"), new String[][] { { "", t(a, "Off"), t(a, "Off: no L3 / R3 on screen (a controller's stick buttons still work)") },
@@ -370,6 +374,18 @@ public final class GameMenu {
         //   Set before v46 with the old separate settings: carried over once (the old keys cleared, so Same as elsewhere is off for good)
         if (GameSettings.get(a, "DM_FORK_BATTLE").isEmpty() && ("on".equals(GameSettings.get(a, "DM_FORK_BATTLE_HIDE")) || "on".equals(GameSettings.get(a, "DM_FORK_BATTLE_LAYOUT")))) {
             GameSettings.set(a, "DM_FORK_BATTLE", "on"); GameSettings.set(a, "DM_FORK_BATTLE_HIDE", ""); GameSettings.set(a, "DM_FORK_BATTLE_LAYOUT", ""); GameSettings.set(a, "DM_FORK_BATTLE_ICONS", ""); }
+        // FORK v47: context controls (touch_ui.c ctx_hidden): each screen kind hides what it does not use; dialogue and menus keep a layout of their own.
+        //   The ⊞ button brings every button back until the screen changes (the screen is a guess from what the game draws)
+        choice(a, "DM_FORK_GESTURES", t(a, "Gesture shortcuts"), new String[][] { { "", t(a, "Off"), "" },   // FORK v47 (touch_ui.c gestures_event)
+            { "on", t(a, "On"), t(a, "A quick three-finger tap opens this menu; two fingers swiped down together press X (the game's menu)") } });
+        heading(a, t(a, "Context controls"));
+        note(a, t(a, "The fork guesses the screen from what the game draws. If buttons you need are hidden, tap ⊞ (top centre) for every button until the screen changes. Arrange a screen's own layout with Move the touch controls while on it."));
+        choice(a, "DM_FORK_CTX_DIALOGUE", t(a, "Dialogue"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
+            { "on", t(a, "Text mode"), t(a, "While someone talks: A, B, the D-pad (for choices), turbo and fast-forward only, in a layout of their own") } });
+        choice(a, "DM_FORK_CTX_MENU", t(a, "Full-screen menus"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
+            { "on", t(a, "Menu mode"), t(a, "Bag, Box, Pokédex, the X menu: the sticks, ZL / ZR and turbo hide, in a layout of their own") } });
+        choice(a, "DM_FORK_CTX_WORLD", t(a, "Overworld"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
+            { "on", t(a, "Hide extras"), t(a, "Walking around: ZL / ZR, L3 / R3 and the D-pad hide (they do nothing there)") } });
         heading(a, t(a, "Battle"));
         choice(a, "DM_FORK_BATTLE", t(a, "Battle controls"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
             { "on", t(a, "Battle mode"), t(a, "Battle mode: in battles the unused buttons hide (L, R, ZL, ZR, +, −, right stick), X shows a Poké Ball, B a back arrow, Y info, and battles keep a layout of their own on each screen (arrange it with Move the touch controls during a battle)") } });
@@ -496,15 +512,60 @@ public final class GameMenu {
         button(a, r, t(a, "Save"), true, () -> { try (FileWriter fw = new FileWriter(new File(m, "notes.txt"))) { fw.write(e.getText().toString()); } catch (IOException x) { } go("order"); });
         button(a, r, t(a, "Cancel"), false, () -> go("order"));
     }
-    private static void confirm(Activity a, String q, Runnable yes) {   // asked in a card at the top of the page, not a pop-up
+    private static void confirm(Activity a, String q, Runnable yes) { confirm(a, q, t(a, "Delete"), yes); }   // FORK v47: the button's label a parameter (restart: OK)
+    private static void confirm(Activity a, String q, String label, Runnable yes) {   // asked in a card at the top of the page, not a pop-up
         LinearLayout c = new LinearLayout(a); c.setOrientation(LinearLayout.VERTICAL); c.setBackground(round(CARD, dp(a, 16), dp(a, 2), WARN)); c.setPadding(dp(a, 16), dp(a, 12), dp(a, 16), dp(a, 12));
         c.addView(text(a, q, 15, TEXT, true)); LinearLayout r = new LinearLayout(a); c.addView(r);
-        button(a, r, t(a, "Delete"), true, yes); button(a, r, t(a, "Cancel"), false, () -> go(page));
+        button(a, r, label, true, yes); button(a, r, t(a, "Cancel"), false, () -> go(page));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = dp(a, 10); body.addView(c, 0, lp); scroll.scrollTo(0, 0);
     }
 
     // ---------- saves, online, system ----------
+    // FORK v47: save slots (ForkSaves.java): each slot a card with Use / Rename / Backups / Delete; a new slot, empty or a copy of the current one
+    private static String slotOpen;   // the slot whose backups are listed (null: none)
+    private static void slots(Activity a) {
+        heading(a, t(a, "Save slots"));
+        note(a, t(a, "Each slot is its own save. Switching restarts the game into the chosen slot: save in the game first. Each start keeps a backup of the slot in use (the newest %d).", ForkSaves.KEEP));
+        String act = ForkSaves.active(a), nxt = ForkSaves.next(a);
+        for (String[] sl : ForkSaves.list(a)) {
+            String id = sl[0]; boolean isAct = id.equals(act), isNext = id.equals(nxt) && !isAct;
+            LinearLayout c = card(a);
+            titleRow(a, c, sl[1], isAct && nxt.equals(act) ? t(a, "In use") : isAct ? t(a, "In use until restart") : isNext ? t(a, "Next start") : null);
+            LinearLayout r = new LinearLayout(a); c.addView(r);
+            if (!id.equals(nxt)) button(a, r, t(a, "Use"), true, () -> { ForkSaves.choose(a, id); RESTART.add("DM_FORK_SLOT"); redraw(); });
+            button(a, r, t(a, "Rename"), false, () -> { slotOpen = "rename:" + id; redraw(); });
+            button(a, r, t(a, "Backups"), false, () -> { slotOpen = id.equals(slotOpen) ? null : id; redraw(); });
+            if (!isAct && !id.equals(nxt) && !id.equals("main")) button(a, r, t(a, "Delete"), false, () -> confirm(a, t(a, "Delete the slot \"%s\" and its backups from the phone?", sl[1]), () -> { ForkSaves.delete(a, id); redraw(); }));
+            if (("rename:" + id).equals(slotOpen)) {
+                EditText e = field(a, c, t(a, "slot name")); e.setText(sl[1]);
+                LinearLayout rr = new LinearLayout(a); c.addView(rr);
+                button(a, rr, t(a, "Save"), true, () -> { ForkSaves.rename(a, id, e.getText().toString()); slotOpen = null; redraw(); });
+                button(a, rr, t(a, "Cancel"), false, () -> { slotOpen = null; redraw(); }); }
+            if (id.equals(slotOpen)) {
+                File[] bs = ForkSaves.backups(a, id);
+                if (bs.length == 0) c.addView(text(a, t(a, "No backups yet: one is made each time the game starts on this slot."), 13, SUB, false));
+                for (File b : bs) {
+                    String n = b.getName(); String when = n.length() >= 15 ? n.substring(0, 4) + "-" + n.substring(4, 6) + "-" + n.substring(6, 8) + " " + n.substring(9, 11) + ":" + n.substring(11, 13) : n;
+                    LinearLayout br = new LinearLayout(a); br.setGravity(Gravity.CENTER_VERTICAL); c.addView(br);
+                    TextView tv = text(a, when, 14, TEXT, false); br.addView(tv, new LinearLayout.LayoutParams(0, -2, 1));
+                    button(a, br, t(a, "Restore"), false, () -> confirm(a, isAct ? t(a, "Restore this backup at the next start? The slot's current save is replaced (a backup of it is kept first).")
+                                                                             : t(a, "Replace this slot's save with the backup from %s?", when), t(a, "OK"), () -> {
+                        try { ForkSaves.restore(a, id, b); if (isAct) RESTART.add("DM_FORK_RESTORE"); } catch (IOException x) { android.widget.Toast.makeText(a, String.valueOf(x), android.widget.Toast.LENGTH_LONG).show(); }
+                        slotOpen = null; redraw(); })); } }
+        }
+        // a new slot
+        LinearLayout c = card(a); titleRow(a, c, t(a, "New slot"), null);
+        EditText name = field(a, c, t(a, "name, e.g. Shiny hunt"));
+        LinearLayout r = new LinearLayout(a); c.addView(r);
+        Runnable[] made = new Runnable[1];
+        java.util.function.Consumer<Boolean> mk = copy -> { try { ForkSaves.create(a, name.getText().toString(), copy); android.widget.Toast.makeText(a, t(a, "Slot made: tap Use to switch to it."), android.widget.Toast.LENGTH_SHORT).show(); }
+                                                            catch (IOException x) { android.widget.Toast.makeText(a, String.valueOf(x), android.widget.Toast.LENGTH_LONG).show(); } redraw(); };
+        button(a, r, t(a, "Empty (new game)"), true, () -> mk.accept(false));
+        button(a, r, t(a, "Copy of the current slot"), false, () -> mk.accept(true));
+        c.addView(text(a, t(a, "A copy takes the current slot's last save in the game."), 13, SUB, false));
+    }
     private static void saves(Activity a) {
+        slots(a);   // FORK v47
         heading(a, t(a, "Saves"));
         action(a, t(a, "Export save data"), t(a, "Save in the game first: the export is the last save the game wrote."),
                () -> pick(a, Intent.ACTION_CREATE_DOCUMENT, GameSettings.game(a)[2] + "-save.zip", REQ_EXPORT));

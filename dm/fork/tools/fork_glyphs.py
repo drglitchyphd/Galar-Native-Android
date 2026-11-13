@@ -40,11 +40,16 @@ def info(d, n):   # an "i" in a ring
     d.ellipse([c - r, c - r, c + r, c + r], outline=255, width=int(w))
     d.ellipse([c - n * 0.05, c - r * 0.62 - n * 0.05, c + n * 0.05, c - r * 0.62 + n * 0.05], fill=255)
     d.rectangle([c - n * 0.045, c - r * 0.28, c + n * 0.045, c + r * 0.62], fill=255)
+def allbtn(d, n):   # four rounded squares: "all buttons" (the context controls' override, v47)
+    w = n * 0.24; g = n * 0.06; x0 = n / 2 - w - g / 2; y0 = n / 2 - w - g / 2
+    for i in range(2):
+        for j in range(2):
+            x, y = x0 + i * (w + g), y0 + j * (w + g); d.rounded_rectangle([x, y, x + w, y + w], radius=n * 0.05, fill=255)
 def turbo(d, n):   # a lightning bolt
     p = [(0.58, 0.14), (0.30, 0.54), (0.48, 0.54), (0.40, 0.86), (0.70, 0.42), (0.52, 0.42), (0.62, 0.14)]
     d.polygon([(x * n, y * n) for x, y in p], fill=255)
 
-for idx, fn in ((12, ff), (13, ball), (14, back), (15, info), (16, turbo)):
+for idx, fn in ((12, ff), (13, ball), (14, back), (15, info), (16, turbo), (17, allbtn)):
     px = cell(fn).load()
     for y in range(CELL):
         for x in range(CELL): vals[y * W + idx * CELL + x] = px[x, y]
@@ -53,6 +58,6 @@ body = ',\n'.join(','.join(str(v) for v in vals[r * 100:(r + 1) * 100]) for r in
 out = src[:m.start()] + 'static const unsigned char ovl_font[] = {\n' + body + '\n};' + src[m.end():]
 out = re.sub(r'ovl_font_w = \d+', 'ovl_font_w = %d' % W, out)
 if '// FORK:' not in out.splitlines()[1]:
-    out = out.replace('\n', '\n// FORK: widened to 32 cells; cells 12-16 drawn by dm/fork/tools/fork_glyphs.py (fast-forward, Poke Ball, back, info, turbo)\n', 1)
+    out = out.replace('\n', '\n// FORK: widened to 32 cells; cells 12-17 drawn by dm/fork/tools/fork_glyphs.py (fast-forward, Poke Ball, back, info, turbo)\n', 1)
 open(H, 'w', encoding='utf-8').write(out)
-print('cells 12-16 written to', H)
+print('cells 12-17 written to', H)

@@ -188,12 +188,19 @@ static uint64_t key_bit(int32_t kc) {
     static int init; if (!init || atomic_exchange(&g_padset_dirty, 0)) { init = 1; pad_map_init(); }   // (the input thread only)
     return kc > 0 && kc < KC_MAX ? g_kc_map[kc] : 0;
 }
-static int32_t axis(float v) { if (fabsf(v) < 0.12f) return 0; float s = (fabsf(v) - 0.12f) / 0.88f; if (s > 1) s = 1; return (int32_t)(copysignf(s, v) * DM_STICK_MAX); }
+// FORK v47 (from Arceus Native 1c2214e): a controller stick's dead zone on its tilt, not on each axis (each axis on its own shortened every diagonal: a full push
+//   at 45 degrees came out at 0.85-0.94 of full). Under 12 % nothing; from 92 % full; the direction kept
+static void stick(float x, float y, int32_t *ox, int32_t *oy) {
+    float m = sqrtf(x * x + y * y); if (!(m >= 0.12f)) { *ox = *oy = 0; return; }
+    float s = (m - 0.12f) / (0.92f - 0.12f); if (s > 1) s = 1;
+    *ox = (int32_t)(x / m * s * DM_STICK_MAX); *oy = (int32_t)(y / m * s * DM_STICK_MAX);
+}
 // Touch: the on-screen controls (touch_ui.c)
 void touch_ui_init(ANativeActivity *a);
 void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32_t s[4]);
 void touch_ui_hide(void);
 void touch_ui_pad(int connected);
+void touch_ui_release(void);   // FORK v47: every finger let go (focus lost)
 #include <jni.h>
 JNIEXPORT void JNICALL Java_com_nxnative_GameActivity_nativePadConnected(JNIEnv *env, jclass c, jboolean on) { (void)env; (void)c; touch_ui_pad(on); }   // GameActivity.java
 void touch_ui_setting(const char *key, const char *value);
@@ -215,9 +222,10 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
         } else now = 0;
     }
     else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
-    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3") || !strcmp(k, "DM_FORK_TOUCH") || !strcmp(k, "DM_FORK_DEADZONE") || !strcmp(k, "DM_FORK_BATTLE_HIDE") || !strcmp(k, "DM_FORK_TOUCH_COLOR") || !strcmp(k, "DM_FORK_TOUCH_SIZE") || !strncmp(k, "DM_FORK_FF", 10) || !strncmp(k, "DM_FORK_TURBO", 13) || !strncmp(k, "DM_FORK_BATTLE", 14)) touch_ui_setting(k, v);   // FORK: + fast-forward, turbo, battle   // FORK: + DM_FORK_TOUCH, DM_FORK_DEADZONE
+    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3") || !strcmp(k, "DM_TOUCH_CAM_SENS") || !strcmp(k, "DM_TOUCH_CAMERA") || !strcmp(k, "DM_TOUCH_RSTICK") || !strcmp(k, "DM_FORK_TOUCH") || !strcmp(k, "DM_FORK_DEADZONE") || !strcmp(k, "DM_FORK_BATTLE_HIDE") || !strcmp(k, "DM_FORK_TOUCH_COLOR") || !strcmp(k, "DM_FORK_TOUCH_SIZE") || !strncmp(k, "DM_FORK_FF", 10) || !strncmp(k, "DM_FORK_TURBO", 13) || !strncmp(k, "DM_FORK_BATTLE", 14) || !strncmp(k, "DM_FORK_CTX_", 12) || !strcmp(k, "DM_FORK_GESTURES")) touch_ui_setting(k, v);   // FORK: + fast-forward, turbo, battle   // FORK: + DM_FORK_TOUCH, DM_FORK_DEADZONE
     else if (!strcmp(k, "DM_FORK_CAPTURE")) { extern volatile int dm_fork_capture_arm, dm_fork_capture_trainer; if (v && !strcmp(v, "trainer")) dm_fork_capture_trainer = 1; else dm_fork_capture_arm = 1; }   // FORK: + trainer (v41)   // FORK: fork_ui.h, the menu's "Capture the next odd frame"
     else if (!strcmp(k, "DM_ASPECT")) __atomic_store_n(&dm_aspect_mode, dm_aspect_parse(v), __ATOMIC_RELAXED);   // FORK: dm_aspect_parse (adds "fix")
+    else if (!strcmp(k, "DM_LSTICK_SENS")) { extern _Atomic int dm_lstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 50 || p > 300) p = 100; if (&dm_lstick_pct) atomic_store(&dm_lstick_pct, p); else now = 0; }   // FORK v47 (hle_hid.c lsens)
     else if (!strcmp(k, "DM_RSTICK_SENS")) { extern _Atomic int dm_rstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 25 || p > 400) p = 100; if (&dm_rstick_pct) atomic_store(&dm_rstick_pct, p); else now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
     else if (!strcmp(k, "DM_SCALER")) { extern volatile int dm_scaler_mode; if (!v || !*v) v = getenv("DM_AUTO_SCALER"); dm_scaler_mode = v && !strcmp(v, "sgsr") ? 1 : v && !strcmp(v, "smooth") ? 2 : 0; }   // (Auto: the app's pick)
     else if (!strcmp(k, "DM_FRAMEGEN")) { extern volatile int dm_framegen_mode; dm_framegen_mode = v && (!strcmp(v, "on") || !strcmp(v, "1")) ? 1 : v && !strcmp(v, "debug") ? 2 : v && !strcmp(v, "lsfg") ? 3 : 0; window_rate(atomic_load(&g_window));   // nvn_vk.c present_window_locked
@@ -295,8 +303,8 @@ static int32_t on_input(struct android_app *app, AInputEvent *e) {
         int k = pad_slot(AInputEvent_getDeviceId(e));
         float rx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_Z, 0), ry = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RZ, 0);
         if (rx == 0 && ry == 0) { rx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RX, 0); ry = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RY, 0); }   // right stick as RX / RY on some drivers
-        g_pads[k].lx = axis(AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0)); g_pads[k].ly = axis(-AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_Y, 0));
-        g_pads[k].rx = axis(rx); g_pads[k].ry = axis(-ry);
+        stick(AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0), -AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_Y, 0), &g_pads[k].lx, &g_pads[k].ly);   // FORK v47: stick()
+        stick(rx, -ry, &g_pads[k].rx, &g_pads[k].ry);
         float hx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0), hy = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_Y, 0);
         float lt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_LTRIGGER, 0), rt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RTRIGGER, 0);
         if (lt == 0) lt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_BRAKE, 0); if (rt == 0) rt = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_GAS, 0);
@@ -682,6 +690,15 @@ static void *log_mirror(void *p) {
         graphics_auto(); pin_update();
         if (n % 6 == 0) fprintf(stderr, "[mem] app %ld MB resident (%ld MB swapped), phone %ld MB available of %ld MB; heat %s\n", kb_of("/proc/self/status", "VmRSS:") / 1024,
                                 kb_of("/proc/self/status", "VmSwap:") / 1024, kb_of("/proc/meminfo", "MemAvailable:") / 1024, kb_of("/proc/meminfo", "MemTotal:") / 1024, thermal_text(th, sizeof th));
+        // FORK v47 (from Arceus Native d11be3a): a freeze report: no frame shown for two of these 5 s looks (5-10 s) while the game is in the foreground with its window:
+        //   what each guest thread waits on goes into the log (crash_dump_now), at most 3 times a run; the game is not stopped, the Download copy refreshed below
+        { extern uint64_t dm_nvn_frame_count(void) __attribute__((weak)); extern int dm_focus_now(void) __attribute__((weak)); extern void crash_dump_now(const char *why) __attribute__((weak));
+          static uint64_t lastf; static int still, dumps;
+          uint64_t f = dm_nvn_frame_count ? dm_nvn_frame_count() : 0; int fg = (!dm_focus_now || dm_focus_now() == 1) && atomic_load(&g_window);
+          if (f && f == lastf && fg) { if (++still == 2 && dumps < 3 && crash_dump_now) { dumps++;
+              fprintf(stderr, "[FORK] [RED] freeze: no frame shown for 10 s in the foreground (frame %llu); what each thread waits on follows\n", (unsigned long long)f); crash_dump_now("no frame for 10 s"); } }
+          else still = 0;
+          lastf = f; }
         { static char d[256]; if (!d[0]) dl_name(d, sizeof d, "log"); copy_file(src, d); }
     }
     return NULL;
@@ -993,8 +1010,10 @@ static void on_cmd(struct android_app *app, int32_t cmd) {
         case APP_CMD_GAINED_FOCUS: immersive(); if (g_started) { dm_focus_set(1); dm_audio_suspend(0); } break;
         // In the background (recents, home, another app) the game keeps running with its sound, as a Switch game does under the HOME menu with a suspend-free
         //   setting: it is not told it lost focus (it would pause itself), and frames are simply not shown while there is no window. DM_BACKGROUND=off pauses it as before
-        case APP_CMD_LOST_FOCUS: if (g_started && !bg_play()) { dm_focus_set(2); } break;
-        case APP_CMD_PAUSE: if (g_started && nvn_vk_heap_alive) nvn_vk_heap_alive(); if (g_started) { if (!bg_play()) { dm_focus_set(3); dm_audio_suspend(1); } if (nvn_vk_cache_save) nvn_vk_cache_save(); } break;
+        case APP_CMD_LOST_FOCUS: touch_ui_release();   // FORK v47
+            if (g_started && !bg_play()) { dm_focus_set(2); } break;
+        case APP_CMD_PAUSE: touch_ui_release();   // FORK v47
+            if (g_started && nvn_vk_heap_alive) nvn_vk_heap_alive(); if (g_started) { if (!bg_play()) { dm_focus_set(3); dm_audio_suspend(1); } if (nvn_vk_cache_save) nvn_vk_cache_save(); } break;
         case APP_CMD_RESUME: if (g_started) { dm_focus_set(1); dm_audio_suspend(0); swapin_start(); } break;
     }
 }

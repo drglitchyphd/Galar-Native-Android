@@ -29,7 +29,7 @@
 #include <string.h>
 #include <time.h>
 
-enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, NCTL };   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
+enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, C_ALL, NCTL };   /* FORK v47: C_ALL, the context controls' "all buttons" override */   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
 typedef struct { float cx, cy, r; int glyph, shown; uint64_t btn; } ctl;
 static ctl g_c[NCTL];
 static float g_w, g_h;
@@ -52,8 +52,10 @@ static int g_fr_on; static float g_fr_x, g_fr_y, g_frk_x, g_frk_y;   // the floa
 //   + / - and the on-screen right stick are neither drawn nor touchable; A, B, X (the quick Poké Ball), Y, the D-pad, the movement stick and the menu button stay
 static int g_bhide;
 extern _Atomic int dm_fork_screen __attribute__((weak)); extern volatile int dm_fork_census_want __attribute__((weak));
+static int g_ctx_over;   // FORK v47 (defined below, with the context controls)
 static int battle_hidden(int c) {
     if (!g_bhide || !&dm_fork_screen || atomic_load(&dm_fork_screen) != 2) return 0;
+    if (g_ctx_over == 2) return 0;   // FORK v47: the ⊞ override
     return c == C_L || c == C_R || c == C_ZL || c == C_ZR || c == C_PLUS || c == C_MINUS || c == C_RSTICK;   // (X stays: the quick Poké Ball in wild battles)
 }
 // FORK: fast-forward (DM_FORK_FF: "" off, "battle" in battles only, "all" anywhere; the speed: host/fork_ff.c), turbo A (DM_FORK_TURBO=on, DM_FORK_TURBO_HZ presses a
@@ -63,15 +65,32 @@ static float g_bfade = -1;   // FORK: DM_FORK_BATTLE_FADE seconds in battles (-1
 static int g_ffscope, g_ff_toggle, g_ff_hold, g_turbo_on, g_turbo_held, g_bicons = 1, g_blayout; static float g_turbo_hz = 10, g_bopacity;
 extern volatile int dm_fork_ff_req __attribute__((weak)), dm_fork_ff_speed __attribute__((weak));
 static int in_battle(void) { return &dm_fork_screen && atomic_load(&dm_fork_screen) == 2; }
-static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0; }
+// FORK v47: context controls, each its own switch (default off): dialogue (DM_FORK_CTX_DIALOGUE), full-screen menus (DM_FORK_CTX_MENU), the overworld
+//   (DM_FORK_CTX_WORLD). Each hides what the screen does not use; dialogue and menus keep a layout of their own (like the battle's). The ⊞ button (C_ALL) brings every
+//   button and the normal layout back until the screen changes (the screen guess: gfx/nvn/fork_ui.h, 0 world, 1 menu, 2 battle, 3 dialogue)
+static int g_ctx_dlg, g_ctx_menu, g_ctx_world, g_ctx_over = -1;   // (g_ctx_over: the screen kind the override was asked on; -1 none)
+static int screen_kind(void) { return &dm_fork_screen ? atomic_load(&dm_fork_screen) : 0; }
+static int g_bmode;   // Battle mode (battle_mode below)
+static int ctx_on(int k) { return k == 3 ? g_ctx_dlg : k == 1 ? g_ctx_menu : k == 0 ? g_ctx_world : k == 2 ? g_bmode : 0; }
+static int ctx_active(int k) { if (g_ctx_over >= 0 && g_ctx_over != screen_kind()) g_ctx_over = -1; return ctx_on(k) && g_ctx_over != k; }
+static int ctx_hidden(int c) {
+    int k = screen_kind(); if (!ctx_active(k) || c == C_ALL || c == C_MENU) return 0;
+    if (k == 3) return !(c == C_A || c == C_B || (c >= C_UP && c <= C_RIGHT) || c == C_TURBO || c == C_FF);   // dialogue: A, B, the D-pad (choices), turbo, fast-forward
+    if (k == 1) return c == C_STICK || c == C_RSTICK || c == C_ZL || c == C_ZR || c == C_L3 || c == C_R3 || c == C_THROW || c == C_TURBO;   // menus: no sticks
+    if (k == 0) return c == C_ZL || c == C_ZR || c == C_L3 || c == C_R3 || (c >= C_UP && c <= C_RIGHT);   // the overworld: no ZL / ZR, L3 / R3, D-pad
+    return 0;
+}
+static int g_ctx_any;   // FORK v47: a context switch is on (census_sync)
+static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0 || g_ctx_any; }
 static void bhide_set(int on) { g_bhide = on; census_sync(); }
 // FORK v46: one switch, "Battle controls: Battle mode" (DM_FORK_BATTLE=on): unused buttons hidden, battle icons, the battle's own layout. Set before v46 (no
 //   DM_FORK_BATTLE yet), the old DM_FORK_BATTLE_HIDE / _LAYOUT still turn it on, so a player's battle setup carries over
-static void battle_mode(int on) { bhide_set(on); g_bicons = on; g_blayout = on; g_w = g_h = 0; census_sync(); }
+static void battle_mode(int on) { g_bmode = on; bhide_set(on); g_bicons = on; g_blayout = on; g_w = g_h = 0; census_sync(); }
 static int fork_hidden(int c) {
     if (c == C_FF) return !g_ffscope || (g_ffscope == 1 && !in_battle());
     if (c == C_TURBO) return !g_turbo_on;
-    return battle_hidden(c);
+    if (c == C_ALL) { int k = screen_kind(); return !ctx_on(k); }   // FORK v47: only where a context mode applies (lit while its override is on)
+    return battle_hidden(c) || ctx_hidden(c);
 }
 static void ff_publish(void) { if (&dm_fork_ff_req) dm_fork_ff_req = (g_ff_toggle || g_ff_hold) && (g_ffscope == 2 || (g_ffscope == 1 && in_battle())); }
 static double g_touch_t; static double g_two_t, g_tap_mute;   // two-finger tap: when the second finger landed; single taps ignored until g_tap_mute
@@ -87,7 +106,7 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 
 // ---------- the player's layout (the in-game editor): position, size and visibility of each control, kept in <files>/touch_layout.txt ----------
 // One line per changed control: "<name> <x / width> <y / height> <radius / height> <shown>"; controls without a line keep the default layout
-static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo" };   // FORK: + ff, turbo
+static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all" };   // FORK: + ff, turbo
 static struct { int set; float fx, fy, fr; int shown, shape; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
 static char g_lay_path[1100]; static int g_lay_loaded;
 // FORK: one layout per screen and orientation: touch_layout_<profile>.txt (outer_landscape, inner_landscape, inner_portrait, outer_portrait), picked from the window's
@@ -101,7 +120,9 @@ static const char *profile_of(float w, float h) {
 const char *touch_ui_profile(void) { return g_lay_prof; }   // (android_main.c: the editor bar names it)
 static void layout_profile(float w, float h) {
     const char *pf = profile_of(w, h);
-    static char pb[40]; if (g_blayout && in_battle()) { snprintf(pb, sizeof pb, "%s_battle", pf); pf = pb; }   // FORK: the battle layout (DM_FORK_BATTLE_LAYOUT)
+    static char pb[40]; if (g_blayout && in_battle() && g_ctx_over != 2) { snprintf(pb, sizeof pb, "%s_battle", pf); pf = pb; }
+    else if (screen_kind() == 3 && ctx_active(3)) { snprintf(pb, sizeof pb, "%s_dialogue", pf); pf = pb; }   // FORK v47: dialogue and menus: layouts of their own
+    else if (screen_kind() == 1 && ctx_active(1)) { snprintf(pb, sizeof pb, "%s_menu", pf); pf = pb; }   // FORK: the battle layout (DM_FORK_BATTLE_LAYOUT)
     if (!g_lay_dir[0] || !strcmp(pf, g_lay_prof)) return;
     static char keep[40]; snprintf(keep, sizeof keep, "%s", pf); pf = keep;
     g_lay_prof = pf; snprintf(g_lay_path, sizeof g_lay_path, "%s/touch_layout_%s.txt", g_lay_dir, pf); g_lay_loaded = 0;
@@ -168,7 +189,8 @@ static void layout(float w, float h) {
     //   16:9 to 20:9 screens; hide or move them in the layout editor like any other
     g_c[C_L3] = (ctl){ g_c[C_STICK].cx, g_c[C_STICK].cy - 0.22f * s, 0.05f * s, OVL_G_L3, 1, DM_BTN_LS };
     g_c[C_R3] = (ctl){ g_c[C_RSTICK].cx, g_c[C_RSTICK].cy - 0.21f * s, 0.05f * s, OVL_G_R3, 1, DM_BTN_RS };
-    g_c[C_FF] = (ctl){ w * 0.5f + 0.24f * s, 0.06f * s, mr, OVL_G_FF, 1, 0 };   // FORK: fast-forward, just right of + (fork_hidden: only when Fast-forward is on)
+    g_c[C_FF] = (ctl){ w * 0.5f + 0.24f * s, 0.06f * s, mr, OVL_G_FF, 1, 0 };
+    g_c[C_ALL] = (ctl){ w * 0.5f + 0.36f * s, 0.06f * s, mr * 0.85f, OVL_G_ALL, 1, 0 };   // FORK v47: ⊞ all buttons, right of fast-forward   // FORK: fast-forward, just right of + (fork_hidden: only when Fast-forward is on)
     g_c[C_TURBO] = (ctl){ w - 0.12f * s, h - 0.50f * s, 0.05f * s, OVL_G_TURBO, 1, 0 };   // FORK: turbo A, above-right of A (only when Turbo A is on)
     // touch-first games (Legends: Arceus): only the movement stick and − / + on screen; everything else is touch on the game itself (touch_ui_event's gestures, touch_menu.c)
     if (GESTURES_ON) for (int c = C_RSTICK; c < NCTL; c++) if (c != C_PLUS && c != C_MINUS && c != C_MENU) g_c[c].shown = 0;
@@ -186,7 +208,7 @@ static void layout(float w, float h) {
         g_c[C_LEFT] = (ctl){ dx - dg, dy, dr, OVL_G_NONE, 1, DM_BTN_LEFT }; g_c[C_RIGHT] = (ctl){ dx + dg, dy, dr, OVL_G_NONE, 1, DM_BTN_RIGHT };
         g_c[C_RSTICK] = (ctl){ 0.50f * w, h - 0.20f * a, 0.09f * q, OVL_G_NONE, 1, 0 };
         g_c[C_THROW].shown = 0;
-        g_c[C_FF] = (ctl){ 0.68f * w, ph + 0.08f * a, sm, OVL_G_FF, 1, 0 }; g_c[C_TURBO] = (ctl){ 0.62f * w, ph + 0.22f * a, 0.045f * q, OVL_G_TURBO, 1, 0 };   // FORK
+        g_c[C_FF] = (ctl){ 0.68f * w, ph + 0.08f * a, sm, OVL_G_FF, 1, 0 }; g_c[C_ALL] = (ctl){ 0.78f * w, ph + 0.08f * a, sm * 0.85f, OVL_G_ALL, 1, 0 }; g_c[C_TURBO] = (ctl){ 0.62f * w, ph + 0.22f * a, 0.045f * q, OVL_G_TURBO, 1, 0 };   // FORK
     }
     if (g_tsize != 1.0f) for (int c = 0; c < NCTL; c++) g_c[c].r *= g_tsize;   // FORK: overall size (before the player's own sizes)
     if (!g_rstick_on) { g_rknob_x = g_c[C_RSTICK].cx; g_rknob_y = g_c[C_RSTICK].cy; }
@@ -194,7 +216,14 @@ static void layout(float w, float h) {
     if (!l3r3_on()) g_c[C_L3].shown = g_c[C_R3].shown = 0;   // (an option, off by default: the layout editor's own choice only counts while it is on)
     if (!g_stick_on) { g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }
 }
-static int ctl_off(int c) { return (c == C_L3 || c == C_R3) && !l3r3_on(); }   // left out entirely, the layout editor too
+// FORK v47 (from Arceus Native 652ab9d): the touch camera's own sensitivity (DM_TOUCH_CAM_SENS 25-300 %, apart from the right stick's DM_RSTICK_SENS), how a drag on
+//   the camera side turns it (DM_TOUCH_CAMERA: drag = the finger's speed, stock; stick = where the finger lands is the centre, held away it keeps turning, faster the
+//   further; the floating sticks scheme already works that way), and whether the right stick is drawn (DM_TOUCH_RSTICK=off hides it and R3)
+static int g_cam_pct = -1, g_cam_stick = -1, g_rs_off = -1;
+static int cam_pct(void) { if (g_cam_pct < 0) { const char *e = getenv("DM_TOUCH_CAM_SENS"); int v = e ? atoi(e) : 100; g_cam_pct = v < 25 || v > 300 ? 100 : v; } return g_cam_pct; }
+static int cam_stick(void) { if (g_cam_stick < 0) { const char *e = getenv("DM_TOUCH_CAMERA"); g_cam_stick = e && !strcmp(e, "stick"); } return g_cam_stick; }
+static int rs_off(void) { if (g_rs_off < 0) { const char *e = getenv("DM_TOUCH_RSTICK"); g_rs_off = e && !strcmp(e, "off"); } return g_rs_off; }
+static int ctl_off(int c) { return ((c == C_L3 || c == C_R3) && !l3r3_on()) || ((c == C_RSTICK || c == C_R3) && rs_off()); }   // left out entirely, the layout editor too (FORK v47: + rs_off)
 static int hit(int c, float x, float y, float slack) {
     if (fork_hidden(c)) return 0;   // FORK
     const ctl *k = &g_c[c]; float dx = x - k->cx, dy = y - k->cy, r = k->r * slack;
@@ -281,6 +310,9 @@ static void recompute_locked(void) {
             if (d > r) { dx *= r / d; dy *= r / d; }
             float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < g_dead * g_dead) nx = ny = 0;   // dead zone (FORK: g_dead, DM_FORK_DEADZONE)
             lx = nx; ly = ny; stick = 1; g_knob_x = g_stick_x + dx; g_knob_y = g_stick_y + dy; }
+        else if (c == C_CAM && g_float <= 0 && cam_stick() && !g_ptr[i].thr) {   // FORK v47: the camera as a stick under the finger (stock scheme): full at 12 % of the screen height
+            float r = g_h * 0.12f, dx = (g_ptr[i].x - g_ptr[i].x0) / r, dy = (g_ptr[i].y - g_ptr[i].y0) / r, m = sqrtf(dx * dx + dy * dy);
+            if (m > 0.08f) { float k = fminf(1.0f, (m - 0.08f) / 0.92f) / m; rx = dx * k; ry = -dy * k; } rstick = 3; }
         else if (c == C_CAM && g_float > 0 && !g_ptr[i].thr) {   // FORK: the floating camera stick, tilt from where the finger landed
             float r = g_c[C_STICK].r, dx = g_ptr[i].x - g_fr_x, dy = g_ptr[i].y - g_fr_y, d = sqrtf(dx * dx + dy * dy);
             if (d > r) { dx *= r / d; dy *= r / d; }
@@ -297,22 +329,25 @@ static void recompute_locked(void) {
     g_ff_hold = ffh; g_turbo_held = turbo; ff_publish();   // FORK
     for (int c = C_A; c < NCTL; c++) if (t < g_held_until[c]) b |= g_c[c].btn;
     for (int i = 0; i < 10; i++) if (g_ptr[i].id >= 0 && g_ptr[i].thr) b |= DM_BTN_ZR;
-    for (int i = 0; i < 10; i++) if (GESTURES_ON && g_ptr[i].id >= 0 && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !touch_menu_active() && t - g_ptr[i].t0 > 0.45 &&
+    for (int i = 0; i < 10; i++) if (GESTURES_ON && !cam_stick() && g_ptr[i].id >= 0 && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !touch_menu_active() && t - g_ptr[i].t0 > 0.45 &&   // FORK v47: not in stick mode (a held finger steers)
                                      fabsf(g_ptr[i].x - g_ptr[i].x0) < g_h * 0.03f && fabsf(g_ptr[i].y - g_ptr[i].y0) < g_h * 0.03f) { g_ptr[i].lp = 1; b |= DM_BTN_ZL; }   // press and hold: ZL (lock on)
     for (int i = 0; i < 10; i++) if (g_ptr[i].id >= 0 && g_ptr[i].lp) b |= DM_BTN_ZL;   // a throw swipe holds ZR (aim) until the finger lifts (throw)
     if (rstick || (b & (DM_BTN_UP | DM_BTN_DOWN | DM_BTN_LEFT | DM_BTN_RIGHT))) g_inner_t = t;   // held: stays clear
+    int camstick = rstick == 3; if (camstick) rstick = 0;   // FORK v47: the camera stick under the finger: not the on-screen right stick either
     g_fr_on = rstick == 2; if (rstick == 2) rstick = 0;   // FORK: the floating camera stick is not the on-screen right stick (drawn on its own)
     g_rstick_on = rstick; if (!rstick) { g_rknob_x = g_c[C_RSTICK].cx; g_rknob_y = g_c[C_RSTICK].cy; }
     if (!stick) { g_stick_on = 0; g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }
     // the camera: the finger's speed, full turn at about a screen height per 0.6 s, at rest within 60 ms of the finger stopping
-    float vmax = g_h / 0.6f; if (t - g_cam_t > 0.06) g_cam_vx = g_cam_vy = 0;
-    if (g_fr_on) rstick = 1;   // FORK: the floating camera stick's tilt instead of the finger's speed
+    float vmax = g_h / 0.6f * 100.0f / (float)cam_pct(); if (t - g_cam_t > 0.06) g_cam_vx = g_cam_vy = 0;   // FORK v47: the touch camera's own sensitivity
+    int own = !rstick;   // FORK v47: the touch camera (drag, stick under the finger, floating): its own sensitivity; the on-screen right stick keeps DM_RSTICK_SENS
+    if (g_fr_on || camstick) { rstick = 1; if (cam_pct() != 100) { float k = cam_pct() / 100.0f; rx = clampf(rx * k, -1, 1); ry = clampf(ry * k, -1, 1); } }   // FORK: the floating camera stick's tilt instead of the finger's speed
     g_btn = b; g_lx = ax(lx); g_ly = ax(ly); g_rx = rstick ? ax(rx) : ax(g_cam_vx / vmax); g_ry = rstick ? ax(ry) : ax(-g_cam_vy / vmax);
+    { extern _Atomic int dm_touch_cam_own __attribute__((weak)); if (&dm_touch_cam_own) atomic_store(&dm_touch_cam_own, own); }   // FORK v47 (hle_hid.c)
 }
 // ---------- the layout editor: hold − for 2 s to enter; drag a control to move it, pinch on it to resize it, double-tap it to hide / show it;
 // hold + for 2 s to go back to the default layout; hold − for 2 s again to save and leave. The game gets no input meanwhile ----------
 static double g_edit_hold_t;   // (g_edit_hold_t: when the hold that toggles the editor started)
-static struct { int32_t id; int c; float ox, oy, x0, y0; double t0; } g_ep[10];
+static struct { int32_t id; int c; float ox, oy, x0, y0; double t0; int mv; } g_ep[10];   // FORK v47 (from Arceus Native 1c2214e): mv, the finger moved: dragging, not a hold
 static struct { int c, active; float d0, r0; } g_pinch;
 static int g_last_tap_c = -1; static double g_last_tap_t;
 static int edit_hit(float x, float y) {   // the smallest control (shown or not) under the finger
@@ -335,12 +370,13 @@ static void edit_event(const AInputEvent *e) {
         if (c >= 0) g_edit_sel = c;   // FORK
         for (int i = 0; i < 10; i++) if (g_ep[i].id >= 0 && c >= 0 && g_ep[i].c == c) {   // a second finger on the same control: pinch
             float dx = x - g_ep[i].x0, dy = y - g_ep[i].y0; g_pinch.c = c; g_pinch.active = 1; g_pinch.d0 = sqrtf(dx * dx + dy * dy) + 1; g_pinch.r0 = g_c[c].r; break; }
-        for (int i = 0; i < 10; i++) if (g_ep[i].id < 0) { g_ep[i].id = AMotionEvent_getPointerId(e, k); g_ep[i].c = c; g_ep[i].x0 = x; g_ep[i].y0 = y; g_ep[i].t0 = now_s();
+        for (int i = 0; i < 10; i++) if (g_ep[i].id < 0) { g_ep[i].id = AMotionEvent_getPointerId(e, k); g_ep[i].c = c; g_ep[i].x0 = x; g_ep[i].y0 = y; g_ep[i].t0 = now_s(); g_ep[i].mv = 0;
             g_ep[i].ox = c >= 0 ? g_c[c].cx - x : 0; g_ep[i].oy = c >= 0 ? g_c[c].cy - y : 0; break; }
     } else if (act == AMOTION_EVENT_ACTION_MOVE) {
         float px[10], py[10]; int n = 0;
         for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) { int32_t id = AMotionEvent_getPointerId(e, k); float x = AMotionEvent_getX(e, k), y = AMotionEvent_getY(e, k);
             for (int i = 0; i < 10; i++) if (g_ep[i].id == id && g_ep[i].c >= 0) {
+                if (fabsf(x - g_ep[i].x0) > g_h * 0.03f || fabsf(y - g_ep[i].y0) > g_h * 0.03f) g_ep[i].mv = 1;   // FORK v47
                 if (g_pinch.active && g_pinch.c == g_ep[i].c) { if (n < 10) { px[n] = x; py[n] = y; n++; } }
                 else { int c = g_ep[i].c; g_c[c].cx = clampf(x + g_ep[i].ox, g_c[c].r, g_w - g_c[c].r); g_c[c].cy = clampf(y + g_ep[i].oy, g_c[c].r, g_h - g_c[c].r); edit_store(c); } } }
         if (g_pinch.active && n >= 2) { float dx = px[0] - px[1], dy = py[0] - py[1]; int c = g_pinch.c;
@@ -386,25 +422,45 @@ void touch_ui_edit_size(float frac) { pthread_mutex_lock(&g_mu); int c = g_edit_
 // the 2-second holds, checked once a frame (a finger held still sends no events): − toggles the editor (saving on the way out), + in the editor resets the layout
 static void edit_holds_locked(void) {
     double t = now_s(); int minus = 0, plus = 0;
-    if (g_edit) { for (int i = 0; i < 10; i++) if (g_ep[i].id >= 0 && !g_pinch.active) { if (g_ep[i].c == C_MINUS) minus = 1; if (g_ep[i].c == C_PLUS) plus = 1; } }
+    if (g_edit) { for (int i = 0; i < 10; i++) if (g_ep[i].id >= 0 && !g_ep[i].mv && !g_pinch.active) { if (g_ep[i].c == C_MINUS) minus = 1; if (g_ep[i].c == C_PLUS) plus = 1; } }   // FORK v47: !mv
     else for (int i = 0; i < 10; i++) if (g_ptr[i].id >= 0 && g_ptr[i].target == C_MINUS) minus = 1;
+    if (g_edit && plus && !minus) { g_edit_hold_t = 0; return; }   // FORK v47 (Arceus Native 1c2214e): + alone does nothing (it is being placed); + and − held together still reset
     if (!minus && !plus) { g_edit_hold_t = 0; return; }
     if (!g_edit_hold_t) { g_edit_hold_t = t; return; }
     if (t - g_edit_hold_t < 2.0) return;
     g_edit_hold_t = 1e18;   // fired: nothing more until the finger lifts
-    if (plus && g_edit) { edit_reset_locked(); click_locked(); return; }   // FORK: edit_reset_locked
+    if (plus && minus && g_edit) { edit_reset_locked(); click_locked(); return; }   // FORK: edit_reset_locked; v47: + and − together
     if (g_edit) { layout_save(); g_edit = 0; for (int i = 0; i < 10; i++) g_ep[i].id = -1; fprintf(stderr, "[touch] layout saved: %s\n", g_lay_path); }
     else { g_edit = 1; for (int i = 0; i < 10; i++) { if (g_ptr[i].id >= 0) { g_ep[0].id = g_ptr[i].id; g_ep[0].c = C_MINUS; g_ep[0].t0 = t; } g_ptr[i].id = -1; }
            g_btn = 0; g_lx = g_ly = g_rx = g_ry = 0; dm_input_set(0, 0, 0, 0, 0); fprintf(stderr, "[touch] layout editor on\n"); front_open_menu(2); }   // FORK: 2 = the editor's bar
     click_locked();
 }
 // Returns the touch buttons and sticks (for the host's touch source) after this event
+// FORK v47: gesture shortcuts (DM_FORK_GESTURES=on, default off): a quick three-finger tap opens the ☰ menu; two fingers swiped down together press X (the
+//   game's menu). Fingers that land on buttons still press them; the gestures are meant for the empty parts of the screen
+static int g_gest = -1; static double g_g3_t, g_g2_t; static int g_g3, g_g2; static float g_g2_y[2]; static int32_t g_g2_id[2];
+static int gestures_on(void) { if (g_gest < 0) { const char *e = getenv("DM_FORK_GESTURES"); g_gest = e && !strcmp(e, "on"); } return g_gest; }
+static void gestures_event(const AInputEvent *e, int32_t act) {
+    if (!gestures_on()) return;
+    size_t n = AMotionEvent_getPointerCount(e); double t = now_s();
+    if (act == AMOTION_EVENT_ACTION_DOWN) { g_g3 = 0; g_g2 = 0; }
+    if (act == AMOTION_EVENT_ACTION_POINTER_DOWN && n == 3) { g_g3 = 1; g_g3_t = t; g_g2 = 0; }
+    if (act == AMOTION_EVENT_ACTION_POINTER_DOWN && n == 2) { g_g2 = 1; g_g2_t = t; for (int k = 0; k < 2; k++) { g_g2_id[k] = AMotionEvent_getPointerId(e, (size_t)k); g_g2_y[k] = AMotionEvent_getY(e, (size_t)k); } }
+    if (act == AMOTION_EVENT_ACTION_POINTER_DOWN && n > 3) g_g3 = 0;
+    if (act == AMOTION_EVENT_ACTION_MOVE && g_g2 && n == 2 && t - g_g2_t < 0.6) {
+        int down = 0; for (size_t k = 0; k < n; k++) for (int j = 0; j < 2; j++) if (AMotionEvent_getPointerId(e, k) == g_g2_id[j] && AMotionEvent_getY(e, k) - g_g2_y[j] > g_h * 0.10f) down++;
+        if (down == 2) { g_g2 = 0; dm_input_press(DM_BTN_X, 80000000ull); click_locked(); g_tap_mute = t + 0.4; fprintf(stderr, "[FORK] [touch] gesture: two-finger swipe down = X\n"); } }
+    if (act == AMOTION_EVENT_ACTION_UP) {
+        if (g_g3 && t - g_g3_t < 0.45) { g_tap_mute = t + 0.3; click_locked(); fprintf(stderr, "[FORK] [touch] gesture: three-finger tap = the menu\n"); front_open_menu(0); }
+        g_g3 = 0; g_g2 = 0; }
+}
 void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32_t s[4]) {
     pthread_mutex_lock(&g_mu);
     layout(w, h); g_visible = 1; g_touch_t = now_s();
     if (g_edit) { edit_event(e); *btn = 0; s[0] = s[1] = s[2] = s[3] = 0; pthread_mutex_unlock(&g_mu); return; }
     int32_t act = AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK;
     size_t idx = (size_t)((AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
+    gestures_event(e, act);   // FORK v47
     uint64_t before = g_btn;
     if (act == AMOTION_EVENT_ACTION_CANCEL) for (int i = 0; i < 10; i++) g_ptr[i].id = -1;
     else if (act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_POINTER_DOWN) {
@@ -440,10 +496,20 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (sb) { dm_input_press(sb, 80000000ull); click_locked(); g_cam_vx = g_cam_vy = 0; }
         }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_MENU && hit(C_MENU, g_ptr[i].x, g_ptr[i].y, 1.5f)) { click_locked(); front_open_menu(0); }
+        for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_ALL && hit(C_ALL, g_ptr[i].x, g_ptr[i].y, 1.5f)) {   // FORK v47: ⊞ all buttons, until the screen changes
+            int k = screen_kind(); g_ctx_over = g_ctx_over == k ? -1 : k; g_w = g_h = 0; click_locked();
+            fprintf(stderr, "[FORK] [touch] all buttons %s (screen %d)\n", g_ctx_over >= 0 ? "on" : "off", k); }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_FF && now_s() - g_ptr[i].t0 < 0.35) { g_ff_toggle = !g_ff_toggle; click_locked();   // FORK: a tap toggles
             fprintf(stderr, "[FORK] [touch] fast-forward %s\n", g_ff_toggle ? "on" : "off"); }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id) { if (g_ptr[i].target == C_CAM) g_cam_vx = g_cam_vy = 0; g_ptr[i].id = -1; }
     }
+    // FORK v47 (from Arceus Native 1c2214e): a finger the system never lifted. Every move (and every new finger) lists all fingers down, so one held here that the
+    //   event does not list went without its UP (a system gesture or panel took it): it lets go of its button or stick (before: a ghost press until the next touch)
+    if (act == AMOTION_EVENT_ACTION_MOVE || act == AMOTION_EVENT_ACTION_POINTER_DOWN)
+        for (int i = 0; i < 10; i++) if (g_ptr[i].id >= 0) { int seen = 0;
+            for (size_t k = 0; k < AMotionEvent_getPointerCount(e) && !seen; k++) seen = AMotionEvent_getPointerId(e, k) == g_ptr[i].id;
+            if (!seen) { static int nl; if (nl++ < 20) fprintf(stderr, "[FORK] [touch] a finger on control %d was never lifted by the system: let go\n", g_ptr[i].target);
+                if (g_ptr[i].target == C_CAM) g_cam_vx = g_cam_vy = 0; g_ptr[i].id = -1; } }
     if (act == AMOTION_EVENT_ACTION_MOVE || act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_POINTER_DOWN)
         for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) {
             int32_t id = AMotionEvent_getPointerId(e, k);
@@ -468,6 +534,16 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
     pthread_mutex_unlock(&g_mu);
 }
 void touch_ui_hide(void) { pthread_mutex_lock(&g_mu); g_visible = 0; pthread_mutex_unlock(&g_mu); }
+// FORK v47 (from Arceus Native 1c2214e): the app lost focus or went to the background (android_main.c): every finger lets go. Android does not always send the lift
+//   for fingers down when a panel opens over the game (the notification shade, Game Booster, the ☰ menu), and their buttons stayed pressed
+void touch_ui_release(void) {
+    pthread_mutex_lock(&g_mu); int n = 0;
+    for (int i = 0; i < 10; i++) { if (g_ptr[i].id >= 0) n++; g_ptr[i].id = -1; g_ep[i].id = -1; }
+    g_pinch.active = 0; g_cam_vx = g_cam_vy = 0; g_stick_on = g_rstick_on = 0; for (int c = 0; c < NCTL; c++) g_held_until[c] = 0;
+    recompute_locked(); dm_input_set(g_btn, g_lx, g_ly, g_rx, g_ry);
+    pthread_mutex_unlock(&g_mu);
+    if (n) fprintf(stderr, "[FORK] [touch] focus lost with %d finger%s down: let go\n", n, n == 1 ? "" : "s");
+}
 // GameActivity.java: a controller connected hides the controls at once (no input needed first); the last one disconnected shows them again
 void touch_ui_pad(int connected) { pthread_mutex_lock(&g_mu); g_visible = !connected; if (!connected) g_touch_t = now_s(); pthread_mutex_unlock(&g_mu); }
 #else
@@ -575,6 +651,10 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_TOUCH_FADE")) g_fade = value ? fmaxf(0.0f, (float)atof(value)) : 3.0f;
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
+    else if (!strcmp(key, "DM_FORK_GESTURES")) g_gest = value && !strcmp(value, "on");   // FORK v47
+    else if (!strncmp(key, "DM_FORK_CTX_", 12)) { int on = value && !strcmp(value, "on");   // FORK v47: the context switches
+        if (!strcmp(key, "DM_FORK_CTX_DIALOGUE")) g_ctx_dlg = on; else if (!strcmp(key, "DM_FORK_CTX_MENU")) g_ctx_menu = on; else if (!strcmp(key, "DM_FORK_CTX_WORLD")) g_ctx_world = on;
+        g_ctx_any = g_ctx_dlg || g_ctx_menu || g_ctx_world; g_ctx_over = -1; g_w = g_h = 0; census_sync(); }
     else if (!strcmp(key, "DM_FORK_FF")) { g_ffscope = !value ? 0 : !strcmp(value, "battle") ? 1 : !strcmp(value, "all") ? 2 : 0; if (!g_ffscope) g_ff_toggle = 0; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_FF_SPEED")) { if (&dm_fork_ff_speed) dm_fork_ff_speed = value ? atoi(value) : 0; }   // FORK (host/fork_ff.c)
     else if (!strcmp(key, "DM_FORK_TURBO")) g_turbo_on = value && !strcmp(value, "on");   // FORK
@@ -583,6 +663,9 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_BATTLE_OPACITY")) { g_bopacity = value && atof(value) > 0 ? clampf((float)atof(value) / 100.0f, 0.05f, 1.0f) : 0; census_sync(); }   // FORK
     else if (!strcmp(key, "DM_FORK_DEADZONE")) g_dead = value ? clampf((float)atof(value) / 100.0f, 0.0f, 0.4f) : 0.12f;   // FORK
     else if (!strcmp(key, "DM_TOUCH_L3R3")) { g_l3r3 = value && !strcmp(value, "on"); g_w = g_h = 0; }   // (laid out again on the next frame)
+    else if (!strcmp(key, "DM_TOUCH_CAM_SENS")) { int v = value ? atoi(value) : 100; g_cam_pct = v < 25 || v > 300 ? 100 : v; }   // FORK v47
+    else if (!strcmp(key, "DM_TOUCH_CAMERA")) g_cam_stick = value && !strcmp(value, "stick");   // FORK v47
+    else if (!strcmp(key, "DM_TOUCH_RSTICK")) { g_rs_off = value && !strcmp(value, "off"); g_w = g_h = 0; }   // FORK v47
 #ifdef __ANDROID__
     else { void touch_ui_haptic_setting(const char *, const char *); touch_ui_haptic_setting(key, value); }   // DM_TOUCH_HAPTIC, DM_RUMBLE
 #endif
@@ -605,7 +688,7 @@ static void prefs(void) {
     { const char *ft = getenv("DM_FORK_TOUCH"), *dz = getenv("DM_FORK_DEADZONE"); g_float = ft && !strcmp(ft, "float");   // FORK: the control scheme, the dead zone
       { const char *b = getenv("DM_FORK_BATTLE"), *bh = getenv("DM_FORK_BATTLE_HIDE"), *bl = getenv("DM_FORK_BATTLE_LAYOUT");   // FORK v46: battle mode (the old keys: before v46)
         battle_mode(b && *b ? !strcmp(b, "on") : (bh && !strcmp(bh, "on")) || (bl && !strcmp(bl, "on"))); }
-      { static const char *const keys[] = { "DM_FORK_FF", "DM_FORK_TURBO", "DM_FORK_TURBO_HZ", "DM_FORK_BATTLE_OPACITY", "DM_FORK_BATTLE_FADE" };   // FORK: the rest, as the menu sets them
+      { static const char *const keys[] = { "DM_FORK_FF", "DM_FORK_TURBO", "DM_FORK_TURBO_HZ", "DM_FORK_BATTLE_OPACITY", "DM_FORK_BATTLE_FADE", "DM_FORK_CTX_DIALOGUE", "DM_FORK_CTX_MENU", "DM_FORK_CTX_WORLD" };   // FORK: the rest, as the menu sets them
         pthread_mutex_unlock(&g_mu); for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++) { const char *v = getenv(keys[i]); if (v && *v) touch_ui_setting(keys[i], v); } pthread_mutex_lock(&g_mu); census_sync(); }
       if (dz && *dz) g_dead = clampf((float)atof(dz) / 100.0f, 0.0f, 0.4f); if (g_float) fprintf(stderr, "[FORK] [touch] floating sticks, tap for A (dead zone %.0f %%)\n", g_dead * 100); }
 }
@@ -628,7 +711,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
         float ia = idle ? 0.22f : 1.0f;
         int faint = 0; (void)g_inner_t;   // FORK: the D-pad and the right stick fade with the rest (upstream: almost gone 2 s after their last touch)
         for (int c = C_A; c < NCTL; c++) { if (!g_c[c].shown || fork_hidden(c)) continue;   // FORK: battle_hidden
-            int on = (g_btn & g_c[c].btn) != 0 || (c == C_FF && (g_ff_toggle || g_ff_hold)) || (c == C_TURBO && g_turbo_held);   // FORK: lit while on
+            int on = (g_btn & g_c[c].btn) != 0 || (c == C_FF && (g_ff_toggle || g_ff_hold)) || (c == C_TURBO && g_turbo_held) || (c == C_ALL && g_ctx_over >= 0);   // FORK: lit while on
             float al = c >= C_UP && c <= C_RIGHT && faint && !on ? 0.25f : 1.0f; if (idle) al = fminf(al, ia);
             if (c == C_THROW) { pokeball(it, &n, max, &g_c[c], on, al); continue; }
             if (c == C_MENU) { menu_icon(it, &n, max, &g_c[c], idle ? fmaxf(al, 0.45f) : al); continue; }   // (never quite gone: it is how the settings are found)

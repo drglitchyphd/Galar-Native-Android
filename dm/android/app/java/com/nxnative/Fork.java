@@ -82,6 +82,11 @@ final class Fork {
     static void exportRoot(Context c) {
         if (lsfgDll(c).isFile()) try { android.system.Os.setenv("DM_FORK_LSFG_DLL", lsfgDll(c).getPath(), true); } catch (Exception e) { }   // (frame generation)
         if (!shared(c)) return;
+        ForkSaves.atStart(c);
+        try { android.system.Os.setenv("DM_VK_CAPTURE_SIZE", "960x540", false); } catch (Exception e) { }   // v47: frame captures (only when asked for) at 960x540, not 320x180   // v47: save slots (a pending switch or restore, then this start's backup), before the engine opens the save
+        // v47: the fork runs Sword at 30 (60 fps scrapped: the Fold held 30 anyway; Smoothness offers 30 with or without Lossless 2x), so Auto / 60 become 30
+        if (!"30".equals(GameSettings.get(c, "DM_FPS_TARGET"))) { GameSettings.set(c, "DM_FPS_TARGET", "30"); try { android.system.Os.setenv("DM_FPS_TARGET", "30", true); } catch (Exception e) { } }
+        if ("3x".equals(GameSettings.get(c, "DM_FORK_FG"))) GameSettings.set(c, "DM_FORK_FG", "2x");   // (3x scrapped in v47)
         try { android.system.Os.setenv("DM_DATA_ROOT", root(c).getPath(), true); } catch (Exception e) { Log.w(TAG, "[FORK] setenv DM_DATA_ROOT: " + e); }
     }
 
