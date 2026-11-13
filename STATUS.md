@@ -28,7 +28,13 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed; 
 - Restart confirm button says OK (GameMenu.confirm takes a label; mod delete keeps Delete).
 - Smoothness → Frame rate 30 / 60 + Lossless 2x on / off (3x scrapped: "runs weird"). 60 + 2x held 30 in the v41 log (frame step counted frame-generation waits as cost?): investigate. 60 alone "does nothing": needs that log.
 - Trainer spotted still unchanged in v46: check the v46 log for `[FORK] spotted banner`; add a burst capture (~6 frames over 1 s) listing every UI draw (shader, textures, viewport before / after).
-- Battle mode looked the same as before (expected: same features, one switch). Asked Steven whether he wants context-aware battle buttons.
+- 60 fps scrapped (v46 log: held 2 slots for 1569 of 1800 frames without frame generation). Smoothness = 30 + Lossless 2x on / off.
+- v46 log: `[FORK] spotted banner` fired, Steven still sees no difference: wait for his trainer capture.
+- Context-aware controls (Steven Nov 13), each its own menu toggle, default off:
+  - dialogue / text boxes: A, B, turbo only (needs a dialogue detector: 56af7f00 text box without battle shaders?);
+  - full-screen menus: D-pad, A, B, L / R, + / −; sticks hidden;
+  - overworld: hide buttons with no use there, no new icons.
+  - Each screen kind has its own layout (like Battle mode), edited while on that screen. Switch after a short hold, plus a small "all buttons" fallback toggle to override the guess.
 
 ## Next
 1. Steven tests v46: banner, intro bars / divider, Smoothness 2x vs 3x, battle mode, menu.
