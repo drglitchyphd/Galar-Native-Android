@@ -36,6 +36,12 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed; 
   - overworld: hide buttons with no use there, no new icons.
   - Each screen kind has its own layout (like Battle mode), edited while on that screen. Switch after a short hold, plus a small "all buttons" fallback toggle to override the guess.
 
+## Queued from Arceus Native (simipoB/Arceus-Native-Android, cloned at /home/user/arceus-native; Steven OK'd porting these, Nov 13)
+- Ghost presses 1c2214e (menu ignores a finger already down, lost fingers released, dead zone on the tilt, reset needs + and − held) and Turnip pool-reuse crash fix 7d49d92 (#240).
+- Touch camera 652ab9d (own sensitivity DM_TOUCH_CAM_SENS, stick mode, hide right stick) and movement stick sensitivity d11be3a. Not gyro.
+- Diagnostics: freeze report d11be3a, bigger capture pictures (DM_VK_CAPTURE_SIZE).
+- Our own, queued: encounter info (shiny / IVs / nature, memory research); gesture shortcuts (e.g. three-finger tap = ☰, two-finger swipe = X menu).
+
 ## Next
 1. Steven tests v46: banner, intro bars / divider, Smoothness 2x vs 3x, battle mode, menu.
 2. Encounter info overlay (shiny / IVs / nature) from game memory, then the live HUD research. Save slots after.
