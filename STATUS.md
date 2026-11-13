@@ -40,6 +40,8 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 - Top-left spotted fade sat 38 % down: both fades sample the 128x4 gradient; now by draw order (1st bottom-right, 2nd top-left on the top edge). Not built.
 - Stutter, ~3 °C warmer, blurry: logs show heat "moderate" (v47: none), GPU copy waits 3-5 → 8-11 ms, generation 4.7 → 7 ms (Performance), Adaptive render scale down to 0.56. The Quality model run: generation 15-24 ms. Cause of the heat not found in the v48 diff; the encounter probe now runs only with Encounter info on. Asked Steven for a cool-phone A/B; offered a render-scale floor (e.g. 85 %).
 
+- v49: the spotted fades swapped edges (the first draw is the top-left one). Now both kept full size, no anchoring (fork_ui.h; not built). Banner still anchored to the bottom.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).

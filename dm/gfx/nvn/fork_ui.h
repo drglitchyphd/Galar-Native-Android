@@ -47,7 +47,9 @@ static void fork_ui_fill(VkCommandBuffer cb) {
     //   no new texture (the same one still bound); shrunk, it stopped in a hard line at the band's lower edge. Both anchored like the banner
     // v49: both shading draws sample the 128x4 gradient (v48 expected the second without a texture of its own, so it took the first's bottom anchor and sat 38 % down,
     //   Steven Nov 13): the first in a frame is the bottom-right fade, the next the top-left one
-    int shading = g_fk_banner == 2 && !strncmp(g_fk_sqkey, "af0ef3ac", 8), shade = shading && g_fk_shade_n == 0, shade2 = shading && g_fk_shade_n > 0;
+    // v50: v49 had the order backwards (the first is the top-left fade: Steven's screenshot showed each on the other's edge). Both fades are soft gradients made for
+    //   the corners, so they are now simply kept full size (the 16:9 picture's corners, stretched to the screen's), whatever their order: no anchoring
+    int shading = g_fk_banner == 2 && !strncmp(g_fk_sqkey, "af0ef3ac", 8), shade = 0, shade2 = 0;
     if (shading) g_fk_shade_n++;
     if (g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) g_fk_spot = 1;   // v49: the banner's frame is not a battle (fk_screen_frame)
     if (((g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) || shade || shade2) && g_fk_th > 0) {
@@ -64,7 +66,8 @@ static void fork_ui_fill(VkCommandBuffer cb) {
         vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
         static int said[3]; int wh = shade ? 1 : shade2 ? 2 : 0; if (!said[wh]++) VLOG("[FORK] spotted %s: kept on the screen's %s edge (scale %.3f, origin %s)", wh == 1 ? "shading" : wh == 2 ? "shading (2nd draw, top left)" : "banner", top ? "top" : "bottom", k, ll ? "lower left" : "upper left");
         return; }
-    int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8);
+    int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8) || shading;   // (v50: + the spotted fades)
+    if (shading) { static int said; if (!said++) VLOG("[FORK] spotted fades: kept full size (the screen's corners)"); }
     if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
     if (++g_fk_fills == 1 || g_fk_fills % 1000 == 0) VLOG("[FORK] fill draws kept full size: %llu", (unsigned long long)g_fk_fills);
