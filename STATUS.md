@@ -23,6 +23,13 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed; 
 - 60 fps mode "doesn't do anything" (without frame generation): needs that run's log.
 - Upstream frame generation: built-in works but not smooth; upstream Lossless did nothing. Dropped from the menu.
 
+## Agreed for v47 (Steven, Nov 13; not built: he is play-testing v46 for a while first)
+- Save slots: unlimited, named; switched in the in-game menu → Saves, then Restart now; a new slot asks Empty or Copy of current; current save = slot 1 untouched; 3 automatic backups per slot (copied at each start), restorable. Engine reads DM_SAVE (android_main.c SETP, not overwritten): the app sets it to the active slot's folder.
+- Restart confirm button says OK (GameMenu.confirm takes a label; mod delete keeps Delete).
+- Smoothness → Frame rate 30 / 60 + Lossless 2x on / off (3x scrapped: "runs weird"). 60 + 2x held 30 in the v41 log (frame step counted frame-generation waits as cost?): investigate. 60 alone "does nothing": needs that log.
+- Trainer spotted still unchanged in v46: check the v46 log for `[FORK] spotted banner`; add a burst capture (~6 frames over 1 s) listing every UI draw (shader, textures, viewport before / after).
+- Battle mode looked the same as before (expected: same features, one switch). Asked Steven whether he wants context-aware battle buttons.
+
 ## Next
 1. Steven tests v46: banner, intro bars / divider, Smoothness 2x vs 3x, battle mode, menu.
 2. Encounter info overlay (shiny / IVs / nature) from game memory, then the live HUD research. Save slots after.
