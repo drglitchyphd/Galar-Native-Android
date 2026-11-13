@@ -91,7 +91,8 @@ static void battle_mode(int on) { g_bmode = on; bhide_set(on); g_bicons = on; g_
 typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6]; } dm_fork_enc_info;
 int dm_fork_enc_get(dm_fork_enc_info *o) __attribute__((weak));
 static int g_enc_on = -1, g_enc_open = 1, g_enc_drag; static float g_enc_ox, g_enc_oy; static dm_fork_enc_info g_enc_now;
-static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); } return g_enc_on; }
+volatile int dm_fork_enc_on;   // FORK v49: host/fork_enc.c reads game memory only while this is set
+static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); dm_fork_enc_on = g_enc_on; } return g_enc_on; }
 static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.active; }
 static void enc_rect(float r4[4]);   // (below, with the drawing)
 static int fork_hidden(int c) {
@@ -669,7 +670,7 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
     else if (!strcmp(key, "DM_FORK_GESTURES")) g_gest = value && !strcmp(value, "on");   // FORK v47
-    else if (!strcmp(key, "DM_FORK_ENC")) g_enc_on = value && !strcmp(value, "on");   // FORK v48
+    else if (!strcmp(key, "DM_FORK_ENC")) { g_enc_on = value && !strcmp(value, "on"); dm_fork_enc_on = g_enc_on; }   // FORK v48 (v49: + the probe)
     else if (!strncmp(key, "DM_FORK_CTX_", 12)) { int on = value && !strcmp(value, "on");   // FORK v47: the context switches
         if (!strcmp(key, "DM_FORK_CTX_DIALOGUE")) g_ctx_dlg = on; else if (!strcmp(key, "DM_FORK_CTX_MENU")) g_ctx_menu = on; else if (!strcmp(key, "DM_FORK_CTX_WORLD")) g_ctx_world = on;
         g_ctx_any = g_ctx_dlg || g_ctx_menu || g_ctx_world; g_ctx_over = -1; g_w = g_h = 0; census_sync(); }

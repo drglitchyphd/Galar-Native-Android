@@ -63,6 +63,9 @@ static void enc_set(const uint8_t *d, int active) {
 void dm_fork_enc_tick(void) {
     static uint64_t n; static int said, lines, was_in; static uint32_t last_ec, battle_ec;
     if (++n % 15 || !is_sword()) return;
+    { static int on = -1; extern volatile int dm_fork_enc_on __attribute__((weak));   // v49: only while Encounter info is on (touch_ui.c sets it; before that, env.txt's DM_FORK_ENC)
+      if (on < 0) { const char *e = getenv("DM_FORK_ENC"); on = e && !strcmp(e, "on"); }
+      if (!(&dm_fork_enc_on ? dm_fork_enc_on : on)) return; }
     if (!said && n >= 30 * 60 && lines < 60) {   // after about a minute: the save is loaded
         said = 1; uint8_t ms[0x110]; LOG("[FORK] enc: heap base %#llx", (unsigned long long)dm_fork_heap_base());
         if (read_heap(O_MYSTATUS, ms, sizeof ms)) {
