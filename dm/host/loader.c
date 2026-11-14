@@ -439,10 +439,12 @@ static void mod_page_note(const module_t *m, uint64_t off, size_t nb) {
 static void mod_pages_open(const module_t *m, uint64_t rx) {
     const char *e = getenv("DM_MODS_RWX"); if (e && !atoi(e)) return;
     int n = 0;
-    for (int k = 0; k < g_nmod_pg; k++) if (g_mod_pg[k].m == m && g_mod_pg[k].pg < rx) {
+    // (pages outside the code area too: Fl4sh's Ultrawide mods for Legends: Arceus put their added code in a gap of the data area, +0x38c851c, which the
+    //   emulators run as code; here it was data, not executable, and the game closed at its first call)
+    for (int k = 0; k < g_nmod_pg; k++) if (g_mod_pg[k].m == m && g_mod_pg[k].pg + 0x4000 <= m->size) {
         if (mprotect(m->base + g_mod_pg[k].pg, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC)) LOG("[RED] %s: +%#llx: a modded code page could not be made writable (%s)", m->name, (unsigned long long)g_mod_pg[k].pg, strerror(errno));
         else n++; }
-    if (n) LOG("%s: %d code page(s) a mod patched stay writable, for mods that keep their variables there (DM_MODS_RWX=0 seals them)", m->name, n);
+    if (n) LOG("%s: %d page(s) a mod patched stay writable and executable, for mods that keep their variables or code there (DM_MODS_RWX=0 seals them)", m->name, n);
 }
 static int pchtxt_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1, const char *path) {
     if (!m->build_id[0]) return 0;
@@ -535,11 +537,52 @@ static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     }
     return total;
 }
+// Widescreen for Legends: Arceus 1.1.1 (DM_ASPECT=wide, the menu's Picture → Widescreen; off by default): after Fl4sh's Ultrawide mods for 1.1.1, with this screen's own
+//   aspect (DM_WIDE_RATIO, its long side over its short, written by the app) instead of a fixed 21:9. The picture fills the screen (nvn_ovl.h) and the camera sees
+//   as much wider, so nothing is stretched:
+//   - six cameras' 16:9 (MOV Wd, #0x8e39; MOVK Wd, #0x3fe3, LSL #16 = 1.7778f) become the screen's aspect;
+//   - the HUD: the function at +0x2abe864.. hands back a layer's box (x, y, w, h, read by LDP S2, S3 at +0x2abe898); a branch there goes to code added in a gap of
+//     zeros in the data area (+0x38c851c, where Fl4sh's mod puts its own), which narrows the box to 16:9 of its height, centred (w' = w x (16/9) / aspect,
+//     x' = x + (w - w') / 2), so the HUD keeps its shape in the middle of the wider picture. Fl4sh's writes a fixed box for 1080p; this follows the box the game
+//     gives, at any resolution. That page is kept writable and executable (mod_pages_open), as the emulators run it.
+//   Every word is checked first (the cameras' 16:9, the LDP, the gap's zeros); a build or code that differs is left alone
+static int arc_wide(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_ASPECT"); if (!e || strcmp(e, "wide")) return 0;
+    const char *r = getenv("DM_WIDE_RATIO"); double ratio = r ? atof(r) : 0;
+    if (ratio < 1.0 || ratio > 4.0) { LOG("[RED] %s: widescreen not applied (no screen aspect: DM_WIDE_RATIO %s)", m->name, r ? r : "not set"); return 0; }
+    if (ratio < 16.0 / 9.0 + 0.01) { LOG("%s: widescreen: this screen is not wider than 16:9 (%.4f)", m->name, ratio); return 0; }
+    static const uint64_t cam[6] = { 0x1261b98, 0x191ddd0, 0x19336bc, 0x2750654, 0x124edfc, 0x194a65c };
+    const uint64_t hook = 0x2abe898, ret = 0x2abe8d4, cave = 0x38c851c;
+    int ok = cave + 0x24 <= lim && hook < m->text_end;
+    for (int i = 0; ok && i < 6; i++) { uint32_t a, b; memcpy(&a, m->base + cam[i], 4); memcpy(&b, m->base + cam[i] + 4, 4);
+        ok = (a & ~31u) == 0x5291c720u && (b & ~31u) == 0x72a7fc60u && (a & 31) == (b & 31) && !overlaps_rewrite(m, cam[i], 8, p0, p1); }
+    uint32_t w; if (ok) { memcpy(&w, m->base + hook, 4); ok = w == 0x2d418d02u && !overlaps_rewrite(m, hook, 4, p0, p1); }   // (LDP S2, S3, [X8, #0xc])
+    for (int i = 0; ok && i < 9; i++) { memcpy(&w, m->base + cave + 4 * i, 4); ok = !w; }
+    if (!ok) { LOG("[RED] %s: widescreen not applied (Legends: Arceus 1.1.1's camera or HUD code differs, or was rewritten)", m->name); return 0; }
+    float f = (float)ratio; uint32_t bits; memcpy(&bits, &f, 4); uint32_t lo = bits & 0xffff, hi = bits >> 16;
+    for (int i = 0; i < 6; i++) { uint32_t rd; memcpy(&rd, m->base + cam[i], 4); rd &= 31;
+        uint32_t ww[2] = { 0x52800000u | lo << 5 | rd, 0x72a00000u | hi << 5 | rd }; memcpy(m->base + cam[i], ww, 8); mod_page_note(m, cam[i], 8); }
+    float k = (float)(16.0 / 9.0 / ratio);
+    uint32_t c[9] = { 0x2d418d02u,   // LDP S2, S3, [X8, #0xc]   (the game's own)
+                      0x1c0000e4u,   // LDR S4, k                 (the word after the B)
+                      0x1e240845u,   // FMUL S5, S2, S4           w'
+                      0x1e253846u,   // FSUB S6, S2, S5           w - w'
+                      0x1e2c1007u,   // FMOV S7, #0.5
+                      0x1f0700c0u,   // FMADD S0, S6, S7, S0      x' = x + (w - w') / 2
+                      0x1e2040a2u,   // FMOV S2, S5
+                      0x14000000u | (uint32_t)(((int64_t)ret - (int64_t)(cave + 28)) >> 2 & 0x3ffffff),   // B the function's return, as the game's next instruction
+                      0 };
+    memcpy(&c[8], &k, 4);
+    memcpy(m->base + cave, c, sizeof c); mod_page_note(m, cave, sizeof c);
+    uint32_t br = 0x14000000u | (uint32_t)(((int64_t)cave - (int64_t)hook) >> 2 & 0x3ffffff); memcpy(m->base + hook, &br, 4); mod_page_note(m, hook, 4);
+    LOG("%s: widescreen for Legends: Arceus 1.1.1: camera aspect %.4f (%08x), HUD kept to 16:9 in the middle (x %.3f of the width)", m->name, ratio, bits, (double)k);
+    return 8;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
-    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n;   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
+    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),
