@@ -1646,6 +1646,9 @@ static void arc_step(uint64_t frame_ns) {
         module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
         if (!m || strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32) || m->size < 0x397e8dc) {   // (the build id may come in capitals)
             LOG("[RED] 60 fps: not Legends: Arceus 1.1.1's main (build %s): the game's frame time left alone", m ? m->build_id : "-"); return; }
+        // Fl4sh's Dynamic FPS mod (a .pchtxt in the mods folder) sets the same frame time from its own timer, and presents every refresh (MOV W1, #1 at +0x2aa278c):
+        //   with it in, the frame time is left to the mod
+        if (*(uint32_t *)(m->base + 0x2aa278c) == 0x52800021u) { LOG("60 fps: the Dynamic FPS mod is in: the game's frame time is left to it"); return; }
         uint32_t *t = (uint32_t *)(m->base + 0x397e8d8);
         if (*t != 33333334u) { LOG("[RED] 60 fps: the game's frame time is %u ns here, not 33333334: left alone, the game stays at 30", *t); return; }
         int w = 0; FILE *f = fopen("/proc/self/maps", "r"); char ln[512];   // (writable where it is: a write to a read-only page would close the game)

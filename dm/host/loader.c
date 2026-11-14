@@ -4,6 +4,7 @@
 #include <TargetConditionals.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <mach-o/getsect.h>
@@ -426,6 +427,23 @@ static int overlaps_rewrite(const module_t *m, uint64_t off, size_t nb, int64_t 
 }
 // One .pchtxt file: "@nsobid-<build id>", "@flag offset_shift <n>", "@enabled" / "@disabled", "@stop", then "<hex offset> <hex bytes>" or "<hex offset> \"text\"" lines
 // (offsets count the 0x100-byte NSO header, as IPSwitch's do); // and # start comments
+// The 16 KB pages of the code area a .pchtxt mod wrote into, kept writable after the area is sealed: some mods keep their own variables in the code they add (Fl4sh's
+//   Dynamic FPS for Legends: Arceus stores its timing there every frame; the Switch emulators allow it, a sealed page closed the game at its first write).
+//   DM_MODS_RWX=0 seals them like the rest
+static struct { const module_t *m; uint64_t pg; } g_mod_pg[64]; static int g_nmod_pg;
+static void mod_page_note(const module_t *m, uint64_t off, size_t nb) {
+    for (uint64_t pg = off & ~0x3FFFull; pg < off + nb; pg += 0x4000) {
+        int k = 0; while (k < g_nmod_pg && !(g_mod_pg[k].m == m && g_mod_pg[k].pg == pg)) k++;
+        if (k == g_nmod_pg && g_nmod_pg < 64) { g_mod_pg[g_nmod_pg].m = m; g_mod_pg[g_nmod_pg].pg = pg; g_nmod_pg++; } }
+}
+static void mod_pages_open(const module_t *m, uint64_t rx) {
+    const char *e = getenv("DM_MODS_RWX"); if (e && !atoi(e)) return;
+    int n = 0;
+    for (int k = 0; k < g_nmod_pg; k++) if (g_mod_pg[k].m == m && g_mod_pg[k].pg < rx) {
+        if (mprotect(m->base + g_mod_pg[k].pg, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC)) LOG("[RED] %s: +%#llx: a modded code page could not be made writable (%s)", m->name, (unsigned long long)g_mod_pg[k].pg, strerror(errno));
+        else n++; }
+    if (n) LOG("%s: %d code page(s) a mod patched stay writable, for mods that keep their variables there (DM_MODS_RWX=0 seals them)", m->name, n);
+}
 static int pchtxt_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1, const char *path) {
     if (!m->build_id[0]) return 0;
     FILE *f = fopen(path, "r"); if (!f) return 0;
@@ -459,7 +477,7 @@ static int pchtxt_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1, const
         int64_t off = (int64_t)addr + shift - 0x100;
         if (off < 0 || (uint64_t)off + nb > lim) { LOG("[RED] %s:%d: +%#llx (%zu bytes) is outside %s, skipped", path, line_no, (unsigned long long)off, nb, m->name); continue; }
         if (overlaps_rewrite(m, (uint64_t)off, nb, p0, p1)) { LOG("[RED] %s:%d: +%#llx is code the host rewrote, skipped", path, line_no, (unsigned long long)off); continue; }
-        memcpy(m->base + off, buf, nb); applied++;
+        memcpy(m->base + off, buf, nb); applied++; mod_page_note(m, (uint64_t)off, nb);
     }
     fclose(f);
     if (applied) LOG("%s: %d patch(es) from %s", m->name, applied, path);
@@ -589,6 +607,7 @@ static void map_image(module_t *m, const char *dir) {
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (modded) __builtin___clear_cache((char *)m->base, (char *)(m->base + rx));
+        mod_pages_open(m, rx);
         if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
         if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
         return;
@@ -602,6 +621,7 @@ static void map_image(module_t *m, const char *dir) {
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     if (modded) __builtin___clear_cache((char *)m->base, (char *)(m->base + rx));
+    mod_pages_open(m, rx);
     uint64_t po = m->patch_off & ~0x3FFFull;
     if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
 }
