@@ -66,7 +66,12 @@ static void fork_ui_fill(VkCommandBuffer cb) {
         vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
         static int said[3]; int wh = shade ? 1 : shade2 ? 2 : 0; if (!said[wh]++) VLOG("[FORK] spotted %s: kept on the screen's %s edge (scale %.3f, origin %s)", wh == 1 ? "shading" : wh == 2 ? "shading (2nd draw, top left)" : "banner", top ? "top" : "bottom", k, ll ? "lower left" : "upper left");
         return; }
-    int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8) || shading;   // (v50: + the spotted fades)
+    // v51: the side fade at the "!" (Steven's screen recording, Nov 13: dark from the left and right, cut off at the UI band's edges). Best match from the logs:
+    //   7c73d8ac with no texture (a shaded gradient), drawn in the overworld right before trainer battles. The same shader draws parts of the battle HUD and menus,
+    //   so only in the overworld with the 3D under it (screen kind 0, a composite this frame) is it kept full size
+    int sidefade = !g_fk_ntex && !strncmp(g_fk_sqkey, "7c73d8ac", 8) && g_fk_comp && atomic_load(&dm_fork_screen) == 0;
+    if (sidefade) { static int said; if (!said++) VLOG("[FORK] spotted side fade (7c73d8ac, no texture, overworld): kept full size"); }
+    int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8) || shading || sidefade;   // (v50: + the spotted fades; v51: + the side fade)
     if (shading) { static int said; if (!said++) VLOG("[FORK] spotted fades: kept full size (the screen's corners)"); }
     if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);

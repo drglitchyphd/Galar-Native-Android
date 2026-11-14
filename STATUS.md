@@ -48,6 +48,10 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 - Frame generation paused on still screens (DM_FORK_FG_STILL=pause, default keep): menus / dialogue present without generation, screen asked for 60 Hz (window_rate), first 2 generated frames after resuming not shown. Log `[FORK] fg: paused / resumed`.
 - Power readout (ForkPower.java): `[FORK] power: W, mA, V, battery °C, level, charging, fg paused` every minute; watts in the performance overlay.
 
+## Steven's v50 notes (Nov 14)
+- Corner fades: perfect now.
+- Side fade at the "!" (screen recording): dark from left / right, cut at the UI band. Guess: 7c73d8ac without texture in the overworld (also battle HUD / menus): kept full size only at screen kind 0 with 3D (fork_ui.h sidefade). In the tree, not built. If wrong: the trainer capture names the shader.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).
