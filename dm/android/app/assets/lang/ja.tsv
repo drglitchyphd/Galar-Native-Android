@@ -353,3 +353,9 @@ Cinematic	シネマティック
 Cinematic: stronger contrast, a slightly warm tone	シネマティック：コントラストを強め、やや暖かい色調
 Widescreen	ワイド
 Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle	ワイド：ゲームのカメラを画面の幅まで広げます。引き伸ばしはなく、HUDは中央の16:9のままです
+Barriers between passes	パス間のバリア
+Fewer	少なく
+Every pass	毎パス
+Auto: fewer on Adreno, one before every pass on other GPUs	自動：Adrenoでは少なく、他のGPUでは各パスの前に1回
+Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	少なく：速く、GPUが休みません。Xclipse、Mali、PowerVRでは影がちらつくことがあります
+Every pass: the safest picture, slower	毎パス：最も安全な画面、遅め

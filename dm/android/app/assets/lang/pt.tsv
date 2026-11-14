@@ -353,3 +353,9 @@ Cinematic	Cinematográfico
 Cinematic: stronger contrast, a slightly warm tone	Cinematográfico: mais contraste e um tom levemente quente
 Widescreen	Panorâmico
 Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle	Panorâmico: a câmera do jogo tão larga quanto a sua tela, sem esticar nada; a interface fica em 16:9 no centro
+Barriers between passes	Barreiras entre passadas
+Fewer	Menos
+Every pass	Cada passada
+Auto: fewer on Adreno, one before every pass on other GPUs	Auto: menos na Adreno, uma antes de cada passada nas outras GPUs
+Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	Menos: mais rápido, a GPU continua ocupada; em Xclipse, Mali e PowerVR as sombras podem piscar
+Every pass: the safest picture, slower	Cada passada: a imagem mais segura, mais lento

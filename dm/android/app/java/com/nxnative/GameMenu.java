@@ -560,6 +560,11 @@ public final class GameMenu {
         // (not for Legends: Arceus: with it the game crashed at loading screens, Arceus-Native-Android#3; android_main.c turns it off there)
         if (!GameSettings.arceus(a)) choice(a, "DM_NVN_ASYNC", t(a, "Faster rendering (experimental)"), new String[][] { { "", t(a, "Off"), "" },
             { "1", t(a, "On"), t(a, "On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub") } });
+        // barriers between the game's draw passes (nvn_vk.c barrier_relaxed, DM_VK_BARRIER): Auto = fewer on Adreno, a full one before each pass elsewhere, where shadows
+        //   flickered with fewer (#20 #31 #32). A full barrier leaves the GPU idle between passes, which cost Xclipse 530 players their frame rate (#48): their choice. From the next start
+        choice(a, "DM_VK_BARRIER", t(a, "Barriers between passes"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: fewer on Adreno, one before every pass on other GPUs") },
+            { "relaxed", t(a, "Fewer"), t(a, "Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker") },
+            { "full", t(a, "Every pass"), t(a, "Every pass: the safest picture, slower") } });
         // a frame capture for a bug report (nvn_vk.c, Frame capture): the engine reads capture.req (frames to wait, so the menu can be closed first) and writes the ZIP
         heading(a, t(a, "Bug reports"));
         action(a, t(a, "Capture a frame"), t(a, "Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue."),
