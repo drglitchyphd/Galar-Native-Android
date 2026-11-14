@@ -853,13 +853,14 @@ public final class SetupActivity extends Activity {
     // lighter one (handheld mode), whose memory the low-memory killer guards closely (a scan worker was killed at 8, #43)
     // Setup workers: one a core (at most 8); how many run at once is decided while they run, by the memory the phone has free then (dmsh_gate.c, shader_split.py
     // mem_wait): the first always runs, each other one only with DM_GATE_FLOOR_MB + DM_GATE_MB free. A phone with 4 GB gets through with one or two, a 16 GB one runs all.
-    // Without the gate (an older build of the tools): the old rule, by total memory
+    // and never more than one per 1.5 GB of the phone's memory, 4 on the lighter profiles (below)
+    // The memory gate alone let all 8 start on a 4 GB phone: the memory it reads as available (MemAvailable) counts the page cache, which the 12 GB of game files
+    //   setup has just unpacked fill, so every worker found "room" that was not there and the low-memory killer ended the setup mid-scan (#215, Redmi Note 9,
+    //   3.8 GB). The cap by total memory applies with the gate too, as before it: 2 workers there, the gate deciding within that
     private int setupWorkers() {
         int j = Math.min(8, Runtime.getRuntime().availableProcessors());
-        if (!new File(getApplicationInfo().nativeLibraryDir, "libdmsh_gate.so").exists()) {
-            android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(mi);
-            j = Math.min(j, (int) (mi.totalMem / (1536L << 20))); String[] p = GameSettings.profile(this); if (p != null && p[2].equals("low")) j = Math.min(j, 4);
-        }
+        android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(mi);
+        j = Math.min(j, (int) (mi.totalMem / (1536L << 20))); String[] p = GameSettings.profile(this); if (p != null && p[2].equals("low")) j = Math.min(j, 4);
         return Math.max(1, j);
     }
     // memory kept free for the phone itself: Android's own low-memory line (MemoryInfo.threshold) with room above it, at least 300 MB
