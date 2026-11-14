@@ -21,7 +21,8 @@ uint64_t dm_program_id(void) { static uint64_t pid; if (!pid) { const char *e = 
 static uint8_t *g_as;              // ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
-uintptr_t dm_fork_heap_base(void) { return (uintptr_t)g_heap; }   // FORK v47: the heap base the game gets (host/fork_enc.c)
+uintptr_t dm_fork_heap_base(void) { return (uintptr_t)g_heap; }
+size_t dm_fork_heap_size(void) { return g_heap_cur; }   // FORK v51: host/fork_enc.c, the search's end   // FORK v47: the heap base the game gets (host/fork_enc.c)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
 static uint8_t *g_alias; static size_t g_alias_cap;
 static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)

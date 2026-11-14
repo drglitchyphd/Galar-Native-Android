@@ -5,6 +5,8 @@
 // Pokémon while the in-battle flag is set (species, shiny, IVs, nature, ability, EVs, checksum). The checksum and a matching trainer name tell whether the offsets
 // hold on this host. Called from gfx/nvn/hle_nvn.c next to the other fork ticks (every present; it looks every 30th).
 #include "hle.h"
+#include <stdatomic.h>
+size_t dm_fork_heap_size(void);   // hle_svc.c (FORK)
 
 uintptr_t dm_fork_heap_base(void);                  // hle_svc.c (FORK)
 int dm_guest_heap_readable(uint64_t a, size_t n);   // hle_svc.c
@@ -60,8 +62,41 @@ static void enc_set(const uint8_t *d, int active) {
         int eo[6] = { 0x26, 0x27, 0x28, 0x2A, 0x2B, 0x29 }; for (int i = 0; i < 6; i++) e.ev[i] = d[eo[i]]; }
     pthread_mutex_lock(&g_enc_mu); g_enc = e; pthread_mutex_unlock(&g_enc_mu);
 }
+// v51: SysBot's wild offset does not hold on this host (Steven's v48 log: a failed checksum there), while the trainer and party offsets do. So the wild Pokémon is
+//   looked for: every 8 bytes of the heap whose header looks like a PK8 (sanity word 0, encryption constant and checksum not 0) gets its species and trainer ID
+//   decrypted (the stream jumped to their block, lcg_jump), and only one with a species 1-898 and the PLAYER's TID / SID (a wild Pokémon carries them, a trainer's
+//   does not) is decrypted in full and checksum-checked. The party and box block is skipped. A find is remembered (g_wild_off) and read first next time
+static _Atomic uint64_t g_wild_off; static _Atomic int g_scanning; static int g_battle_found, g_scan_tried; static uint64_t g_battle_t;
+static uint16_t g_scan_tid, g_scan_sid; static uint32_t g_scan_skip_ec;
+static uint32_t g_jA[130], g_jC[130];   // the LCG stepped n times: seed_n = g_jA[n] * seed + g_jC[n]
+static void lcg_tables(void) { uint32_t a = 1, c = 0; for (int i = 0; i < 130; i++) { g_jA[i] = a; g_jC[i] = c; a *= 0x41C64E6Du; c = c * 0x41C64E6Du + 0x6073u; } }
+static int lines_g;
+#define LOG_LIMIT(...) do { if (lines_g < 60) { lines_g++; LOG(__VA_ARGS__); } } while (0)
+static int trainer_ids(uint16_t *tid, uint16_t *sid) { uint8_t ms[0xA4]; if (!read_heap(O_MYSTATUS, ms, sizeof ms)) return 0; *tid = rd16(ms + 0xA0); *sid = rd16(ms + 0xA2); return *tid || *sid; }
+static void *find_wild(void *arg) {
+    (void)arg; uintptr_t b = dm_fork_heap_base(); uint64_t t0 = now_ns(), hits = 0, best = 0; if (!g_jA[1]) lcg_tables();
+    uint64_t lim = dm_fork_heap_size(); if (lim > 0x148) lim -= 0x148; else lim = 0;
+    for (uint64_t off = 0x1000; off < lim; off += 8) {
+        if (off >= 0x45075000 && off < 0x450CB000) { off = 0x450CB000 - 8; continue; }   // (the boxes and the party)
+        const uint8_t *p = (const uint8_t *)(b + off);
+        if (p[4] | p[5]) continue;
+        uint32_t ec = rd32(p); if (!ec || !rd16(p + 6)) continue;
+        int pa = k_block[(ec >> 13) & 31][0]; uint32_t wi = (uint32_t)pa * 40;   // block A (species, TID, SID) sits at encrypted block pa
+        uint32_t s1 = g_jA[wi + 1] * ec + g_jC[wi + 1]; const uint8_t *q = p + 8 + pa * 0x50;
+        uint16_t sp = rd16(q) ^ (uint16_t)(s1 >> 16); if (!sp || sp > 898) continue;
+        uint32_t s3 = g_jA[wi + 3] * ec + g_jC[wi + 3]; if ((uint16_t)(rd16(q + 4) ^ (uint16_t)(s3 >> 16)) != g_scan_tid) continue;
+        uint32_t s4 = g_jA[wi + 4] * ec + g_jC[wi + 4]; if ((uint16_t)(rd16(q + 6) ^ (uint16_t)(s4 >> 16)) != g_scan_sid) continue;
+        uint8_t d[0x148]; if (read_pk8(off, d) <= 0) continue;
+        hits++; LOG_LIMIT("[FORK] enc search: a Pokémon with your ID at heap + %#llx: species %u", (unsigned long long)off, rd16(d + 8));
+        if (!best && rd32(d) != g_scan_skip_ec) best = off;
+        if (hits >= 12) break;
+    }
+    LOG_LIMIT("[FORK] enc search: %llu found in %.1f s%s", (unsigned long long)hits, (now_ns() - t0) / 1e9, best ? "" : " (none new: a trainer battle, or not in memory yet)");
+    if (best) atomic_store(&g_wild_off, best);
+    atomic_store(&g_scanning, 0); return NULL;
+}
 void dm_fork_enc_tick(void) {
-    static uint64_t n; static int said, lines, was_in; static uint32_t last_ec, battle_ec;
+    static uint64_t n; static int said, lines, was_in; static uint32_t last_ec, battle_ec; (void)last_ec;
     if (++n % 15 || !is_sword()) return;
     { static int on = -1; extern volatile int dm_fork_enc_on __attribute__((weak));   // v49: only while Encounter info is on (touch_ui.c sets it; before that, env.txt's DM_FORK_ENC)
       if (on < 0) { const char *e = getenv("DM_FORK_ENC"); on = e && !strcmp(e, "on"); }
@@ -74,13 +109,27 @@ void dm_fork_enc_tick(void) {
         else LOG("[FORK] enc trainer: not readable at heap + %#x", O_MYSTATUS);
         uint8_t p[0x148]; int ok = read_pk8(O_PARTY, p); if (ok >= 0) log_pk8("party slot 1", p, ok); else LOG("[FORK] enc party: not readable"); lines++;
     }
-    uint8_t fl; int in = read_heap(O_INBATTLE, &fl, 1) && fl;
-    if (!in) { if (was_in) enc_set(NULL, 0); was_in = 0; return; }
-    uint8_t w[0x148]; int ok = read_pk8(O_WILD, w); if (ok < 0) return;
-    uint32_t ec = rd32(w);
-    if (!was_in) { was_in = 1; int wild = ok > 0 && ec != battle_ec; battle_ec = ec; enc_set(w, wild);   // a new battle: wild when the slot holds a new Pokémon
-        if (!wild && lines < 60) { lines++; LOG("[FORK] enc: a battle without a new wild Pokémon (a trainer battle?): no panel"); } }
-    else if (ok > 0 && ec != battle_ec) { battle_ec = ec; enc_set(w, 1); }   // (the slot written after the flag: the wild one after all)
-    if (ec == last_ec || lines >= 60) return; last_ec = ec;
-    log_pk8("wild", w, ok); lines++;
+    // v51: in a battle by the game's flag, or by the fork's screen guess (gfx/nvn/fork_ui.h dm_fork_screen 2)
+    extern _Atomic int dm_fork_screen __attribute__((weak));
+    uint8_t fl; int in = (read_heap(O_INBATTLE, &fl, 1) && fl) || (&dm_fork_screen && atomic_load(&dm_fork_screen) == 2);
+    if (!in) { if (was_in) { enc_set(NULL, 0); LOG_LIMIT("[FORK] enc: battle over"); } was_in = 0; g_battle_found = 0; return; }
+    if (!was_in) { was_in = 1; g_battle_found = 0; g_scan_tried = 0; g_battle_t = n; }
+    if (g_battle_found) return;
+    // the wild Pokémon: the last place it was found (or SysBot's offset), then a search of the heap (find_wild, on its own thread)
+    uint16_t tid, sid; if (!trainer_ids(&tid, &sid)) return;
+    uint64_t offs[2] = { atomic_load(&g_wild_off), O_WILD };
+    int old = 0;
+    for (int k = 0; k < 2; k++) { uint8_t w[0x148]; if (!offs[k] || read_pk8(offs[k], w) <= 0) continue;
+        uint32_t ec = rd32(w); if (rd16(w + 0x0C) != tid || rd16(w + 0x0E) != sid) continue;
+        if (ec == battle_ec) { old = 1; continue; }   // (the last battle's wild Pokémon still there: a trainer battle, or not written yet)
+        battle_ec = ec; g_battle_found = 1; atomic_store(&g_wild_off, offs[k]); enc_set(w, 1);
+        if (lines < 60) { lines++; LOG("[FORK] enc: the wild Pokémon at heap + %#llx", (unsigned long long)offs[k]); log_pk8("wild", w, 1); }
+        return; }
+    if (old && n - g_battle_t < 150) return;   // (the known place still holds the last one: wait up to 5 s for a new one before searching)
+    if (old) { if (!g_scan_tried) { g_scan_tried = 1; LOG_LIMIT("[FORK] enc: the wild slot still holds the last battle's Pokémon: a trainer battle (no panel)"); } return; }
+    if (!g_scan_tried && !atomic_load(&g_scanning) && n - g_battle_t >= 60) {   // (after 2 s in the battle: the wild Pokémon has been written by then)
+        g_scan_tried = 1; atomic_store(&g_scanning, 1); g_scan_tid = tid; g_scan_sid = sid; g_scan_skip_ec = battle_ec;
+        pthread_t t; if (pthread_create(&t, NULL, find_wild, NULL)) atomic_store(&g_scanning, 0); else pthread_detach(t); }
+    { static int said_trainer; if (g_scan_tried && !atomic_load(&g_scanning) && !g_battle_found && said_trainer != (int)g_battle_t) { said_trainer = (int)g_battle_t;
+        if (lines < 60) { lines++; LOG("[FORK] enc: no wild Pokémon with your trainer ID in memory: a trainer battle (no panel)"); } } }
 }
