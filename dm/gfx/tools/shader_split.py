@@ -60,10 +60,13 @@ def skey(ctl, code):
 def same_shader(a, b):
     """Two copies of one key hold the same shader: the code areas are equal, and so are the control sections up to their own length (control +0x20). Pokémon Legends: Z-A's UI layout archives
     (__ArchiveShader.bnsh inside the .truiv packs) give 104 KB control sections whose stage descriptor length runs 456 bytes past their own length, and those trailing bytes differ between copies"""
+    # A control section whose own length runs past the shorter copy is compared over what the key covers (ctl_len): a shader the game handed to NVN is captured with
+    #   0x880 control bytes, and the same shader in a file can carry more (Sword / Shield's system_resource fog.bnsh: 0xcd8). Comparing whole sections of different
+    #   lengths stopped the second setup of every player whose game had captured it (#261: "key bcff56c018a00140 is the same but ... differs")
     (ca, ka), (cb, kb) = a, b
     n = struct.unpack_from('<I', ca, 0x20)[0] if len(ca) >= 0x24 else len(ca)
-    n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
-    return ka == kb and ca[:n] == cb[:n]
+    if 0x760 <= n <= min(len(ca), len(cb)): return ka == kb and ca[:n] == cb[:n]
+    return ka == kb and ca[:ctl_len(ca)] == cb[:ctl_len(cb)]
 
 def check(where, st, ctl, code):
     """control section and code area consistent; returns the reason if not"""
