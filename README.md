@@ -37,6 +37,8 @@
 
 ## What's new
 
+- **Widescreen, 1440p and mods (v0.40).** ☰ → Picture → **Widescreen** widens the game's camera to your screen's own shape, with the HUD kept 16:9 in the middle; nothing is stretched. ☰ → Graphics → **Resolution → 1440p** renders TV mode at 2560x1440 (heavier). Both are off by default. Fl4sh's `.pchtxt` mods that keep data or code of their own (Dynamic FPS, the Ultrawide mods) no longer crash the game. Controls no longer stop working when the phone gets hot and Graphics Auto switches modes (#49). ☰ → Performance → **Barriers between passes** lets Xclipse, Mali and PowerVR players trade steady shadows for speed (#48).
+
 - **Graphics fixes (v0.39).** Exploded and stretched polygons on older Adreno drivers (Vulkan 1.1) are fixed: vertex sizes are now built into each pipeline there (`DM_VK_NO_EDS=0` goes back). Background pipeline building (`DM_VK_ASYNC_PSO`) is now off everywhere, as it left objects missing for frames. Relaxed barriers are Adreno-only (dark, flickering shadows on Xclipse, PowerVR and Mali). PowerVR converts BC textures on the CPU (purple objects).
 
 - **Mali crash fix (v0.21).** Arm's driver makes more screen buffers than the game asks for (14 for 8 on a Mali-G57). The game had room for 8, so on some Mali phones the driver closed it a few frames in. It now has room for 32 and uses the count the driver reports.
