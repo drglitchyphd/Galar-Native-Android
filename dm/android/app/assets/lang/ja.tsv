@@ -366,3 +366,21 @@ Model tests (Adreno)	モデルのテスト（Adreno）
 For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	ポリゴンが伸びたり爆発したりする場合に。変更後にゲームを再起動し、直ったかをGitHubで教えてください。
 Copy shared data on the GPU	共有データをGPUでコピー
 On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	オン：ドライバーのアラインメントから外れた位置にあるデータを、CPUではなくGPUで、それ以前のGPUの書き込みの後にコピーします（古いAdrenoでポリゴンが爆発する問題のテスト）
+Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	ワイド：ゲームのカメラを画面の横幅いっぱいに広げ、引き伸ばしません（ソード／シールド 1.3.2。HUDは引き伸ばされます）
+Output	出力
+Float target	浮動小数の描画先
+Output: what each shader writes is limited. If the white goes away, tell us	出力：各シェーダーが書き込む値を制限します。白が消えたら教えてください
+Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us	浮動小数の描画先：ライティング後のシーンを圧縮形式ではなく16ビット浮動小数の画像に保存します。白が消えたら教えてください
+Multiplies	乗算
+Additions	加算
+Multiply-adds	積和
+Multiplies: every multiply result is limited. If the white goes away, tell us	乗算：すべての乗算結果を制限します。白が消えたら教えてください
+Additions: every add / subtract result is limited. If the white goes away, tell us	加算：すべての加算・減算結果を制限します。白が消えたら教えてください
+Multiply-adds: every fused multiply-add result is limited. If the white goes away, tell us	積和：すべての積和演算の結果を制限します。白が消えたら教えてください
+NaN fix	NaN修正
+NaN fix + textures	NaN修正＋テクスチャ
+NaN fix: broken values the shaders write become 0 instead of turning the picture white. Tell us how it looks	NaN修正：シェーダーが書き込む壊れた値を、画面を白くする代わりに0にします。見た目を教えてください
+NaN fix + textures: the same, and broken values read from textures become 0 too. Tell us how it looks	NaN修正＋テクスチャ：同じ処理に加え、テクスチャから読んだ壊れた値も0にします。見た目を教えてください
+This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	このバージョンではゲームのシェーダーの変換方法が変わりました：今すぐ更新します。ファイルは不要で、セーブデータはそのままです。この画面を開いたままにしてください。セットアップのシェーダー手順と同じくらい時間がかかります。
+Setting up	セットアップ
+Keep the phone cooler: half the workers (setup takes longer)	端末を熱くしにくくする：ワーカーを半分にします（セットアップに時間がかかります）

@@ -366,3 +366,34 @@ Model tests (Adreno)	Tests des modèles (Adreno)
 For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	Pour les polygones étirés ou qui explosent. Redémarre le jeu après l'avoir changé et dis-nous sur GitHub s'ils ont disparu.
 Copy shared data on the GPU	Copier les données partagées sur le GPU
 On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	Activé : les données que le jeu place hors de l'alignement du pilote sont copiées sur le GPU, après ce que le GPU a écrit avant, au lieu du CPU (un test pour les polygones qui explosent sur les anciens Adreno)
+Sticks	Joysticks
+Fixed	Fixes
+Fixed: the sticks stay where they are drawn, as on Joy-Cons	Fixes : les joysticks restent là où ils sont dessinés, comme sur les Joy-Con
+Floating	Flottants
+Floating: touch anywhere on the left half to move (the stick comes to your thumb); drag on the right half to turn the camera	Flottants : touchez n'importe où sur la moitié gauche pour bouger (le joystick vient sous votre pouce) ; glissez sur la moitié droite pour tourner la caméra
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	Désactivée : ce GPU met %s ms par image, plus que le jeu ne peut en céder. Désactivez-la puis réactivez-la pour réessayer.
+Off until the next start (see the log for why).	Désactivée jusqu'au prochain démarrage (la raison est dans le journal).
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Désactivée : même au plus léger, elle coûtait au jeu ses propres images ici (jusqu'à %s fps). Désactivez-la puis réactivez-la pour réessayer.
+Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	Désactivée à 30 fps : la génération d'images demande le jeu à 60 fps stables (Performances → Images par seconde : 60).
+Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.	En pause : le jeu tourne ici à %s fps, et la génération d'images demande 60 stables. Elle se réactive seule quand le jeu tient 60.
+On: a picture is made between each two of the game's frames, so 60 fps moves like 120. Only while the game holds a locked 60 fps; your input shows about 8 ms later	Activé : une image est créée entre chaque paire d'images du jeu, 60 fps paraissent donc 120. Seulement quand le jeu tient 60 fps stables ; vos commandes s'affichent environ 8 ms plus tard
+Auto: 2x, light (the game at a locked 60 shown at 120)	Auto : 2x, léger (le jeu à 60 stables affiché à 120)
+Widescreen	Grand écran
+Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	Grand écran : la caméra du jeu aussi large que votre écran, rien n'est étiré (Sword / Shield 1.3.2 ; l'interface est étirée)
+Output	Sortie
+Float target	Cible flottante
+Output: what each shader writes is limited. If the white goes away, tell us	Sortie : ce que chaque shader écrit est limité. Si le blanc disparaît, dites-le-nous
+Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us	Cible flottante : la scène éclairée est stockée dans une image flottante 16 bits au lieu de l'image compacte. Si le blanc disparaît, dites-le-nous
+Multiplies	Multiplications
+Additions	Additions
+Multiply-adds	Multiplications-additions
+Multiplies: every multiply result is limited. If the white goes away, tell us	Multiplications : chaque résultat de multiplication est limité. Si le blanc disparaît, dites-le-nous
+Additions: every add / subtract result is limited. If the white goes away, tell us	Additions : chaque résultat d'addition / soustraction est limité. Si le blanc disparaît, dites-le-nous
+Multiply-adds: every fused multiply-add result is limited. If the white goes away, tell us	Multiplications-additions : chaque résultat de multiplication-addition est limité. Si le blanc disparaît, dites-le-nous
+NaN fix	Correctif NaN
+NaN fix + textures	Correctif NaN + textures
+NaN fix: broken values the shaders write become 0 instead of turning the picture white. Tell us how it looks	Correctif NaN : les valeurs cassées écrites par les shaders deviennent 0 au lieu de rendre l'image blanche. Dites-nous ce que ça donne
+NaN fix + textures: the same, and broken values read from textures become 0 too. Tell us how it looks	Correctif NaN + textures : pareil, et les valeurs cassées lues dans les textures deviennent 0 aussi. Dites-nous ce que ça donne
+This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	Cette version traduit les shaders du jeu autrement : mise à jour en cours. Tes fichiers ne sont pas nécessaires et ta sauvegarde est conservée. Garde cet écran ouvert ; cela prend autant de temps que l'étape des shaders de l'installation.
+Setting up	Installation
+Keep the phone cooler: half the workers (setup takes longer)	Garder le téléphone plus frais : moitié moins de processus (l'installation est plus longue)

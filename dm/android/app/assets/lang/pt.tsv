@@ -366,3 +366,34 @@ Model tests (Adreno)	Testes de modelos (Adreno)
 For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	Para polígonos esticados ou explodindo. Reinicie o jogo depois de mudar e diga no GitHub se sumiram.
 Copy shared data on the GPU	Copiar dados compartilhados na GPU
 On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	Ligado: os dados que o jogo coloca fora do alinhamento do driver são copiados na GPU, depois do que a GPU escreveu antes, em vez de na CPU (um teste para polígonos explodindo em Adreno antigos)
+Sticks	Analógicos
+Fixed	Fixos
+Fixed: the sticks stay where they are drawn, as on Joy-Cons	Fixos: os analógicos ficam onde são desenhados, como nos Joy-Con
+Floating	Flutuantes
+Floating: touch anywhere on the left half to move (the stick comes to your thumb); drag on the right half to turn the camera	Flutuantes: toque em qualquer lugar da metade esquerda para andar (o analógico vai até o seu polegar); arraste na metade direita para girar a câmera
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	Desligada: esta GPU precisa de %s ms para cada imagem, mais do que o jogo pode ceder. Desligue e ligue para tentar de novo.
+Off until the next start (see the log for why).	Desligada até o próximo início (o motivo está no log).
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Desligada: mesmo no modo mais leve ela tirava quadros do próprio jogo aqui (até %s fps). Desligue e ligue para tentar de novo.
+Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	Desligada a 30 fps: a geração de quadros precisa do jogo a 60 fps estáveis (Desempenho → Taxa de quadros: 60).
+Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.	Pausada: o jogo roda a %s fps aqui, e a geração de quadros precisa de 60 estáveis. Ela volta sozinha quando o jogo mantém 60.
+On: a picture is made between each two of the game's frames, so 60 fps moves like 120. Only while the game holds a locked 60 fps; your input shows about 8 ms later	Ligado: uma imagem é criada entre cada dois quadros do jogo, então 60 fps se movem como 120. Só enquanto o jogo mantém 60 fps estáveis; seus comandos aparecem cerca de 8 ms depois
+Auto: 2x, light (the game at a locked 60 shown at 120)	Auto: 2x, leve (o jogo a 60 estáveis mostrado a 120)
+Widescreen	Widescreen
+Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	Widescreen: a câmera do jogo tão larga quanto a sua tela, nada esticado (Sword / Shield 1.3.2; a interface fica esticada)
+Output	Saída
+Float target	Destino flutuante
+Output: what each shader writes is limited. If the white goes away, tell us	Saída: o que cada shader escreve é limitado. Se o branco sumir, avise-nos
+Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us	Destino flutuante: a cena iluminada é guardada numa imagem de ponto flutuante de 16 bits em vez da compactada. Se o branco sumir, avise-nos
+Multiplies	Multiplicações
+Additions	Somas
+Multiply-adds	Multiplicar-somar
+Multiplies: every multiply result is limited. If the white goes away, tell us	Multiplicações: cada resultado de multiplicação é limitado. Se o branco sumir, avise-nos
+Additions: every add / subtract result is limited. If the white goes away, tell us	Somas: cada resultado de soma / subtração é limitado. Se o branco sumir, avise-nos
+Multiply-adds: every fused multiply-add result is limited. If the white goes away, tell us	Multiplicar-somar: cada resultado de multiplicação-soma é limitado. Se o branco sumir, avise-nos
+NaN fix	Correção NaN
+NaN fix + textures	Correção NaN + texturas
+NaN fix: broken values the shaders write become 0 instead of turning the picture white. Tell us how it looks	Correção NaN: os valores quebrados que os shaders escrevem viram 0 em vez de deixar a imagem branca. Conte-nos como ficou
+NaN fix + textures: the same, and broken values read from textures become 0 too. Tell us how it looks	Correção NaN + texturas: o mesmo, e os valores quebrados lidos de texturas também viram 0. Conte-nos como ficou
+This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	Esta versão traduz os shaders do jogo de outro jeito: atualizando agora. Seus arquivos não são necessários e seu save é mantido. Deixe esta tela aberta; leva o mesmo tempo que a etapa de shaders da instalação.
+Setting up	Configuração
+Keep the phone cooler: half the workers (setup takes longer)	Manter o celular mais fresco: metade dos processos (a configuração demora mais)

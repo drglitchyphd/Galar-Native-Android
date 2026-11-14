@@ -225,6 +225,9 @@ public final class SetupActivity extends Activity {
         open.setOnClickListener(v -> { drv.setVisibility(android.view.View.VISIBLE); open.setVisibility(android.view.View.GONE); });
         cd.addView(drv); ((LinearLayout.LayoutParams) r5.getLayoutParams()).topMargin = px(8);
         maliOptions(drv);
+        // setup's own heat (#262: an 8+ Gen 1 ran hot through a 2 h 43 min setup): half the workers, from the next setup or shader update
+        LinearLayout cs = card(more, null, T.t(this, "Setting up"), acc);
+        check(cs, T.t(this, "Keep the phone cooler: half the workers (setup takes longer)"), "DM_SETUP_COOL", "1");
         TextView sn = text(more, T.t(this, "Settings (picture, graphics, textures, controller buttons, touch controls, mods) are in the game: tap the menu button at the top left, or hold − on a controller for 3 seconds for the controller buttons."), 13, 0xFF8A909B, false);
         sn.setPadding(px(4), px(16), px(4), 0);
         ScrollView sv = new ScrollView(this); sv.setFillViewport(true); sv.addView(root);
@@ -867,6 +870,7 @@ public final class SetupActivity extends Activity {
         int j = Math.min(8, Runtime.getRuntime().availableProcessors());
         android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(mi);
         j = Math.min(j, (int) (mi.totalMem / (1536L << 20))); String[] p = GameSettings.profile(this); if (p != null && p[2].equals("low")) j = Math.min(j, 4);
+        if ("1".equals(envGet("DM_SETUP_COOL"))) j = j / 2;   // "Keep the phone cooler": half the workers, a slower setup that heats the phone less (#262)
         return Math.max(1, j);
     }
     // memory kept free for the phone itself: Android's own low-memory line (MemoryInfo.threshold) with room above it, at least 300 MB
