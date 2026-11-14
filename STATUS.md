@@ -1,6 +1,7 @@
 # STATUS
 
-**Build:** v50 (not tested yet): v49 + spotted fades full size + frame generation paused on still screens (setting, default keep; 60 Hz there) + power readout (log / overlay). Upstream: nothing new.
+**Build:** v51 (not tested yet): v50 + spotted side fade (7c73d8ac, overworld) full size + encounter panel finds the wild Pokémon by a heap search (and battles by the screen guess: v50 log, a wild Chewtle battle, showed the game's in-battle flag offset does not hold here either). Upstream: nothing new.
+- v50: v49 + spotted fades full size + frame generation paused on still screens (setting, default keep; 60 Hz there) + power readout (log / overlay). Upstream: nothing new.
 - v49: v48 + spotted banner frame not a battle (g_fk_spot), spotted fades by draw order (bottom-right, then top-left on the top edge), encounter probe only with Encounter info on, **Lowest resolution when hot** (DM_FORK_SCALE_FLOOR stock / 85 / 70; hle_resscale.c factor_now). Upstream: nothing new.
 - Heat (Steven's cool run on v48, Performance model): heat none, generation 4.4-6.2 ms, full resolution. The Quality model (15-24 ms) made frames miss and the guard drop to 0.70: keep Performance.
 - v48:
