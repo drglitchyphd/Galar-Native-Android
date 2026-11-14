@@ -359,3 +359,6 @@ Every pass	Cada passada
 Auto: fewer on Adreno, one before every pass on other GPUs	Auto: menos na Adreno, uma antes de cada passada nas outras GPUs
 Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	Menos: mais rápido, a GPU continua ocupada; em Xclipse, Mali e PowerVR as sombras podem piscar
 Every pass: the safest picture, slower	Cada passada: a imagem mais segura, mais lento
+Resolution	Resolução
+1080p, as the game is made	1080p, como o jogo foi feito
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p: mais nítido, mas mais pesado para a GPU (menos fps, celular mais quente)

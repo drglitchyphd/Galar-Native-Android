@@ -293,6 +293,9 @@ public final class GameMenu {
             // Lowest: handheld mode with the game's 3D render scale capped (Pokémon Sword / Shield: the engine's hle_resscale.c; Scarlet / Violet have no such scale)
             { "lowest", t(a, "Lowest"), t(a, "Lowest: handheld mode, 3D at 960x540, coolest") } };
         choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) || GameSettings.arceus(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);   // (Lowest: Sword / Shield's render scale only)
+        // Legends: Arceus's TV-mode render size (loader.c arc_res): 1080p as the game is made, or 1440p (sharper, heavier); from the next start
+        if (GameSettings.arceus(a)) choice(a, "DM_ARC_RES", t(a, "Resolution"), new String[][] { { "", "1080p", t(a, "1080p, as the game is made") },
+            { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)") } });
         // Legends: Arceus: the POTATO mod's draw distance and shadows (android_main.c lowspec, DM_LOWSPEC 1 / 2), for phones that cannot hold its frame rate
         // Legends: Arceus: flat normal maps on the field's ground and tree bark (setup_game.py flat_normals): on this engine their detail lights shadowed ground purple
         if (GameSettings.arceus(a)) choice(a, "DM_FLAT_NORMALS", t(a, "No reflections"), new String[][] { { "", t(a, "On"), t(a, "On: smooth ground lighting, no purple shadows") },

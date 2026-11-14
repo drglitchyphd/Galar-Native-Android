@@ -578,11 +578,26 @@ static int arc_wide(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     LOG("%s: widescreen for Legends: Arceus 1.1.1: camera aspect %.4f (%08x), HUD kept to 16:9 in the middle (x %.3f of the width)", m->name, ratio, bits, (double)k);
     return 8;
 }
+// 1440p for Legends: Arceus 1.1.1 (DM_ARC_RES=1440, the menu's Graphics → Resolution; off by default): the game's TV-mode render size, 1920x1080, becomes
+//   2560x1440 at the five places it is set (after Fl4sh's "2560x1440" mod for 1.1.1): sharper, and heavier on the GPU. Handheld mode keeps its own 720p.
+//   Each word is checked first (MOV / MOVK of 0x780 or 0x438 into the register the game uses); a build or code that differs is left alone
+static int arc_res(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_ARC_RES"); if (!e || atoi(e) != 1440) return 0;
+    static const struct { uint64_t off; uint32_t orig, imm; } R[] = {
+        { 0x29f0650, 0x5280f008u, 0xa00 }, { 0x29f0654, 0x52808709u, 0x5a0 }, { 0x29f0410, 0x5280f008u, 0xa00 }, { 0x29f0414, 0x52808709u, 0x5a0 },
+        { 0x2b9a5fc, 0x5280f008u, 0xa00 }, { 0x2b9a604, 0x52808708u, 0x5a0 }, { 0x277bd44, 0x5280f009u, 0xa00 }, { 0x277bd50, 0x52808708u, 0x5a0 },
+        { 0x29e99e8, 0xf2c0f008u, 0xa00 }, { 0x29e99f4, 0xf2c08708u, 0x5a0 } };
+    for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w; memcpy(&w, m->base + R[i].off, 4);
+        if (R[i].off + 4 > m->text_end || w != R[i].orig || overlaps_rewrite(m, R[i].off, 4, p0, p1)) { LOG("[RED] %s: 1440p not applied (Legends: Arceus 1.1.1's render size code differs at +%#llx)", m->name, (unsigned long long)R[i].off); return 0; } }
+    for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w = (R[i].orig & ~(0xffffu << 5)) | R[i].imm << 5; memcpy(m->base + R[i].off, &w, 4); }
+    LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)", m->name);
+    return (int)(sizeof R / sizeof *R);
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
-    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
+    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),

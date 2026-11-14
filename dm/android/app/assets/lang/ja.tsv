@@ -359,3 +359,6 @@ Every pass	毎パス
 Auto: fewer on Adreno, one before every pass on other GPUs	自動：Adrenoでは少なく、他のGPUでは各パスの前に1回
 Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	少なく：速く、GPUが休みません。Xclipse、Mali、PowerVRでは影がちらつくことがあります
 Every pass: the safest picture, slower	毎パス：最も安全な画面、遅め
+Resolution	解像度
+1080p, as the game is made	1080p（ゲーム本来の解像度）
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p：より鮮明ですがGPUの負荷が増えます（fpsが下がり、端末が熱くなります）
