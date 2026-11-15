@@ -69,6 +69,8 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 // ================= Device =================
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperties g_memp;
+#include "vk_quirks.h"   // the unified driver layer's table: every per-GPU workaround's default, from one description of the GPU
+static gpu_id g_gpuid = { .driver_id = -1 };
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
 // Passes as dynamic rendering (1) or as Vulkan 1.0 render passes (0: rend_begin); draw state set per draw (1, extended dynamic state) or built into each pipeline (0: sst).
 //   0 where the driver lacks them (Arm's r3x drivers for Mali-G57 / G68 / G77 / G78, Vulkan 1.1: A25 5G); DM_VK_NO_DYNREN=1 / DM_VK_NO_EDS=1 force 0 on any driver
@@ -295,13 +297,20 @@ void mtl_init(void) {
     if ((g_divisor = !as_mali && has_ext(de, nde, "VK_EXT_vertex_attribute_divisor"))) dext[ndext++] = "VK_EXT_vertex_attribute_divisor";
     if ((g_eds2 = has_ext(de, nde, "VK_EXT_extended_dynamic_state2"))) dext[ndext++] = "VK_EXT_extended_dynamic_state2";
     int compctl = has_ext(de, nde, "VK_EXT_image_compression_control"); if (compctl) dext[ndext++] = "VK_EXT_image_compression_control";   // to read whether render targets stay compressed
+    // the GPU described once for the quirk table (vk_quirks.h); the driver ID and Arm's release are added below, where the driver properties are read
+    g_gpuid.vendor = g_props.vendorID; g_gpuid.driver_version = g_props.driverVersion; snprintf(g_gpuid.name, sizeof g_gpuid.name, "%s", g_props.deviceName);
+    g_gpuid.custom = getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"); g_gpuid.api = g_props.apiVersion;
+#if defined(DM_GAME_PROGRAM_ID) && DM_GAME_PROGRAM_ID == 0x01001F5010DFA000ull
+    g_gpuid.port = PORT_ARCEUS;   // (Legends: Arceus: the table's Arceus rules)
+#endif
+    { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); g_gpuid.ram_kb = kb; }
     if (getenv("DM_VK_NO_HOST_IMPORT")) g_host_import = 0;
     // Imported host memory pins the game's pools (about 3 GB) for every submission. Samsung's Xclipse driver of the late-2026 One UI update refuses that a few frames into play
     // (vkQueueSubmit: VK_ERROR_OUT_OF_HOST_MEMORY with a gigabyte free, #39), so on Xclipse the driver's own memory backs the pools instead (as on Mali); elsewhere a
     // submission that fails while pools are imported leaves a marker (host_import_failed, next to the pipeline cache) and the next start does the same. DM_VK_HOST_IMPORT=1 forces import.
     // Decided before the fd route below: deciding it after left Xclipse without the fd route, on mirrored pools (every pool twice in memory, swapping, multi-second stalls: #41)
     if (g_host_import && !getenv("DM_VK_HOST_IMPORT")) {
-        const char *why = g_props.vendorID == 0x144D ? "Samsung Xclipse" : NULL;
+        const char *why = quirk_note(Q_HOST_IMPORT_OFF, quirk_default(Q_HOST_IMPORT_OFF, &g_gpuid), 0) ? "Samsung Xclipse" : NULL;
         // (never on Adreno, 0x5143: its fallback, moving the driver's mappings, is the route that crashed it on area changes; one failed submission must not switch it for good)
         if (!why && g_props.vendorID != 0x5143 && host_import_mark(0)) why = "a submission failed with it last time";
         if (why) { g_host_import = 0; VLOG("memory pools: host import off (%s): the driver's own memory backs the pools", why); }
@@ -344,7 +353,7 @@ void mtl_init(void) {
         // Samsung Xclipse without export (its export crashed the driver: Xclipse 530 / 540, #45 / #57 / #59) took the mremap route, where its driver handed out
         //   mappings the pools had taken and the game crashed on scene changes: it takes the heap route too
         {   const char *he = getenv("DM_VK_DMAHEAP"), *sh = getenv("DM_VK_POOL_SHADOW");
-            int want = he ? atoi(he) : (!g_fdmap && !heap_crashed && (g_props.vendorID == 0x13B5 || g_props.vendorID == 0x144D));
+            int want = he ? atoi(he) : (!g_fdmap && !heap_crashed && quirk_default(Q_DMAHEAP, &g_gpuid)); quirk_note(Q_DMAHEAP, want, he != NULL);
             if (sh && atoi(sh)) want = 0;   // (a forced mirror leaves it out too)
             VkPhysicalDeviceExternalBufferInfo xi = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO, .usage = BUF_ALL, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
             VkExternalBufferProperties xp = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES };
@@ -361,7 +370,7 @@ void mtl_init(void) {
                 else VLOG("memory pools: no dma-buf heap could be opened (errno %d)", errno);
             } else if (want) VLOG("memory pools: the driver does not import dma-buf buffers (features %#x)", (unsigned)xp.externalMemoryProperties.externalMemoryFeatures);
         }
-        if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && g_props.vendorID == 0x13B5) { g_fdtype = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; g_fdmap = -1;
+        if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && quirk_note(Q_DMABUF_TRY, quirk_default(Q_DMABUF_TRY, &g_gpuid), 0)) { g_fdtype = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; g_fdmap = -1;
             VLOG("memory pools: Mali lists no exportable buffer: the dma-buf route tried anyway (it falls back by itself)"); }
         if (g_heapmap) { dext[ndext++] = "VK_KHR_external_memory_fd"; dext[ndext++] = "VK_EXT_external_memory_dma_buf"; }
         else if (g_fdmap) { dext[ndext++] = "VK_KHR_external_memory_fd"; if (g_fdtype == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) dext[ndext++] = "VK_EXT_external_memory_dma_buf"; }
@@ -396,12 +405,20 @@ void mtl_init(void) {
     int dynren = old ? x_dynren && fdr.dynamicRendering : f13.dynamicRendering, timeline = old11 ? fts.timelineSemaphore : f12.timelineSemaphore;
     int eds = old ? x_eds && fed.extendedDynamicState : 1;
     if (!timeline && g_tlsem) { g_tlsem = 0; VLOG("timeline semaphores listed but not supported: a fence for each submission instead"); }
-    g_dynren = dynren && !(getenv("DM_VK_NO_DYNREN") && atoi(getenv("DM_VK_NO_DYNREN")));
+    // Galar renders with render passes on Adreno (its vkCmdBeginRendering allocated every time: #205); Arceus keeps dynamic rendering there (vk_quirks.h Q_NO_DYNREN).
+    //   DM_VK_NO_DYNREN=0 / 1 decides on any GPU
+    { const char *e = getenv("DM_VK_NO_DYNREN"); int no = quirk_note(Q_NO_DYNREN, e ? atoi(e) != 0 : quirk_default(Q_NO_DYNREN, &g_gpuid), e != NULL);
+      g_dynren = dynren && !no; }
     // Qualcomm's Vulkan 1.1 drivers (Adreno 6xx / 710 stock, API 1.1.x) misread vertex strides passed per draw (vkCmdBindVertexBuffers2): exploded, stretched
-    //   polygons across the view (Arceus #34, Galar #209). Built into each pipeline there unless DM_VK_NO_EDS=0
+    //   polygons across the view (Arceus #34, Galar #209). Built into each pipeline there unless DM_VK_NO_EDS=0 (vk_quirks.h Q_NO_EDS)
     const char *ne = getenv("DM_VK_NO_EDS");
-    int old_qc = g_props.vendorID == 0x5143 && VK_API_VERSION_MINOR(g_props.apiVersion) < 2 && VK_API_VERSION_MAJOR(g_props.apiVersion) == 1;
-    g_eds = eds && !(ne ? atoi(ne) != 0 : old_qc);
+    int old_qc = quirk_default(Q_NO_EDS, &g_gpuid);
+    g_eds = eds && !quirk_note(Q_NO_EDS, ne ? atoi(ne) != 0 : old_qc, ne != NULL);
+    // DM_VK_BASELINE=1 (vk_quirks.h): the Vulkan 1.1 floor on any GPU, each feature's own fallback, as a phone with an old driver runs: render passes, the draw state in
+    //   each pipeline, a fence per submission. For reproducing a low-end driver's problem on a phone with a new one
+    { const char *e = getenv("DM_VK_BASELINE"); if (e && atoi(e) > 0) { g_dynren = 0; g_eds = 0; g_tlsem = 0;
+        VLOG("[quirk] Vulkan 1.1 baseline (DM_VK_BASELINE): render passes, draw state in each pipeline, a fence per submission, whatever this driver offers"); } }
+    g_gpuid.dynren = g_dynren;
     VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : dynren ? "render passes (DM_VK_NO_DYNREN)" : "render passes (the driver has no dynamic rendering)",
          g_eds ? "set per draw (extended dynamic state)" : !eds ? "built into each pipeline (the driver has no extended dynamic state)"
                : ne ? "built into each pipeline (DM_VK_NO_EDS)" : "built into each pipeline (Qualcomm Vulkan 1.1 driver: per-draw vertex strides drawn wrong; DM_VK_NO_EDS=0 to try)");
@@ -412,7 +429,7 @@ void mtl_init(void) {
     //   uniform buffers were copied at record time (DM_VK_UBO_SNAPSHOT) and its BC textures decoded, not transcoded to ETC2 (DM_VK_BC_TRANSCODE=off): the two logs that play
     //   on v0.5x (#77, #110) have both, and every crash lacks one of them. Both from the first start there (the safe-start ladder took four crashes to reach them);
     //   env.txt still wins
-    if (g_props.vendorID == 0x13B5 && (g_props.driverVersion >> 22) < 49 && strstr(g_props.deviceName, "G615") && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) {
+    if (quirk_note(Q_G615_SAFE, quirk_default(Q_G615_SAFE, &g_gpuid), 0)) {
         int u = !getenv("DM_VK_UBO_SNAPSHOT"), b = !getenv("DM_VK_BC_TRANSCODE");
         setenv("DM_VK_UBO_SNAPSHOT", "1", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
         VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110)",
@@ -452,10 +469,10 @@ void mtl_init(void) {
         VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &fc }; vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (!drvp) snprintf(dp.driverName, sizeof dp.driverName, "%s", g_props.vendorID == 0x13B5 ? "Mali (no driver properties: taken as ARM's)" : "unknown");
         // Samsung's Xclipse driver too: the probe self-test (float-controls) found inf - inf not NaN without them on Xclipse 540 and 940, and every check right with them
-        const char *e = getenv("DM_VK_FLOAT_CONTROLS"); int arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : g_props.vendorID == 0x13B5;
-        int sec = drvp ? dp.driverID == VK_DRIVER_ID_SAMSUNG_PROPRIETARY : g_props.vendorID == 0x144D;
+        const char *e = getenv("DM_VK_FLOAT_CONTROLS"); g_gpuid.driver_id = drvp ? (int)dp.driverID : -1;
+        int arm = gpu_is_arm_driver(&g_gpuid), sec = gpu_is_samsung_driver(&g_gpuid);
         arm_known = 1; if (arm) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); g_arm_beta = drvp && strstr(dp.driverInfo, "bet") != NULL; }
-        g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : arm || sec);
+        g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : quirk_default(Q_FLOAT_CONTROLS, &g_gpuid));
         // The test shader below crashed a driver (#89: Mali-G57, the start ended right after this line): a start that dies there leaves the marker, and later starts on
         //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 tries again)
         int fc_crashed = g_fctl && mark_file(drv_mark("float_controls_crashed"), "", 0) && !e;
@@ -483,10 +500,12 @@ void mtl_init(void) {
     }
     // A driver without Vulkan 1.2 or the float-controls extension: Arm's own when it is ARM's vendor ID and not a driver package (PanVK reports ARM's ID too)
     if (!arm_known && g_props.vendorID == 0x13B5 && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); }
+    g_gpuid.arm_rel = g_arm_rel; g_gpuid.arm_p = g_arm_p; g_gpuid.arm_beta = g_arm_beta;   // (the quirk table's description complete from here)
+    gpu_id_log(&g_gpuid); quirk_note(Q_FLOAT_CONTROLS, g_fctl, getenv("DM_VK_FLOAT_CONTROLS") != NULL);
     // Arm erratum 3779215 (r38p1 to r49p0 and r50p0 to r51p0, fixed in r49p1 and r52p0; a beta r49p1, the G925's, is not known to have the fix): a clamp to zero of a value
     //   selected between constants compiled as a plain min or max. Shaders on those drivers get spv_clamp_zero; DM_VK_CLAMP_ZERO=0 / 1 decides on any driver
-    { int v = g_arm_rel * 100 + g_arm_p; const char *e = getenv("DM_VK_CLAMP_ZERO");
-      g_clampzero = e ? atoi(e) != 0 : g_arm_rel && ((v >= 3801 && v < 4901) || (g_arm_beta && v >= 4901 && v < 4902) || (v >= 5000 && v < 5101));
+    { const char *e = getenv("DM_VK_CLAMP_ZERO");
+      g_clampzero = quirk_note(Q_CLAMP_ZERO, e ? atoi(e) != 0 : quirk_default(Q_CLAMP_ZERO, &g_gpuid), e != NULL);
       if (g_clampzero) VLOG("shaders: a clamp to zero of a value selected between constants gets a zero the compiler cannot fold (Arm erratum 3779215%s)", e ? ", DM_VK_CLAMP_ZERO" : g_arm_beta ? ", a beta driver" : ""); }
     // NaN in min / max / saturate (spv_nan_minmax): the frame capture of a white scene on Arm's own driver (#110, Mali-G615 MC2 r44p1; #111 the G925 on r49p1 too) has
     //   every lit surface's first draw put the format's maximum in the lit scene, with float controls on; PanVK on the same GPUs draws it right. Maxwell's min / max / saturate
@@ -501,7 +520,7 @@ void mtl_init(void) {
     { const char *e = getenv("DM_VK_B10_AS_RGBA16"); if (e && atoi(e) > 0) { nvn_fmt_vk_b10_as_rgba16(1); VLOG("formats: R11G11B10F drawn and sampled as RGBA16F (DM_VK_B10_AS_RGBA16, a Mali test)"); } }
     { const char *e = getenv("DM_VK_FMZ"); g_fmz = e && atoi(e) > 0;
       if (g_fmz) VLOG("shaders: a multiply by 0 gives 0 even for infinity and NaN, as on the Switch's GPU (FMZ, every multiply: DM_VK_FMZ)"); }
-    { const char *e = getenv("DM_VK_NAN_MINMAX"); g_nanmm = e ? atoi(e) : g_arm_rel ? 2 : 0; if (g_nanmm < 0 || g_nanmm > 2) g_nanmm = 1;
+    { const char *e = getenv("DM_VK_NAN_MINMAX"); g_nanmm = e ? atoi(e) : quirk_default(Q_NAN_MINMAX, &g_gpuid); if (g_nanmm < 0 || g_nanmm > 2) g_nanmm = 1; quirk_note(Q_NAN_MINMAX, g_nanmm, e != NULL);
       if (g_nanmm) VLOG("shaders: min / max / saturate give the operand that is not NaN, as on the Switch's GPU (NMin / NMax / NClamp%s%s)", g_nanmm == 2 ? " and the rule written out with isnan" : "",
                         e ? ", DM_VK_NAN_MINMAX" : ", Arm's own driver"); }
     // Dual-source blending (the game's blend factors SRC1_*) needs dualSrcBlend; Arm's own driver has none (r44p1), and a pipeline using it there is undefined: those
@@ -520,7 +539,7 @@ void mtl_init(void) {
         if (mark_file(drv_mark("bc_gpu_crashed"), "", 0) && !be) VLOG("[RED] BC layer: the driver crashed setting it up at an earlier start: BC textures converted on the CPU (DM_VK_BC_GPU=1 tries again)");
         // PowerVR: its compute results already differ from the CPU's for some kinds at the start-up check, and objects came out purple on a Tensor G5 (#32, with
         //   reflections on and off): every BC texture converted on the CPU there unless DM_VK_BC_GPU=1
-        else if (g_props.vendorID == 0x1010 && !(be && atoi(be) > 0)) VLOG("BC layer: off on PowerVR (BC textures converted on the CPU; DM_VK_BC_GPU=1 turns it on)");
+        else if (quirk_note(Q_BC_GPU_OFF, quirk_default(Q_BC_GPU_OFF, &g_gpuid) && !(be && atoi(be) > 0), be != NULL)) VLOG("BC layer: off on PowerVR (BC textures converted on the CPU; DM_VK_BC_GPU=1 turns it on)");
         else {
             mark_file(drv_mark("bc_gpu_crashed"), "setting up the BC layer (its shaders built and checked on this GPU); if this file is still here the driver crashed doing so, and later starts convert on the CPU\n", 1);
             bc_gpu_info bi = { g_dev, g_q, g_qf, vkGetDeviceProcAddr, &g_memp, vk_logf }; g_bcgpu = bc_gpu_init(&bi) ? 7 : 0;
@@ -652,7 +671,7 @@ static void fbc_forget(VkImageView v);   // (the framebuffers naming a view, des
 typedef struct { uint64_t h; uint8_t img; } qent;
 static qent *g_vq; static int g_vqcap = -1; static size_t g_vqhead, g_vqcount;
 static int quarantine_on(void) {
-    if (g_vqcap < 0) { const char *e = getenv("DM_VK_VIEW_QUARANTINE"); g_vqcap = e ? atoi(e) : g_arm_rel && g_dynren ? 2048 : 0;
+    if (g_vqcap < 0) { const char *e = getenv("DM_VK_VIEW_QUARANTINE"); g_vqcap = quirk_note(Q_VIEW_QUARANTINE, e ? atoi(e) : quirk_default(Q_VIEW_QUARANTINE, &g_gpuid), e != NULL);
         if (g_vqcap > 0 && !(g_vq = calloc((size_t)g_vqcap, sizeof *g_vq))) g_vqcap = 0;
         if (g_vqcap > 0) VLOG("image views: the last %d destroyed views and images kept back (Arm's driver: a reused view handle hits stale rendering state)", g_vqcap); }
     return g_vqcap > 0;
@@ -1297,7 +1316,7 @@ static void barrier_host(VkCommandBuffer cb) {
 static uint64_t g_bar_full, g_bar_narrow, g_bar_none;   // barriers before draw passes (mtl_barrier_stats)
 // (relaxed only on Adreno unless DM_VK_BARRIER says otherwise, as Galar: measured there, where each full barrier idles the GPU. On Xclipse, PowerVR and Mali shadows
 //   flickered and surfaces broke up with them on, Arceus-Native-Android #20 #31 #32: a full barrier before each pass there)
-static int barrier_relaxed(void) { static int v = -1; if (v < 0) { v = arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") && (getenv("DM_VK_BARRIER") || g_props.vendorID == 0x5143); VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
+static int barrier_relaxed(void) { static int v = -1; if (v < 0) { v = quirk_note(Q_BARRIER_RELAXED, arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") && (getenv("DM_VK_BARRIER") || quirk_default(Q_BARRIER_RELAXED, &g_gpuid)), getenv("DM_VK_BARRIER") != NULL); VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
 static void barrier_all(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
@@ -1715,7 +1734,7 @@ static uint64_t g_drop_n, g_drop_saved;   // textures stored without their large
 static int tex_quality_half(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_TEX_QUALITY"); v = e && !strcmp(e, "half");
-        if (v && g_arm_rel && g_arm_rel < 49 && getenv("DM_VK_TEX_QUALITY_AUTO")) { v = 0;
+        if (v && quirk_default(Q_TEX_HALF_UNSAFE, &g_gpuid) && getenv("DM_VK_TEX_QUALITY_AUTO")) { v = 0; quirk_note(Q_TEX_HALF_UNSAFE, 1, 0);
             VLOG("texture quality full, not the phone profile's half: Arm's driver r%dp%d closed the game with half textures (Mali-G615 MC2, #82); DM_VK_TEX_QUALITY=half in env.txt uses it anyway", g_arm_rel, g_arm_p); }
         else if (v) VLOG("texture quality half: the game's large textures without their largest mip level"); }
     return v;
@@ -1761,7 +1780,7 @@ static vtex *tex_new(const tex_t *t, int pkg) {
     VkFormat fl[2] = { x->fmt, twin }; VkImageFormatListCreateInfo fli = { .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, .viewFormatCount = twin != x->fmt ? 2 : 1, .pViewFormats = fl };
     // Mali (Arm) keeps AFBC only on images that are not mutable (Bifrost) or list their view formats (Valhall): there every colour image that is not block-compressed
     // gets the same treatment as render targets do on Adreno, and one with no sRGB / linear twin is not mutable at all
-    static int arm = -1; if (arm < 0) arm = g_props.vendorID == 0x13B5 || getenv("DM_VK_ARM_FORMATS") != NULL;
+    static int arm = -1; if (arm < 0) arm = quirk_note(Q_ARM_FORMATS, quirk_default(Q_ARM_FORMATS, &g_gpuid) || getenv("DM_VK_ARM_FORMATS") != NULL, getenv("DM_VK_ARM_FORMATS") != NULL);
     int plain = !fmt_compressed(t->d.format) || nvn_fmt_vk_decode(t->d.format);
     if (!nolist && !x->is3d) {
         if (fmt_is_depth(x->fmt) || x->fmt == VK_FORMAT_S8_UINT) { ci.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; x->fixed_fmt = 1; }
@@ -2510,7 +2529,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     ns = spv_strip_unused(code, ns / 4) * 4;   // capabilities declared but unused (Float64, fragment interlock): strict drivers refuse or mis-handle them
     { size_t nw; uint32_t *c2 = spv_image_caps(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }   // and the format-less storage image ones they need
     // Adreno picks another 2x2 block than Maxwell for a gather on a texel centre: its gathers are nudged by 1/512 of a texel (spv_gather_bias). DM_VK_GATHER_BIAS=0 / 1 decides
-    static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = e ? atoi(e) != 0 : g_props.vendorID == 0x5143; if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
+    static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = quirk_note(Q_GATHER_BIAS, e ? atoi(e) != 0 : quirk_default(Q_GATHER_BIAS, &g_gpuid), e != NULL); if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
     if (gbias) { size_t nw; uint32_t *c2 = spv_gather_bias(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_fctl) { size_t nw; uint32_t *c2 = spv_float_controls(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_nanmm) { size_t nw; uint32_t *c2 = spv_nan_minmax(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_nanmm_n, 1); } }   // (before spv_clamp_zero, which knows both)
@@ -2977,7 +2996,7 @@ static void pass_writes(int depth, int stencil) {
 //   in vkCmdBeginRendering). A change while a pass is open now only records the new targets (g_rt_stale); the next draw or clear goes on in the open pass when they
 //   are the ones it was begun with (g_pass_resumed), and ends it as before when they are not. Pending clears belong to the old targets: then the change ends the pass at once
 static p_set_rt g_pass_rt; static uint64_t g_pass_resumed;
-static int pass_defer_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_DEFER"); v = e ? atoi(e) != 0 : g_props.vendorID == 0x5143;   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before)
+static int pass_defer_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_DEFER"); v = quirk_note(Q_PASS_DEFER, e ? atoi(e) != 0 : quirk_default(Q_PASS_DEFER, &g_gpuid), e != NULL);   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before)
     if (v) VLOG("target changes that need no new pass keep it open (DM_VK_PASS_DEFER)"); } return v; }
 static int rt_same(const p_set_rt *a, const p_set_rt *b);
 static void sub_split_at_target(void);
@@ -3212,9 +3231,8 @@ static nvn_hmap g_pso_used = {.klen = sizeof(VkPipeline)}, g_pso_rec = {.klen = 
 static uint64_t g_pso_evicted;
 static int pso_cap(void) {
     static int cap = -2; if (cap > -2) return cap;
-    const char *e = getenv("DM_VK_PIPE_KEEP"); long kb = 0;
-    if (!e) { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); }
-    cap = e ? atoi(e) : (g_props.vendorID == 0x13B5 || (kb > 0 && kb < 7500000)) ? 800 : 0;
+    const char *e = getenv("DM_VK_PIPE_KEEP");
+    cap = quirk_note(Q_PIPE_KEEP, e ? atoi(e) : quirk_default(Q_PIPE_KEEP, &g_gpuid), e != NULL);   // (the phone's memory: g_gpuid.ram_kb, read with the GPU's description)
     if (cap > 0) VLOG("pipelines kept: at most %d (the least recently used ones destroyed when unused for 30 s)", cap); else cap = 0;
     return cap;
 }
@@ -3284,7 +3302,7 @@ static void *apso_main(void *a) {
 }
 static int apso_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = e ? atoi(e) != 0 : 0;   // (off unless DM_VK_ASYNC_PSO=1: on a slower Adreno (710, #34) its skipped draws were objects missing for frames, 4,700 in one run)
+    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = quirk_note(Q_ASYNC_PSO, e ? atoi(e) != 0 : quirk_default(Q_ASYNC_PSO, &g_gpuid), e != NULL);   // (off unless DM_VK_ASYNC_PSO=1: on a slower Adreno (710, #34) its skipped draws were objects missing for frames, 4,700 in one run)
    
         if (v) { pthread_t t; if (pthread_create(&t, NULL, apso_main, NULL)) v = 0; else { pthread_detach(t); VLOG("pipelines the lists did not have: built in the background, their draws skipped until then (DM_VK_ASYNC_PSO)"); } } }
     return v;
@@ -3484,7 +3502,7 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     //   (VK_ATTACHMENT_UNUSED: a target with a gap): found and isolated by the Persona 5 Royal Android port (Brandon04Gonzalez/p5r-android, MIT). Such a pipeline
     //   is made without the cache on PowerVR; every other pipeline, and every other GPU, keeps it
     VkPipelineCache pc_ = g_pcache;
-    if (g_props.vendorID == 0x1010 && !g_dynren) for (uint32_t i = 0; i < ncb; i++) if (!cf[i]) { pc_ = VK_NULL_HANDLE; break; }
+    if (quirk_default(Q_PCACHE_GAPS_OFF, &g_gpuid) && !g_dynren) for (uint32_t i = 0; i < ncb; i++) if (!cf[i]) { pc_ = VK_NULL_HANDLE; break; }
     VkResult r = vkCreateGraphicsPipelines(g_dev, pc_, 1, &gi, NULL, &p);
     if (r == VK_INCOMPLETE && p) { RED_ONCE(107, "graphics pipeline creation answered VK_INCOMPLETE (out of spec; Mali, Adreno 5xx): the pipeline it made is used"); r = VK_SUCCESS; }
     if (r) { VLOG("[RED] graphics pipeline (vertex %s fragment %s) failed: %d", vs->key, fs ? fs->key : "-", r); return VK_NULL_HANDLE; }
@@ -4208,7 +4226,7 @@ static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
 //   pass's layer 0, that rectangle) is a pass of its own on that slice, cleared by its load op; the game's pass then opens again on its next draw (loading what is there).
 //   DM_VK_CLEAR_BY_PASS=1 / 0 decides on any driver
 static int clear_by_pass(void) {
-    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = e ? atoi(e) != 0 : g_props.vendorID == 0x144D;
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = quirk_note(Q_CLEAR_BY_PASS, e ? atoi(e) != 0 : quirk_default(Q_CLEAR_BY_PASS, &g_gpuid), e != NULL);
                                     if (v) VLOG("clears inside a layered pass over a 3D target: a pass of their own on the slice (Samsung Xclipse driver, or DM_VK_CLEAR_BY_PASS)"); }
     return v;
 }
