@@ -10,6 +10,7 @@
 //   shaders_at_crash.txt  the last pipelines the engine built before each log ended (vertex / fragment shader keys), the GPU breadcrumbs (vk_crumbs.h: the
 //                       passes and pipelines of the submission that was on the GPU at a device lost / hang / crash) and the pack's translation chain: the shaders
 //                       themselves are not copied (they come from the game), we take them from our own pack by key
+//   quirks.txt          the driver workarounds each run used (vk_quirks.h "[quirk]" lines)
 //   memory.txt          the run's memory every 30 s (android_main.c [mem] / [mem-by]: what grew, for a run Android ended for memory)
 //   warnings.txt        the engine's [RED] / FATAL lines counted by kind (a picture problem's clues: missing shaders, failed pipelines, skipped draws)
 //   frame-capture.zip   the newest ☰ → Capture a frame, when one was made in the last two days
@@ -67,6 +68,7 @@ final class DebugBundle {
             exits(c, z);
             text(z, "shaders_at_crash.txt", shaders(c, dir));
             text(z, "memory.txt", memory(dir));
+            text(z, "quirks.txt", grep(dir, "[quirk]", "The driver workarounds each run used (vk_quirks.h: the GPU described once, every workaround's value and whether env.txt set it).\n"));
             text(z, "warnings.txt", warnings(dir));
             // the newest frame capture (☰ → Capture a frame), when one was made in the last two days: a picture problem's evidence, beside the logs
             File fc = new File(dir, "frame-capture.zip");
@@ -259,6 +261,17 @@ final class DebugBundle {
             sb.append('\n');
             int from = Math.max(0, ls.size() - 160); if (from > 0) { sb.append(ls.get(0)).append('\n').append(ls.get(1)).append("\n...\n"); }
             for (int i = from; i < ls.size(); i++) sb.append(ls.get(i)).append('\n');
+        }
+        return sb.toString();
+    }
+    // the lines of both logs that hold a tag, in order (at most 400 a log)
+    private static String grep(File dir, String tag, String head) {
+        StringBuilder sb = new StringBuilder(head);
+        for (String n : new String[] { "log.prev.txt", "log.txt" }) {
+            File f = new File(dir, n); if (!f.isFile()) continue; int k = 0; sb.append("\n== ").append(n).append('\n');
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
+                String l; while ((l = r.readLine()) != null && k < 400) if (l.contains(tag)) { sb.append(l).append('\n'); k++; }
+            } catch (IOException e) { }
         }
         return sb.toString();
     }
