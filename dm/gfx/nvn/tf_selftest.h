@@ -140,6 +140,7 @@ out:
 #define TFST_S(x) ((x) < 0 ? "could not be set up" : (x) == 96 ? "all 96 written" : (x) == 0 ? "[RED] NOTHING written" : "[RED] only some written")
     VLOG("transform feedback self-test: vertex-shader stores in a pass with no attachments (as the captures run): %s (%d); with a 1x1 colour attachment: %s (%d); compute: %s (%d)",
          TFST_S(a), a, TFST_S(b), b, TFST_S(c), c);
+    g_tfst_a = a; g_tfst_b = b; g_tfst_c = c;   // (tfp_decide: whether captures go as points)
     if (g_tf_att < 0) { g_tf_att = a != 96 && b == 96 && g_tf_view;
         if (g_tf_att) VLOG("transform feedback captures: with a 1x1 colour attachment from now on (this driver drops them in a pass with nothing attached; DM_VK_TF_ATT=0 puts them back)"); }
 }

@@ -168,6 +168,9 @@ static int g_bcgpu;   // the BC layer is on (mtl_init): a mask of the paths that
 static int g_fctl_ext, g_drvprops_ext;   // a Vulkan 1.1 driver with VK_KHR_shader_float_controls / VK_KHR_driver_properties (enabled at device creation)
 static int g_fctl;    // every shader asks for SignedZeroInfNanPreserve (spv_float_controls; mtl_init decides)
 static void tf_selftest(void);   // tf_selftest.h (included with the capture passes)
+static void tfp_decide(void); static int g_tf_pts = -1, g_vstores = 1; static VkShaderModule g_tfp_fs[4];   // captures as points (tf_points.h); the driver has vertex stores
+enum { TFP_W = 256, TFP_H = 256 };   // the point targets: up to 65,536 vertices a capture
+static int g_tfst_a = -1, g_tfst_b = -1, g_tfst_c = -1;   // the transform feedback self-test's counts (tf_selftest.h), -1 not run
 static void vtx_canary(void);   // vtx_canary.h: per-draw vertex sizes checked on this driver at start
 static int g_arm_rel, g_arm_p;   // Arm's own Mali driver: its release, r<rel>p<p> (driverVersion is VK_MAKE_VERSION(rel, p, 0): 0xb001000 = r44p1); 0 for any other driver
 static int g_arm_beta;           // ... a beta build of it (driverInfo "v1.r49p1-03bet0": the G925's)
@@ -505,6 +508,7 @@ void mtl_init(void) {
     //   factors become the first output's (bfac_dev), named once in the log. DM_VK_DUALSRC=keep passes them as they are
     // Transform feedback (Legends: Arceus skins its characters and sways its trees with it) is captured by the vertex shader storing into buffers: that needs
     //   vertexPipelineStoresAndAtomics (Arceus-Native-Android#6: on Arm's driver the player, the Pokemon and swaying trees vanished, PanVK drew them)
+    g_vstores = f2.features.vertexPipelineStoresAndAtomics != 0;
     VLOG("vertex shader stores (transform feedback captures): %s", f2.features.vertexPipelineStoresAndAtomics ? "supported" : "[RED] not supported by this driver: captured vertices stay empty, animated models vanish");
     g_dualsrc = f2.features.dualSrcBlend || (getenv("DM_VK_DUALSRC") && !strcmp(getenv("DM_VK_DUALSRC"), "keep"));
     if (getenv("DM_VK_DUALSRC") && !strcmp(getenv("DM_VK_DUALSRC"), "emulate")) g_dualsrc = 0;   // (a test: the two-step blend of draw on a driver that has dualSrcBlend)
@@ -541,6 +545,7 @@ void mtl_init(void) {
     dummies_init();
     vtx_canary();    // (whether this driver reads vertex sizes given per draw right; if not, they go into each pipeline: vtx_canary.h)
     tf_selftest();   // (Arm's driver: whether transform feedback captures write; tf_selftest.h)
+    tfp_decide();    // (and whether they go as points: tf_points.h)
     pcache_open();
     if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) { pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); }
 }
@@ -2293,7 +2298,7 @@ typedef struct vshader {
     uint32_t *code; size_t nw;                  // fragment shaders: the (rebound) SPIR-V, for variants
     uint8_t out_cls[8];                         // fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
     struct { uint64_t drop; uint32_t um, sm; int sw; VkShaderModule mod; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)
-    int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
+    int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod, ptsmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
 } vshader;
 static char g_spv_dir[1024];
 static nvn_hmap g_shmap = {.klen = 8};      // shader key (8 bytes) → stage + 1 (as a pointer)
@@ -2523,6 +2528,9 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         size_t tw; uint32_t *tc = spv_tf_variant(code, ns / 4, (const int (*)[2])s->tf, TF_BIND, &tw);
         if (tc) { VkShaderModuleCreateInfo tci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = tw * 4, .pCode = tc }; if (vkCreateShaderModule(g_dev, &tci, NULL, &s->tfmod)) s->tfmod = VK_NULL_HANDLE; free(tc); }
         if (!s->tfmod) VLOG("[RED] shader %s: transform feedback capture variant failed", hex);
+        if (g_tf_pts > 0) { size_t pw; uint32_t *pc_ = spv_tf_points_variant(code, ns / 4, (const int (*)[2])s->tf, TFP_W, &pw);   // the point route (tf_points.h)
+            if (pc_) { VkShaderModuleCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = pw * 4, .pCode = pc_ }; if (vkCreateShaderModule(g_dev, &pci, NULL, &s->ptsmod)) s->ptsmod = VK_NULL_HANDLE; free(pc_); }
+            if (!s->ptsmod) VLOG("[RED] shader %s: transform feedback point variant failed", hex); }
     }
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
@@ -2922,6 +2930,7 @@ static void td_note(vtex *x, uint64_t ser, uint32_t lv, uint32_t sl) {
 // for the GPU to go idle; from the Arceus engine, androidswithy 84fb5df) unless one reads or rewrites what an earlier one in the pass wrote (keep = 0); anything else
 // between them ends the pass (tf_end). DM_VK_TF_BATCH=0: one pass and one barrier each
 #include "tf_selftest.h"
+#include "tf_points.h"
 #include "vtx_canary.h"
 static int tf_batch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TF_BATCH"); v = !(e && !strcmp(e, "0")); } return v; }
 static int tf_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_ntfw; i++) if (lo < g_tfw[i].hi && g_tfw[i].lo < hi) return 1; return 0; }
@@ -3068,7 +3077,7 @@ static void outside_pass(void) { if (P.open) g_brk_other++; g_pass_last_by_rt = 
 typedef struct {
     void *sh[5]; uint32_t cfmt[8], dfmt, sfmt; uint32_t chmask; blend_st blend[8];
     struct { uint32_t fmt, off; uint8_t bind, used, inst, pad; uint32_t div; } attr[32];
-    uint8_t samples, a2c, poly, clamp, topo, logic_en, logic_op, blend_en, depth_zero, discard, ds_swap, pad[5];   // ds_swap: first half of an emulated dual-source blend (draw)
+    uint8_t samples, a2c, poly, clamp, topo, logic_en, logic_op, blend_en, depth_zero, discard, ds_swap, tfpts, pad[4];   // tfpts: a capture drawn as points into that many targets (tf_points.h)   // ds_swap: first half of an emulated dual-source blend (draw)
 } pkey;
 static nvn_hmap g_pso = {.klen = sizeof(pkey)}, g_pso_fail = {.klen = sizeof(pkey)};
 // Without extended dynamic state (g_eds 0) the state the draws otherwise set per draw is part of the pipeline: cull mode, front face, exact topology, depth test / write /
@@ -3400,7 +3409,8 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     if (!g_eds && !ss) { RED_ONCE(110, "a pipeline without its draw state on a driver without extended dynamic state (vertex %s): not made", vs ? vs->key : "-"); return VK_NULL_HANDLE; }
     VkPipelineShaderStageCreateInfo st[5]; uint32_t nst = 0;
     if (!g_clipctl && !k.depth_zero && vs && !vs->glmod) RED_ONCE(27, "GL depth mode without VK_EXT_depth_clip_control and no translated depth fallback for vertex shader %s", vs->key);
-    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && k.discard)) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap) : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
+    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && (k.discard || k.tfpts))) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap) : i == 0 && k.tfpts && pr->sh[0]->ptsmod ? pr->sh[0]->ptsmod : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
+    if (k.tfpts && k.tfpts <= 4) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = g_tfp_fs[k.tfpts - 1], .pName = "main" };   // (the points' outputs into the targets)
     VkVertexInputBindingDescription vb[17]; VkVertexInputAttributeDescription va[32]; VkVertexInputBindingDivisorDescriptionEXT vd[16]; uint32_t nvb = 0, nva = 0, nvd = 0; uint32_t have = 0;
     for (uint32_t loc = 0; loc < 32; loc++) {
         if (!k.attr[loc].used) continue;
@@ -3424,12 +3434,13 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
         cf[i] = (VkFormat)k.cfmt[i]; memset(&cb[i], 0, sizeof cb[i]);
         uint32_t m = (k.chmask >> (4 * i)) & 0xf;
         if (fs && fs->color_known && !(fs->color_mask >> i & 1)) m = 0;   // outputs the shader does not write keep their content (nvn_mtl.m pso_desc)
+        if (k.tfpts) m = 0xf;   // (a capture's targets: every channel)
         cb[i].colorWriteMask = m;
         if (k.blend_en >> i & 1 && m && !fmt_int_class(cf[i])) { cb[i].blendEnable = VK_TRUE;   // integer targets never blend (Vulkan: undefined)
             cb[i].srcColorBlendFactor = bfac_dev(k.blend[i].src_rgb); cb[i].dstColorBlendFactor = bfac_dev(k.blend[i].dst_rgb); cb[i].srcAlphaBlendFactor = bfac_dev(k.blend[i].src_a); cb[i].dstAlphaBlendFactor = bfac_dev(k.blend[i].dst_a);
             cb[i].colorBlendOp = bop(k.blend[i].eq_rgb); cb[i].alphaBlendOp = bop(k.blend[i].eq_a); }
     }
-    VkPipelineColorBlendStateCreateInfo bs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .logicOpEnable = k.logic_en, .logicOp = (VkLogicOp)k.logic_op,
+    VkPipelineColorBlendStateCreateInfo bs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .logicOpEnable = k.tfpts ? 0 : k.logic_en, .logicOp = (VkLogicOp)k.logic_op,
                                            .attachmentCount = ncb, .pAttachments = cb };
     VkDynamicState dyn[24]; uint32_t nd = 0;
     VkDynamicState base[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
@@ -3471,6 +3482,7 @@ static VkPipeline pso_get(vprog *pr, VkPrimitiveTopology topo) {
     k.chmask = S.chmask.mask; k.blend_en = (uint8_t)S.color.blend_en; for (int i = 0; i < 8; i++) if (k.cfmt[i]) k.blend[i] = S.blend[i];
     k.a2c = S.ms.a2c; k.poly = S.poly.mode == NVN_POLYGON_MODE_LINE ? 1 : S.poly.mode == NVN_POLYGON_MODE_POINT ? 2 : 0; k.clamp = (uint8_t)!!S.depth_clamp; k.topo = (uint8_t)topo_class(topo);
     k.logic_en = S.color.logic_op != NVN_LOGIC_OP_COPY; k.logic_op = (uint8_t)S.color.logic_op; k.depth_zero = (uint8_t)atomic_load(&g_depth_zero); k.discard = (uint8_t)!!S.rast_discard;
+    if (P_tf && g_tf_pts > 0) { k.discard = 0; k.tfpts = (uint8_t)P.ncolor; }   // (a capture drawn as points: tf_points.h)
     k.ds_swap = (uint8_t)g_ds_swap;
     for (int i = 0; i < vs->nin; i++) {
         uint32_t loc = vs->in[i].location; if (loc >= 32) continue;
@@ -3818,10 +3830,11 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     // Rasterizer discard: the vertex stage alone. With transform feedback active the draw captures its outputs (the shader's capture variant stores them into the bound
     // feedback buffers, as nvn_mtl.m tf_draw: Pokémon Legends: Arceus / Z-A skin characters so); otherwise it changes nothing and is skipped
     VkBuffer tfb[4] = {0}; VkDeviceSize tfo[4] = {0}, tfr[4] = {0}; uint32_t tfpc[5] = {0}; int tfcap = 0;
+    uint32_t tfp_base[4] = {0}, tfp_rows = 0; int tfp_n = 0;   // a capture as points (tf_points.h): the buffers' first words, the target rows, how many targets
     if (S.rast_discard) {
         vshader *vs = pr->sh[0];
         if (!S.tf_on) return;
-        if (!vs->tfmod) { RED_ONCE(100, "transform feedback with vertex shader %s, which has no capture variant: nothing captured", vs->key); return; }
+        if (g_tf_pts > 0 ? !vs->ptsmod || !tfp_init() : !vs->tfmod) { RED_ONCE(100, "transform feedback with vertex shader %s, which has no capture variant: nothing captured", vs->key); return; }
         if (!dw || dw->ind || dw->mdi_cnt || dw->instances > 1 || dw->prim == 6 || dw->prim == 7) { RED_ONCE(101, "transform feedback draw that is indexed, indirect, instanced or a fan / quad list (vertex %s): not captured", vs->key); return; }
         if (dw->count <= 0) return;
         VkDeviceSize al = g_props.limits.minStorageBufferOffsetAlignment ? g_props.limits.minStorageBufferOffsetAlignment : 256;
@@ -3844,7 +3857,15 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         for (int st = 0; keep && st < 5; st++) for (int q = 0; keep && q < 16; q++) {
             if (S.ubo[st][q].addr && tf_hits(S.ubo[st][q].addr, S.ubo[st][q].addr + (S.ubo[st][q].size ? S.ubo[st][q].size : 65536))) keep = 0;
             if (S.ssbo[st][q].addr && tf_hits(S.ssbo[st][q].addr, S.ssbo[st][q].addr + (S.ssbo[st][q].size ? S.ssbo[st][q].size : 65536))) keep = 0; }
-        tf_pass_begin(keep);
+        if (g_tf_pts > 0) {   // as points: one target per capture buffer, the buffers numbered from 0 with stride = components x 4, TFP_W pixels a row
+            vshader *vs_ = pr->sh[0]; int nb_ = 0;
+            for (int b = 0; b < 4; b++) if (vs_->tf_stride[b]) { if (b != nb_ || vs_->tf_stride[b] != 4u * (uint32_t)vs_->tf[b][1]) nb_ = -1; else nb_++; if (nb_ < 0) break; }
+            if (nb_ <= 0 || (uint64_t)dw->count > (uint64_t)TFP_W * TFP_H) { RED_ONCE(126, "transform feedback as points: vertex %s's capture (%d vertices) does not fit the targets: not captured", vs_->key, dw->count); return; }
+            for (int b = 0; b < 4; b++) tfp_base[b] = tfpc[1 + b];
+            tfp_rows = ((uint32_t)dw->count + TFP_W - 1) / TFP_W; tfp_n = nb_;
+            tfpc[1] = tfp_rows; tfpc[2] = tfpc[3] = tfpc[4] = 0;   // (the point variant's push constants: { first, rows })
+            tfp_pass_begin(nb_, tfp_rows);
+        } else tf_pass_begin(keep);
     } else if (!pass_begin()) return;
     if (!tfcap && (P.hd || P.hs)) {   // a draw writing depth / stencil: noted; in a pass begun with store op NONE for it, the pass restarts storing (pass_writes)
         int st_w = P.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP ||
@@ -3853,6 +3874,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         if (!P.open) return;
     }
     int prim = dw ? dw->prim : di->prim; VkPrimitiveTopology topo = topo_of(prim);
+    if (tfcap && g_tf_pts > 0) topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;   // (a capture as points: one per vertex, tf_points.h)
     uint64_t pp1 = mark ? mono_ns() : 0;
     VkPipeline p = pso_get(pr, topo); if (!p) return;
     if (mark) { g_vp_pass += pp1 - pp0; g_vp_pso += mono_ns() - pp1; }   // (DM_VK_PROF: the "pass + pipeline" stage split)
@@ -3871,6 +3893,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     if (!atomic_load(&g_origin_ll)) { v.y = vy + vh; v.height = -vh; }   // NVN upper-left: NDC +1 on the first row (Vulkan puts -1 there)
     if (v.minDepth < 0) v.minDepth = 0; if (v.minDepth > 1) v.minDepth = 1; if (v.maxDepth < 0) v.maxDepth = 0; if (v.maxDepth > 1) v.maxDepth = 1;
     vkCmdSetViewport(cb, 0, 1, &v);
+    if (tfcap && tfp_n) { VkViewport pv = { 0, 0, (float)TFP_W, (float)tfp_rows, 0, 1 }; vkCmdSetViewport(cb, 0, 1, &pv); }   // (the targets, one pixel a vertex)
     VkRect2D sc = {{0, 0}, {P.tw, P.th}};
     if (R.has_sc && !tfcap) { long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h; if (x1 > (long)P.tw) x1 = P.tw; if (y1 > (long)P.th) y1 = P.th;
         if (x1 <= x0 || y1 <= y0) return; sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
@@ -3925,6 +3948,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
                   g_tfchk_at = at; g_tfchk_n = (uint32_t)n; g_tfchk_frame = g_frame_no; } } }
         vkCmdDraw(cb, (uint32_t)dw->count, 1, (uint32_t)dw->first, (uint32_t)dw->base_instance);
         vshader *vs = pr->sh[0];
+        if (tfp_n) {   // as points: the targets into the capture buffers
+            int nc_[4]; for (int b = 0; b < 4; b++) nc_[b] = vs->tf[b][1];
+            pass_end(); tfp_repack(CB(), tfp_n, (uint32_t)dw->count, tfb, tfo, tfr, tfp_base, nc_); }
         for (int b = 0; b < 4; b++) if (tfb[b]) { uint64_t n = (uint64_t)dw->count * vs->tf_stride[b], at = S.tf[b].addr + S.tf_off[b]; wb_note(at, n); S.tf_off[b] += n;
             if (g_ntfw < 64) { g_tfw[g_ntfw].lo = at; g_tfw[g_ntfw].hi = at + n; g_ntfw++; } }
         if (!tf_batch_on()) pass_end();   // (batched: the pass stays open for the next capture; its end makes the writes visible)
