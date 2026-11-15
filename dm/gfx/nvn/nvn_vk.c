@@ -54,7 +54,10 @@
 #include "../../host/dm.h"
 
 #define VLOG(...) do { fprintf(stderr, "[dm] [nvn-vk] " __VA_ARGS__); fputc('\n', stderr); } while (0)
-#define VDIE(...) do { VLOG("FATAL " __VA_ARGS__); abort(); } while (0)
+// A fatal Vulkan error (VDIE) aborts, and SIGABRT is not one of the signals the crash handler takes (crash.c), so boot_state never said "crashed": the next start
+//   neither went a safe-start level up nor offered another driver (#280: Mali-G68 r38p1, "vkWaitSemaphores failed: -4 (device lost?)" 12 s in, every start)
+void dm_crash_note(int in_game) __attribute__((weak));
+#define VDIE(...) do { VLOG("FATAL " __VA_ARGS__); if (dm_crash_note) dm_crash_note(0); abort(); } while (0)
 static int g_red_once[128];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) VLOG("[RED] " __VA_ARGS__); } while (0)
 #define VKCHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) VDIE("%s failed: %d (%s:%d)", #x, r_, __FILE__, __LINE__); } while (0)
