@@ -55,6 +55,8 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 
 - Encounter panel never showed: SysBot's wild offset 0x8FEA3648 is garbage on this host (v48 log: checksum BAD), while MyStatus / party hold. v51 (in the tree, compiles, not built): battle = the game's flag OR the fork's screen guess; the wild Pokémon is searched for in the heap (fork_enc.c find_wild, own thread: PK8-like header, species + TID / SID decoded by an LCG jump, must be the player's TID / SID, then full checksum; party / box block skipped), the find remembered for the next battle; a remembered slot still holding the last battle's Pokémon = a trainer battle (no search). Logs `[FORK] enc search`.
 
+- Queued for v52 (Steven's sketch, Nov 15): the encounter panel as Poké Ball (top left, the handle) + name ribbon (red, gold on a shiny) + info box below (touch_ui.c enc_layout / enc_draw; mock: docs/encounter_panel_mock.png). The area dex out of battle will use the same frame. Compiles, not built.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).

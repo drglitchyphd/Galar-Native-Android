@@ -720,31 +720,43 @@ static void otext(dm_ovl_item *it, int *n, int max, float x, float y, float ch, 
     for (int i = 0; s[i]; i++) { int c = (unsigned char)s[i]; if (c >= 'a' && c <= 'z') c -= 32; if (c == ' ') continue; if (c < 33 || c > 95) c = '?';
         dm_ovl_item *o = add(it, n, max, x + cw * (i + 0.5f), y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = c; o->gscale = 0.92f; o->galpha = a; } }
 }
+// FORK v52: the panel after Steven's sketch (Nov 15): the Poké Ball at the top left (the handle: tap folds the panel to it), a name ribbon running right from the ball,
+//   and the info box hanging below the ribbon. Folded: the ball alone (a gold star badge on a shiny). The area dex out of battle will use the same frame
 #define ENC_COLS 20
-#define ENC_LINES 5
 static float enc_ch(void) { return g_h * 0.030f; }
-// the open panel: x0, y0, x1, y1, its top-left corner at the control's (folded) Poké Ball, kept on screen
-static void enc_rect(float r4[4]) {
-    float ch = enc_ch(), pad = ch * 0.5f, w = ENC_COLS * ch * 0.6f + 2 * pad, h = ENC_LINES * ch * 1.3f + 2 * pad;
-    float x0 = clampf(g_c[C_ENC].cx - g_c[C_ENC].r, 0, g_w - w), y0 = clampf(g_c[C_ENC].cy - g_c[C_ENC].r, 0, g_h - h);
-    r4[0] = x0; r4[1] = y0; r4[2] = x0 + w; r4[3] = y0 + h;
+// the parts, from the ball's centre (cx, cy) and radius r: ribbon x0..x1 at cy, box x0..x1, y0..y1; kept on screen by moving the whole panel
+typedef struct { float cx, cy, r, rx1, rh, bx0, by0, bx1, by1; } enc_geo;
+static enc_geo enc_layout(void) {
+    enc_geo g; float ch = enc_ch(), pad = ch * 0.5f, r = g_c[C_ENC].r, wtxt = ENC_COLS * ch * 0.6f + 2 * pad;
+    g.r = r; g.rh = fmaxf(r * 1.15f, ch * 1.6f);
+    float w = r * 0.6f + wtxt, h = 4 * ch * 1.3f + 2 * pad;   // (the box: four lines)
+    float cx = g_c[C_ENC].cx, cy = g_c[C_ENC].cy;
+    float right = cx + w, bottom = cy + r * 0.55f + h;
+    if (right > g_w) cx -= right - g_w; if (bottom > g_h) cy -= bottom - g_h; if (cx - r < 0) cx = r; if (cy - r < 0) cy = r;
+    g.cx = cx; g.cy = cy; g.rx1 = cx + w; g.bx0 = cx - r * 0.35f; g.bx1 = cx + w - r * 0.15f; g.by0 = cy + r * 0.55f; g.by1 = g.by0 + h;
+    return g;
 }
+static void enc_rect(float r4[4]) { enc_geo g = enc_layout(); r4[0] = g.cx - g.r; r4[1] = g.cy - g.r; r4[2] = g.rx1; r4[3] = g.by1; }
 static void enc_draw(dm_ovl_item *it, int *n, int max) {
-    const dm_fork_enc_info *e = &g_enc_now;
+    const dm_fork_enc_info *e = &g_enc_now; dm_ovl_item *o;
     if (!g_enc_open) {   // folded: the Poké Ball, a gold star badge on a shiny
         pokeball(it, n, max, &g_c[C_ENC], 0, 1.0f);
         if (e->shiny) { const ctl *k = &g_c[C_ENC]; float br = k->r * 0.42f, bx = k->cx + k->r * 0.72f, by = k->cy - k->r * 0.72f;
             add(it, n, max, bx, by, br, OVL_DISC, 240, 190, 40, 1.0f);
-            dm_ovl_item *o = add(it, n, max, bx, by, br, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_STAR; o->gscale = 0.8f; o->galpha = 1.0f; } }
+            o = add(it, n, max, bx, by, br, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_STAR; o->gscale = 0.8f; o->galpha = 1.0f; } }
         return; }
-    float r4[4]; enc_rect(r4); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, x = r4[0] + pad, y = r4[1] + pad + lh * 0.5f;
-    dm_ovl_item *o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.82f); if (o) { o->x = r4[0]; o->y = r4[1]; o->w = r4[2] - r4[0]; o->h = r4[3] - r4[1]; o->radius = 0.12f; }
-    if (e->shiny) { o = add(it, n, max, 0, 0, 1, OVL_RRECT, 240, 190, 40, 0.95f); if (o) { o->x = r4[0]; o->y = r4[1]; o->w = r4[2] - r4[0]; o->h = ch * 0.18f; o->radius = 0.5f; } }   // a gold edge on a shiny
-    char ln[64];
-    snprintf(ln, sizeof ln, "%.17s", e->species >= 0 && e->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[e->species] : "?"); otext(it, n, max, x, y, ch, ln, 1.0f);
-    if (e->shiny) { float sx = x + (ENC_COLS - 1.5f) * ch * 0.6f; add(it, n, max, sx, y, ch * 0.62f, OVL_DISC, 240, 190, 40, 1.0f);
-        o = add(it, n, max, sx, y, ch * 0.62f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_STAR; o->gscale = 0.8f; o->galpha = 1.0f; } }
-    y += lh; snprintf(ln, sizeof ln, "%-8s %.11s", k_enc_nature[e->nature % 25], e->ability >= 0 && e->ability < (int)(sizeof k_enc_ability / sizeof *k_enc_ability) ? k_enc_ability[e->ability] : "?"); otext(it, n, max, x, y, ch, ln, 0.92f);
+    enc_geo g = enc_layout(); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f;
+    // the info box (under the ribbon), then the ribbon (a pill from the ball's middle to the right), then the ball over the ribbon's left end
+    o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.84f); if (o) { o->x = g.bx0; o->y = g.by0; o->w = g.bx1 - g.bx0; o->h = g.by1 - g.by0; o->radius = 0.10f; }
+    int R = e->shiny ? 240 : 205, G = e->shiny ? 190 : 50, B = e->shiny ? 40 : 55;   // (red, gold on a shiny)
+    o = add(it, n, max, 0, 0, 1, OVL_RRECT, R, G, B, 0.95f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = g.rx1 - g.cx; o->h = g.rh; o->radius = 0.5f; }
+    ctl ball = g_c[C_ENC]; ball.cx = g.cx; ball.cy = g.cy; pokeball(it, n, max, &ball, 0, 1.0f);
+    char ln[64]; float nch = fminf(ch * 1.15f, g.rh * 0.7f);
+    snprintf(ln, sizeof ln, "%.15s", e->species >= 0 && e->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[e->species] : "?");
+    otext(it, n, max, g.cx + g.r * 1.15f, g.cy, nch, ln, 1.0f);
+    if (e->shiny) { float sx = g.rx1 - g.rh * 0.75f; o = add(it, n, max, sx, g.cy, g.rh * 0.36f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_STAR; o->gscale = 0.9f; o->galpha = 1.0f; } }
+    float x = g.bx0 + pad + g.r * 0.25f, y = g.by0 + pad + lh * 0.5f + g.rh * 0.15f;
+    snprintf(ln, sizeof ln, "%-8s %.11s", k_enc_nature[e->nature % 25], e->ability >= 0 && e->ability < (int)(sizeof k_enc_ability / sizeof *k_enc_ability) ? k_enc_ability[e->ability] : "?"); otext(it, n, max, x, y, ch, ln, 0.92f);
     y += lh; otext(it, n, max, x, y, ch, "   HP AT DF SA SD SP", 0.6f);
     y += lh; snprintf(ln, sizeof ln, "IV %2d %2d %2d %2d %2d %2d", e->iv[0], e->iv[1], e->iv[2], e->iv[3], e->iv[4], e->iv[5]); otext(it, n, max, x, y, ch, ln, 1.0f);
     y += lh; snprintf(ln, sizeof ln, "EV%3d%3d%3d%3d%3d%3d", e->ev[0], e->ev[1], e->ev[2], e->ev[3], e->ev[4], e->ev[5]); otext(it, n, max, x, y, ch, ln, 0.75f);
