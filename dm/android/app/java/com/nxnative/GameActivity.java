@@ -30,7 +30,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         // shaders the game captured last time: hand over to it before there is a window (the engine starts with the window, android_main.c)
         //   (alive only after this: set before it, the setup screen took this finishing activity for a running game and sent the player back to it, round and round;
         //   the game named, so the launcher of two games does not come in between)
-        if (!viaSetup && SetupActivity.pendingWork(GameSettings.dir(this))) { startActivity(new Intent(this, SetupActivity.class).putExtra("game", GameSettings.game(this)[0])); finish(); return; }
+        if (!viaSetup && (SetupActivity.pendingWork(GameSettings.dir(this)) || SetupActivity.shadersStale(this, GameSettings.dir(this)))) { startActivity(new Intent(this, SetupActivity.class).putExtra("game", GameSettings.game(this)[0])); finish(); return; }
         alive = true;
         im = getSystemService(InputManager.class);
         if (im != null) im.registerInputDeviceListener(this, null);

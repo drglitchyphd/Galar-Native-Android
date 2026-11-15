@@ -543,17 +543,24 @@ def nvn_captured(cap):
     code header; compute code has no header and its own magic); for Shield's file shaders it agrees with the BNSH stage on every one checked (76 vertex, 88 pixel)"""
     names = sorted(f[:-5] for f in os.listdir(cap) if f.endswith('.code') and os.path.exists(os.path.join(cap, f[:-5] + '.ctl'))) if os.path.isdir(cap) else []
     # a first setup has none yet: the game captures them on its first run and the next setup translates them, so only an existing but empty capture dir is wrong
-    if not names and os.path.isdir(cap): print(f'[RED] the profile has shader_nvn_capture on, but there are no captured shaders in {cap}: shaders the game builds in memory will have no translation (DM_NVN_SHDUMP on the Mac)', flush=True)
+    if not names and os.path.isdir(cap): print(f'no captured shaders in {cap} yet: the shaders the game builds in memory get translated once it has run and saved them', flush=True)
     elif not names: print(f'no captured shaders yet ({cap}): the game captures the shaders it builds in memory on its first run, and the next setup translates them', flush=True)
-    out = []
+    out = []; bad = 0
     for k in names:
         ctl, code = open(os.path.join(cap, k + '.ctl'), 'rb').read(), open(os.path.join(cap, k + '.code'), 'rb').read()
         st = 'cs' if code[:4] == CS_MAGIC else SPH_STAGE.get((struct.unpack_from('<I', code, 0x30)[0] >> 10) & 0xf) if len(code) >= 0x34 else None
-        if st is None: red(f'nvn_capture/{k}: no stage in the shader program header')
-        why = check(f'nvn_capture/{k}', st, ctl, code)
-        if why: red(f'nvn_capture/{k}: {why}')
-        if skey(ctl, code) != k: red(f'nvn_capture/{k}: the key of the captured control section and code is {skey(ctl, code)}')
+        # A capture that cannot be read (a shader the game had not finished writing, a file cut short) is left out with a warning: one such file stopped every
+        #   setup of that game until it was deleted by hand (#215: 4 of 320 on a Mali-G52, "no stage in the shader program header", "code area header magic does not
+        #   match the stage"). The game captures it again when it builds it next time
+        why = 'no stage in the shader program header' if st is None else check(f'nvn_capture/{k}', st, ctl, code) or (
+              f'the key of the captured control section and code is {skey(ctl, code)}' if skey(ctl, code) != k else None)
+        if why:   # (deleted, or the engine, which saves only shaders it has no file for, would never save a good copy)
+            for ext in ('.ctl', '.code'):
+                try: os.remove(os.path.join(cap, k + ext))
+                except OSError: pass
+            print(f'[RED] nvn_capture/{k}: {why}: left out and deleted (the game saves it again)', flush=True); bad += 1; continue
         out.append((f'/nvn_capture/{k}', st, ctl, code))
+    if bad: print(f'captured shaders: {len(out)} read, {bad} left out (unreadable)', flush=True)
     return out
 
 def gfpak_members(d):
