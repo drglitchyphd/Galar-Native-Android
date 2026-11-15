@@ -152,6 +152,8 @@ public final class SetupActivity extends Activity {
             Toast.makeText(this, T.t(this, "The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept)."), Toast.LENGTH_LONG).show();
         if (ready()) setupShortcut();
         if (ready() && !asked && !running && notices()) asked = true;   // the last run crashed starting its graphics: this screen offers a driver instead of starting the game
+        // the last run crashed (Android's record of it, ApplicationExitInfo): offered once, a debug report for a GitHub issue (DebugBundle); Play goes on as a start would
+        if (ready() && !asked && !running && DebugBundle.offerAfterCrash(this, () -> { if (pendingWork(gameDir())) startCaptures(); else startGame(); })) asked = true;
         if (ready() && !asked && !running) { gameIcon(); if (!pendingWork(gameDir())) { startGame(); return; } }
         setupScreen(official);
         if (ready() && !asked) startCaptures();

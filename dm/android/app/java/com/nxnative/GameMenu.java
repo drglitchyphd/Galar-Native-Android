@@ -572,6 +572,12 @@ public final class GameMenu {
         action(a, t(a, "Capture a frame"), t(a, "Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue."),
                () -> { try (java.io.FileWriter w = new java.io.FileWriter(new File(GameSettings.dir(a), "capture.req"))) { w.write("90"); } catch (IOException e) { }
                        android.widget.Toast.makeText(a, t(a, "Capturing in 3 seconds: close the menu."), android.widget.Toast.LENGTH_LONG).show(); });
+        // the debug report (DebugBundle): logs, Android's crash records, phone / GPU / driver details in one ZIP in Download, and a pre-filled GitHub issue
+        action(a, t(a, "Make a debug report"), t(a, "Logs, Android's crash records and this phone's GPU and driver details in one file in Download (a ZIP ending in debug-report.zip), and a GitHub issue with them filled in. No game files or saves."),
+               () -> DebugBundle.run(a));
+        // GPU crash tracing (vk_crumbs.h, DM_VK_BREADCRUMBS): the GPU marks each pass it finishes, so a device lost names the pass it stopped in. Slower: off by default
+        choice(a, "DM_VK_BREADCRUMBS", t(a, "GPU crash tracing"), new String[][] { { "", t(a, "Off"), "" },
+            { "1", t(a, "On"), t(a, "On: the GPU notes each step it finishes, so when the graphics crash the log says where. A little slower: turn it on only to reproduce a crash, then make a debug report") } });
         // Mali's white scenes (#47 #53 #64 #68 #69 #72 #75): switches the engine has for narrowing it down, which players could only set by editing env.txt; each one a
         //   tester tries (with a capture) rules a cause in or out. Shown on Mali phones only
         if (DriverPackages.gpu(a).contains("mali")) {

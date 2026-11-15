@@ -644,6 +644,12 @@ static void vk_trim(void) {
     pthread_mutex_unlock(&g_amu);
     if (nf) { g_trim_bytes += freed; g_trim_n += nf; static int said; if (said++ < 30) VLOG("device memory: %d empty block%s given back (%.0f MB; %.0f MB in all so far)", nf, nf == 1 ? "" : "s", freed / 1048576.0, g_trim_bytes / 1048576.0); }
 }
+// The device memory this engine holds in its blocks (MB), for the log's memory line (android_main.c log_mirror): a run Android ends for memory then shows whether
+//   the growth was the engine's GPU memory or something else
+long nvn_vk_device_mb(void) {
+    double t = 0; pthread_mutex_lock(&g_amu); for (int k = 0; k < g_nblocks; k++) t += g_blocks[k]->size; pthread_mutex_unlock(&g_amu);
+    return (long)(t / 1048576);
+}
 
 // ================= Deferred destruction: objects the GPU may still use go when the submissions recorded so far are done =================
 enum { DF_IMAGE, DF_VIEW, DF_BUFFER, DF_BUFVIEW, DF_ALLOC, DF_PIPELINE, DF_FRAMEBUFFER };
@@ -1093,6 +1099,8 @@ static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 static sub_t *g_inflight[NSUB * 2]; static int g_nin;   // submitted, not yet completed, in submission order (under g_cmu)
 static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
 static int on_sub_thread(void) { return atomic_load(&g_sub_thread_set) && pthread_equal(pthread_self(), g_sub_thread); }
+static uint64_t g_frame_no;   // (defined again below, where it is used most: a tentative definition)
+#include "vk_crumbs.h"   // GPU breadcrumbs: what each submission held, printed when the GPU fails
 
 static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) g = mono_ns(); return g * 12 / 625; }
 static void wb_apply(sub_t *s) {
@@ -1154,9 +1162,12 @@ static void *completion_main(void *unused) {
         pthread_mutex_unlock(&g_cmu);
         VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_tl, .pValues = &want };
         VkResult r = g_tlsem ? vk_wait(&wi, VK_NULL_HANDLE, 2000000000ull) : vk_wait(NULL, vf, 2000000000ull);
-        if (r == VK_TIMEOUT) continue;
-        if (r) VDIE("%s failed: %d (device lost?)", g_tlsem ? "vkWaitSemaphores" : "vkWaitForFences", r);
-        post_apply(s); gpu_ts_done(s);
+        if (r == VK_TIMEOUT) {   // a submission 10 s late: the GPU hangs (no device lost yet); its breadcrumbs printed once
+            static uint64_t late, late_t, told; uint64_t now = mono_ns();
+            if (late != want) { late = want; late_t = now; } else if (told != want && now - late_t > 10000000000ull) { told = want; nvn_vk_crumbs_dump("GPU hang: a submission more than 10 s late"); }
+            continue; }
+        if (r) { nvn_vk_crumbs_dump("device lost"); VDIE("%s failed: %d (device lost?)", g_tlsem ? "vkWaitSemaphores" : "vkWaitForFences", r); }
+        cr_completed(s); post_apply(s); gpu_ts_done(s);
         pthread_mutex_lock(&g_cmu);
         memmove(g_inflight, g_inflight + 1, (size_t)--g_nin * sizeof *g_inflight);
         atomic_store(&g_done, want);
@@ -1253,6 +1264,7 @@ void mtl_sub_begin(void) {
         if (atomic_load(&g_gpu[k].frame) != s->frame) { atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].frame, s->frame); }
         atomic_fetch_add(&g_gpu[k].pending, 1);
         vkCmdResetQueryPool(s->cb, g_tsq, (uint32_t)i * 2, 2); vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_tsq, (uint32_t)i * 2); }
+    cr_sub_begin(s);
     g_sub = s;
     g_bar_clean = g_after_pass = 0;
     static int inited; if (!inited) { inited = 1; state_reset(); }
@@ -1355,6 +1367,7 @@ static int fbc_on(void) { static int on = -1; if (on < 0) { const char *e = gete
 // Begins a pass described as dynamic rendering. cf: each colour slot's format (a slot with no view: ignored), dsfmt: the depth / stencil attachment's format,
 //   samples: the attachments' sample count; swapchain: the one colour attachment is a swapchain image (framebuffer kept, see g_scfb)
 static void rend_begin(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain) {
+    cr_pass_begin(cb, ri, cf, dsfmt);   // (breadcrumbs: the pass noted for its submission)
     if (g_dynren) { vkCmdBeginRendering(cb, ri); return; }
     rpkey k; memset(&k, 0, sizeof k); k.n = (uint8_t)ri->colorAttachmentCount; k.samples = (uint8_t)(samples ? samples : 1);
     VkImageView views[9]; VkClearValue cv[9]; uint32_t nv = 0;
@@ -1393,7 +1406,7 @@ static void rend_begin(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint
     VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = ri->renderArea, .clearValueCount = nv, .pClearValues = cv };
     vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
 }
-static void rend_end(VkCommandBuffer cb) { if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb); }
+static void rend_end(VkCommandBuffer cb) { if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb); cr_pass_end(cb); }   // (breadcrumbs: with DM_VK_BREADCRUMBS the GPU marks the pass done)
 
 // The marker of a submission that failed with imported pools (see mtl_init): set = 1 writes it, 0 tells whether it is there
 static int host_import_mark(int set) {
@@ -1432,12 +1445,12 @@ static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFe
     pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, g_tlsem ? VK_NULL_HANDLE : vf); pthread_mutex_unlock(&g_qmu);
     if (r && g_host_import && host_import_mark(1)) VLOG("[RED] vkQueueSubmit failed with imported host memory: the next start will not import it");
     if (r && g_heapmap > 0 && heap_import_mark(1)) VLOG("[RED] vkQueueSubmit failed with dma-buf pools: the next start moves the driver's mappings instead");
-    if (r) VDIE("vkQueueSubmit failed: %d", r);
+    if (r) { nvn_vk_crumbs_dump("vkQueueSubmit failed"); VDIE("vkQueueSubmit failed: %d", r); }
 }
 // Fence values are handed out under g_cmu so the present thread's submissions (screenshots) and the game's stay in order on the timeline
 static uint64_t submit_tracked(sub_t *s, VkCommandBuffer *cbs, uint32_t n) {
     pthread_mutex_lock(&g_cmu);
-    uint64_t f = ++g_fence; s->fence = f;
+    uint64_t f = ++g_fence; s->fence = f; cr_submitted(s);
     if (!g_tlsem) {   // a new fence for this submission (the slot is reused only after its last submission completed, so the old fence is no longer waited on)
         if (s->vf) vkDestroyFence(g_dev, s->vf, NULL);
         VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; s->vf = VK_NULL_HANDLE; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &s->vf));
@@ -3855,7 +3868,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     VkCommandBuffer cb = CB(); if (mark) mark[1] = mono_ns();
     { static VkCommandBuffer bcb; static VkPipeline bp; static uint64_t bfence;   // the same pipeline already bound in this command buffer: no rebind (Vulkan keeps it across passes)
       static int off = -1; if (off < 0) off = getenv("DM_VK_BIND_ALWAYS") != NULL;
-      if (off || cb != bcb || bp != p || bfence != g_sub->fence) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; if (pso_cap()) pso_used(p); } }
+      if (off || cb != bcb || bp != p || bfence != g_sub->fence) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; if (pso_cap()) pso_used(p);
+          cr_pipe(pr->sh[0] ? pr->sh[0]->key : NULL, pr->sh[1] ? pr->sh[1]->key : NULL); } }   // (breadcrumbs: the shaders bound, in this pass)
     // dynamic state
     float vx = 0, vy = 0, vw = (float)P.tw, vh = (float)P.th;
     if (S.has_vp) { vx = S.vp[0][0]; vy = S.vp[0][1]; vw = S.vp[0][2]; vh = S.vp[0][3]; }
