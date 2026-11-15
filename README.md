@@ -37,7 +37,9 @@
 
 ## What's new
 
-- **Widescreen, 1440p and mods (v0.40).** ☰ → Picture → **Widescreen** widens the game's camera to your screen's own shape, with the HUD kept 16:9 in the middle; nothing is stretched. ☰ → Graphics → **Resolution → 1440p** renders TV mode at 2560x1440 (heavier). Both are off by default. Fl4sh's `.pchtxt` mods that keep data or code of their own (Dynamic FPS, the Ultrawide mods) no longer crash the game. Controls no longer stop working when the phone gets hot and Graphics Auto switches modes (#49). ☰ → Performance → **Barriers between passes** lets Xclipse, Mali and PowerVR players trade steady shadows for speed (#48).
+- **1440p off again (v0.41).** v0.40's 1440p made the game close at every start: the game's own memory for render targets is sized for 1080p. v0.41 ignores the setting, so players who picked it can play again with nothing to change. New for older Adreno phones with exploding polygons: ☰ → Model tests (Adreno) → **Copy shared data on the GPU**, a test (#34, #46).
+
+- **Widescreen, 1440p and mods (v0.40).** ☰ → Picture → **Widescreen** widens the game's camera to your screen's own shape, with the HUD kept 16:9 in the middle; nothing is stretched. Off by default. Fl4sh's `.pchtxt` mods that keep data or code of their own (Dynamic FPS, the Ultrawide mods) no longer crash the game. Controls no longer stop working when the phone gets hot and Graphics Auto switches modes (#49). ☰ → Performance → **Barriers between passes** lets Xclipse, Mali and PowerVR players trade steady shadows for speed (#48).
 
 - **Graphics fixes (v0.39).** Exploded and stretched polygons on older Adreno drivers (Vulkan 1.1) are fixed: vertex sizes are now built into each pipeline there (`DM_VK_NO_EDS=0` goes back). Background pipeline building (`DM_VK_ASYNC_PSO`) is now off everywhere, as it left objects missing for frames. Relaxed barriers are Adreno-only (dark, flickering shadows on Xclipse, PowerVR and Mali). PowerVR converts BC textures on the CPU (purple objects).
 
