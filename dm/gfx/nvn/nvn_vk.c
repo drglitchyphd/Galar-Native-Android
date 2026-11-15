@@ -165,6 +165,7 @@ static int g_bcgpu;   // the BC layer is on (mtl_init): a mask of the paths that
 static int g_fctl_ext, g_drvprops_ext;   // a Vulkan 1.1 driver with VK_KHR_shader_float_controls / VK_KHR_driver_properties (enabled at device creation)
 static int g_fctl;    // every shader asks for SignedZeroInfNanPreserve (spv_float_controls; mtl_init decides)
 static void tf_selftest(void);   // tf_selftest.h (included with the capture passes)
+static void vtx_canary(void);   // vtx_canary.h: per-draw vertex sizes checked on this driver at start
 static int g_arm_rel, g_arm_p;   // Arm's own Mali driver: its release, r<rel>p<p> (driverVersion is VK_MAKE_VERSION(rel, p, 0): 0xb001000 = r44p1); 0 for any other driver
 static int g_arm_beta;           // ... a beta build of it (driverInfo "v1.r49p1-03bet0": the G925's)
 static int g_clampzero; static _Atomic int g_clampzero_n;   // shaders get spv_clamp_zero (Arm erratum 3779215: mtl_init decides); how many it changed
@@ -535,6 +536,7 @@ void mtl_init(void) {
          nvn_fmt_vk_transcode(0x46) ? "transcoded to ETC2 on upload" : nvn_fmt_vk_decode(0x46) ? "decoded on upload" : "sampled by the GPU");
     completion_start();
     dummies_init();
+    vtx_canary();    // (whether this driver reads vertex sizes given per draw right; if not, they go into each pipeline: vtx_canary.h)
     tf_selftest();   // (Arm's driver: whether transform feedback captures write; tf_selftest.h)
     pcache_open();
     if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) { pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); }
@@ -2917,6 +2919,7 @@ static void td_note(vtex *x, uint64_t ser, uint32_t lv, uint32_t sl) {
 // for the GPU to go idle; from the Arceus engine, androidswithy 84fb5df) unless one reads or rewrites what an earlier one in the pass wrote (keep = 0); anything else
 // between them ends the pass (tf_end). DM_VK_TF_BATCH=0: one pass and one barrier each
 #include "tf_selftest.h"
+#include "vtx_canary.h"
 static int tf_batch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TF_BATCH"); v = !(e && !strcmp(e, "0")); } return v; }
 static int tf_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_ntfw; i++) if (lo < g_tfw[i].hi && g_tfw[i].lo < hi) return 1; return 0; }
 static void tf_pass_begin(int keep) {
