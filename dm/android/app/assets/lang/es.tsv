@@ -362,3 +362,7 @@ Every pass: the safest picture, slower	Cada pasada: la imagen más segura, más 
 Resolution	Resolución
 1080p, as the game is made	1080p, tal como está hecho el juego
 1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p: más nítido, pero más pesado para la GPU (menos fps, el móvil se calienta más)
+Model tests (Adreno)	Pruebas de modelos (Adreno)
+For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	Para polígonos estirados o que explotan. Reinicia el juego después de cambiarlo y dinos en GitHub si desaparecen.
+Copy shared data on the GPU	Copiar datos compartidos en la GPU
+On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	Activado: los datos que el juego coloca fuera de la alineación del controlador se copian en la GPU, después de lo que la GPU escribió antes, en lugar de en la CPU (una prueba para polígonos que explotan en Adreno antiguos)

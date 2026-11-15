@@ -362,3 +362,7 @@ Every pass: the safest picture, slower	毎パス：最も安全な画面、遅�
 Resolution	解像度
 1080p, as the game is made	1080p（ゲーム本来の解像度）
 1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p：より鮮明ですがGPUの負荷が増えます（fpsが下がり、端末が熱くなります）
+Model tests (Adreno)	モデルのテスト（Adreno）
+For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	ポリゴンが伸びたり爆発したりする場合に。変更後にゲームを再起動し、直ったかをGitHubで教えてください。
+Copy shared data on the GPU	共有データをGPUでコピー
+On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	オン：ドライバーのアラインメントから外れた位置にあるデータを、CPUではなくGPUで、それ以前のGPUの書き込みの後にコピーします（古いAdrenoでポリゴンが爆発する問題のテスト）

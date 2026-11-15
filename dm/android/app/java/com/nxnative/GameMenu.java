@@ -598,6 +598,15 @@ public final class GameMenu {
             choice(a, "DM_VK_NO_PASS_MERGE", t(a, "Merge render passes"), new String[][] { { "", t(a, "On"), "" },
                 { "1", t(a, "Off"), t(a, "Off: every render target change starts a new pass") } });
         }
+        // Exploding polygons on older Adreno drivers (#34 #46: Adreno 710, storage buffers aligned to 64): a storage buffer the game places off that alignment is
+        //   given to the GPU as a copy taken when the draw is recorded (nvn_vk.c, "bound as a snapshot"), which misses what the GPU wrote earlier in the frame.
+        //   On: copied on the GPU, in order, after those writes (DM_VK_SSBO_GPU_COPY). A test until players confirm it; shown on Adreno phones
+        if (DriverPackages.gpu(a).contains("adreno")) {
+            heading(a, t(a, "Model tests (Adreno)"));
+            note(a, t(a, "For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone."));
+            choice(a, "DM_VK_SSBO_GPU_COPY", t(a, "Copy shared data on the GPU"), new String[][] { { "", t(a, "Off"), "" },
+                { "1", t(a, "On"), t(a, "On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)") } });
+        }
     }
     // the graphics driver: the phone's own, an installed package (Turnip, PanVK...), a new package from the file picker, or the releases page for this GPU; from the next start
     private static void driver(Activity a) {
