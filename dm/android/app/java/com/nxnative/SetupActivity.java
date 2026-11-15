@@ -102,17 +102,11 @@ public final class SetupActivity extends Activity {
     // set up for this app version: the shader pack's translation chain (the ready file) is the one the engine was built for (assets/shader_chain, build_apk.py);
     // an update that changes the chain otherwise starts the game with a pack the engine refuses (every 3D shader "SPIR-V missing")
     private boolean ready() { return setUp() && chainCurrent(); }
-    private boolean chainCurrent() { return chainCurrent(this, gameDir()); }
-    static boolean chainCurrent(android.content.Context c, File gameDir) {
+    private boolean chainCurrent() {
         String want, have;
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getAssets().open("shader_chain")))) { want = r.readLine(); } catch (IOException e) { return true; }   // an older build without the asset
-        try (BufferedReader r = new BufferedReader(new FileReader(new File(gameDir, "ready")))) { have = r.readLine(); } catch (IOException e) { return false; }
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("shader_chain")))) { want = r.readLine(); } catch (IOException e) { return true; }   // an older build without the asset
+        try (BufferedReader r = new BufferedReader(new FileReader(new File(gameDir(), "ready")))) { have = r.readLine(); } catch (IOException e) { return false; }
         return want != null && have != null && want.trim().equals(have.trim());
-    }
-    // the game set up, but its shader pack is for another translation or incomplete: started straight into the game (a shortcut, adb), it would draw nothing but
-    //   the clear colour (#215: a flat blue screen); GameActivity sends it here, where the shaders are updated first (shadersOnly)
-    static boolean shadersStale(android.content.Context c, File gameDir) {
-        return new File(gameDir, "ready").exists() && (!chainCurrent(c, gameDir) || !new File(gameDir, "shaders.pak").exists() || !packComplete(gameDir));
     }
 
     @Override protected void onCreate(Bundle b) {
