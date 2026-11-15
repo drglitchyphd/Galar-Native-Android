@@ -2352,7 +2352,9 @@ static vtex *tex_new(const tex_t *t, int pkg) {
     }
     return x;
 }
+static int b10_swapped_tex(const vtex *x); static void b10_note(const char *what, const vtex *x, int other); static uint32_t fmt_texel_bytes(VkFormat f);
 static VkImageView view_get(vtex *t, VkImageViewType vt, VkFormat fmt, uint32_t lvl, uint32_t nlvl, uint32_t lay, uint32_t nlay, const uint8_t sw[4], VkImageAspectFlags aspect) {
+    if (fmt != t->fmt && b10_swapped_tex(t) && fmt_texel_bytes(fmt) != 8) { b10_note("viewed in a 4-byte format: made in its own format", t, fmt); fmt = t->fmt; }
     if (t->fixed_fmt && fmt != t->fmt && fmt != t->twin) { RED_ONCE(73, "a view in format %d of an image whose formats are fixed to %d / %d: viewed in its own format (DM_VK_NO_FMT_LIST=1 to compare)", fmt, t->fmt, t->twin); fmt = t->fmt; }
     vview_key k = { (uint32_t)fmt, (uint32_t)vt, lvl, nlvl, lay, nlay, (uint32_t)sw[0] | (uint32_t)sw[1] << 8 | (uint32_t)sw[2] << 16 | (uint32_t)sw[3] << 24, (uint32_t)aspect };
     pthread_mutex_lock(&t->vmu);
@@ -2400,6 +2402,23 @@ static int tex_upload(vtex *x, const tex_t *t) {
     return r;
 }
 // a level / layer's bytes in an upload's staging: its texels as uploaded (o*: decoded or transcoded with BC), or with BC the blocks themselves if those are larger
+// R11G11B10F drawn as RGBA16F (DM_VK_B10_AS_RGBA16, the Mali float-target test, #282): the image's texel is 8 bytes where the game's memory holds 4. Every place the
+//   game's bytes meet the image converts them (uploads and buffer→texture copies expand, texture→buffer copies are left out rather than writing twice the bytes into
+//   the game's memory), a view in a 4-byte format is made in the image's own format (Vulkan cannot view across texel sizes), and each such meeting is logged once
+//   ("b10 swap:"), up to 60, so a player's log shows what the swap still misses (the streaks of #282)
+static int b10_swapped_tex(const vtex *x) { return x && x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT && nvn_fmt_vk_b10_swapped(x->nvn_fmt); }
+static void b10_note(const char *what, const vtex *x, int other) {
+    static int n; static char seen[64][96]; char k[96]; snprintf(k, sizeof k, "%s %ux%u %d", what, x ? x->w : 0, x ? x->h : 0, other);
+    for (int i = 0; i < n && i < 64; i++) if (!strcmp(seen[i], k)) return;
+    if (n >= 60) return; strlcpy(seen[n++], k, sizeof seen[0]);
+    VLOG("b10 swap: %s (image %ux%u levels %u, the other side's format %d)", what, x ? x->w : 0, x ? x->h : 0, x ? x->levels : 0, other);
+}
+static uint16_t b10_half(uint32_t v, int mbits) { uint32_t e = v >> mbits & 31, m = v & ((1u << mbits) - 1); return (uint16_t)(e << 10 | m << (10 - mbits)); }   // (same bias 15; inf / NaN carry over)
+// rows of R11G11B10F texels → RGBA16F (alpha 1)
+static void b10_expand(const uint8_t *src, size_t spitch, uint32_t w, size_t rows, uint8_t *dst, size_t dpitch) {
+    for (size_t r = 0; r < rows; r++) { const uint32_t *in = (const uint32_t *)(src + r * spitch); uint16_t *o = (uint16_t *)(dst + r * dpitch);
+        for (uint32_t i = 0; i < w; i++) { uint32_t v = in[i]; o[4 * i] = b10_half(v & 0x7ff, 6); o[4 * i + 1] = b10_half(v >> 11 & 0x7ff, 6); o[4 * i + 2] = b10_half(v >> 22, 5); o[4 * i + 3] = 0x3c00; } }
+}
 static VkDeviceSize up_slot(int bck, int bw, int bh, int bpb, int obw, int obh, int obpb, uint32_t w, uint32_t h, uint32_t z) {
     VkDeviceSize out = (VkDeviceSize)((w + obw - 1) / obw) * obpb * ((h + obh - 1) / obh), blocks = (VkDeviceSize)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh);
     return z * (bck && blocks > out ? blocks : out);
@@ -2407,7 +2426,8 @@ static VkDeviceSize up_slot(int bck, int bw, int bh, int bpb, int obw, int obh, 
 static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb) return -1;
     // BC on a GPU without it: the blocks are deswizzled into scratch and decoded into staging as plain texels (bc_decode.c)
-    int bck = nvn_fmt_vk_decode(t->d.format), etk = nvn_fmt_vk_transcode(t->d.format), obpb = etk ? bc_transcode_bytes(etk) : bck ? bc_texel_bytes(bck) : bpb,
+    int b10 = b10_swapped_tex(x) && bpb == 4 && bw == 1;   // (expanded from scratch, as BC is decoded)
+    int bck = nvn_fmt_vk_decode(t->d.format), etk = nvn_fmt_vk_transcode(t->d.format), obpb = etk ? bc_transcode_bytes(etk) : bck ? bc_texel_bytes(bck) : b10 ? 8 : bpb,
         obw = bck && !(etk && bc_transcode_blocks(etk)) ? 1 : bw, obh = bck && !(etk && bc_transcode_blocks(etk)) ? 1 : bh; uint8_t *scratch = NULL;   // (transcoded: ETC2 / EAC blocks, 4x4 like BC)
     unsigned layers = x->is3d ? 1 : x->layers;
     VkDeviceSize total = 0;
@@ -2439,9 +2459,9 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     for (unsigned l = 0; l < x->levels; l++) {
         uint32_t w = x->w >> l ? x->w >> l : 1, h = x->h >> l ? x->h >> l : 1, z = x->is3d ? (x->d >> l ? x->d >> l : 1) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh, opitch = (size_t)((w + obw - 1) / obw) * obpb, orows = (h + obh - 1) / obh;
-        if (bck) { free(scratch); scratch = malloc(pitch * rows * z); }
+        if (bck || b10) { free(scratch); scratch = malloc(pitch * rows * z); }
         for (unsigned y = 0; y < layers; y++) {
-            uint8_t *dst = bck ? scratch : sp + off; uint64_t c0 = mono_ns();
+            uint8_t *dst = bck || b10 ? scratch : sp + off; uint64_t c0 = mono_ns();
             if (linear) {   // LINEAR: rows at the texture's stride (one level, one layer)
                 size_t stride = t->d.stride ? t->d.stride : pitch; for (size_t r = 0; r < rows; r++) memcpy(dst + r * pitch, t->mem + r * stride, pitch);
             } else if (nvn_deswizzle(&t->d, l + (unsigned)x->drop, y, t->mem, dst, pitch)) { RED_ONCE(5, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
@@ -2457,6 +2477,7 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
                     g_bc_gpu_levels++; off += SLOT(w, h, z); continue; }
             }
             if (bck) bc_convert(bck, etk, scratch, pitch, rows, (int)w, (int)h, z, sp + off, opitch, orows);
+            else if (b10) { b10_expand(scratch, pitch, w, rows * z, sp + off, opitch); if (!l && !y) b10_note("texels from the game's memory expanded on upload", x, 0); }
             rg[nrg++] = (VkBufferImageCopy){ .bufferOffset = so + off, .bufferRowLength = (uint32_t)(opitch / obpb * obw), .bufferImageHeight = (uint32_t)(orows * obh),
                 .imageSubresource = { x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : x->aspect, l, x->is3d ? 0 : y, 1 }, .imageExtent = { w, h, z } };
             off += SLOT(w, h, z);
@@ -2486,7 +2507,6 @@ static vtex *pkg_upload(const tex_t *t) {
     nvn_dirty_protect(t->mem, t->L.size); x->stamp = nvn_dirty_now();
     if (tex_upload(x, t)) { vtex_unref(x); return NULL; }
     x->pkg = 1; x->span = nvn_dirty_span(t->mem, t->L.size); x->seen = nvn_dirty_now();
-    if (nvn_fmt_vk_b10_swapped(t->d.format)) RED_ONCE(51, "a texture from the game's files in R11G11B10F with DM_VK_B10_AS_RGBA16 on: its texels do not fit RGBA16F and it comes out wrong (turn the test off)");
     return x;
 }
 static vtex *serial_get(uint64_t k) {   // caller holds g_smu
@@ -4926,6 +4946,14 @@ static void copy_b2t(const p_copy_b2t *c, int to_buffer) {
     int nz = c->r.depth ? c->r.depth : 1;
     VkBuffer b; VkDeviceSize o; if (!pool_buf(c->src, img * nz, &b, &o, NULL)) { RED_ONCE(46, "texture copy buffer side outside the pools"); return; }
     if (row % bpb || (img % row)) { RED_ONCE(47, "texture copy pitch %zu not a whole number of %d-byte blocks", row, bpb); return; }
+    if (b10_swapped_tex(x) && bpb == 4) {
+        if (to_buffer) { b10_note("texture copied back to the game's memory: left out (8-byte texels into 4-byte room)", x, 0); return; }
+        if (S.copy_stride || S.copy_img_stride || c->r.width <= 0) { b10_note("buffer copied in with its own strides: left out", x, 0); return; }
+        const uint8_t *src = (const uint8_t *)(uintptr_t)c->src; size_t orow = (size_t)c->r.width * 8, oimg = orow * rows;
+        VkBuffer sb; VkDeviceSize so; uint8_t *sp = arena_alloc(g_sub, oimg * nz ? oimg * nz : 16, &sb, &so);
+        b10_expand(src, row, (uint32_t)c->r.width, rows * nz, sp, orow); b10_note("buffer copied in: expanded", x, 0);
+        b = sb; o = so; row = orow; img = oimg; bpb = 8;
+    } else {
     int bck = nvn_fmt_vk_decode(c->tex->d.format);
     if (bck && to_buffer) { RED_ONCE(98, "a BC texture decoded on upload copied back to a buffer: skipped (format %#x)", c->tex->d.format); return; }
     if (bck && (g_bcgpu & 2) && bc_gpu_can(bck, nvn_fmt_vk_transcode(c->tex->d.format) ? 1 : 0)) {   // the BC layer: from the pool's GPU-side blocks, so blocks the GPU wrote come out right too
@@ -4940,6 +4968,7 @@ static void copy_b2t(const p_copy_b2t *c, int to_buffer) {
         VkBuffer sb; VkDeviceSize so; uint8_t *sp = arena_alloc(g_sub, oimg * nz ? oimg * nz : 16, &sb, &so);
         for (int s = 0; s < nz; s++) (etk ? bc_transcode_image : bc_decode_image_mt)(bck, src + s * img, row, c->r.width, c->r.height, sp + s * oimg, orow);
         b = sb; o = so; row = orow; img = oimg; bpb = tb; if (!blk) bw = bh = 1;
+    }
     }
     outside_pass();
     VkBufferImageCopy r = { .bufferOffset = o, .bufferRowLength = (uint32_t)(row / bpb * bw), .bufferImageHeight = (uint32_t)(img / row * bh),
@@ -4957,6 +4986,7 @@ static void copy_t2t(const p_copy_t2t *c) {
                          c->src->d.width, c->src->d.height, c->src->d.format, c->src->d.flags, c->sr.xoffset, c->sr.yoffset, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial,
                          c->dst->d.width, c->dst->d.height, c->dst->d.format, c->dst->d.flags, c->dr.xoffset, c->dr.yoffset, c->dr.width, c->dr.height, s && d && s->img && d->img ? "" : " (an image missing)");
     if (!s || !d || !s->img || !d->img) return;
+    if (b10_swapped_tex(s) != b10_swapped_tex(d) && s->fmt != d->fmt) b10_note("texture copy between the swapped image and another format", b10_swapped_tex(s) ? s : d, b10_swapped_tex(s) ? d->fmt : s->fmt);
     depth_read(s);   // (copied from: DM_VK_DEPTH_DISCARD keeps storing it)
     if (s->drop || d->drop) { RED_ONCE(105, "a texture kept at half quality in a texture copy: left out (DM_VK_TEX_QUALITY=full to compare)"); return; }
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
