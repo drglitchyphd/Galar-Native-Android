@@ -131,6 +131,8 @@ public final class SetupActivity extends Activity {
         cleanLeftovers();   // (before the game may start straight away: a stopped setup's leftovers, in the background)
         if (ready()) setupShortcut();
         if (ready() && !asked && !running && notices()) asked = true;   // the last run crashed starting its graphics: this screen offers a driver instead of starting the game
+        // the last run crashed (Android's record of it, ApplicationExitInfo): offered once, a debug report for a GitHub issue (DebugBundle); Play goes on as a start would
+        if (ready() && !asked && !running && DebugBundle.offerAfterCrash(this, () -> { if (pendingWork(gameDir())) startCaptures(); else startGame(); })) asked = true;
         if (ready() && !asked && !running) { gameIcon(); if (!pendingWork(gameDir())) { startGame(); return; } }
         setupScreen(official);
         if (getIntent().getBooleanExtra("from_app", false)) startSetupFromApp();   // am start ... --ez setup true --ez from_app true: set up (again) from the installed app, over adb

@@ -821,6 +821,12 @@ static void *log_mirror(void *p) {
               fprintf(stderr, "[RED] freeze: no frame shown for 10 s in the foreground (frame %llu); what each thread waits on follows\n", (unsigned long long)f); crash_dump_now("no frame for 10 s"); } }
           else still = 0;
           lastf = f; }
+        // what the resident memory is (cheap: /proc/self/status, no smaps walk that would stall the game's page faults): anonymous (the game's heaps, the driver's
+        //   own allocations), file-backed (libraries, mapped game files), shared (buffers shared with the GPU driver), and the device memory this engine holds.
+        //   A run Android ends for memory leaves these lines as the record of what grew (DebugBundle.java's report: logs/log.prev.txt)
+        if (n % 6 == 0) { extern long nvn_vk_device_mb(void) __attribute__((weak));
+            fprintf(stderr, "[mem-by] anonymous %ld MB, files %ld MB, shared %ld MB, engine GPU blocks %ld MB, peak resident %ld MB\n", kb_of("/proc/self/status", "RssAnon:") / 1024,
+                    kb_of("/proc/self/status", "RssFile:") / 1024, kb_of("/proc/self/status", "RssShmem:") / 1024, nvn_vk_device_mb ? nvn_vk_device_mb() : -1, kb_of("/proc/self/status", "VmHWM:") / 1024); }
         { static char d[256]; if (!d[0]) dl_name(d, sizeof d, "log"); copy_file(src, d); }
     }
     return NULL;
