@@ -817,6 +817,7 @@ static void *inspector_main(void *p) {
     return NULL;
 }
 #include "safe_start.h"   // safe_start(): one level safer after a start that crashed in the graphics driver (tests/t_safe_start.c)
+static void seed_from_assets(void);   // (below: the pipeline list shipped with the app)
 static void host_start(void) {
     if (g_started++) return;
     const char *f = g_app->activity->externalDataPath; snprintf(g_files, sizeof g_files, "%s", f ? f : "/sdcard/nxnative");
@@ -895,6 +896,7 @@ static void host_start(void) {
     snprintf(p, sizeof p, "%s/mods", g_files); mkdir(p, 0770);   // made by the app itself, so it can read what is put there (a folder another user made, adb's for one, it cannot)
     boot_guard(p);   // (before the mods are read: a crash with mods switches them off)
     mods_romfs(p);
+    seed_from_assets();
     SETP("DM_VK_PSO_RECORD", "vk_pipelines.bin"); SETP("DM_VK_PCACHE", "vk_pipeline_cache.bin"); SETG("DM_VK_PSO_SEED", "vk_pipelines_seed.bin");
     snprintf(q, sizeof q, "%s/shaders.pak", g_game); if (!stat(q, &st)) setenv("DM_SPV_PAK", q, 0);   // the packed shader set, else vk/b-<chain>/
     { snprintf(p, sizeof p, "%s/aoc", g_game); struct stat as; if (!stat(p, &as)) setenv("DM_AOC_DIR", p, 0); }   // the DLC the player owns (Shield: the Expansion Pass keys; its content is in the update)
@@ -1020,6 +1022,20 @@ void front_frame_work(uint64_t busy_ns, uint64_t period_ns) {
 // Loading (GameActivity polls this every 500 ms and tells Android 13+ through GameManager.setGameState, so the system can raise the clocks and the storage
 //   speed for it): the game reading its files at 8 MB/s or more; over once it reads under 1 MB/s for 2 s. A load also tells the hint session (Android 16:
 //   APerformanceHint_notifyWorkloadSpike) that this frame's CPU work jumps, before the governor sees the late frames. DM_LOAD_HINT=0: neither
+// The pipeline list shipped with the app (assets/vk_pipelines_seed.bin, build_apk.py: every pipeline the game used on a phone) into the game folder, where
+//   DM_VK_PSO_SEED points: the first play after a setup gets them built before it starts too (nvn_vk.c prewarm), not only what this phone recorded. Copied
+//   when missing or of another size (a new app version's list); dm.zip is only unpacked by a setup, so the list is an asset of its own
+static void seed_from_assets(void) {
+    AAssetManager *am = g_app && g_app->activity ? g_app->activity->assetManager : NULL; if (!am) return;
+    AAsset *a = AAssetManager_open(am, "vk_pipelines_seed.bin", AASSET_MODE_STREAMING); if (!a) return;
+    char dst[1100], tmp[1110]; snprintf(dst, sizeof dst, "%s/vk_pipelines_seed.bin", g_game); snprintf(tmp, sizeof tmp, "%s.part", dst);
+    off_t n = AAsset_getLength(a); struct stat st;
+    if (!stat(dst, &st) && st.st_size == n) { AAsset_close(a); return; }
+    FILE *f = fopen(tmp, "wb"); char b[65536]; int k, ok = f != NULL; off_t got = 0;
+    while (ok && (k = AAsset_read(a, b, sizeof b)) > 0) { ok = fwrite(b, 1, (size_t)k, f) == (size_t)k; got += k; }
+    AAsset_close(a); if (f && fclose(f)) ok = 0;
+    if (ok && got == n && !rename(tmp, dst)) fprintf(stderr, "pipeline list shipped with the app: %lld bytes into the game folder\n", (long long)n); else unlink(tmp);
+}
 // the shaders built before the game starts (nvn_vk.c nvn_vk_prewarm_progress, DM_VK_PREWARM): done << 32 | listed while the game waits for them, else -1
 JNIEXPORT jlong JNICALL Java_com_nxnative_GameActivity_nativePrewarm(JNIEnv *env, jclass c) {
     (void)env; (void)c; extern int nvn_vk_prewarm_progress(int *done, int *total) __attribute__((weak));

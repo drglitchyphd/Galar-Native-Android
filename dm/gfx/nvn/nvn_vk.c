@@ -3404,12 +3404,26 @@ static void *prewarm_static(void) {
     return NULL;
 }
 // the main prewarm's shared state: the list, the next entry to take, the programs made so far (their layouts made once, under pw.mu: prog_layout is not for two threads)
-static struct { pso_rec *rs; int n; atomic_int next, built, had, failed, noshader, waits; pthread_mutex_t mu; nvn_hmap progs, seen; } g_pw = {
+static struct { pso_rec *rs; int n, ns; atomic_int next, unfit, built, had, failed, noshader, waits; pthread_mutex_t mu; nvn_hmap progs, seen; } g_pw = {
     .mu = PTHREAD_MUTEX_INITIALIZER, .progs = {.klen = 40}, .seen = {.klen = sizeof(pso_rec)} };
+// a pipeline from the shipped list (recorded on another phone): its colour / depth / stencil targets and vertex formats must be ones this GPU has, or it is left
+//   out (a driver handed an unsupported format may fail or worse; this phone's own list only holds what it built)
+static int fmt_has(uint32_t f, VkFormatFeatureFlags need, int buffer) {
+    if (!f) return 1;
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, (VkFormat)f, &fp);
+    return ((buffer ? fp.bufferFeatures : fp.optimalTilingFeatures) & need) == need;
+}
+static int pso_formats_ok(const pkey *k) {
+    for (int i = 0; i < 8; i++) if (!fmt_has(k->cfmt[i], VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, 0)) return 0;
+    if (!fmt_has(k->dfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0) || !fmt_has(k->sfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0)) return 0;
+    for (int i = 0; i < 32; i++) if (k->attr[i].used && !fmt_has(k->attr[i].fmt, VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT, 1)) return 0;
+    return 1;
+}
 static void *prewarm_worker(void *arg) {
     (void)arg; int waits = 0;
     for (int i; (i = atomic_fetch_add(&g_pw.next, 1)) < g_pw.n; ) {
         atomic_fetch_add(&g_pw_done, 1);
+        if (i < g_pw.ns && !pso_formats_ok(&g_pw.rs[i].k)) { atomic_fetch_add(&g_pw.unfit, 1); continue; }
         pthread_mutex_lock(&g_pw.mu);
         if (nvn_hm_get(&g_pw.seen, &g_pw.rs[i])) { pthread_mutex_unlock(&g_pw.mu); continue; }
         nvn_hm_put(&g_pw.seen, &g_pw.rs[i], (void *)1);
@@ -3446,13 +3460,13 @@ static void *prewarm_run(void) {
     pso_rec *rs = NULL; int n = 0;
     int ns = pso_rec_load(getenv("DM_VK_PSO_SEED"), &rs, &n), nr = pso_rec_load(getenv("DM_VK_PSO_RECORD"), &rs, &n);
     if (!n) { free(rs); return NULL; }
-    g_pw.rs = rs; g_pw.n = n; atomic_store(&g_pw_total, n);
+    g_pw.rs = rs; g_pw.n = n; g_pw.ns = ns; atomic_store(&g_pw_total, n);   // (the shipped list first: pso_rec_load appends)
     int nt = prewarm_threads(); pthread_t th[16]; int started = 0;
     for (int i = 1; i < nt; i++) if (!pthread_create(&th[started], NULL, prewarm_worker, NULL)) started++;
     prewarm_worker(NULL);
     for (int i = 0; i < started; i++) pthread_join(th[i], NULL);
-    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built, %d already there, %d failed, %d with a shader missing, %.1f s on %d thread(s)%s (paused %d times for low memory)",
-         n, ns, nr, atomic_load(&g_pw.built), atomic_load(&g_pw.had), atomic_load(&g_pw.failed), atomic_load(&g_pw.noshader), (mono_ns() - t0) / 1e9, started + 1,
+    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built, %d already there, %d failed, %d with a shader missing, %d shipped ones with formats this GPU lacks, %.1f s on %d thread(s)%s (paused %d times for low memory)",
+         n, ns, nr, atomic_load(&g_pw.built), atomic_load(&g_pw.had), atomic_load(&g_pw.failed), atomic_load(&g_pw.noshader), atomic_load(&g_pw.unfit), (mono_ns() - t0) / 1e9, started + 1,
          prewarm_all() ? ", before the game" : "", atomic_load(&g_pw.waits));
     free(rs); g_pw.rs = NULL;
     pcache_save();

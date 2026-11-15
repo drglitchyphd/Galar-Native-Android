@@ -154,6 +154,8 @@ def main():
         for f in ('cjk_fallback.ttf', 'cjk_fallback.LICENSE.txt'):   # the Chinese / Korean shared-font stand-in (GameActivity copies it into the game's font/)
             p = os.path.join(ANDROID, 'app/assets', f)
             if os.path.isfile(p): z.write(p, 'assets/' + f)
+        seed = g.table('vk_pipelines_seed.bin')   # the pipelines the game used on a phone (android_main.c copies it into the game folder; nvn_vk.c builds them before the game starts)
+        if seed.is_file(): z.write(str(seed), 'assets/vk_pipelines_seed.bin')
         z.writestr('assets/shader_chain', shader_chain(g) + '\n')   # the launcher sends players back to setup when their shader pack was made for another chain
         z.writestr('assets/games', ''.join(f'{f.id}\t{f.get("name")}\t{_game.file_stem(f)}\t{list(f.builds().values())[-1]["display"]}\t{"heavy" if f.get("android_heavy", "off") == "on" else ""}\n' for f in fam))   # the games this app runs, its own first, with the version they need (GameSettings.games)
         z.writestr('assets/app', f'{a.name}\t{g.get("app_repo", "github.com/simipoB/Galar-Native-Android")}\n')   # the app's name and where its official releases are (SetupActivity)
