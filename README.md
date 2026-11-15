@@ -37,6 +37,8 @@
 
 ## What's new
 
+- **Setup fixes from Galar Native (v0.44).** Setup no longer stops on a captured shader that's damaged or also in the game files. 4 GB phones run fewer setup workers, so Android doesn't end setup partway. The shader pack is compressed on every core. New on the setup screen: **Keep the phone cooler** (half the workers, slower).
+
 - **Crash fixes (v0.42).** The engine's own code no longer runs on a game thread's small 16 KB stack: it crashed there on some phones (#46). A GPU crash ("device lost") now counts as a crash, so the next start offers the safe options instead of failing the same way again.
 
 - **1440p off again (v0.41).** v0.40's 1440p made the game close at every start: the game's own memory for render targets is sized for 1080p. v0.41 ignores the setting, so players who picked it can play again with nothing to change. New for older Adreno phones with exploding polygons: ☰ → Model tests (Adreno) → **Copy shared data on the GPU**, a test (#34, #46). Each start now draws two test squares off-screen and checks their shape; a driver that misreads per-draw vertex sizes (the exploding polygons of #34) gets the safe vertex mode by itself.
