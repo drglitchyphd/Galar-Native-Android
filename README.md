@@ -37,6 +37,8 @@
 
 ## What's new
 
+- **Crash fixes (v0.42).** The engine's own code no longer runs on a game thread's small 16 KB stack: it crashed there on some phones (#46). A GPU crash ("device lost") now counts as a crash, so the next start offers the safe options instead of failing the same way again.
+
 - **1440p off again (v0.41).** v0.40's 1440p made the game close at every start: the game's own memory for render targets is sized for 1080p. v0.41 ignores the setting, so players who picked it can play again with nothing to change. New for older Adreno phones with exploding polygons: ☰ → Model tests (Adreno) → **Copy shared data on the GPU**, a test (#34, #46). Each start now draws two test squares off-screen and checks their shape; a driver that misreads per-draw vertex sizes (the exploding polygons of #34) gets the safe vertex mode by itself.
 
 - **Widescreen, 1440p and mods (v0.40).** ☰ → Picture → **Widescreen** widens the game's camera to your screen's own shape, with the HUD kept 16:9 in the middle; nothing is stretched. Off by default. Fl4sh's `.pchtxt` mods that keep data or code of their own (Dynamic FPS, the Ultrawide mods) no longer crash the game. Controls no longer stop working when the phone gets hot and Graphics Auto switches modes (#49). ☰ → Performance → **Barriers between passes** lets Xclipse, Mali and PowerVR players trade steady shadows for speed (#48).
