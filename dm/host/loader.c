@@ -582,7 +582,12 @@ static int arc_wide(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
 //   2560x1440 at the five places it is set (after Fl4sh's "2560x1440" mod for 1.1.1): sharper, and heavier on the GPU. Handheld mode keeps its own 720p.
 //   Each word is checked first (MOV / MOVK of 0x780 or 0x438 into the register the game uses); a build or code that differs is left alone
 static int arc_res(module_t *m, int64_t p0, int64_t p1) {
+    // Off for now unless forced (DM_ARC_RES_FORCE=1): the game's GPU memory areas stay sized for 1080p, so the first 2560x1440 render target (0xf00000 bytes)
+    //   finds no free block and the game's own pool allocator reads through a null pointer at start (main+0x2a8d750 from the texture builder at main+0x2a97f40;
+    //   v0.40 players who chose 1440p could not start the game). A player's DM_ARC_RES=1440 is ignored, so they can play again with nothing to change
     const char *e = getenv("DM_ARC_RES"); if (!e || atoi(e) != 1440) return 0;
+    { const char *f = getenv("DM_ARC_RES_FORCE"); if (!(f && atoi(f) > 0)) {
+        LOG("%s: 1440p is off for now (DM_ARC_RES=1440 ignored): the game's render target memory is sized for 1080p and the game crashed at start", m->name); return 0; } }
     static const struct { uint64_t off; uint32_t orig, imm; } R[] = {
         { 0x29f0650, 0x5280f008u, 0xa00 }, { 0x29f0654, 0x52808709u, 0x5a0 }, { 0x29f0410, 0x5280f008u, 0xa00 }, { 0x29f0414, 0x52808709u, 0x5a0 },
         { 0x2b9a5fc, 0x5280f008u, 0xa00 }, { 0x2b9a604, 0x52808708u, 0x5a0 }, { 0x277bd44, 0x5280f009u, 0xa00 }, { 0x277bd50, 0x52808708u, 0x5a0 },
