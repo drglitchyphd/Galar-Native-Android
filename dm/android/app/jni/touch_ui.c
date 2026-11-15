@@ -29,7 +29,7 @@
 #include <string.h>
 #include <time.h>
 
-enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, C_ALL, C_ENC, NCTL };   /* FORK v48: C_ENC, the encounter panel (drag to move, tap to collapse) */   /* FORK v47: C_ALL, the context controls' "all buttons" override */   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
+enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, C_ALL, C_ENC, C_RUN, NCTL };   /* FORK v52: C_RUN, run from a wild battle */   /* FORK v48: C_ENC, the encounter panel (drag to move, tap to collapse) */   /* FORK v47: C_ALL, the context controls' "all buttons" override */   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
 typedef struct { float cx, cy, r; int glyph, shown; uint64_t btn; } ctl;
 static ctl g_c[NCTL];
 static float g_w, g_h;
@@ -88,15 +88,25 @@ static void bhide_set(int on) { g_bhide = on; census_sync(); }
 static void battle_mode(int on) { g_bmode = on; bhide_set(on); g_bicons = on; g_blayout = on; g_w = g_h = 0; census_sync(); }
 // FORK v48: the encounter panel (DM_FORK_ENC=on, default off): the wild Pokémon of this battle from host/fork_enc.c (species, shiny, nature, ability, IVs, EVs).
 //   A control of its own (C_ENC: its place in the layout file as "enc"): dragged, it moves (saved in this screen's layout); tapped, it folds to a Poké Ball and back
-typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6]; } dm_fork_enc_info;
+typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6], form; } dm_fork_enc_info;   // (as host/fork_enc.c)
 int dm_fork_enc_get(dm_fork_enc_info *o) __attribute__((weak));
 static int g_enc_on = -1, g_enc_open = 1, g_enc_drag; static float g_enc_ox, g_enc_oy; static dm_fork_enc_info g_enc_now;
 volatile int dm_fork_enc_on;   // FORK v49: host/fork_enc.c reads game memory only while this is set
 static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); dm_fork_enc_on = g_enc_on; } return g_enc_on; }
 static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.active; }
 static void enc_rect(float r4[4]);   // (below, with the drawing)
+// FORK v52: the Run button (DM_FORK_RUN=on, default off): in a battle, Down three times then A (the battle menu's cursor starts on Fight each turn, Run is last).
+//   With Encounter info on, only in wild battles (a trainer battle has no running); without it, in every battle (the game then just says there is no running)
+static int g_run_on = -1;
+static int run_on(void) { if (g_run_on < 0) { const char *e = getenv("DM_FORK_RUN"); g_run_on = e && !strcmp(e, "on"); } return g_run_on; }
+static void *run_macro(void *p) {
+    (void)p; static const uint64_t seq[] = { DM_BTN_DOWN, DM_BTN_DOWN, DM_BTN_DOWN, DM_BTN_A };
+    for (int i = 0; i < 4; i++) { dm_input_press(seq[i], 80000000ull); usleep(170000); }
+    return NULL;
+}
 static int fork_hidden(int c) {
     if (c == C_ENC) return !enc_live();
+    if (c == C_RUN) return !run_on() || !(&dm_fork_screen && atomic_load(&dm_fork_screen) == 2) || (enc_on() && dm_fork_enc_get && !g_enc_now.active);
     if (c == C_FF) return !g_ffscope || (g_ffscope == 1 && !in_battle());
     if (c == C_TURBO) return !g_turbo_on;
     if (c == C_ALL) { int k = screen_kind(); return !ctx_on(k); }   // FORK v47: only where a context mode applies (lit while its override is on)
@@ -116,7 +126,7 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 
 // ---------- the player's layout (the in-game editor): position, size and visibility of each control, kept in <files>/touch_layout.txt ----------
 // One line per changed control: "<name> <x / width> <y / height> <radius / height> <shown>"; controls without a line keep the default layout
-static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all", "enc" };   // FORK: + ff, turbo
+static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all", "enc", "run" };   // FORK: + ff, turbo
 static struct { int set; float fx, fy, fr; int shown, shape; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
 static char g_lay_path[1100]; static int g_lay_loaded;
 // FORK: one layout per screen and orientation: touch_layout_<profile>.txt (outer_landscape, inner_landscape, inner_portrait, outer_portrait), picked from the window's
@@ -201,7 +211,8 @@ static void layout(float w, float h) {
     g_c[C_R3] = (ctl){ g_c[C_RSTICK].cx, g_c[C_RSTICK].cy - 0.21f * s, 0.05f * s, OVL_G_R3, 1, DM_BTN_RS };
     g_c[C_FF] = (ctl){ w * 0.5f + 0.24f * s, 0.06f * s, mr, OVL_G_FF, 1, 0 };
     g_c[C_ALL] = (ctl){ w * 0.5f + 0.36f * s, 0.06f * s, mr * 0.85f, OVL_G_ALL, 1, 0 };
-    g_c[C_ENC] = (ctl){ 0.06f * w + mr, 0.20f * h, mr, OVL_G_BALL, 1, 0 };   // FORK v48: the encounter panel's corner (its Poké Ball when folded), left side under ☰   // FORK v47: ⊞ all buttons, right of fast-forward   // FORK: fast-forward, just right of + (fork_hidden: only when Fast-forward is on)
+    g_c[C_ENC] = (ctl){ 0.06f * w + mr, 0.20f * h, mr, OVL_G_BALL, 1, 0 };
+    g_c[C_RUN] = (ctl){ w * 0.60f, h - 0.08f * s, mr, OVL_G_RUN, 1, 0 };   // FORK v52: Run, bottom centre-right (battles keep their own layout in Battle mode)   // FORK v48: the encounter panel's corner (its Poké Ball when folded), left side under ☰   // FORK v47: ⊞ all buttons, right of fast-forward   // FORK: fast-forward, just right of + (fork_hidden: only when Fast-forward is on)
     g_c[C_TURBO] = (ctl){ w - 0.12f * s, h - 0.50f * s, 0.05f * s, OVL_G_TURBO, 1, 0 };   // FORK: turbo A, above-right of A (only when Turbo A is on)
     // touch-first games (Legends: Arceus): only the movement stick and − / + on screen; everything else is touch on the game itself (touch_ui_event's gestures, touch_menu.c)
     if (GESTURES_ON) for (int c = C_RSTICK; c < NCTL; c++) if (c != C_PLUS && c != C_MINUS && c != C_MENU) g_c[c].shown = 0;
@@ -234,7 +245,7 @@ static int g_cam_pct = -1, g_cam_stick = -1, g_rs_off = -1;
 static int cam_pct(void) { if (g_cam_pct < 0) { const char *e = getenv("DM_TOUCH_CAM_SENS"); int v = e ? atoi(e) : 100; g_cam_pct = v < 25 || v > 300 ? 100 : v; } return g_cam_pct; }
 static int cam_stick(void) { if (g_cam_stick < 0) { const char *e = getenv("DM_TOUCH_CAMERA"); g_cam_stick = e && !strcmp(e, "stick"); } return g_cam_stick; }
 static int rs_off(void) { if (g_rs_off < 0) { const char *e = getenv("DM_TOUCH_RSTICK"); g_rs_off = e && !strcmp(e, "off"); } return g_rs_off; }
-static int ctl_off(int c) { return ((c == C_L3 || c == C_R3) && !l3r3_on()) || ((c == C_RSTICK || c == C_R3) && rs_off()) || (c == C_THROW && !GESTURES_ON) || (c == C_ENC && !enc_on()); }   // FORK v48: + the encounter panel only when it is on   // FORK v48: + the throw button (Legends: Arceus only) out of Sword's editor   // left out entirely, the layout editor too (FORK v47: + rs_off)
+static int ctl_off(int c) { return ((c == C_L3 || c == C_R3) && !l3r3_on()) || ((c == C_RSTICK || c == C_R3) && rs_off()) || (c == C_THROW && !GESTURES_ON) || (c == C_ENC && !enc_on()) || (c == C_RUN && !run_on()); }   // FORK v48: + the encounter panel only when it is on   // FORK v48: + the throw button (Legends: Arceus only) out of Sword's editor   // left out entirely, the layout editor too (FORK v47: + rs_off)
 static int hit(int c, float x, float y, float slack) {
     if (fork_hidden(c)) return 0;   // FORK
     const ctl *k = &g_c[c]; float dx = x - k->cx, dy = y - k->cy, r = k->r * slack;
@@ -508,6 +519,8 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (sb) { dm_input_press(sb, 80000000ull); click_locked(); g_cam_vx = g_cam_vy = 0; }
         }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_MENU && hit(C_MENU, g_ptr[i].x, g_ptr[i].y, 1.5f)) { click_locked(); front_open_menu(0); }
+        for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_RUN && hit(C_RUN, g_ptr[i].x, g_ptr[i].y, 1.5f)) {   // FORK v52: run
+            pthread_t th; click_locked(); if (!pthread_create(&th, NULL, run_macro, NULL)) pthread_detach(th); fprintf(stderr, "[FORK] [touch] run: Down x3, A\n"); }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_ENC) {   // FORK v48: dropped: kept in this screen's layout; tapped: folds / opens
             if (g_enc_drag) { edit_store(C_ENC); layout_save(); } else { g_enc_open = !g_enc_open; click_locked(); }
             g_enc_drag = 0; }
@@ -622,7 +635,7 @@ static void pokeball(dm_ovl_item *it, int *n, int max, const ctl *c, int on, flo
     add(it, n, max, x, y + r * 0.07f, r * 1.03f, OVL_DISC, 5, 20, 40, 0.35f * a);
     add(it, n, max, x, y, r, OVL_DISC, 30, 30, 36, 0.92f * a);
     add(it, n, max, x, y, r * 0.90f, OVL_DISC, 225 + lift / 3, 40 + lift, 45 + lift, 0.95f * a);
-    add(it, n, max, x, y + r * 0.45f, r * 0.62f, OVL_DISC, 245, 245, 245, 0.55f * a);
+    { dm_ovl_item *h = add(it, n, max, x, y, r * 0.90f, OVL_DISC, 0, 0, 0, 0); if (h) { h->glyph = OVL_G_HALF; h->gscale = 1.0f; h->galpha = 0.97f * a; } }   // FORK v52: the white lower half (was a pale disc)
     dm_ovl_item *o = add(it, n, max, x, y, r * 0.90f, OVL_RRECT, 30, 30, 36, 0.95f * a); if (o) { o->y = y - r * 0.09f; o->h = r * 0.18f; o->radius = 0.5f; }
     add(it, n, max, x, y, r * 0.30f, OVL_DISC, 30, 30, 36, 0.95f * a);
     add(it, n, max, x, y, r * 0.21f, OVL_DISC, 250, 250, 250, 0.98f * a);
@@ -670,6 +683,7 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
     else if (!strcmp(key, "DM_FORK_GESTURES")) g_gest = value && !strcmp(value, "on");   // FORK v47
+    else if (!strcmp(key, "DM_FORK_RUN")) { g_run_on = value && !strcmp(value, "on"); g_w = g_h = 0; }   // FORK v52
     else if (!strcmp(key, "DM_FORK_ENC")) { g_enc_on = value && !strcmp(value, "on"); dm_fork_enc_on = g_enc_on; }   // FORK v48 (v49: + the probe)
     else if (!strncmp(key, "DM_FORK_CTX_", 12)) { int on = value && !strcmp(value, "on");   // FORK v47: the context switches
         if (!strcmp(key, "DM_FORK_CTX_DIALOGUE")) g_ctx_dlg = on; else if (!strcmp(key, "DM_FORK_CTX_MENU")) g_ctx_menu = on; else if (!strcmp(key, "DM_FORK_CTX_WORLD")) g_ctx_world = on;
@@ -713,6 +727,7 @@ static void prefs(void) {
 }
 // FORK v48: text from the label atlas: ASCII 33-95 at their own cells (overlay/ovl_font.h), upper case, monospace (advance 0.6 of the height)
 #include "fork_enc_names.h"
+#include "fork_enc_types.h"   // FORK v52
 static const char *const k_enc_nature[25] = { "HARDY","LONELY","BRAVE","ADAMANT","NAUGHTY","BOLD","DOCILE","RELAXED","IMPISH","LAX","TIMID","HASTY","SERIOUS","JOLLY",
     "NAIVE","MODEST","MILD","QUIET","BASHFUL","RASH","CALM","GENTLE","SASSY","CAREFUL","QUIRKY" };
 static void otext(dm_ovl_item *it, int *n, int max, float x, float y, float ch, const char *s, float a) {   // (x, y: the first character's left edge and the line's centre)
@@ -748,8 +763,17 @@ static void enc_draw(dm_ovl_item *it, int *n, int max) {
     enc_geo g = enc_layout(); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f;
     // the info box (under the ribbon), then the ribbon (a pill from the ball's middle to the right), then the ball over the ribbon's left end
     o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.84f); if (o) { o->x = g.bx0; o->y = g.by0; o->w = g.bx1 - g.bx0; o->h = g.by1 - g.by0; o->radius = 0.10f; }
-    int R = e->shiny ? 240 : 205, G = e->shiny ? 190 : 50, B = e->shiny ? 40 : 55;   // (red, gold on a shiny)
-    o = add(it, n, max, 0, 0, 1, OVL_RRECT, R, G, B, 0.95f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = g.rx1 - g.cx; o->h = g.rh; o->radius = 0.5f; }
+    // v52: the ribbon in the Pokémon's type colours (two types: the second at the right end), a gold edge on a shiny
+    static const unsigned char tc[18][3] = { {168,167,122},{194,46,40},{169,143,243},{163,62,161},{226,191,101},{182,161,54},{166,185,26},{115,87,151},{183,183,206},
+        {238,129,48},{99,144,240},{122,199,76},{247,208,44},{249,85,135},{150,217,214},{111,53,252},{112,87,70},{214,133,173} };
+    int ti = e->species > 0 && e->species < 899 ? e->species : 0;
+    if (ti && e->form > 0 && e->form < k_enc_fc[ti] && k_enc_fsi[ti]) ti = k_enc_fsi[ti] + e->form - 1;
+    int t1 = ti < (int)sizeof k_enc_t1 ? k_enc_t1[ti] % 18 : 0, t2 = ti < (int)sizeof k_enc_t2 ? k_enc_t2[ti] % 18 : t1;
+    float rl = g.rx1 - g.cx;
+    if (e->shiny) { o = add(it, n, max, 0, 0, 1, OVL_RRECT, 240, 190, 40, 1.0f); if (o) { float m = g.rh * 0.12f; o->x = g.cx - m; o->y = g.cy - g.rh * 0.5f - m; o->w = rl + 2 * m; o->h = g.rh + 2 * m; o->radius = 0.5f; } }
+    if (t2 != t1) { o = add(it, n, max, 0, 0, 1, OVL_RRECT, tc[t2][0], tc[t2][1], tc[t2][2], 0.97f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = rl; o->h = g.rh; o->radius = 0.5f; } }
+    o = add(it, n, max, 0, 0, 1, OVL_RRECT, tc[t1][0], tc[t1][1], tc[t1][2], 0.97f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = t2 != t1 ? rl * 0.70f : rl; o->h = g.rh; o->radius = 0.5f; }
+    o = add(it, n, max, 0, 0, 1, OVL_RRECT, 0, 0, 0, 0.18f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = rl; o->h = g.rh; o->radius = 0.5f; }   // (a light shade: white text reads on yellow / ice)
     ctl ball = g_c[C_ENC]; ball.cx = g.cx; ball.cy = g.cy; pokeball(it, n, max, &ball, 0, 1.0f);
     char ln[64]; float nch = fminf(ch * 1.15f, g.rh * 0.7f);
     snprintf(ln, sizeof ln, "%.15s", e->species >= 0 && e->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[e->species] : "?");

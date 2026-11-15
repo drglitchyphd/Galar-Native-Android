@@ -50,6 +50,13 @@ def star(d, n):   # a five-pointed star (shiny, the encounter panel)
     c = n / 2; ro = n * 0.40; ri = ro * 0.42
     pts = [(c + (ro if i % 2 == 0 else ri) * math.sin(i * math.pi / 5), c - (ro if i % 2 == 0 else ri) * math.cos(i * math.pi / 5)) for i in range(10)]
     d.polygon(pts, fill=255)
+def halfdisc(d, n):   # the lower half of a disc filling the cell (the Poké Ball's white half, v52)
+    d.pieslice([0, 0, n - 1, n - 1], start=0, end=180, fill=255)
+def run(d, n):   # run away: an open doorway and an arrow out of it (v52)
+    w = int(n * 0.07)
+    d.line([(n * 0.42, n * 0.20), (n * 0.18, n * 0.20), (n * 0.18, n * 0.80), (n * 0.42, n * 0.80)], fill=255, width=w, joint='curve')
+    d.rectangle([n * 0.36, n * 0.46, n * 0.70, n * 0.54], fill=255)
+    d.polygon([(n * 0.84, n * 0.50), (n * 0.64, n * 0.32), (n * 0.64, n * 0.68)], fill=255)
 def turbo(d, n):   # a lightning bolt
     p = [(0.58, 0.14), (0.30, 0.54), (0.48, 0.54), (0.40, 0.86), (0.70, 0.42), (0.52, 0.42), (0.62, 0.14)]
     d.polygon([(x * n, y * n) for x, y in p], fill=255)
@@ -61,7 +68,7 @@ def char(ch):
         ft = ImageFont.truetype(FONT, int(n * 0.78)); b = d.textbbox((0, 0), ch, font=ft)
         d.text(((n - (b[2] - b[0])) / 2 - b[0], (n - (b[3] - b[1])) / 2 - b[1]), ch, font=ft, fill=255)
     return f
-for idx, fn in [(12, ff), (13, ball), (14, back), (15, info), (16, turbo), (17, allbtn), (18, star)] + [(c, char(chr(c))) for c in range(33, 96)]:
+for idx, fn in [(12, ff), (13, ball), (14, back), (15, info), (16, turbo), (17, allbtn), (18, star), (19, halfdisc), (20, run)] + [(c, char(chr(c))) for c in range(33, 96)]:
     px = cell(fn).load()
     for y in range(CELL):
         for x in range(CELL): vals[y * W + idx * CELL + x] = px[x, y]

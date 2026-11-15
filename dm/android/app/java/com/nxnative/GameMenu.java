@@ -386,6 +386,8 @@ public final class GameMenu {
         // FORK v48: the encounter panel (touch_ui.c enc_draw, host/fork_enc.c)
         choice(a, "DM_FORK_ENC", t(a, "Encounter info"), new String[][] { { "", t(a, "Off"), "" },
             { "on", t(a, "On"), t(a, "In wild battles: a panel with the Pokémon's species, shiny, nature, ability, IVs and EVs. Drag it to move it; tap it to fold it to a Poké Ball (gold star = shiny)") } });
+        choice(a, "DM_FORK_RUN", t(a, "Run button"), new String[][] { { "", t(a, "Off"), "" },   // FORK v52 (touch_ui.c run_macro)
+            { "on", t(a, "On"), t(a, "In wild battles: one tap picks Run from the battle menu (with Encounter info on it shows in wild battles only)") } });
         heading(a, t(a, "Context controls"));
         note(a, t(a, "The fork guesses the screen from what the game draws. If buttons you need are hidden, tap ⊞ (top centre) for every button until the screen changes. Arrange a screen's own layout with Move the touch controls while on it."));
         choice(a, "DM_FORK_CTX_DIALOGUE", t(a, "Dialogue"), new String[][] { { "", t(a, "Same as elsewhere"), "" },

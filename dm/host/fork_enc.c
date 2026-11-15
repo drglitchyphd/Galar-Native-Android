@@ -51,13 +51,13 @@ static int is_sword(void) {
 }
 // v48: what the encounter panel shows (android/app/jni/touch_ui.c dm_fork_enc_get): the wild Pokémon of this battle. A battle counts as wild when the wild slot
 //   holds a new Pokémon (another encryption constant than the last battle's): in a trainer battle it still holds the last wild one, so nothing is shown
-typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6]; } dm_fork_enc_info;   // iv / ev: HP, Atk, Def, SpA, SpD, Spe
+typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6], form; } dm_fork_enc_info;   // (v52: + form, the types)   // iv / ev: HP, Atk, Def, SpA, SpD, Spe
 static pthread_mutex_t g_enc_mu = PTHREAD_MUTEX_INITIALIZER; static dm_fork_enc_info g_enc;
 int dm_fork_enc_get(dm_fork_enc_info *o) { pthread_mutex_lock(&g_enc_mu); *o = g_enc; pthread_mutex_unlock(&g_enc_mu); return o->active; }
 static void enc_set(const uint8_t *d, int active) {
     dm_fork_enc_info e = { 0 };
     if (active) { uint32_t pid = rd32(d + 0x1C), x = rd32(d + 0x0C) ^ pid, xr = (x ^ (x >> 16)) & 0xFFFF, iv = rd32(d + 0x8C);
-        e.active = 1; e.species = rd16(d + 8); e.shiny = xr < 16 ? (xr == 0 ? 2 : 1) : 0; e.nature = d[0x20] < 25 ? d[0x20] : 0; e.ability = rd16(d + 0x14);
+        e.active = 1; e.species = rd16(d + 8); e.form = d[0x24]; e.shiny = xr < 16 ? (xr == 0 ? 2 : 1) : 0; e.nature = d[0x20] < 25 ? d[0x20] : 0; e.ability = rd16(d + 0x14);
         int sh[6] = { 0, 5, 10, 20, 25, 15 }; for (int i = 0; i < 6; i++) e.iv[i] = (iv >> sh[i]) & 31;
         int eo[6] = { 0x26, 0x27, 0x28, 0x2A, 0x2B, 0x29 }; for (int i = 0; i < 6; i++) e.ev[i] = d[eo[i]]; }
     pthread_mutex_lock(&g_enc_mu); g_enc = e; pthread_mutex_unlock(&g_enc_mu);
