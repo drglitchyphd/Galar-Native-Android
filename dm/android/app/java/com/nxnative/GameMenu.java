@@ -316,6 +316,10 @@ public final class GameMenu {
             // Lowest: handheld mode with the game's 3D render scale capped (Pokémon Sword / Shield: the engine's hle_resscale.c; Scarlet / Violet have no such scale)
             { "lowest", t(a, "Lowest"), t(a, GameSettings.paldea(a) ? "Lowest: handheld mode, 3D at 960x540, coolest" : "Lowest: 3D at 960x540, coolest") } };
         choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);
+        // the shaders this phone knows, built before the game starts (nvn_vk.c DM_VK_PREWARM): from the next start
+        choice(a, "DM_VK_PREWARM", t(a, "Shaders at start"), new String[][] {
+            { "", t(a, "All before playing"), t(a, "Every shader this phone has used is built before the game starts, on all cores: a short wait, then nothing missing or stuttering") },
+            { "background", t(a, "While playing"), t(a, "The game starts at once and builds them as it goes: objects can be missing or stutter for the first minutes") } });
         // the game's own 3D render scale, capped (android_main.c DM_RES_CAP, hle_resscale.c): Sword / Shield, at once. The HUD and text stay sharp; only the 3D is drawn smaller
         if (!GameSettings.paldea(a)) choice(a, "DM_RES_CAP", t(a, "3D render scale"), new String[][] {
             { "", t(a, "Auto"), t(a, "Auto: what the Graphics setting gives, lowered by itself when the phone is hot") },

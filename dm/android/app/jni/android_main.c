@@ -1020,6 +1020,12 @@ void front_frame_work(uint64_t busy_ns, uint64_t period_ns) {
 // Loading (GameActivity polls this every 500 ms and tells Android 13+ through GameManager.setGameState, so the system can raise the clocks and the storage
 //   speed for it): the game reading its files at 8 MB/s or more; over once it reads under 1 MB/s for 2 s. A load also tells the hint session (Android 16:
 //   APerformanceHint_notifyWorkloadSpike) that this frame's CPU work jumps, before the governor sees the late frames. DM_LOAD_HINT=0: neither
+// the shaders built before the game starts (nvn_vk.c nvn_vk_prewarm_progress, DM_VK_PREWARM): done << 32 | listed while the game waits for them, else -1
+JNIEXPORT jlong JNICALL Java_com_nxnative_GameActivity_nativePrewarm(JNIEnv *env, jclass c) {
+    (void)env; (void)c; extern int nvn_vk_prewarm_progress(int *done, int *total) __attribute__((weak));
+    int d = 0, t = 0; if (!nvn_vk_prewarm_progress || !nvn_vk_prewarm_progress(&d, &t)) return -1;
+    return (jlong)((uint64_t)(uint32_t)d << 32 | (uint32_t)t);
+}
 JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env, jclass c) {
     (void)env; (void)c;
     static int off = -1; if (off < 0) { const char *e = getenv("DM_LOAD_HINT"); off = e && !strcmp(e, "0"); } if (off) return 0;
