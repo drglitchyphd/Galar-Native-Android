@@ -3406,6 +3406,9 @@ static void *prewarm_main(void *arg) {
 // Builds the pipeline for key k (no lookup: pso_get and the prewarm do that); ss: the draw state built in, on a driver without extended dynamic state (else NULL)
 static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     vshader *vs = pr->sh[0], *fs = pr->sh[1]; VkPipeline p = VK_NULL_HANDLE;
+    // a capture drawn as points (a key recorded while that route was on, or now): only with the route on and its shaders made. A recorded one built ahead at a start
+    //   with the route off had no point modules: Adreno's driver crashed in vkCreateGraphicsPipelines on the null module
+    if (k.tfpts && (g_tf_pts <= 0 || k.tfpts > 4 || !vs || !vs->ptsmod || !tfp_init() || !g_tfp_fs[k.tfpts - 1])) return VK_NULL_HANDLE;
     if (!g_eds && !ss) { RED_ONCE(110, "a pipeline without its draw state on a driver without extended dynamic state (vertex %s): not made", vs ? vs->key : "-"); return VK_NULL_HANDLE; }
     VkPipelineShaderStageCreateInfo st[5]; uint32_t nst = 0;
     if (!g_clipctl && !k.depth_zero && vs && !vs->glmod) RED_ONCE(27, "GL depth mode without VK_EXT_depth_clip_control and no translated depth fallback for vertex shader %s", vs->key);
