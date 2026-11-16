@@ -57,7 +57,7 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 
 - Queued for v52 (Steven's sketch, Nov 15): the encounter panel as Poké Ball (top left, the handle) + name ribbon (red, gold on a shiny) + info box below (touch_ui.c enc_layout / enc_draw; mock: docs/encounter_panel_mock.png). The area dex out of battle will use the same frame. Compiles, not built.
 
-- v51 panel WORKS (Steven's logs: Yamper 835, Chewtle 833, checksum ok; SysBot's offset holds, the v50 failure was the in-battle flag). Queued for v52 (compiles, not built): Poké Ball with a white lower half (atlas cell 19), ribbon in the type colours (fork_enc_types.h from PKHeX personal_swsh, forms included; 2 types = split ribbon; shiny = gold edge + ★), **Run button** (DM_FORK_RUN, off; C_RUN: Down x3 + A, wild battles only when Encounter info is on; atlas cell 20). Mock: docs/encounter_panel_mock.png.
+- v51 panel WORKS (Steven's logs: Yamper 835, Chewtle 833, checksum ok; SysBot's offset holds, the v50 failure was the in-battle flag). Queued for v52 (compiles, not built): Poké Ball with a white lower half (atlas cell 19), ribbon in the type colours (fork_enc_types.h from PKHeX personal_swsh, forms included; 2 types = split ribbon; shiny = gold edge + ★); the Run button was tried and scrapped (Steven, Nov 16: no native run; a menu macro would need the cursor behaviour; atlas cell 20 kept unused). Mock: docs/encounter_panel_mock.png.
 
 ## Next
 1. Steven tests v47 (long run).
