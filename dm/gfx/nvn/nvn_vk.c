@@ -195,6 +195,18 @@ static PFN_vkVoidFunction vk_dev_fn(const char *name) {   // a device function; 
     return NULL;
 }
 #define VK_LOAD_D(f) f = (PFN_##f)vk_dev_fn(#f);
+// Vulkan 1.0 drivers take SPIR-V 1.0 only: every shader module is made from a 1.0 copy (nvn_spv.c spv_to_10) where the shader allows it; one that really needs more
+//   is passed as it is (the driver may refuse it) and named once in the log
+static PFN_vkCreateShaderModule g_csm_real;
+static _Atomic int g_csm10_n, g_csm10_fail;
+static VKAPI_ATTR VkResult VKAPI_CALL vk_shader_module_10(VkDevice d, const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *a, VkShaderModule *m) {
+    size_t nw = 0; uint32_t *c = spv_to_10(ci->pCode, ci->codeSize / 4, &nw);
+    if (!c) { if (ci->codeSize >= 8 && ci->pCode[1] > 0x00010000u && !atomic_fetch_add(&g_csm10_fail, 1)) VLOG("[RED] Vulkan 1.0: a shader needs more than SPIR-V 1.0 (a subgroup instruction): passed as it is"); return g_csm_real(d, ci, a, m); }
+    VkShaderModuleCreateInfo c2 = *ci; c2.codeSize = nw * 4; c2.pCode = c;
+    VkResult r = g_csm_real(d, &c2, a, m); free(c);
+    if (atomic_fetch_add(&g_csm10_n, 1) == 0) VLOG("Vulkan 1.0: shaders made SPIR-V 1.0 as they load (first: %s)", r ? "refused" : "ok");
+    return r;
+}
 const char *nvn_vk_gpu_name(void) { return g_dev ? g_props.deviceName : NULL; }   // android_main.c boot_guard
 void mtl_init(void) {
     if (g_dev) return;
@@ -229,7 +241,12 @@ void mtl_init(void) {
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .flags = ifl, .pApplicationInfo = &ai, .enabledExtensionCount = niext, .ppEnabledExtensionNames = iext,
                                  .enabledLayerCount = nlayers, .ppEnabledLayerNames = layers };
     VkResult ir = vkCreateInstance(&ici, NULL, &g_inst); uint32_t npd = 0;
-    if (ir == VK_SUCCESS) { VK_INSTANCE(VK_LOAD_I) vkEnumeratePhysicalDevices(g_inst, &npd, NULL); }
+    if (ir == VK_SUCCESS) { VK_INSTANCE(VK_LOAD_I)
+        // a Vulkan 1.0 instance has these only under their extension names (VK_KHR_get_physical_device_properties2, enabled above when listed)
+        if (!vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2 = (PFN_vkGetPhysicalDeviceProperties2)vkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties2KHR");
+        if (!vkGetPhysicalDeviceFeatures2) vkGetPhysicalDeviceFeatures2 = (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2KHR");
+        if (!vkGetPhysicalDeviceExternalBufferProperties) vkGetPhysicalDeviceExternalBufferProperties = (PFN_vkGetPhysicalDeviceExternalBufferProperties)vkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceExternalBufferPropertiesKHR");
+        vkEnumeratePhysicalDevices(g_inst, &npd, NULL); }
     if (!npd) {   // a driver package for another GPU (Turnip, Adreno only, chosen on a Mali-G615: "no Vulkan device" at every start, #71): this start goes on with the phone's own driver
         const char *drv = getenv("DM_VK_DRIVER");
         if (drv && *drv) {
@@ -249,7 +266,7 @@ void mtl_init(void) {
     VkExtensionProperties *de = calloc(nde ? nde : 1, sizeof *de); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &nde, de);
     const char *dext[24]; uint32_t ndext = 0;
     g_api = g_props.apiVersion < g_instance_api ? g_props.apiVersion : g_instance_api;   // (the version the driver hands out functions for: the lower of the two)
-    if (getenv("DM_VK_API")) { int a = atoi(getenv("DM_VK_API")); uint32_t f = a == 11 ? VK_API_VERSION_1_1 : a == 12 ? VK_API_VERSION_1_2 : g_api; if (f < g_api) g_api = f; }
+    if (getenv("DM_VK_API")) { int a = atoi(getenv("DM_VK_API")); uint32_t f = a == 10 ? VK_API_VERSION_1_0 : a == 11 ? VK_API_VERSION_1_1 : a == 12 ? VK_API_VERSION_1_2 : g_api; if (f < g_api) g_api = f; }
     int old = g_api < VK_API_VERSION_1_3, old11 = g_api < VK_API_VERSION_1_2;
     int x_dynren = 0, x_eds = 0;   // (old drivers: the extension is listed and enabled; its feature structure goes into the chain below only then)
     if (old) {   // what Vulkan 1.3 has built in, as extensions (Vulkan 1.1 / 1.2 drivers: older Mali, PowerVR, Adreno 6xx stock drivers)
@@ -294,7 +311,16 @@ void mtl_init(void) {
     if ((g_border = has_ext(de, nde, "VK_EXT_custom_border_color"))) dext[ndext++] = "VK_EXT_custom_border_color";
     if ((g_divisor = !as_mali && has_ext(de, nde, "VK_EXT_vertex_attribute_divisor"))) dext[ndext++] = "VK_EXT_vertex_attribute_divisor";
     if ((g_eds2 = has_ext(de, nde, "VK_EXT_extended_dynamic_state2"))) dext[ndext++] = "VK_EXT_extended_dynamic_state2";
-    int compctl = has_ext(de, nde, "VK_EXT_image_compression_control"); if (compctl) dext[ndext++] = "VK_EXT_image_compression_control";   // to read whether render targets stay compressed
+    int compctl = has_ext(de, nde, "VK_EXT_image_compression_control"); if (compctl) dext[ndext++] = "VK_EXT_image_compression_control";
+    // Vulkan 1.0 drivers: what 1.1 has built in and the engine relies on, as extensions. maintenance1: the flipped viewport (a negative height) that turns NVN's upper-left
+    //   origin into Vulkan's; shader_draw_parameters: the base instance 718 of 1,543 Sword / Shield shaders read; storage_buffer_storage_class: a shader that uses it
+    //   (the shaders themselves are made SPIR-V 1.0 at module creation: vk_shader_module_10)
+    if (g_api < VK_API_VERSION_1_1) {
+        static const char *const x10[] = { "VK_KHR_maintenance1", "VK_KHR_shader_draw_parameters", "VK_KHR_storage_buffer_storage_class" };
+        for (unsigned k = 0; k < sizeof x10 / sizeof *x10; k++) { if (has_ext(de, nde, x10[k])) dext[ndext++] = x10[k]; else VLOG("[RED] Vulkan 1.0 driver without %s: %s", x10[k],
+            k == 0 ? "the picture may come out upside down" : k == 1 ? "shaders that read the base instance will not load" : "shaders with storage buffers of that kind will not load"); }
+        VLOG("Vulkan 1.0 driver: shaders made SPIR-V 1.0 as they load, 1.1 features through their extensions");
+    }   // to read whether render targets stay compressed
     if (getenv("DM_VK_NO_HOST_IMPORT")) g_host_import = 0;
     // Imported host memory pins the game's pools (about 3 GB) for every submission. Samsung's Xclipse driver of the late-2026 One UI update refuses that a few frames into play
     // (vkQueueSubmit: VK_ERROR_OUT_OF_HOST_MEMORY with a gigabyte free, #39), so on Xclipse the driver's own memory backs the pools instead (as on Mali); elsewhere a
@@ -430,6 +456,7 @@ void mtl_init(void) {
     VKCHECK(vkCreateDevice(g_pd, &dci, NULL, &g_dev));
     { extern void dm_boot_device_up(void) __attribute__((weak)); if (dm_boot_device_up) dm_boot_device_up(); }   // (android_main.c boot_state: a crash from here on counts as the driver's)
     VK_DEVICE(VK_LOAD_D)
+    if (g_api < VK_API_VERSION_1_1) { g_csm_real = vkCreateShaderModule; vkCreateShaderModule = vk_shader_module_10; }   // (Vulkan 1.0: every shader through spv_to_10)
     vkGetDeviceQueue(g_dev, g_qf, 0, &g_q);
     p_push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(g_dev, "vkCmdPushDescriptorSetKHR");
     if (compctl && fic.imageCompressionControl) p_layout2 = (PFN_vkGetImageSubresourceLayout2EXT)vkGetDeviceProcAddr(g_dev, "vkGetImageSubresourceLayout2EXT");
