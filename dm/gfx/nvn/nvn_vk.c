@@ -245,6 +245,7 @@ void mtl_init(void) {
         if (!vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2 = (PFN_vkGetPhysicalDeviceProperties2)vkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties2KHR");
         if (!vkGetPhysicalDeviceFeatures2) vkGetPhysicalDeviceFeatures2 = (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2KHR");
         if (!vkGetPhysicalDeviceExternalBufferProperties) vkGetPhysicalDeviceExternalBufferProperties = (PFN_vkGetPhysicalDeviceExternalBufferProperties)vkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceExternalBufferPropertiesKHR");
+        if (getenv("DM_VK_NO_F2") && atoi(getenv("DM_VK_NO_F2")) > 0) { vkGetPhysicalDeviceProperties2 = NULL; vkGetPhysicalDeviceFeatures2 = NULL; vkGetPhysicalDeviceExternalBufferProperties = NULL; }   // (a test: a driver with only Vulkan 1.0's own calls)
         vkEnumeratePhysicalDevices(g_inst, &npd, NULL); }
     if (!npd) {   // a driver package for another GPU (Turnip, Adreno only, chosen on a Mali-G615: "no Vulkan device" at every start, #71): this start goes on with the phone's own driver
         const char *drv = getenv("DM_VK_DRIVER");
@@ -304,7 +305,7 @@ void mtl_init(void) {
     else if (has_ext(de, nde, "VK_EXT_load_store_op_none")) { dext[ndext++] = "VK_EXT_load_store_op_none"; g_store_none = 1; }
     if (getenv("DM_VK_NO_STORE_NONE")) g_store_none = 0;
     if (!g_nopush) { VkPhysicalDevicePushDescriptorPropertiesKHR pd = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR };
-        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pd }; vkGetPhysicalDeviceProperties2(g_pd, &pp);
+        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pd }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (pd.maxPushDescriptors) g_maxpush = pd.maxPushDescriptors; if (getenv("DM_VK_MAXPUSH")) g_maxpush = (uint32_t)atoi(getenv("DM_VK_MAXPUSH"));   // a lower limit tests the set path
         VLOG("push descriptors: up to %u per program", g_maxpush); }
     if ((g_host_import = has_ext(de, nde, "VK_EXT_external_memory_host"))) dext[ndext++] = "VK_EXT_external_memory_host";
@@ -421,7 +422,11 @@ void mtl_init(void) {
     VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = old ? tail : (void *)&f13 };
     VkPhysicalDeviceVulkan11Features f11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12 };
     VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = old11 ? tail : (void *)&f11 };
-    vkGetPhysicalDeviceFeatures2(g_pd, &f2);
+    // A Vulkan 1.0 driver without VK_KHR_get_physical_device_properties2 has no Features2 / Properties2 at all: the plain 1.0 query, and the device made with
+    //   pEnabledFeatures (below); every extension feature structure then stays zero, so those features count as absent (Galaxy-Android's Vulkan 1.0 renderer works so)
+    int have_f2 = vkGetPhysicalDeviceFeatures2 != NULL;
+    if (have_f2) vkGetPhysicalDeviceFeatures2(g_pd, &f2);
+    else { vkGetPhysicalDeviceFeatures(g_pd, &f2.features); VLOG("Vulkan 1.0 driver without VK_KHR_get_physical_device_properties2: core features only"); }
     int dynren = old ? x_dynren && fdr.dynamicRendering : f13.dynamicRendering, timeline = old11 ? fts.timelineSemaphore : f12.timelineSemaphore;
     int eds = old ? x_eds && fed.extendedDynamicState : 1;
     if (!timeline && g_tlsem) { g_tlsem = 0; VLOG("timeline semaphores listed but not supported: a fence for each submission instead"); }
@@ -455,6 +460,7 @@ void mtl_init(void) {
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_qf, .queueCount = 1, .pQueuePriorities = &prio };
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext };
+    if (!have_f2) { dci.pNext = NULL; dci.pEnabledFeatures = &f2.features; }   // (no Features2 on this driver: features the 1.0 way)
     VKCHECK(vkCreateDevice(g_pd, &dci, NULL, &g_dev));
     { extern void dm_boot_device_up(void) __attribute__((weak)); if (dm_boot_device_up) dm_boot_device_up(); }   // (android_main.c boot_state: a crash from here on counts as the driver's)
     VK_DEVICE(VK_LOAD_D)
@@ -478,7 +484,7 @@ void mtl_init(void) {
         int drvp = g_api >= VK_API_VERSION_1_2 || g_drvprops_ext;
         VkPhysicalDeviceDriverProperties dp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
         VkPhysicalDeviceFloatControlsProperties fc = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES, .pNext = drvp ? &dp : NULL };
-        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &fc }; vkGetPhysicalDeviceProperties2(g_pd, &pp);
+        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &fc }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (!drvp) snprintf(dp.driverName, sizeof dp.driverName, "%s", g_props.vendorID == 0x13B5 ? "Mali (no driver properties: taken as ARM's)" : "unknown");
         // Samsung's Xclipse driver too: the probe self-test (float-controls) found inf - inf not NaN without them on Xclipse 540 and 940, and every check right with them
         const char *e = getenv("DM_VK_FLOAT_CONTROLS"); int arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : g_props.vendorID == 0x13B5;
@@ -579,7 +585,7 @@ void mtl_init(void) {
     }
     if (g_host_import) {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
-        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &hp }; vkGetPhysicalDeviceProperties2(g_pd, &pp);
+        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &hp }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         g_host_align = hp.minImportedHostPointerAlignment ? hp.minImportedHostPointerAlignment : 4096;
     }
     {   // 24-bit depth where the device renders to it (Adreno), else the 32-bit float formats (Apple GPUs)
