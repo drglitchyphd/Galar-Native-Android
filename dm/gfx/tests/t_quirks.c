@@ -13,8 +13,16 @@ static int fails, checks;
 static int old_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5; }   // drvp ? dp.driverID == ARM : vendor == 0x13B5
 static int old_sec_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 21 : g->vendor == 0x144D; }
 static int old(int q, const gpu_id *g) {
-    int v = g->arm_rel * 100 + g->arm_p;
+    int v = g->arm_rel * 100 + g->arm_p, arc = g->port == PORT_ARCEUS;
+    // Arceus Native's own expressions (Arceus-Native-Android main 3c5c6d1, nvn_vk.c), where they differ from Galar's
+    if (arc) switch (q) {
+    case Q_NO_DYNREN: return 0;                               // g_dynren = dynren && !(DM_VK_NO_DYNREN): no Adreno default
+    case Q_ASYNC_PSO: return 0;                               // v = e ? atoi(e) != 0 : 0 (#34)
+    case Q_NO_EDS: return g->vendor == 0x5143 && ((g->api >> 12) & 0x3ff) < 2 && ((g->api >> 22) & 0x7f) == 1;   // old_qc
+    case Q_BC_GPU_OFF: return g->vendor == 0x1010;            // "BC layer: off on PowerVR"
+    }
     switch (q) {
+    case Q_NO_EDS: case Q_BC_GPU_OFF: return 0;               // (not in Galar)
     case Q_NO_DYNREN: return g->vendor == 0x5143;
     case Q_HOST_IMPORT_OFF: return g->vendor == 0x144D;
     case Q_DMAHEAP: return g->vendor == 0x13B5 || g->vendor == 0x144D;
@@ -44,22 +52,25 @@ static void arm_fields(gpu_id *g, int rel, int p, int beta) {
     g->arm_rel = arm ? rel : 0; g->arm_p = arm ? p : 0; g->arm_beta = arm && g->driver_id >= 0 ? beta : 0;
     g->driver_version = (uint32_t)rel << 22 | (uint32_t)p << 12;
 }
-static gpu_id mk(uint32_t ven, int did, int rel, int p, int beta, int custom, const char *name, long ram, int dynren) {
-    gpu_id g; memset(&g, 0, sizeof g); g.vendor = ven; g.driver_id = did; g.custom = custom; g.ram_kb = ram; g.dynren = dynren; snprintf(g.name, sizeof g.name, "%s", name);
+static gpu_id mk_(int port, uint32_t api, uint32_t ven, int did, int rel, int p, int beta, int custom, const char *name, long ram, int dynren) {
+    gpu_id g; memset(&g, 0, sizeof g); g.port = port; g.api = api; g.vendor = ven; g.driver_id = did; g.custom = custom; g.ram_kb = ram; g.dynren = dynren; snprintf(g.name, sizeof g.name, "%s", name);
     arm_fields(&g, rel, p, beta); return g;
 }
+#define mk(...) mk_(PORT_GALAR, 1u << 22 | 3u << 12, __VA_ARGS__)
 int main(void) {
     const uint32_t vens[] = { 0x5143, 0x13B5, 0x144D, 0x1010, 0x10DE, 0x1002, 0 };
     const int dids[] = { -1, 9, 21, 8 /* Qualcomm */, 18 /* Turnip */, 20 /* PanVK */, 0 };
     const char *names[] = { "Mali-G615 MC2", "Mali-G720-Immortalis MC12", "Adreno (TM) 830", "Samsung Xclipse 940", "PowerVR B-Series BXM-8-256", "" };
     const long rams[] = { 0, 3800000, 7499999, 7500000, 11800000 };
+    const uint32_t apis[] = { 1u << 22, 1u << 22 | 1u << 12 | 128, 1u << 22 | 2u << 12, 1u << 22 | 3u << 12 | 231 };
     int n = 0;
+    for (int port = 0; port <= 1; port++) for (unsigned ap = 0; ap < 4; ap++)
     for (unsigned a = 0; a < sizeof vens / sizeof *vens; a++) for (unsigned b = 0; b < sizeof dids / sizeof *dids; b++)
     for (int rel = 20; rel <= 55; rel += 1) for (int p = 0; p <= 2; p++) for (int beta = 0; beta <= 1; beta++) for (int custom = 0; custom <= 1; custom++) {
         if (vens[a] != 0x13B5 && (rel != 20 || p || beta)) continue;   // (the release only matters for Arm's ID)
         for (unsigned c = 0; c < sizeof names / sizeof *names; c++) for (unsigned d = 0; d < sizeof rams / sizeof *rams; d++) for (int dr = 0; dr <= 1; dr++) {
-            gpu_id g = mk(vens[a], dids[b], rel, p, beta, custom, names[c], rams[d], dr); n++;
-            for (int q = 0; q < Q_N; q++) CHECK(quirk_default(q, &g) == old(q, &g), "quirk %d (%s) on vendor %#x driver %d r%dp%d%s%s \"%s\" %ld kB dynren %d: table %d, old %d", q, Q_INFO[q].what,
+            gpu_id g = mk_(port, apis[ap], vens[a], dids[b], rel, p, beta, custom, names[c], rams[d], dr); n++;
+            for (int q = 0; q < Q_N; q++) CHECK(quirk_default(q, &g) == old(q, &g), "port %d api %#x quirk %d (%s) on vendor %#x driver %d r%dp%d%s%s \"%s\" %ld kB dynren %d: table %d, old %d", g.port, g.api, q, Q_INFO[q].what,
                 g.vendor, g.driver_id, rel, p, beta ? " beta" : "", custom ? " package" : "", g.name, g.ram_kb, dr, quirk_default(q, &g), old(q, &g));
         }
     }
@@ -82,6 +93,12 @@ int main(void) {
     CHECK(quirk_default(Q_HOST_IMPORT_OFF, &xcl) && quirk_default(Q_DMAHEAP, &xcl) && quirk_default(Q_FLOAT_CONTROLS, &xcl) && quirk_default(Q_CLEAR_BY_PASS, &xcl), "Xclipse 940 (#39 #41): Samsung's set");
     gpu_id pvr = mk(0x1010, 0, 0, 0, 0, 0, "PowerVR B-Series BXM-8-256", 3800000, 0);
     CHECK(quirk_default(Q_PCACHE_GAPS_OFF, &pvr) && quirk_default(Q_PIPE_KEEP, &pvr) == 800, "PowerVR BXM-8-256 on 4 GB: no cache for gap pipelines, pipelines capped");
+    gpu_id a710 = mk_(PORT_ARCEUS, 1u << 22 | 1u << 12 | 128, 0x5143, 8, 0, 0, 0, 0, "Adreno (TM) 710", 5600000, 1);
+    CHECK(quirk_default(Q_NO_EDS, &a710) && !quirk_default(Q_ASYNC_PSO, &a710) && !quirk_default(Q_NO_DYNREN, &a710), "Arceus on an Adreno 710 with Qualcomm's 1.1 driver (#34): strides in pipelines, no async pipelines, dynamic rendering");
+    gpu_id a710g = mk_(PORT_GALAR, 1u << 22 | 1u << 12 | 128, 0x5143, 8, 0, 0, 0, 0, "Adreno (TM) 710", 5600000, 1);
+    CHECK(!quirk_default(Q_NO_EDS, &a710g) && quirk_default(Q_ASYNC_PSO, &a710g) && quirk_default(Q_NO_DYNREN, &a710g), "Galar on the same Adreno 710: Galar's rules, unchanged");
+    gpu_id g5 = mk_(PORT_ARCEUS, 1u << 22 | 3u << 12, 0x1010, 0, 0, 0, 0, 0, "PowerVR D-Series DXT-48-1536", 11800000, 1);
+    CHECK(quirk_default(Q_BC_GPU_OFF, &g5), "Arceus on a Tensor G5 (PowerVR, #32): BC on the CPU");
     printf(fails ? "%d of %d FAILED\n" : "all %d passed\n", fails ? fails : checks, checks);
     return fails != 0;
 }

@@ -12,7 +12,11 @@
 #include <string.h>
 #include <stdio.h>
 enum { VEN_QCOM = 0x5143, VEN_ARM = 0x13B5, VEN_SAMSUNG = 0x144D, VEN_IMG = 0x1010 };
+// The port: the same table in Galar Native and Arceus Native; where the two ports were tuned apart on players' phones, the rule says which port it is for
+enum { PORT_GALAR = 0, PORT_ARCEUS = 1 };
 typedef struct {
+    int port;               // PORT_* (nvn_vk.c: from DM_GAME_PROGRAM_ID, the build's game)
+    uint32_t api;           // the device's Vulkan version (VkPhysicalDeviceProperties.apiVersion)
     uint32_t vendor, driver_version;
     int driver_id;          // VkDriverId; -1 when the driver gives no driver properties (Vulkan 1.1 without the extension)
     int arm_rel, arm_p, arm_beta;   // Arm's own Mali driver: r<rel>p<p> (0: another driver, PanVK included)
@@ -42,6 +46,8 @@ enum {
     Q_PIPE_KEEP,         // at most 800 pipelines kept (least recently used destroyed): Mali, or a phone under 7.5 GB
     Q_CLEAR_BY_PASS,     // clears in a layered pass over a 3D target as passes of their own: Xclipse
     Q_PCACHE_GAPS_OFF,   // a pipeline with a colour gap made without the pipeline cache: PowerVR's driver crashes on it
+    Q_NO_EDS,            // draw state built into each pipeline: Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34; Galar #209 reported the same)
+    Q_BC_GPU_OFF,        // BC textures converted on the CPU, not the GPU: PowerVR's compute results differ, objects purple (Arceus #32)
     Q_N
 };
 static const struct { const char *env, *what; } Q_INFO[Q_N] = {
@@ -65,14 +71,22 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] = {
     [Q_PIPE_KEEP] = { "DM_VK_PIPE_KEEP", "pipelines kept at most (count)" },
     [Q_CLEAR_BY_PASS] = { "DM_VK_CLEAR_BY_PASS", "3D-target clears as passes" },
     [Q_PCACHE_GAPS_OFF] = { "", "colour-gap pipelines without the pipeline cache" },
+    [Q_NO_EDS] = { "DM_VK_NO_EDS", "draw state built into each pipeline" },
+    [Q_BC_GPU_OFF] = { "DM_VK_BC_GPU", "BC textures converted on the CPU" },
 };
 // Arm's own driver: by driver ID where the driver gives one, else by vendor (PanVK reports Arm's vendor ID with its own driver ID)
 static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }
 static int gpu_is_samsung_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 21 /* VK_DRIVER_ID_SAMSUNG_PROPRIETARY */ : g->vendor == VEN_SAMSUNG; }
 static int quirk_default(int q, const gpu_id *g) {
     int v = g->arm_rel * 100 + g->arm_p;
+    int arc = g->port == PORT_ARCEUS;
     switch (q) {
-    case Q_NO_DYNREN: case Q_BARRIER_RELAXED: case Q_GATHER_BIAS: case Q_PASS_DEFER: case Q_ASYNC_PSO: return g->vendor == VEN_QCOM;
+    // the two ports apart: Galar's Adreno render passes (#205: 27.5 → 17.3 ms on the S25+) and worker-built pipelines are not in Arceus, where async pipelines left
+    //   objects missing for frames on an Adreno 710 (Arceus #34); Arceus's Qualcomm 1.1 stride fix and PowerVR CPU BC conversion are not in Galar yet
+    case Q_NO_DYNREN: case Q_ASYNC_PSO: return g->vendor == VEN_QCOM && !arc;
+    case Q_NO_EDS: return arc && g->vendor == VEN_QCOM && (g->api >> 22 & 0x7f) == 1 && (g->api >> 12 & 0x3ff) < 2;   // (VK_API_VERSION_MAJOR / MINOR)
+    case Q_BC_GPU_OFF: return arc && g->vendor == VEN_IMG;
+    case Q_BARRIER_RELAXED: case Q_GATHER_BIAS: case Q_PASS_DEFER: return g->vendor == VEN_QCOM;
     case Q_HOST_IMPORT_OFF: case Q_CLEAR_BY_PASS: return g->vendor == VEN_SAMSUNG;
     case Q_DMAHEAP: return g->vendor == VEN_ARM || g->vendor == VEN_SAMSUNG;
     case Q_DMABUF_TRY: case Q_ARM_FORMATS: return g->vendor == VEN_ARM;
@@ -96,8 +110,8 @@ static int quirk_note(int q, int value, int from_env) {
     return value;
 }
 static void gpu_id_log(const gpu_id *g) {
-    fprintf(stderr, "[dm] [quirk] GPU %s, vendor %#x, driver id %d, driver version %#x, %s, memory %ld MB\n", g->name, g->vendor, g->driver_id, g->driver_version,
-            g->custom ? "a driver package" : "the phone's own driver", g->ram_kb / 1024);
+    fprintf(stderr, "[dm] [quirk] %s: GPU %s, Vulkan %u.%u, vendor %#x, driver id %d, driver version %#x, %s, memory %ld MB\n", g->port == PORT_ARCEUS ? "Arceus Native" : "Galar Native",
+            g->name, g->api >> 22 & 0x7f, g->api >> 12 & 0x3ff, g->vendor, g->driver_id, g->driver_version, g->custom ? "a driver package" : "the phone's own driver", g->ram_kb / 1024);
     if (g->arm_rel) fprintf(stderr, "[dm] [quirk] Arm driver r%dp%d%s\n", g->arm_rel, g->arm_p, g->arm_beta ? " (beta)" : "");
 }
 #endif

@@ -302,7 +302,10 @@ void mtl_init(void) {
     int compctl = has_ext(de, nde, "VK_EXT_image_compression_control"); if (compctl) dext[ndext++] = "VK_EXT_image_compression_control";   // to read whether render targets stay compressed
     // the GPU described once for the quirk table (vk_quirks.h); the driver ID and Arm's release are added below, where the driver properties are read
     g_gpuid.vendor = g_props.vendorID; g_gpuid.driver_version = g_props.driverVersion; snprintf(g_gpuid.name, sizeof g_gpuid.name, "%s", g_props.deviceName);
-    g_gpuid.custom = getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER");
+    g_gpuid.custom = getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"); g_gpuid.api = g_props.apiVersion;
+#if defined(DM_GAME_PROGRAM_ID) && DM_GAME_PROGRAM_ID == 0x01001F5010DFA000ull
+    g_gpuid.port = PORT_ARCEUS;   // (Legends: Arceus: the table's Arceus rules)
+#endif
     { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); g_gpuid.ram_kb = kb; }
     if (getenv("DM_VK_NO_HOST_IMPORT")) g_host_import = 0;
     // Imported host memory pins the game's pools (about 3 GB) for every submission. Samsung's Xclipse driver of the late-2026 One UI update refuses that a few frames into play
