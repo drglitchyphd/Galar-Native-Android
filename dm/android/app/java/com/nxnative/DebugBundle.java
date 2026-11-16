@@ -109,7 +109,7 @@ final class DebugBundle {
         JSONObject g = new JSONObject(); String[] gm = GameSettings.game(c); File dir = GameSettings.dir(c);
         g.put("titleId", gm[0]); g.put("name", gm[1]); g.put("version", GameSettings.version(c));
         g.put("setUp", new File(dir, "ready").exists()); g.put("shaderChain", first(new File(dir, "ready")));
-        g.put("packComplete", SetupActivity.packComplete(dir)); g.put("packShaders", packCount(new File(dir, "shaders.pak")));
+        g.put("packComplete", packComplete(dir)); g.put("packShaders", packCount(new File(dir, "shaders.pak")));
         g.put("savePlace", first(new File(dir, "save_place.txt")));
         j.put("game", g);
 
@@ -322,13 +322,18 @@ final class DebugBundle {
         else if (drv.contains("turnip") || DriverPackages.isTurnip(DriverPackages.current(c))) d = "Turnip (custom Adreno driver)";
         else if (drv.contains("panvk") || drv.contains("malisx") || drv.contains("panfrost")) d = "PanVK / malisx2 (custom Mali driver)";
         else d = "Other custom driver";
-        StringBuilder u = new StringBuilder("https://").append(GameSettings.app(c)[1]).append("/issues/new?template=bug_report.yml");
+        String repo = GameSettings.app(c)[1];   // (the issue form exists in Galar-Native-Android only; elsewhere the plain body below fills the issue)
+        StringBuilder u = new StringBuilder("https://").append(repo).append(repo.contains("Galar-Native") ? "/issues/new?template=bug_report.yml" : "/issues/new?labels=bug");
         int why = l.isEmpty() ? -1 : l.get(0).getReason();
         String kind = !crash ? "Problem" : why == ApplicationExitInfo.REASON_LOW_MEMORY || why == ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE ? "Closed by Android (memory)"
                     : why == ApplicationExitInfo.REASON_ANR ? "Not responding" : "Crash";
         q(u, "title", "[" + ver + "] " + kind + " on " + phone);
         q(u, "phone", phone); q(u, "gpu", (soc.isEmpty() ? "" : soc + " / ") + gpu); q(u, "version", ver); q(u, "game", GameSettings.game(c)[1]); q(u, "driver", d);
-        q(u, "logs", "Debug report: " + (zip != null ? zip.getName() : "debug-report.zip") + " from Download (attach it here). " + (crash ? "Last exit: " + lastExitLine(c) : ""));
+        String logs = "Debug report: " + (zip != null ? zip.getName() : "debug-report.zip") + " from Download (attach it here). " + (crash ? "Last exit: " + lastExitLine(c) : "");
+        q(u, "logs", logs);
+        // a repository without the issue form (Arceus-Native-Android) takes the plain body instead; with the form, GitHub uses the fields above
+        q(u, "body", "**What happens**\n\n(say what you did and what went wrong)\n\n**Phone:** " + phone + "\n**GPU:** " + (soc.isEmpty() ? "" : soc + " / ") + gpu + "\n**Version:** " + ver
+                     + "\n**Game:** " + GameSettings.game(c)[1] + "\n**Driver:** " + d + "\n\n" + logs + "\n");
         return u.toString();
     }
     private static void q(StringBuilder u, String k, String v) {
@@ -388,6 +393,12 @@ final class DebugBundle {
     private static String first(File f) { try (BufferedReader r = new BufferedReader(new FileReader(f))) { String l = r.readLine(); return l == null ? "" : l.trim(); } catch (IOException e) { return ""; } }
     private static String read(File f, int max) { try (InputStream in = new FileInputStream(f)) { byte[] b = new byte[max]; int n = in.read(b); return n > 0 ? new String(b, 0, n, StandardCharsets.UTF_8) : ""; } catch (IOException e) { return ""; } }
     private static String asset(Context c, String n) { try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getAssets().open(n)))) { String l = r.readLine(); return l == null ? "" : l.trim(); } catch (IOException e) { return ""; } }
+    // the pack holds at least 9/10 of the setup's shaders (the rule of Galar's SetupActivity.packComplete, kept here so this file is the same in every port)
+    private static boolean packComplete(File d) {
+        int have = packCount(new File(d, "shaders.pak")), want = 0; if (have < 0) return true;
+        try (BufferedReader r = new BufferedReader(new FileReader(new File(d, "shader_map.tsv")))) { String l; while ((l = r.readLine()) != null) if (!l.isEmpty() && l.charAt(0) != '#') want++; } catch (IOException e) { return have >= 10000; }
+        return want == 0 || have >= want * 9L / 10;
+    }
     private static int packCount(File pak) {
         try (java.io.RandomAccessFile f = new java.io.RandomAccessFile(pak, "r")) { byte[] h = new byte[12]; f.readFully(h); if (h[0] != 'N' || h[1] != 'X' || h[2] != 'S' || h[3] != 'P') return -1;
             return (h[8] & 0xff) | (h[9] & 0xff) << 8 | (h[10] & 0xff) << 16 | (h[11] & 0xff) << 24; } catch (IOException e) { return -1; }
