@@ -759,6 +759,10 @@ static void *log_mirror(void *p) {
         char th[64];
         if (!n) { char t0[64]; thermal_text(t0, sizeof t0); }   // looks the thermal functions up
         graphics_auto(); pin_update();
+        // DM_TEST_CRASH=<seconds> (a test of the crash path only: crash.c's record, Android's tombstone, the debug report offered at the next start): a native crash
+        //   that many seconds after the start. A release app cannot be signalled from adb, so this is the way to make one on purpose. Unset: nothing
+        { static int at = -2; if (at == -2) { const char *e = getenv("DM_TEST_CRASH"); at = e && atoi(e) > 0 ? atoi(e) : -1; }
+          if (at > 0 && (n + 1) * 5 >= at) { fprintf(stderr, "[RED] DM_TEST_CRASH: crashing on purpose now (a test of the crash path)\n"); fflush(stderr); *(volatile int *)16 = 1; } }
         if (n % 6 == 0) fprintf(stderr, "[mem] app %ld MB resident (%ld MB swapped), phone %ld MB available of %ld MB; heat %s\n", kb_of("/proc/self/status", "VmRSS:") / 1024,
                                 kb_of("/proc/self/status", "VmSwap:") / 1024, kb_of("/proc/meminfo", "MemAvailable:") / 1024, kb_of("/proc/meminfo", "MemTotal:") / 1024, thermal_text(th, sizeof th));
         // what the resident memory is (cheap: /proc/self/status, no smaps walk that would stall the game's page faults): anonymous (the game's heaps, the driver's
