@@ -48,7 +48,7 @@ Delete this mod from the phone?	このModを端末から削除しますか？
 Deleted: applies the next time you start the game.	削除しました：次にゲームを起動したときに反映されます。
 Display	表示
 Done	完了
-Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + to reset).	ドラッグで移動、ピンチでサイズ変更、ダブルタップで非表示。−を2秒長押しで保存（+の長押しでリセット）。
+Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset).	ドラッグで移動。サイズを変えるには、ボタンに触れてから画面のどこでも2本指でピンチ。ダブルタップで非表示。−を2秒長押しで保存（+の長押しでリセット）。
 Edit notes	メモを編集
 Enter both the server and the room code.	サーバーとルームコードの両方を入力してください。
 Export save data	セーブデータを書き出す
@@ -298,14 +298,12 @@ L3 / R3 buttons	L3 / R3 ボタン
 Off: no L3 / R3 on screen (a controller's stick buttons still work)	オフ：画面に L3 / R3 を表示しない（コントローラーのスティック押し込みは使えます）
 On: L3 and R3 above the sticks (move them with Move the touch controls)	オン：スティックの上に L3 と R3（「タッチ操作の配置を変更」で動かせます）
 Frame generation (experimental)	フレーム生成（試験的）
-On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Needs a fast GPU; your input shows about 17 ms later	オン：ゲームの2つのフレームの間に画像を1枚作り、30 fpsを60のように動かします。高速なGPUが必要です。操作の反映が約17ミリ秒遅れます
 Lossless Scaling: the in-between picture made by your own copy of Lossless Scaling's frame generation (sharper motion, needs a faster GPU)	Lossless Scaling：中間の画像を、お持ちのLossless Scalingのフレーム生成で作ります（動きがより鮮明、より高速なGPUが必要）
 Own Lossless Scaling? Import its Lossless.dll (in the program's folder) to use its frame generation here.	Lossless Scalingをお持ちですか？そのLossless.dll（プログラムのフォルダー内）を取り込むと、ここでそのフレーム生成を使えます。
 Import Lossless.dll	Lossless.dllを取り込む
 Lossless Scaling imported. Choose it under Frame generation.	Lossless Scalingを取り込みました。フレーム生成で選んでください。
 Could not import Lossless Scaling: %s	Lossless Scalingを取り込めませんでした：%s
 Lossless Scaling pictures	Lossless Scalingの生成枚数
-Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)	自動：120 Hzの画面では4x、90 Hzでは3x、それ以外は2x（30 fps時）
 2x: one picture between each two of the game's frames (30 fps moves like 60)	2x：ゲームの2つのフレームの間に1枚（30 fpsが60のように動きます）
 3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x：2つのフレームの間に2枚（90 fps相当。均一になるのは90 Hzの画面のみ）
 4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x：2つのフレームの間に3枚（120 fps相当。120 Hzの画面と高速なGPUが必要）
@@ -324,3 +322,63 @@ Divisions	除算
 Textures: every texture read is limited to a sane range. If the white goes away, tell us: a texture is read wrong	テクスチャ：テクスチャの読み取り値をすべて妥当な範囲に制限します。白が消えたら教えてください（テクスチャの読み取りが誤っています）
 Inputs: every value the vertex shader hands over is limited. If the white goes away, tell us	入力：頂点シェーダーから渡される値をすべて制限します。白が消えたら教えてください
 Divisions: every division is limited. If the white goes away, tell us	除算：すべての除算結果を制限します。白が消えたら教えてください
+Low: 3D at about 600p, lighter	低：3Dを約600pで描画、軽め
+Lowest: 3D at 960x540, coolest	最低：3Dを960x540で描画、最も発熱が少ない
+Locked for now	現在はロック中
+Off for every phone until the game holds a solid frame rate without it. It comes back after that.	ゲームがこれなしで安定したフレームレートを保てるようになるまで、すべての端末でオフです。その後で戻ってきます。
+Save folder	セーブの保存先
+App folder	アプリのフォルダー
+App folder: Android/data, as before	アプリのフォルダー：これまでどおり Android/data
+Documents	ドキュメント
+Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/Galar Native/%s/save（Syncthingなどの同期ツール用）。次回の起動時にセーブがそこへコピーされ、既にあったものはバックアップとして残ります。すべてのファイルへのアクセスが必要です
+The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	前回のセットアップはゲームのシェーダーの一部しか変換しなかったため、ゲームの一部が描画されませんでした。もう一度セットアップをタップしてください。残りを仕上げます（変換済みのものは保持されます）。
+FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0：AMDのアップスケーラー。輪郭を考慮して拡大し、その後シャープ化します
+Faster rendering	高速レンダリング
+Auto: on for Adreno GPUs, off for others	自動：Adreno GPUではオン、それ以外ではオフ
+Off: the graphics work runs on the game's own thread	オフ：グラフィック処理をゲーム自身のスレッドで行います
+Bright scenes in a wider format	明るい場面をより広い形式で描画
+On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	オン：明るい場面をより余裕のある形式（R11G11B10Fの代わりにRGBA16F）で描画します。白い画面やちらつきのテストです。メモリを少し多く使います
+AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1：輪郭を保つ拡大の後にシャープ化（シャープネスで強さを調整）
+Colour	色合い
+Natural	ナチュラル
+Natural: the colours as the game draws them	ナチュラル：ゲーム本来の色
+Vibrant	ビビッド
+Vibrant: muted colours lifted, a touch more contrast (less grey haze)	ビビッド：くすんだ色を鮮やかにし、コントラストを少し強めます（灰色のもやを軽減）
+Cinematic	シネマティック
+Cinematic: stronger contrast, a slightly warm tone	シネマティック：コントラストを強め、やや暖かい色調
+Sticks	スティック
+Fixed	固定
+Fixed: the sticks stay where they are drawn, as on Joy-Cons	固定：スティックは表示された位置にとどまります（Joy-Conと同じ）
+Floating	フローティング
+Floating: touch anywhere on the left half to move (the stick comes to your thumb); drag on the right half to turn the camera	フローティング：画面の左半分のどこに触れても移動できます（スティックが親指の位置に来ます）。右半分をドラッグするとカメラが回ります
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	オフ：このGPUは1枚の画像に%s msかかり、ゲームが割ける時間を超えています。オフにしてからオンにすると再試行します。
+Off until the next start (see the log for why).	次回の起動までオフ（理由はログにあります）。
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	オフ：最も軽い設定でも、ここではゲーム自身のフレームを奪っていました（%s fpsまで低下）。オフにしてからオンにすると再試行します。
+Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	30 fpsではオフ：フレーム生成にはゲームが60 fpsで安定している必要があります（パフォーマンス → フレームレート：60）。
+Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.	一時停止中：ここではゲームが%s fpsで動いており、フレーム生成には安定した60が必要です。ゲームが60を保つと自動で再開します。
+On: a picture is made between each two of the game's frames, so 60 fps moves like 120. Only while the game holds a locked 60 fps; your input shows about 8 ms later	オン：ゲームの2フレームごとに中間の画像を作り、60 fpsを120のように動かします。ゲームが60 fpsで安定しているときだけ。操作は約8 ms遅れて表示されます
+Auto: 2x, light (the game at a locked 60 shown at 120)	自動：2x、軽め（60で安定したゲームを120で表示）
+Widescreen	ワイド
+Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	ワイド：ゲームのカメラを画面の横幅いっぱいに広げ、引き伸ばしません（ソード／シールド 1.3.2。HUDは引き伸ばされます）
+Output	出力
+Float target	浮動小数の描画先
+Output: what each shader writes is limited. If the white goes away, tell us	出力：各シェーダーが書き込む値を制限します。白が消えたら教えてください
+Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us	浮動小数の描画先：ライティング後のシーンを圧縮形式ではなく16ビット浮動小数の画像に保存します。白が消えたら教えてください
+Multiplies	乗算
+Additions	加算
+Multiply-adds	積和
+Multiplies: every multiply result is limited. If the white goes away, tell us	乗算：すべての乗算結果を制限します。白が消えたら教えてください
+Additions: every add / subtract result is limited. If the white goes away, tell us	加算：すべての加算・減算結果を制限します。白が消えたら教えてください
+Multiply-adds: every fused multiply-add result is limited. If the white goes away, tell us	積和：すべての積和演算の結果を制限します。白が消えたら教えてください
+NaN fix	NaN修正
+NaN fix + textures	NaN修正＋テクスチャ
+NaN fix: broken values the shaders write become 0 instead of turning the picture white. Tell us how it looks	NaN修正：シェーダーが書き込む壊れた値を、画面を白くする代わりに0にします。見た目を教えてください
+NaN fix + textures: the same, and broken values read from textures become 0 too. Tell us how it looks	NaN修正＋テクスチャ：同じ処理に加え、テクスチャから読んだ壊れた値も0にします。見た目を教えてください
+This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	このバージョンではゲームのシェーダーの変換方法が変わりました：今すぐ更新します。ファイルは不要で、セーブデータはそのままです。この画面を開いたままにしてください。セットアップのシェーダー手順と同じくらい時間がかかります。
+Setting up	セットアップ
+Keep the phone cooler: half the workers (setup takes longer)	端末を熱くしにくくする：ワーカーを半分にします（セットアップに時間がかかります）
+Updating the shaders for this app version: your files aren't needed and your save is kept.	このアプリのバージョン用にシェーダーを更新しています：ファイルは不要で、セーブデータはそのままです。
+Updating the shaders	シェーダーを更新中
+3D render scale	3D描画スケール
+Auto: what the Graphics setting gives, lowered by itself when the phone is hot	自動：グラフィック設定に従い、端末が熱いと自動で下げます
+50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50%：3Dを半分のサイズで描画。最も涼しく速い（文字とメニューは鮮明なまま）

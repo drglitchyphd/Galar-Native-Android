@@ -28,7 +28,7 @@ uint32_t *spv_drop_inputs(const uint32_t *code, size_t words, uint64_t drop, siz
 // A copy in which every user vector output of the entry point starts at the value an unwritten Maxwell attribute reads, (0, 0, 0, 1): vertex / tessellation evaluation
 // shaders that write only some components (or none) of an output the next stage reads (dmsh_build.py vs_init / vs_pad on the Metal side). NULL if nothing to do
 uint32_t *spv_init_outputs(const uint32_t *code, size_t words, size_t *out_words);
-enum { PROBE_SAMPLES = 1, PROBE_INPUTS = 2, PROBE_DIV = 4 };
+enum { PROBE_SAMPLES = 1, PROBE_INPUTS = 2, PROBE_DIV = 4, PROBE_OUTPUT = 8, PROBE_MUL = 16, PROBE_ADD = 32, PROBE_FMA = 64, NAN_FIX_OUT = 128, NAN_FIX_TEX = 256 };
 uint32_t *spv_probe(const uint32_t *code, size_t words, size_t *out_words, unsigned mask);   // diagnostic clamps in fragment shaders (DM_VK_PROBE)
 uint32_t *spv_swap_out01(const uint32_t *code, size_t words, size_t *out_words);   // fragment outputs at locations 0 and 1 swapped (dual-source blending emulated)
 // Drops capabilities / extensions / execution modes a shader declares but never uses (Float64, fragment shader interlock), in place; returns the new length in words
@@ -52,6 +52,12 @@ uint32_t *spv_nan_minmax(const uint32_t *code, size_t words, size_t *out_words);
 uint32_t *spv_nan_select(const uint32_t *code, size_t words, size_t *out_words);
 // A copy in which every 32-bit float multiply (OpFMul, GLSL.std.450 Fma) gives 0 when an operand is 0, as Maxwell's FMZ does (0 x inf / NaN = 0); NULL when it has none
 uint32_t *spv_fmz(const uint32_t *code, size_t words, size_t *out_words);
+// A copy in which scalar 32-bit Log2 / Exp2 / InverseSqrt / Sqrt and float-to-integer conversions give Maxwell's answers where SPIR-V's are undefined (log2 (0) = -inf,
+// exp2 below 2^-126 = 0, inversesqrt (0) = +inf, a negative root NaN, F2I clamped with NaN 0), the classes chosen by mask. NULL if there is none
+enum { EXACT_LOG2 = 1, EXACT_EXP2 = 2, EXACT_RSQ = 4, EXACT_SQRT = 8, EXACT_FTOI = 16, EXACT_ALL = 31 };
+uint32_t *spv_exact_math(const uint32_t *code, size_t words, size_t *out_words, unsigned mask);
+// A copy in which every Function variable without an initializer starts at zero (the translator's registers; Mesa turns undefined values into 0). NULL if there is none
+uint32_t *spv_init_locals(const uint32_t *code, size_t words, size_t *out_words);
 // A copy in which a constant-zero limit of a min / max / clamp of a value selected between constants is a zero the compiler cannot fold (Arm erratum 3779215, see nvn_spv.c).
 // NULL if there is none
 uint32_t *spv_clamp_zero(const uint32_t *code, size_t words, size_t *out_words);

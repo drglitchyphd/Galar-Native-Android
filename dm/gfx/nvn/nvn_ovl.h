@@ -21,7 +21,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height);
 // DM_ASPECT=20:9 (opt-in, for a 20:9 .pchtxt mod that widens the game's camera) gives it a 20:9 box instead, the 16:9 picture stretched into it; DM_ASPECT=fill stretches it
 // over the whole window (nvn_vk.c present_window, touch_menu.c). The in-game menu changes it while playing (android_main.c nativeSetting: dm_aspect_mode)
 enum { DM_ASPECT_FIT, DM_ASPECT_20_9, DM_ASPECT_FILL, DM_ASPECT_FIX };   // FORK: DM_ASPECT_FIX, "fix": filled, with the camera and UI corrected (host/fork_aspect.c)
-static inline int dm_aspect_parse(const char *e) { return !e ? DM_ASPECT_FIT : !strcmp(e, "20:9") ? DM_ASPECT_20_9 : !strcmp(e, "fill") ? DM_ASPECT_FILL : !strcmp(e, "fix") ? DM_ASPECT_FIX : DM_ASPECT_FIT; }   // FORK
+static inline int dm_aspect_parse(const char *e) { return !e ? DM_ASPECT_FIT : !strcmp(e, "20:9") ? DM_ASPECT_20_9 : !strcmp(e, "fill") || !strcmp(e, "wide") ? DM_ASPECT_FILL : !strcmp(e, "fix") ? DM_ASPECT_FIX : DM_ASPECT_FIT; }   // FORK
 __attribute__((weak)) int dm_aspect_mode = -1;   // -1: not read yet (one definition kept by the linker)
 static inline int dm_aspect(void) {
     int m = __atomic_load_n(&dm_aspect_mode, __ATOMIC_RELAXED);

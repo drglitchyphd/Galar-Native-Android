@@ -126,7 +126,16 @@ static class SwshXlate
                 // Job debug = false: turn off DebugMode (DebugMode skips the AST optimizer and the output is full of temporaries; semantics unchanged)
                 var flags = (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0);
                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
-                ShaderProgram p = ctx.Translate();
+                ShaderProgram p;
+                // A shader the optimizer cannot take (v0.83 setups: 19 of 38,570 Sword shaders threw InvalidCastException with DebugMode off) is translated again in
+                //   DebugMode, as every shader was before, instead of being left out
+                try { p = ctx.Translate(); }
+                catch (Exception ex) when ((flags & TranslationFlags.DebugMode) == 0)
+                {
+                    flags |= TranslationFlags.DebugMode; acc = new Accessor(code, job);
+                    ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
+                    p = ctx.Translate(); acc.Notes.Add("optimizer failed (" + ex.GetType().Name + "): translated in DebugMode");
+                }
                 if (UsesFloat64(p.BinaryCode))   // Tears of the Kingdom 1.4.3: 30 shaders used double and failed in the Metal compiler
                 {
                     job["softfloat64"] = true; acc = new Accessor(code, job);

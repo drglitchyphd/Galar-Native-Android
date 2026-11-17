@@ -118,7 +118,15 @@ void hid_keys_init(void) {
     pthread_t th; if (g_nsteps && !pthread_create(&th, NULL, keys_main, NULL)) { pthread_detach(th); LOG("DM_KEYS: %d steps", g_nsteps); }
 }
 
-static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
+// The controller is chosen once, by the mode at start, and stays connected when the mode changes. Graphics Auto drops from TV to handheld mode while the phone is hot
+//   (android_main.c graphics_auto): the controller then moved from No. 1 to the handheld one, which the game, already reading No. 1, never took up, so every button
+//   and the stick went dead mid-game until a restart (seen in Legends: Arceus, Arceus-Native-Android #49; Sword / Shield share this code). On a Switch a Pro
+//   Controller also stays controller No. 1 when the console leaves its dock
+static uint32_t connected_id(void) {
+    static _Atomic int64_t id = -1; int64_t v = atomic_load(&id);
+    if (v < 0) { int64_t want = dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1, exp = -1; atomic_compare_exchange_strong(&id, &exp, want); v = atomic_load(&id); }
+    return (uint32_t)v;
+}
 uint32_t hle_hid_connected_npad(void) { return connected_id(); }   // nfp's NFC device sits on this controller (hle_sdk16.c)
 static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }

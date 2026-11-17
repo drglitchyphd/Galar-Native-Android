@@ -52,13 +52,18 @@ static int family(uint64_t a, uint64_t b) {   // the same game, or Sword with Sh
 }
 static uint64_t my_program(void) { uint64_t dm_program_id(void); return dm_program_id(); }
 
-// the phone's Wi-Fi address (the first IPv4 that is up and not loopback; wlan first), numeric (a.b.c.d = a << 24 | ...), as nn::ldn::Ipv4Address holds it
+// the phone's Wi-Fi address (the first IPv4 that is up and not loopback on a Wi-Fi interface: wlan*, then the phone's own hotspot swlan* / ap* / softap*, then a wired
+//   eth* (USB adapters, emulators)), numeric (a.b.c.d = a << 24 | ...), as nn::ldn::Ipv4Address holds it. Never the mobile data interface (rmnet*, ccmni*): no other phone
+//   can be reached there, and the game then hosted and searched all the time, in battles too (#211: every Dynamax crash log ran local play over mobile data,
+//   100.x / 7.x carrier addresses; the S25+, local play off, never crashed). DM_LDN_ANY_IF=1 takes any interface, as before
 static int wifi_addr(uint32_t *ip, uint32_t *mask) {
     struct ifaddrs *ia, *i; if (getifaddrs(&ia)) return 0; int found = 0;
-    for (int pass = 0; pass < 2 && !found; pass++)
+    static const char *const pref[] = { "wlan", "swlan", "ap", "softap", "eth" };
+    const char *any = getenv("DM_LDN_ANY_IF"); int passes = (int)(sizeof pref / sizeof *pref) + (any && atoi(any) > 0);
+    for (int pass = 0; pass < passes && !found; pass++)
         for (i = ia; i; i = i->ifa_next) {
             if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_UP) || (i->ifa_flags & IFF_LOOPBACK)) continue;
-            if (!pass && strncmp(i->ifa_name, "wlan", 4)) continue;
+            if (pass < (int)(sizeof pref / sizeof *pref) && strncmp(i->ifa_name, pref[pass], strlen(pref[pass]))) continue;
             *ip = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr); *mask = i->ifa_netmask ? ntohl(((struct sockaddr_in *)i->ifa_netmask)->sin_addr.s_addr) : 0xffffff00u;
             found = 1; break;
         }
@@ -210,7 +215,7 @@ HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless over the phone's Wi-Fi (of
     else if ((g_relay = getenv("DM_RELAY_ROOM") && *getenv("DM_RELAY_ROOM")) && !relay_start()) { LOG("[RED] [ldn] the online room could not be joined (see [relay] above): local play is off"); r = RES_FAIL; }
     else if (g_relay) { g_ip = relay_vip(); g_mask = 0xFFFF0000u; relay_on_left(peer_left); for (int k = 0; k < MAXN; k++) g_member[k] = -1; g_state = ST_INIT; g_reason = 0;
         struct in_addr a = { htonl(g_ip) }; LOG("[ldn] local play over the online room, this phone %s", inet_ntoa(a)); }
-    else if (!wifi_addr(&g_ip, &g_mask)) { LOG("[ldn] no Wi-Fi address: local play needs the phone on a Wi-Fi network"); r = RES_FAIL; }
+    else if (!wifi_addr(&g_ip, &g_mask)) { { static int said; if (!said++) LOG("[ldn] no Wi-Fi address: local play needs the phone on a Wi-Fi network (mobile data is not used for it)"); } r = RES_FAIL; }
     else { static int seeded; if (!seeded++) srand((unsigned)time(NULL) ^ g_ip ^ (unsigned)getpid());
            for (int k = 0; k < MAXN; k++) g_member[k] = -1; g_state = ST_INIT; g_reason = 0; struct in_addr a = { htonl(g_ip) }; LOG("[ldn] local play over Wi-Fi, this phone %s", inet_ntoa(a)); }
     pthread_mutex_unlock(&g_mu); return r;

@@ -487,10 +487,9 @@ static int pchtxt_dir(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     if (files) LOG("%s: mods folder %s: %d .pchtxt file(s), %d patch(es) applied to this module", m->name, d, files, total);
     return total;
 }
-// Built-in patches. (No built-in 20:9 camera: the 16:9 that PR #48 patched, MOVK X9, #0x8e39 / #0x3fe3 at +0x607de8, is a camera object's default aspect, which
-// the game replaces for the gameplay camera; patched, the picture was unchanged. DM_ASPECT=20:9 is the presentation alone, for a 20:9 .pchtxt mod.)
+// Built-in patches. (The 16:9 that PR #48 patched alone, MOVK X9, #0x8e39 / #0x3fe3 at +0x607de8, is a camera object's default aspect, which the game replaces
+// for the gameplay camera: patched alone, the picture was unchanged. wide_patch below also patches where the gameplay camera takes it, and the culling.)
 int dm_step_hz; uint8_t *dm_step_word;   // the high frame rate below: its rate and the game's step word, which hle_nvn.c vstep_tick rewrites every frame
-uint8_t *dm_step_table;   // the game's whole frame-time table (5 u64 ns, intervals 1-5), when it holds the game's own values: vstep_tick writes the real step into all of it
 static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1);
 // Built-in community mods (builtin_mods.h, from dm/games/*/builtin_mods/*.pchtxt), each behind a setting: Scarlet / Violet 4.0.0's dynamic frame rate (Fl4sh's ASM
 // "Dynamic FPS": up to 60, the game's step from the time each frame really took) with DM_FPS_TARGET=60, their 2048×2048 shadow maps (Fl4sh's "2K Shadows") with
@@ -518,10 +517,48 @@ static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     }
     return total;
 }
+// Widescreen (DM_ASPECT=wide, the menu's Picture → Widescreen): the game's camera made as wide as the screen, for Sword and Shield 1.3.2, after Fl4sh's Ultrawide
+//   mods (16:10 / 21:9 / 32:9 .pchtxt), with this screen's own aspect (DM_WIDE_RATIO, its long side over its short, written by the app) instead of a fixed one.
+//   The frame stays 1280x720 (the picture fills the screen: nvn_ovl.h); what the camera sees is widened, so nothing is stretched. Three places:
+//   - the gameplay camera copies its parameters from the scene's (Shield / Sword +0x607670): the aspect, LDR W9, [X1, #0xd4] at +0x6076c4, becomes a branch into
+//     the three free words after the function before (+0x607664: MOV W9, #lo; MOVK W9, #hi, LSL #16; B back);
+//   - a camera object's default aspect, MOVK X9 #0x8e39 / #0x3fe3 (16:9) at +0x607de8 / +0x607dec;
+//   - culling (Shield +0xd93444, Sword +0xd93414): LDP X12, X13, [X0, #0xd0] takes the frustum's aspect into the copy on the stack, of which only the low word (the
+//     aspect) is ever read. Fl4sh's mod sets the top half of whatever X12 held (MOVK): here MOVZ W12, the aspect rounded up to its top 16 bits (culls a hair
+//     wider than it sees, never narrower), the same every frame.
+//   Every word is checked first (the three free words zero, the rest the game's own); a build or code that differs is left alone. The HUD is drawn in the same
+//   16:9 frame and is stretched with it: a widescreen mod's UI fix would be a separate patch
+static const struct { const char *build, *game; uint64_t cull; } WIDE_SITES[] = {
+    { "a16802625e7826bf83b6f9708e475b91", "Shield 1.3.2", 0xd93444 },
+    { "a3b75bcd3311385aeed67fbeeb79cbb7", "Sword 1.3.2", 0xd93414 },
+};
+static int wide_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_ASPECT"); if (!e || strcmp(e, "wide")) return 0;
+    const char *r = getenv("DM_WIDE_RATIO"); double ratio = r ? atof(r) : 0;
+    int si = -1; for (unsigned i = 0; i < sizeof WIDE_SITES / sizeof *WIDE_SITES; i++) if (!strncasecmp(m->build_id, WIDE_SITES[i].build, 32)) si = (int)i;
+    if (si < 0) { LOG("[RED] %s: widescreen not applied (not Pokémon Sword / Shield 1.3.2's main)", m->name); return 0; }
+    if (ratio < 1.0 || ratio > 4.0) { LOG("[RED] %s: widescreen not applied (no screen aspect: DM_WIDE_RATIO %s)", m->name, r ? r : "not set"); return 0; }
+    if (ratio > 16.0 / 9.0 - 0.01 && ratio < 16.0 / 9.0 + 0.01) { LOG("%s: widescreen: this screen is 16:9 already", m->name); return 0; }
+    const uint64_t cave = 0x607664, ld = 0x6076c4, def = 0x607de8, cull = WIDE_SITES[si].cull;
+    static const uint32_t orig_ld = 0xb940d429u, orig_def[2] = { 0xf2d1c729u, 0xf2e7fc69u }, orig_cull = 0xa94d340cu, zero[3] = { 0, 0, 0 };
+    if (cull + 4 > m->text_end || memcmp(m->base + cave, zero, 12) || memcmp(m->base + ld, &orig_ld, 4) || memcmp(m->base + def, orig_def, 8) || memcmp(m->base + cull, &orig_cull, 4) ||
+        overlaps_rewrite(m, cave, 12, p0, p1) || overlaps_rewrite(m, ld, 4, p0, p1) || overlaps_rewrite(m, def, 8, p0, p1) || overlaps_rewrite(m, cull, 4, p0, p1)) {
+        LOG("[RED] %s: widescreen not applied (%s: the camera or culling code differs, or was rewritten)", m->name, WIDE_SITES[si].game); return 0; }
+    float f = (float)ratio; uint32_t b; memcpy(&b, &f, 4); uint32_t lo = b & 0xffff, hi = b >> 16, hc = (b + 0xffffu) >> 16;
+    uint32_t w[3] = { 0x52800000u | lo << 5 | 9, 0x72a00000u | hi << 5 | 9, 0x14000000u | (uint32_t)(((int64_t)(ld + 4) - (int64_t)(cave + 8)) >> 2 & 0x3ffffff) };   // MOV W9 / MOVK W9 / B back
+    uint32_t br = 0x14000000u | (uint32_t)(((int64_t)cave - (int64_t)ld) >> 2 & 0x3ffffff);
+    uint32_t dw[2] = { 0xf2c00000u | lo << 5 | 9, 0xf2e00000u | hi << 5 | 9 };   // MOVK X9, #lo, LSL #32 / MOVK X9, #hi, LSL #48
+    uint32_t cw = 0x52a00000u | hc << 5 | 12;   // MOVZ W12, #hc, LSL #16
+    memcpy(m->base + cave, w, 12); memcpy(m->base + ld, &br, 4); memcpy(m->base + def, dw, 8); memcpy(m->base + cull, &cw, 4);
+    LOG("%s: widescreen camera for %s: aspect %.4f (%08x), culling %.4f, at +%#llx / +%#llx / +%#llx", m->name, WIDE_SITES[si].game, ratio, b,
+        (double)({ uint32_t c = hc << 16; float g; memcpy(&g, &c, 4); g; }), (unsigned long long)ld, (unsigned long long)def, (unsigned long long)cull);
+    return 4;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
+    n += wide_patch(m, lim, p0, p1);
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),
@@ -538,26 +575,48 @@ static const struct { const char *build; uint64_t itv, dt; const char *game; } F
 //   dm_fps_live (30 or 60), which the in-game menu changes while playing (android_main.c nativeSetting): at 30 every frame is held 2 slots and the game told
 //   interval 2, as the game itself does at 30 (hle_nvn.c vstep_tick, reported_hold); at 60 the hold is 1, 2 when frames run late. 90 / 120 (env.txt) stay fixed
 int dm_fps_live;   // 0: not live (the game's own 30, or a fixed 90 / 120)
-// The stadium crowd at 30 (DM_CROWD_30, on unless "0"): the crowd's flipbook (models ob0041..ob0044 stadiumcrowda..d, in the new-game intro in Rose's stadium after the
-//   name entry) flickers at 60, and no fix in the frame step has cured it yet. When the game opens one of those models the live rate drops to 30; when it next loads a
-//   zone's scripts (bin/script/amx/z_*.amx: play has moved to a field area) the rate it had comes back, unless the menu changed it meanwhile. hle_fs.c h_fs_OpenFile
-static pthread_mutex_t g_crowd_mu = PTHREAD_MUTEX_INITIALIZER; static int g_crowd_saved;   // the live rate before the hold, 0: no hold
-void dm_fps_scene_file(const char *path) {
-    if (!path || !__atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED)) return;
+// The game's own 30 where the patch makes the stadium crowd flicker (DM_NATIVE_START, on unless "0"). With the live frame rate the patch is not written at load:
+//   the title screen and the opening run exactly as at 30 on the Switch (the game's own present interval 2 and its own step). The crowd's flipbook (the title
+//   screen's stadium, and models ob0041..ob0044 stadiumcrowda..d in the opening after the name entry) flickered under the patch even at 30, each frame held 2 slots
+//   of 60 Hz by the host with the step fed by it, and not at the game's own 30 (v0.59, which left the patch out at 30). The patch goes in when play reaches a field
+//   area (a zone's scripts load, bin/script/amx/z_*.amx) or the menu asks for 60, comes out again while a stadium crowd is loaded (DM_CROWD_30, on unless "0"), and
+//   goes back in at the next field area. dm_fps_tick writes the two words on the present thread: the code word through a moment of read + write + execute on its
+//   one page (the code area is sealed), the step word in data; while the patch is out the host feeds the step no more (dm_step_word NULL: hle_nvn.c vstep_on)
+static struct { uint8_t *itv, *dt; uint32_t wi, wd, owi, owd; int fps, want, on, patched, broken; } g_fp;   // on: the patch is handled here; want: the live rate to go back to
+static int g_fp_native = 1;   // the game's own 30 is asked for: from the start until a field area, and while a stadium crowd is loaded
+void dm_fps_scene_file(const char *path) {   // hle_fs.c h_fs_OpenFile
+    if (!path || !g_fp.on) return;
     int crowd = strstr(path, "_stadiumcrowd") != NULL, zone = !crowd && strstr(path, "/script/amx/z_") != NULL;
     if (!crowd && !zone) return;
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_CROWD_30"); on = !(e && !strcmp(e, "0")); }
-    if (!on) return;
-    pthread_mutex_lock(&g_crowd_mu);
-    int cur = __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED);
-    if (crowd && !g_crowd_saved && cur != 30) {
-        g_crowd_saved = cur; __atomic_store_n(&dm_fps_live, 30, __ATOMIC_RELAXED);
-        LOG("frame rate: the stadium crowd is loading (%s): 30 fps until play moves to a field area (its flipbook flickers at %d)", path, cur); }
-    else if (zone && g_crowd_saved) {
-        if (cur == 30) { __atomic_store_n(&dm_fps_live, g_crowd_saved, __ATOMIC_RELAXED); LOG("frame rate: a field area loads (%s): %d fps again", path, g_crowd_saved); }
-        else LOG("frame rate: a field area loads (%s): the menu set %d meanwhile, kept", path, cur);
-        g_crowd_saved = 0; }
-    pthread_mutex_unlock(&g_crowd_mu);
+    static int c30 = -1; if (c30 < 0) { const char *e = getenv("DM_CROWD_30"); c30 = !(e && !strcmp(e, "0")); }
+    if (crowd && c30 && !__atomic_exchange_n(&g_fp_native, 1, __ATOMIC_RELAXED)) LOG("frame rate: the stadium crowd is loading (%s): the game's own 30 until a field area", path);
+    if (zone && __atomic_exchange_n(&g_fp_native, 0, __ATOMIC_RELAXED)) LOG("frame rate: a field area loads (%s)", path);
+}
+static int fp_write(int patched) {
+    long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 4096;
+    uint8_t *page = (uint8_t *)((uintptr_t)g_fp.itv & ~(uintptr_t)(pg - 1));
+    if (mprotect(page, (size_t)pg, PROT_READ | PROT_WRITE | PROT_EXEC)) {   // (executable throughout: another thread may be running code on this page)
+        g_fp.broken = 1; LOG("[RED] frame rate: the 60 fps patch cannot be %s (mprotect: %s): it stays as it is for this run", patched ? "written" : "taken out", strerror(errno)); return 0; }
+    __atomic_store_n((uint32_t *)g_fp.itv, patched ? g_fp.wi : g_fp.owi, __ATOMIC_RELEASE);
+    mprotect(page, (size_t)pg, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache((char *)g_fp.itv, (char *)g_fp.itv + 4);
+    if (!patched) dm_step_word = NULL;   // (the host stops feeding the step before the game's own value goes back)
+    dm_guest_write_prepare(g_fp.dt, 4); __atomic_store_n((uint32_t *)g_fp.dt, patched ? g_fp.wd : g_fp.owd, __ATOMIC_RELAXED);
+    if (patched) { dm_step_hz = g_fp.fps; dm_step_word = g_fp.dt; }
+    g_fp.patched = patched; return 1;
+}
+// Each present (hle_nvn.c, the present thread, before the step is decided): the patch in or out as asked
+void dm_fps_tick(void) {
+    if (!g_fp.on || g_fp.broken) return;
+    int live = __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED), nat = __atomic_load_n(&g_fp_native, __ATOMIC_RELAXED);
+    if (!g_fp.patched) {
+        if (live == 60) { nat = 0; __atomic_store_n(&g_fp_native, 0, __ATOMIC_RELAXED); g_fp.want = 60; }   // (the menu asked for 60 meanwhile: its choice)
+        if (!nat && fp_write(1)) { __atomic_store_n(&dm_fps_live, g_fp.want, __ATOMIC_RELAXED);
+            LOG("frame rate: the 60 fps patch is in, live frame rate %d (the menu switches 30 / 60 at once)", g_fp.want); }
+    } else if (nat) {
+        g_fp.want = live == 60 ? 60 : 30;
+        if (fp_write(0)) { __atomic_store_n(&dm_fps_live, 30, __ATOMIC_RELAXED); LOG("frame rate: the 60 fps patch is out: the game's own 30 (then %d again)", g_fp.want); }
+    }
 }
 static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     const char *e = getenv("DM_FPS_TARGET"), *lv = getenv("DM_FPS_LIVE"); int live = !(lv && !strcmp(lv, "0"));
@@ -573,16 +632,15 @@ static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
         LOG("[RED] %s: %d fps patch not applied (%s: the step word lies in code, or that code was rewritten)", m->name, fps, FPS_SITES[si].game); return 0; }
     uint32_t wi, wd; memcpy(&wi, m->base + itv, 4); memcpy(&wd, m->base + dt, 4);
     if ((wi != 0x2a1503e1u && wi != 0x52800041u) || wd != 33333334u) { LOG("[RED] %s: %d fps patch not applied (unexpected words %08x %u)", m->name, fps, wi, wd); return 0; }
-    // The game does not take its step from the interval alone: once a frame (Shield FUN_006ea110 / FUN_006df360 in Ghidra, image +0x5ea110 / +0x5df360) it
-    //   measures its own frame cost, max(CPU work without its waits, the GPU time between two timestamp counter reports), rounds it up to whole vsyncs and
-    //   picks that entry of this table (16.7 / 33.3 / 50 / 66.7 / 83.3 ms). On this engine both measures miss time: the waits it subtracts are where our
-    //   translation and a throttled phone make it wait, and the timestamps of one submission are equal (written when it completes), so the game advanced
-    //   33 ms for frames that took 40-62 ms: the world, its animations above all, in slow motion. With the whole table found, every entry gets the real step
-    {   static const uint64_t own[5] = { 16666667, 33333334, 50000000, 66666667, 83333334 }; uint64_t t[5];
-        if (dt >= 8 && dt - 8 >= m->text_end && dt + 32 <= lim) { memcpy(t, m->base + dt - 8, sizeof t);
-            if (!memcmp(t, own, sizeof t)) dm_step_table = m->base + dt - 8; }
-        if (!dm_step_table) LOG("%s: the frame-time table around +%#llx is not the game's own: only its interval-2 entry follows the real step", m->name, (unsigned long long)dt); }
     wi = 0x52800021u; wd = (uint32_t)((1000000000ull + (uint64_t)fps - 1) / (uint64_t)fps);
+    { const char *ns = getenv("DM_NATIVE_START");
+      if (fps == 60 && live && !(ns && !strcmp(ns, "0"))) {   // the game's own 30 until a field area or 60 from the menu (dm_fps_tick)
+        g_fp.itv = m->base + itv; g_fp.dt = m->base + dt; g_fp.wi = wi; g_fp.wd = wd; g_fp.fps = fps; g_fp.want = want == 60 ? 60 : 30; g_fp.on = 1;
+        memcpy(&g_fp.owi, m->base + itv, 4); g_fp.owd = 33333334u;   // (the game's own words: the patch can come out again)
+        __atomic_store_n(&dm_fps_live, 30, __ATOMIC_RELAXED);
+        LOG("%s: 60 fps patch for %s ready, not written yet: the game's own 30 until play reaches a field area or the menu asks for 60, then %d (live frame rate)",
+            m->name, FPS_SITES[si].game, g_fp.want);
+        return 2; } }
     memcpy(m->base + itv, &wi, 4); memcpy(m->base + dt, &wd, 4);
     dm_step_hz = fps; dm_step_word = m->base + dt;
     if (fps == 60 && live) __atomic_store_n(&dm_fps_live, want == 60 ? 60 : 30, __ATOMIC_RELAXED);

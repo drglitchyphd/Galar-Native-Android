@@ -48,7 +48,7 @@ Delete this mod from the phone?	¿Eliminar este mod del teléfono?
 Deleted: applies the next time you start the game.	Eliminado: se aplica la próxima vez que inicies el juego.
 Display	Pantalla
 Done	Listo
-Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + to reset).	Arrastra un control para moverlo, pellizca para cambiar su tamaño, toca dos veces para ocultarlo. Mantén − 2 s para guardar (mantén + para restablecer).
+Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset).	Arrastra un control para moverlo. Para cambiar su tamaño, tócalo y luego pellizca con dos dedos en cualquier parte. Toca dos veces para ocultarlo. Mantén − 2 s para guardar (mantén + para restablecer).
 Edit notes	Editar notas
 Enter both the server and the room code.	Introduce el servidor y el código de sala.
 Export save data	Exportar partida guardada
@@ -298,14 +298,12 @@ L3 / R3 buttons	Botones L3 / R3
 Off: no L3 / R3 on screen (a controller's stick buttons still work)	Desactivado: sin L3 / R3 en pantalla (los botones de los sticks de un mando siguen funcionando)
 On: L3 and R3 above the sticks (move them with Move the touch controls)	Activado: L3 y R3 sobre los sticks (muévelos con Mover los controles táctiles)
 Frame generation (experimental)	Generación de fotogramas (experimental)
-On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Needs a fast GPU; your input shows about 17 ms later	Activada: se crea una imagen entre cada dos fotogramas del juego, así 30 fps se mueven como 60. Requiere una GPU rápida; tus acciones se ven unos 17 ms más tarde
 Lossless Scaling: the in-between picture made by your own copy of Lossless Scaling's frame generation (sharper motion, needs a faster GPU)	Lossless Scaling: la imagen intermedia la crea tu propia copia de la generación de fotogramas de Lossless Scaling (movimiento más nítido, requiere una GPU más rápida)
 Own Lossless Scaling? Import its Lossless.dll (in the program's folder) to use its frame generation here.	¿Tienes Lossless Scaling? Importa su Lossless.dll (en la carpeta del programa) para usar aquí su generación de fotogramas.
 Import Lossless.dll	Importar Lossless.dll
 Lossless Scaling imported. Choose it under Frame generation.	Lossless Scaling importado. Elígelo en Generación de fotogramas.
 Could not import Lossless Scaling: %s	No se pudo importar Lossless Scaling: %s
 Lossless Scaling pictures	Imágenes de Lossless Scaling
-Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)	Auto: 4x en una pantalla de 120 Hz, 3x en 90 Hz, si no 2x (a 30 fps)
 2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: una imagen entre cada dos fotogramas del juego (30 fps se mueven como 60)
 3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: dos imágenes entre cada dos fotogramas (como 90 fps; uniforme solo en una pantalla de 90 Hz)
 4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: tres imágenes entre cada dos fotogramas (como 120 fps; requiere una pantalla de 120 Hz y una GPU rápida)
@@ -324,3 +322,63 @@ Divisions	Divisiones
 Textures: every texture read is limited to a sane range. If the white goes away, tell us: a texture is read wrong	Texturas: cada lectura de textura se limita a un rango razonable. Si el blanco desaparece, avísanos: una textura se lee mal
 Inputs: every value the vertex shader hands over is limited. If the white goes away, tell us	Entradas: cada valor que entrega el sombreador de vértices se limita. Si el blanco desaparece, avísanos
 Divisions: every division is limited. If the white goes away, tell us	Divisiones: cada división se limita. Si el blanco desaparece, avísanos
+Low: 3D at about 600p, lighter	Bajo: 3D a unos 600p, más ligero
+Lowest: 3D at 960x540, coolest	Mínimo: 3D a 960x540, el más fresco
+Locked for now	Bloqueado por ahora
+Off for every phone until the game holds a solid frame rate without it. It comes back after that.	Desactivado en todos los teléfonos hasta que el juego mantenga una tasa de fotogramas estable sin esto. Volverá después.
+Save folder	Carpeta de guardado
+App folder	Carpeta de la app
+App folder: Android/data, as before	Carpeta de la app: Android/data, como antes
+Documents	Documentos
+Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/Galar Native/%s/save, para herramientas de sincronización como Syncthing. Tu partida se copia allí en el próximo inicio; lo que ya hubiera se guarda como copia de seguridad. Requiere acceso a todos los archivos
+The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	La última configuración tradujo solo una parte de los shaders del juego, por eso partes del juego no se dibujaban. Toca Configurar una vez más: las termina (las ya hechas se conservan).
+FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0: el escalador de AMD, ampliación que respeta los bordes y luego nitidez
+Faster rendering	Renderizado más rápido
+Auto: on for Adreno GPUs, off for others	Auto: activado en GPU Adreno, desactivado en las demás
+Off: the graphics work runs on the game's own thread	Desactivado: el trabajo gráfico se hace en el hilo del propio juego
+Bright scenes in a wider format	Escenas iluminadas en un formato más amplio
+On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	Activado: la escena iluminada se dibuja en un formato con más margen (RGBA16F en lugar de R11G11B10F), una prueba para imágenes blancas o que parpadean; usa un poco más de memoria
+AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1: escalado que respeta los bordes y luego nitidez (Nitidez ajusta cuánta)
+Colour	Color
+Natural	Natural
+Natural: the colours as the game draws them	Natural: los colores tal como los dibuja el juego
+Vibrant	Vivo
+Vibrant: muted colours lifted, a touch more contrast (less grey haze)	Vivo: los colores apagados se avivan, un poco más de contraste (menos bruma gris)
+Cinematic	Cinemático
+Cinematic: stronger contrast, a slightly warm tone	Cinemático: más contraste y un tono ligeramente cálido
+Sticks	Joysticks
+Fixed	Fijos
+Fixed: the sticks stay where they are drawn, as on Joy-Cons	Fijos: los joysticks se quedan donde se dibujan, como en los Joy-Con
+Floating	Flotantes
+Floating: touch anywhere on the left half to move (the stick comes to your thumb); drag on the right half to turn the camera	Flotantes: toca en cualquier parte de la mitad izquierda para moverte (el joystick va a tu pulgar); arrastra en la mitad derecha para girar la cámara
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	Desactivada: esta GPU necesita %s ms por imagen, más de lo que el juego puede ceder. Desactívala y actívala para volver a intentarlo.
+Off until the next start (see the log for why).	Desactivada hasta el próximo inicio (el motivo está en el registro).
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Desactivada: incluso en su modo más ligero le quitaba al juego sus propios fotogramas aquí (hasta %s fps). Desactívala y actívala para volver a intentarlo.
+Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	Desactivada a 30 fps: la generación de fotogramas necesita el juego a 60 fps estables (Rendimiento → Fotogramas: 60).
+Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.	Pausada: el juego va a %s fps aquí, y la generación de fotogramas necesita 60 estables. Se reactiva sola cuando el juego mantiene 60.
+On: a picture is made between each two of the game's frames, so 60 fps moves like 120. Only while the game holds a locked 60 fps; your input shows about 8 ms later	Activado: se crea una imagen entre cada dos fotogramas del juego, así 60 fps se mueven como 120. Solo mientras el juego mantiene 60 fps estables; tu control se ve unos 8 ms más tarde
+Auto: 2x, light (the game at a locked 60 shown at 120)	Auto: 2x, ligero (el juego a 60 estables mostrado a 120)
+Widescreen	Panorámica
+Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	Panorámica: la cámara del juego tan ancha como tu pantalla, sin estirar nada (Sword / Shield 1.3.2; la interfaz se estira)
+Output	Salida
+Float target	Destino flotante
+Output: what each shader writes is limited. If the white goes away, tell us	Salida: lo que escribe cada sombreador se limita. Si el blanco desaparece, avísanos
+Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us	Destino flotante: la escena iluminada se guarda en una imagen de 16 bits en coma flotante en lugar de la compacta. Si el blanco desaparece, avísanos
+Multiplies	Multiplicaciones
+Additions	Sumas
+Multiply-adds	Multiplicar-sumar
+Multiplies: every multiply result is limited. If the white goes away, tell us	Multiplicaciones: cada resultado de multiplicación se limita. Si el blanco desaparece, avísanos
+Additions: every add / subtract result is limited. If the white goes away, tell us	Sumas: cada resultado de suma o resta se limita. Si el blanco desaparece, avísanos
+Multiply-adds: every fused multiply-add result is limited. If the white goes away, tell us	Multiplicar-sumar: cada resultado de multiplicación-suma se limita. Si el blanco desaparece, avísanos
+NaN fix	Arreglo NaN
+NaN fix + textures	Arreglo NaN + texturas
+NaN fix: broken values the shaders write become 0 instead of turning the picture white. Tell us how it looks	Arreglo NaN: los valores rotos que escriben los sombreadores pasan a 0 en lugar de volver blanca la imagen. Cuéntanos cómo se ve
+NaN fix + textures: the same, and broken values read from textures become 0 too. Tell us how it looks	Arreglo NaN + texturas: lo mismo, y los valores rotos leídos de texturas también pasan a 0. Cuéntanos cómo se ve
+This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	Esta versión traduce los shaders del juego de otra forma: se están actualizando. No hacen falta tus archivos y tu partida se conserva. Deja esta pantalla abierta; tarda lo mismo que el paso de shaders de la instalación.
+Setting up	Configuración
+Keep the phone cooler: half the workers (setup takes longer)	Mantener el móvil más fresco: la mitad de procesos (la configuración tarda más)
+Updating the shaders for this app version: your files aren't needed and your save is kept.	Actualizando los shaders para esta versión de la app: no hacen falta tus archivos y tu partida se conserva.
+Updating the shaders	Actualizando los shaders
+3D render scale	Escala de renderizado 3D
+Auto: what the Graphics setting gives, lowered by itself when the phone is hot	Auto: lo que da el ajuste de Gráficos, reducido solo cuando el móvil se calienta
+50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50 %: el 3D a la mitad de tamaño, lo más fresco y rápido (el texto y los menús siguen nítidos)

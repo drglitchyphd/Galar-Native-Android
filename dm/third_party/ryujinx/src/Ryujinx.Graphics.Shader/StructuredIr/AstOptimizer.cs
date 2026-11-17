@@ -129,7 +129,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                         parent.Remove(block);
                     }
                 }
-                else if (isIf && parent.Type == AstBlockType.Else && parent.Count == (hasElse ? 2 : 1))
+                // nxnative: "else { if (c) ... }" is no longer folded into "else if (c) ...". The SPIR-V generator takes only an Else block as an If's false
+                //   branch (SpirvGenerator.Generate, BlockEntered): an ElseIf after an If was never branched to, its code dropped. With the optimizer on (no
+                //   DebugMode) that removed the glyph flip / rotation branch of Sword / Shield's text vertex shader (984a6ee420835029): every dialogue and menu
+                //   text came out empty (Galar Native v0.83, #249 #251 #252 #256 #257). The fold only made GLSL read nicer
+                else if (false && isIf && parent.Type == AstBlockType.Else && parent.Count == (hasElse ? 2 : 1))
                 {
                     AstBlock parentOfParent = parent.Parent;
 

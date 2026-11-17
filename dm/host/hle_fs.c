@@ -9,6 +9,7 @@
 #include "front.h"
 #include <dirent.h>
 #include <errno.h>
+#include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -78,6 +79,11 @@ static int dm_fs_test_fail(const char *pt) {
 }
 static int in_txn_dir(const char *hp) { for (int i = 0; i < g_nmnt; i++) { size_t n = strlen(g_mnt[i].dir); if (g_mnt[i].commit[0] && !strncmp(hp, g_mnt[i].dir, n) && (hp[n] == '/' || !hp[n])) return 1; } return 0; }
 static int rm_tree(const char *p);
+static int fs_aside(const char *p) {   // 1: moved to <p>.stale-<time> (rm_tree could not delete it)
+    char to[1200]; snprintf(to, sizeof to, "%s.stale-%ld", p, (long)time(NULL));
+    if (rename(p, to)) return 0;
+    errno = 0; LOG("save transaction: %s could not be deleted (not this app's files?): moved aside to %s", p, to); return 1;
+}
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_nmnt; i++)
@@ -97,8 +103,10 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
 #endif
         mkdir(dir, 0755);
         const char *why = NULL;
-        if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
-        else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
+        // a leftover that cannot be deleted (files another app or a computer copied in, owned by someone else: a .new from adb at 06:07 kept a phone's saves read-only
+        //   all day) is renamed aside instead, which needs only the parent folder's permission; the committed directory is never touched
+        if (!access(work, F_OK) && rm_tree(work) && !fs_aside(work)) why = "cannot clear the work directory left over from last time";
+        else if (!access(neu, F_OK) && rm_tree(neu) && !fs_aside(neu)) why = "cannot clear the .new left over from last time";
         else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0)) why = "cloning the work directory failed";
         if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }

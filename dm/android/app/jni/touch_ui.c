@@ -161,6 +161,10 @@ static void layout_apply(float w, float h) {
 // L3 / R3 on screen: an option (DM_TOUCH_L3R3=on, Controls → Touch controls), off by default: Sword and Shield hardly use them. -1: not read yet
 static int g_l3r3 = -1;
 static int l3r3_on(void) { if (g_l3r3 < 0) { const char *e = getenv("DM_TOUCH_L3R3"); g_l3r3 = e && !strcmp(e, "on"); } return g_l3r3; }
+// Floating sticks (DM_TOUCH_STICKS=floating, Controls → Touch controls): the movement stick's base comes to wherever the thumb lands on the left half (below the top
+// row), and the right half is the camera alone, by dragging (no right stick on screen). Fixed (default): the sticks where the layout puts them, as on Joy-Cons.
+// Asked for by a player whose thumbs kept hitting the game's own touch buttons (the Poké Ball / satchel) around the fixed sticks
+static int float_on(void) { return g_float > 0; }   // FORK: upstream's floating sticks (DM_TOUCH_STICKS) give way to the fork's (DM_FORK_TOUCH=float, g_float above)
 static void layout(float w, float h) {
     static int init; if (!init++) for (int i = 0; i < 10; i++) g_ptr[i].id = -1;   // no finger down
     if (w == g_w && h == g_h) return;
@@ -225,6 +229,7 @@ static void layout(float w, float h) {
     if (!g_rstick_on) { g_rknob_x = g_c[C_RSTICK].cx; g_rknob_y = g_c[C_RSTICK].cy; }
     layout_apply(w, h);
     if (!l3r3_on()) g_c[C_L3].shown = g_c[C_R3].shown = 0;   // (an option, off by default: the layout editor's own choice only counts while it is on)
+    if (float_on()) g_c[C_RSTICK].shown = g_c[C_R3].shown = 0;   // (floating: the right half drags the camera; R3 went with the stick it sat on)
     if (!g_stick_on) { g_stick_x = g_knob_x = g_c[C_STICK].cx; g_stick_y = g_knob_y = g_c[C_STICK].cy; }
 }
 // FORK v47 (from Arceus Native 652ab9d): the touch camera's own sensitivity (DM_TOUCH_CAM_SENS 25-300 %, apart from the right stick's DM_RSTICK_SENS), how a drag on
@@ -359,8 +364,11 @@ static void recompute_locked(void) {
 // ---------- the layout editor: hold − for 2 s to enter; drag a control to move it, pinch on it to resize it, double-tap it to hide / show it;
 // hold + for 2 s to go back to the default layout; hold − for 2 s again to save and leave. The game gets no input meanwhile ----------
 static double g_edit_hold_t;   // (g_edit_hold_t: when the hold that toggles the editor started)
-static struct { int32_t id; int c; float ox, oy, x0, y0; double t0; int mv; } g_ep[10];   // FORK v47 (from Arceus Native 1c2214e): mv, the finger moved: dragging, not a hold
+static struct { int32_t id; int c; float ox, oy, x0, y0, x, y; double t0; int mv; } g_ep[10];   // (x y: where the finger is now, upstream)   // FORK v47 (from Arceus Native 1c2214e): mv, the finger moved: dragging, not a hold
 static struct { int c, active; float d0, r0; } g_pinch;
+// The control last touched in the editor (a yellow-white ring): a pinch with two fingers anywhere on the screen sizes it. A pinch had to start with both fingers
+//   on the control itself, which small ones (− + ☰, L3 / R3) do not leave room for; and a finger resting on + for 2 s resets the whole layout
+static int g_sel = -1;
 static int g_last_tap_c = -1; static double g_last_tap_t;
 static int edit_hit(float x, float y) {   // the smallest control (shown or not) under the finger
     int best = -1; float br = 1e9f;
@@ -387,6 +395,7 @@ static void edit_event(const AInputEvent *e) {
     } else if (act == AMOTION_EVENT_ACTION_MOVE) {
         float px[10], py[10]; int n = 0;
         for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) { int32_t id = AMotionEvent_getPointerId(e, k); float x = AMotionEvent_getX(e, k), y = AMotionEvent_getY(e, k);
+            for (int i = 0; i < 10; i++) if (g_ep[i].id == id) { g_ep[i].x = x; g_ep[i].y = y; }
             for (int i = 0; i < 10; i++) if (g_ep[i].id == id && g_ep[i].c >= 0) {
                 if (fabsf(x - g_ep[i].x0) > g_h * 0.03f || fabsf(y - g_ep[i].y0) > g_h * 0.03f) g_ep[i].mv = 1;   // FORK v47
                 if (g_pinch.active && g_pinch.c == g_ep[i].c) { if (n < 10) { px[n] = x; py[n] = y; n++; } }
@@ -400,8 +409,10 @@ static void edit_event(const AInputEvent *e) {
             if (c >= 0 && t - g_ep[i].t0 < 0.3 && mx * mx + my * my < g_h * g_h * 0.0004f) {   // a tap: a double tap toggles the control
                 if (g_last_tap_c == c && t - g_last_tap_t < 0.4 && c != C_PLUS && c != C_MINUS && c != C_MENU) { g_c[c].shown = !g_c[c].shown; edit_store(c); g_last_tap_c = -1; click_locked(); }
                 else { g_last_tap_c = c; g_last_tap_t = t; } }
-            if (g_pinch.active && g_pinch.c == c) g_pinch.active = 0;
+            if (g_pinch.active && g_pinch.c == c) { g_pinch.active = 0;   // (the finger left behind lets go of it: no jump to where it rests)
+                for (int j = 0; j < 10; j++) if (j != i && g_ep[j].id >= 0 && g_ep[j].c == c) g_ep[j].c = -1; }
             g_ep[i].id = -1; }
+        layout_save();   // (each lift: closing the app keeps the edit, #200)
     }
 }
 // FORK: the editor's commands, also from its Save / Reset / Cancel bar (ForkTouch.java through android_main.c)
@@ -431,6 +442,12 @@ int touch_ui_edit_shape(void) {   // FORK: the editor bar's Shape button: the se
     pthread_mutex_unlock(&g_mu); return sh; }
 void touch_ui_edit_size(float frac) { pthread_mutex_lock(&g_mu); int c = g_edit_sel;
     if (g_edit && c >= 0 && g_h > 0) { g_c[c].r = clampf(frac, 0.025f, 0.25f) * g_h; edit_store(c); } pthread_mutex_unlock(&g_mu); }
+// Android's Back while the layout editor is open (android_main.c): saved and left, as holding − does (Galar-Native-Android #200: no way out was found)
+int touch_ui_edit_back(void) {
+    pthread_mutex_lock(&g_mu); int was = g_edit;
+    if (g_edit) { layout_save(); g_edit = 0; for (int i = 0; i < 10; i++) g_ep[i].id = -1; fprintf(stderr, "[FORK] [touch] layout saved (Back): %s\n", g_lay_path); }
+    pthread_mutex_unlock(&g_mu); return was;
+}
 // the 2-second holds, checked once a frame (a finger held still sends no events): − toggles the editor (saving on the way out), + in the editor resets the layout
 static void edit_holds_locked(void) {
     double t = now_s(); int minus = 0, plus = 0;

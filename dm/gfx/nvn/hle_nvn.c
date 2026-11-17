@@ -1068,7 +1068,13 @@ typedef struct { int kind, n, idx; uint64_t *h; NVNqueue *q; sync_t *s; win_t *o
 enum { RQ_N = 512 };
 static rq_item g_rq[RQ_N]; static uint64_t g_rq_head, g_rq_tail; static int g_rq_presents;
 static pthread_mutex_t g_rq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_rq_cv = PTHREAD_COND_INITIALIZER;
-static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ASYNC"); v = e && strcmp(e, "off") && strcmp(e, "0"); if (v) LOG("[nvn] the replay runs on its own thread (DM_NVN_ASYNC)"); } return v; }
+// DM_NVN_ASYNC=1 on, 0 / off off; unset (Auto): on for Adreno, where it is tested (a Galaxy S25+ went from 42 ms frames to a steady 33 at 30 fps, the replay's 28-33 ms
+//   moved off the game's thread), off for other GPUs until it has been run there
+const char *nvn_vk_gpu_name(void) __attribute__((weak));
+static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ASYNC"); const char *g = nvn_vk_gpu_name ? nvn_vk_gpu_name() : NULL;
+    int autoon = !(e && *e) && g && strstr(g, "Adreno");
+    v = autoon || (e && *e && strcmp(e, "off") && strcmp(e, "0"));
+    LOG("[nvn] the replay %s (DM_NVN_ASYNC %s)", v ? "runs on its own thread" : "runs on the game's thread", e && *e ? e : autoon ? "Auto: on for Adreno" : "Auto: off for this GPU"); } return v; }
 static const char *volatile g_rq_at = "idle";
 // A wait on the replay thread that takes this long has gone wrong: said in the log with who is waiting and what the replay thread is doing
 static void rq_wait(const char *who) {
@@ -1600,28 +1606,15 @@ static void vstep_tick(const win_t *o) {
     double cost = cpu > gpu ? cpu : gpu;
     // at most 2 slots: 30 fps is the floor, 60 when frames fit (a 3-slot hold, 20 fps, swung the picture between 20 and 60). The live target 30 holds every frame 2
     int k0 = g_vs.k, n = nvn_fstep_next(&g_vs, shown, cost, live_fps() == 30 ? 2 : 1, 2, 0);
-    uint32_t ns = (uint32_t)(((uint64_t)n * 1000000000ull + (uint64_t)dm_step_hz - 1) / (uint64_t)dm_step_hz);
-    { extern volatile int dm_fork_ff_pct __attribute__((weak)); if (&dm_fork_ff_pct && dm_fork_ff_pct > 100) ns = (uint32_t)((uint64_t)ns * (uint64_t)dm_fork_ff_pct / 100u); }   // FORK: fast-forward (host/fork_ff.c)
-    // The game's step follows real time (loader.c fps_patch, dm_step_table): the time since the last frame's start, in whole slots, up to 83.3 ms (the longest
-    //   step the game's own table has), the part of a slot left over carried into the next frame and anything over 83.3 ms of a stall dropped; every entry
-    //   of the table gets it, so whichever the game picks from its own measures, game time = real time. Presentation still holds frames k slots (above).
-    //   DM_GAME_STEP=fixed: only the interval-2 entry, with the hold's step, as before
-    { extern uint8_t *dm_step_table __attribute__((weak)); static int fixed = -1; static double acc, game_sum, real_sum;
-      if (fixed < 0) { const char *e = getenv("DM_GAME_STEP"); fixed = e && !strcmp(e, "fixed"); if (!fixed && &dm_step_table && dm_step_table) LOG("[nvn] game step: real time, whole slots up to 83.3 ms (DM_GAME_STEP=fixed: the hold's step)"); }
-      if (!fixed && &dm_step_table && dm_step_table) {
-          int maxs = (int)(83333334.0 / v); if (maxs < 1) maxs = 1;
-          acc += shown > 0 ? shown : (double)n;
-          int g = (int)floor(acc + 0.5); if (g < 1) g = 1; if (g > maxs) g = maxs;
-          acc -= g; if (acc > maxs) acc = maxs; if (acc < -1) acc = -1;
-          game_sum += g; real_sum += shown > 0 ? shown : (double)n;
-          uint64_t gn = (uint64_t)((double)g * v + 0.5);
-          { extern volatile int dm_fork_ff_pct __attribute__((weak)); if (&dm_fork_ff_pct && dm_fork_ff_pct > 100) gn = gn * (uint64_t)dm_fork_ff_pct / 100u; }   // FORK: fast-forward (host/fork_ff.c), on the real-time step too
-          ns = (uint32_t)gn;
-          dm_guest_write_prepare(dm_step_table, 40);
-          for (int i = 0; i < 5; i++) __atomic_store_n((uint64_t *)(dm_step_table + 8 * i), gn, __ATOMIC_RELAXED);
-          if (o->presents % 1800 == 0 && real_sum > 0) { LOG("[nvn] game step: game time %.3f of real time over the last %.0f slots", game_sum / real_sum, real_sum); game_sum = real_sum = 0; }
-      } }
-    dm_guest_write_prepare(dm_step_word, 4); __atomic_store_n((uint32_t *)dm_step_word, ns, __ATOMIC_RELAXED);
+    // The game's step: the 60 FPS mod's (Fl4sh's pchtxt for Sword / Shield 1.3.2, loader.c fps_patch), and nothing else: the interval-2 entry of the game's
+    //   frame-time table holds one constant step, 1 / fps (16.67 ms; 33.33 ms while the live rate is 30), written when it changes; the rest of the table stays
+    //   the game's own. The world and its animations move by the same step every frame (a step that followed real time, v0.73, moved them by 1-2-3 slots:
+    //   the player's run swung between two poses, #190, and fast objects skipped collisions, #187). A phone that cannot hold the rate plays slower, as with the
+    //   mod. Presentation still holds frames 1 or 2 slots (above), so they are shown evenly
+    uint32_t ns = (uint32_t)((1000000000ull * (live_fps() == 30 && dm_step_hz == 60 ? 2 : 1) + (uint64_t)dm_step_hz - 1) / (uint64_t)dm_step_hz);
+    { extern volatile int dm_fork_ff_pct __attribute__((weak)); if (&dm_fork_ff_pct && dm_fork_ff_pct > 100) ns = (uint32_t)((uint64_t)ns * (uint64_t)dm_fork_ff_pct / 100u); }   // FORK: fast-forward (host/fork_ff.c): the step scaled (written when it changes)
+    { static uint32_t last; if (ns != last) { dm_guest_write_prepare(dm_step_word, 4); __atomic_store_n((uint32_t *)dm_step_word, ns, __ATOMIC_RELAXED); last = ns;
+          LOG("[nvn] game step: %.2f ms a frame, as the 60 FPS mod", ns / 1e6); } }
     atomic_store(&g_fs_k, g_vs.k); held[g_vs.k]++;
     if (k0 && g_vs.k != k0 && nlog < 40) LOG("[nvn] frame step: hold %d → %d slots of %.2f ms at present %llu (cost %.2f slots, GPU %.2f)%s", k0, g_vs.k, v / 1e6,
                                              (unsigned long long)o->presents, cost, gpu, ++nlog == 40 ? "; further changes not logged" : "");
@@ -1650,6 +1643,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     { void dm_fork_ff_tick(void); dm_fork_ff_tick(); }   // FORK: fast-forward (host/fork_ff.c)
     { void dm_fork_enc_tick(void); dm_fork_enc_tick(); }   // FORK v47: encounter info probe, log only (host/fork_enc.c)
     if (dm_fps_state) { static int was; int c = fps_step_cap(); if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? " (prerendered movie)" : ""); was = c; } }
+    { extern void dm_fps_tick(void) __attribute__((weak)); if (dm_fps_tick) dm_fps_tick(); }   // (loader.c: the 60 fps patch deferred to a field area goes in)
     if (fstep_on()) fstep_tick(o); else if (vstep_on()) vstep_tick(o); else if (dyn_on()) dyn_tick(o);
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
     present_cfg(o);
