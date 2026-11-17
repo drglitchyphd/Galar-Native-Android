@@ -98,7 +98,14 @@ extern _Atomic int dm_fork_battle_age __attribute__((weak));   // gfx/nvn/fork_u
 // v53 (Steven: close faster after a battle): hidden once the battle HUD has been gone 1 s (30 frames); it may blink off during a long battle message and come back
 static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.active && (!&dm_fork_battle_age || atomic_load(&dm_fork_battle_age) <= 30); }
 static void enc_rect(float r4[4]);   // (below, with the drawing)
+// FORK v53: the battle D-pad (DM_FORK_BATTLE_DPAD=on, default off). In a battle (the right stick does nothing there) every touch that is not on a button is a
+//   floating D-pad: where the finger lands is the centre, held a little away (2.5 % of the screen height) it presses the nearest of Up / Down / Left / Right (the game
+//   repeats a held direction itself); a quick tap is A, two fingers tapping together B. The fixed D-pad and the sticks hide in battles. ⊞ turns it off until the screen changes
+static int g_bdpad = -1;
+static int bdpad_on(void) { if (g_bdpad < 0) { const char *e = getenv("DM_FORK_BATTLE_DPAD"); g_bdpad = e && !strcmp(e, "on"); } return g_bdpad; }
+static int bdpad_now(void) { return bdpad_on() && in_battle() && g_ctx_over != 2; }
 static int fork_hidden(int c) {
+    if (bdpad_now() && ((c >= C_UP && c <= C_RIGHT) || c == C_STICK || c == C_RSTICK || c == C_L3 || c == C_R3)) return 1;   // v53: the battle D-pad replaces them
     if (c == C_ENC) return !enc_live();
     if (c == C_FF) return !g_ffscope || (g_ffscope == 1 && !in_battle());
     if (c == C_TURBO) return !g_turbo_on;
@@ -253,6 +260,7 @@ static int hit(int c, float x, float y, float slack) {
 static int target_at(float x, float y) {
     if (g_float <= 0 && hit(C_RSTICK, x, y, 1.3f)) return C_RSTICK;   // FORK: floating sticks: the fixed right stick is not there
     for (int c = C_A; c < NCTL; c++) if (hit(c, x, y, 1.3f)) return c;   // thumbs miss: touch areas 1.3 times the drawing
+    if (bdpad_now()) return C_STICK;   // FORK v53: the battle D-pad, anywhere not on a button
     if (g_float > 0) return x < g_w * 0.5f ? C_STICK : C_CAM;   // FORK: floating sticks, each on its own half
     if (x < g_w * 0.42f && y > g_h * 0.30f) return C_STICK;
     if (x > g_w * 0.45f) return C_CAM;
@@ -326,6 +334,10 @@ static void recompute_locked(void) {
     for (int i = 0; i < 10; i++) {
         if (g_ptr[i].id < 0) continue;
         int c = g_ptr[i].target;
+        if (c == C_STICK && bdpad_now()) {   // FORK v53: the battle D-pad: the nearest direction once the finger is 2.5 % of the screen height from where it landed
+            float dx = g_ptr[i].x - g_stick_x, dy = g_ptr[i].y - g_stick_y, dz = g_h * 0.025f, r = g_c[C_STICK].r, d = sqrtf(dx * dx + dy * dy);
+            if (d > dz) b |= fabsf(dx) > fabsf(dy) ? (dx > 0 ? DM_BTN_RIGHT : DM_BTN_LEFT) : (dy > 0 ? DM_BTN_DOWN : DM_BTN_UP);
+            if (d > r) { dx *= r / d; dy *= r / d; } stick = 1; g_knob_x = g_stick_x + dx; g_knob_y = g_stick_y + dy; continue; }
         if (c == C_STICK) { float r = g_c[C_STICK].r, dx = g_ptr[i].x - g_stick_x, dy = g_ptr[i].y - g_stick_y, d = sqrtf(dx * dx + dy * dy);
             if (d > r) { dx *= r / d; dy *= r / d; }
             float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < g_dead * g_dead) nx = ny = 0;   // dead zone (FORK: g_dead, DM_FORK_DEADZONE)
@@ -506,7 +518,7 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (t == C_RSTICK || (t >= C_UP && t <= C_RIGHT)) g_inner_t = now_s();
             if (t == C_STICK) { float r = g_c[C_STICK].r; g_stick_on = 1;   // the base comes to the thumb, kept on screen
                 (void)r; g_stick_x = g_c[C_STICK].cx; g_stick_y = g_c[C_STICK].cy;
-                if (g_float > 0) { g_stick_x = x; g_stick_y = y; } }   // FORK: floating: the base where the thumb landed
+                if (g_float > 0 || bdpad_now()) { g_stick_x = x; g_stick_y = y; } }   // (v53: + the battle D-pad)   // FORK: floating: the base where the thumb landed
             if (t == C_CAM && g_float > 0) { g_fr_x = g_frk_x = x; g_fr_y = g_frk_y = y; }   // FORK   // fixed, as on a Joy-Con: the thumb's offset from the base is the tilt
             break; }
     } else if (act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) {
@@ -518,7 +530,7 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             double t = now_s();
             if (t - g_two_t < 0.4) { g_two_t = 0; g_tap_mute = t + 0.3; dm_input_press(DM_BTN_B, 80000000ull); click_locked(); }
             else if (t >= g_tap_mute && !g_ptr[i].lp) { static int dg = -1; if (dg < 0) dg = getenv("DM_TOUCH_DIAG") != NULL; if (dg && !touch_menu_active()) touch_menu_tap(g_ptr[i].x0, g_ptr[i].y0, g_w, g_h);   // (diagnosis: what is under the tap)
-                if (touch_menu_active()) touch_menu_tap(g_ptr[i].x0, g_ptr[i].y0, g_w, g_h); else if ((GESTURES && g_ptr[i].target == C_CAM) || g_float > 0) { dm_input_press(DM_BTN_A, 80000000ull); click_locked(); } }   // FORK: || floating (a tap on either half)
+                if (touch_menu_active()) touch_menu_tap(g_ptr[i].x0, g_ptr[i].y0, g_w, g_h); else if ((GESTURES && g_ptr[i].target == C_CAM) || g_float > 0 || bdpad_now()) { dm_input_press(DM_BTN_A, 80000000ull); click_locked(); } }   // FORK: || floating (v53: || the battle D-pad) (a tap on either half)
         }
         // quick swipes on the camera side (under 0.35 s, a tenth of the screen height or more): left / right = L / R (the item or Pokémon), down = X (items / Pokémon)
         for (int i = 0; i < 10; i++) if (GESTURES && g_ptr[i].id == id && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !g_ptr[i].lp && now_s() - g_ptr[i].t0 < 0.35 && !touch_menu_active()) {
@@ -690,6 +702,7 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
     else if (!strcmp(key, "DM_FORK_GESTURES")) g_gest = value && !strcmp(value, "on");   // FORK v47
+    else if (!strcmp(key, "DM_FORK_BATTLE_DPAD")) { g_bdpad = value && !strcmp(value, "on"); g_w = g_h = 0; }   // FORK v53
     else if (!strcmp(key, "DM_FORK_ENC")) { g_enc_on = value && !strcmp(value, "on"); dm_fork_enc_on = g_enc_on; g_enc_census = g_enc_on; census_sync(); }   // FORK v48 (v49: + the probe)
     else if (!strncmp(key, "DM_FORK_CTX_", 12)) { int on = value && !strcmp(value, "on");   // FORK v47: the context switches
         if (!strcmp(key, "DM_FORK_CTX_DIALOGUE")) g_ctx_dlg = on; else if (!strcmp(key, "DM_FORK_CTX_MENU")) g_ctx_menu = on; else if (!strcmp(key, "DM_FORK_CTX_WORLD")) g_ctx_world = on;
@@ -829,7 +842,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
             if (c >= C_UP && c <= C_RIGHT && al == 1.0f) {   // FORK: <= C_RIGHT (the controls after the D-pad have no direction dot)
                 float r = g_c[c].r, ox = c == C_LEFT ? -0.42f : c == C_RIGHT ? 0.42f : 0, oy = c == C_UP ? -0.42f : c == C_DOWN ? 0.42f : 0;
                 add(it, &n, max, g_c[c].cx + ox * r, g_c[c].cy + oy * r, r * 0.22f, OVL_DISC, 255, 255, 255, 0.9f); } }
-        if (g_float <= 0 || g_stick_on)   // FORK: floating sticks: shown only under the thumb
+        if ((g_float <= 0 && !bdpad_now()) || g_stick_on)   // FORK: floating sticks: shown only under the thumb (v53: the battle D-pad too)
             compass(it, &n, max, g_stick_on ? 1.0f : idle ? ia : 0.75f, g_stick_x, g_stick_y, g_knob_x, g_knob_y, g_c[C_STICK].r);
         if (g_fr_on) compass(it, &n, max, 1.0f, g_fr_x, g_fr_y, g_frk_x, g_frk_y, g_c[C_STICK].r);   // FORK: the floating camera stick under the finger
         if (g_c[C_RSTICK].shown && g_float <= 0 && !fork_hidden(C_RSTICK)) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,   // faint while unused: it and the D-pad sit over the dialogue box

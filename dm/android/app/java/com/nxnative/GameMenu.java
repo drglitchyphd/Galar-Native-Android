@@ -435,6 +435,9 @@ public final class GameMenu {
         heading(a, t(a, "Battle"));
         choice(a, "DM_FORK_BATTLE", t(a, "Battle controls"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
             { "on", t(a, "Battle mode"), t(a, "Battle mode: in battles the unused buttons hide (L, R, ZL, ZR, +, −, right stick), X shows a Poké Ball, B a back arrow, Y info, and battles keep a layout of their own on each screen (arrange it with Move the touch controls during a battle)") } });
+        // FORK v53: the battle D-pad (touch_ui.c bdpad_now)
+        choice(a, "DM_FORK_BATTLE_DPAD", t(a, "Battle D-pad"), new String[][] { { "", t(a, "Off"), "" },
+            { "on", t(a, "Anywhere"), t(a, "In battles, any touch not on a button is a D-pad: hold a little away from where your finger lands to move, a quick tap is A, two fingers B") } });
         if ("on".equals(GameSettings.get(a, "DM_FORK_BATTLE"))) {
             slider(a, t(a, "Battle opacity"), "DM_FORK_BATTLE_OPACITY", 0, 100, 0, v -> v == 0 ? t(a, "same as elsewhere") : v + " %");
             slider(a, t(a, "Battle: fade after"), "DM_FORK_BATTLE_FADE", -1, 10, -1, v -> v < 0 ? t(a, "same as elsewhere") : v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v)); }
