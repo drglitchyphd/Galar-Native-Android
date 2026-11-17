@@ -85,6 +85,7 @@ static void fk_census_note(const char *k) { for (int i = 0; i < g_fk_cn; i++) if
 //   Battle: 3D with b6ff050a or ecacdb40 (the census of a battle; 56af7f00 alone is not one: dialogue boxes draw with it too, capture Nov 9); menu: no 3D, UI only.
 //   Held 10 frames before it changes
 _Atomic int dm_fork_screen;
+_Atomic int dm_fork_battle_age = 100000;   // FORK v53: frames since the battle HUD (b6ff050a / ecacdb40) was last drawn; touch_ui.c hides the encounter panel after 30
 volatile int dm_fork_census_want;
 static int g_fk_census_fg;   // FORK v50: fork_fg.h wants the screen kind (frame generation paused on still screens)   // touch_ui.c: the battle controls need the screen kind (else only Fill, corrected runs the census)
 static void fk_screen_frame(int comp) {
@@ -94,6 +95,7 @@ static void fk_screen_frame(int comp) {
     // FORK v47: 3 = dialogue: 3D with the text-box shader 56af7f00 and no battle HUD (an NPC talking in the field). A guess: logged, and touch_ui.c has an
     //   "all buttons" override for when it is wrong
     int dlg = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) dlg = 1;
+    { static int age; age = bat ? 0 : age < 100000 ? age + 1 : age; atomic_store(&dm_fork_battle_age, age); }   // FORK v53: frames since the battle HUD was last drawn (the encounter panel's 1 s close)
     int k = !comp && g_fk_cn ? 1 : comp && bat ? 2 : comp && dlg ? 3 : 0; static int cand = -1, held;
     if (k != cand) { cand = k; held = 0; return; }
     // (out of a battle only after 3 s without its HUD, to the world or dialogue: its text phases hide the HUD for a moment. To a full-screen menu (the Bag in a

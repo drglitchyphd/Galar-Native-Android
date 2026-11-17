@@ -4843,7 +4843,7 @@ static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, Vk
     for (int i = 0; i < n; i++) {
         dm_ovl_item *q = &it[i];
         ovl_pc pc = { { q->x, q->y, q->w, q->h }, { q->r, q->g, q->b, q->a }, { (float)q->shape, q->ring, q->radius, q->h > 0 ? q->w / q->h : 1 },
-                      { (float)q->glyph, q->gscale > 0 ? q->gscale : 0.5f, q->galpha, 0 }, { (float)lext.width, (float)lext.height }, (float)rot };
+                      { (float)q->glyph, q->gscale > 0 ? q->gscale : 0.5f, q->galpha, (float)q->gtint }, { (float)lext.width, (float)lext.height }, (float)rot };   // FORK v53: glyph.w = gtint (coloured labels)
         vkCmdPushConstants(cb, O.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
         vkCmdDraw(cb, 6, 1, 0, 0);
     }

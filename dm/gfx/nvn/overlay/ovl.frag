@@ -18,7 +18,7 @@ void main() {
             float nc = float(textureSize(font, 0).x / textureSize(font, 0).y);   // FORK: the cell count from the atlas's width (the fork's is 32 wide: fork_glyphs.py)
             vec2 t = vec2(p.glyph.x + g.x, g.y) / vec2(nc, 1.0);
             float s = texture(font, t).r; float ga = smoothstep(0.35, 0.65, s) * p.glyph.z;
-            col.rgb = mix(col.rgb, vec3(1.0), ga); col.a = max(col.a, ga);
+            col.rgb = mix(col.rgb, p.glyph.w > 0.5 ? p.color.rgb : vec3(1.0), ga); col.a = max(col.a, ga);   // FORK v53: glyph.w = 1: the label in the fill colour
         }
     }
     o = vec4(col.rgb * col.a, col.a);   // premultiplied

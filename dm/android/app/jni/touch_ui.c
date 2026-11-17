@@ -81,7 +81,8 @@ static int ctx_hidden(int c) {
     return 0;
 }
 static int g_ctx_any;   // FORK v47: a context switch is on (census_sync)
-static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0 || g_ctx_any; }
+static int g_enc_census;   // FORK v53: the encounter panel needs the screen kind too
+static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0 || g_ctx_any || g_enc_census; }
 static void bhide_set(int on) { g_bhide = on; census_sync(); }
 // FORK v46: one switch, "Battle controls: Battle mode" (DM_FORK_BATTLE=on): unused buttons hidden, battle icons, the battle's own layout. Set before v46 (no
 //   DM_FORK_BATTLE yet), the old DM_FORK_BATTLE_HIDE / _LAYOUT still turn it on, so a player's battle setup carries over
@@ -92,8 +93,10 @@ typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6], form
 int dm_fork_enc_get(dm_fork_enc_info *o) __attribute__((weak));
 static int g_enc_on = -1, g_enc_open = 1, g_enc_drag; static float g_enc_ox, g_enc_oy; static dm_fork_enc_info g_enc_now;
 volatile int dm_fork_enc_on;   // FORK v49: host/fork_enc.c reads game memory only while this is set
-static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); dm_fork_enc_on = g_enc_on; } return g_enc_on; }
-static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.active; }
+static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); dm_fork_enc_on = g_enc_on; g_enc_census = g_enc_on; census_sync(); } return g_enc_on; }
+extern _Atomic int dm_fork_battle_age __attribute__((weak));   // gfx/nvn/fork_ui.h
+// v53 (Steven: close faster after a battle): hidden once the battle HUD has been gone 1 s (30 frames); it may blink off during a long battle message and come back
+static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.active && (!&dm_fork_battle_age || atomic_load(&dm_fork_battle_age) <= 30); }
 static void enc_rect(float r4[4]);   // (below, with the drawing)
 static int fork_hidden(int c) {
     if (c == C_ENC) return !enc_live();
@@ -687,7 +690,7 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_TOUCH")) g_float = value && !strcmp(value, "float");   // FORK
     else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
     else if (!strcmp(key, "DM_FORK_GESTURES")) g_gest = value && !strcmp(value, "on");   // FORK v47
-    else if (!strcmp(key, "DM_FORK_ENC")) { g_enc_on = value && !strcmp(value, "on"); dm_fork_enc_on = g_enc_on; }   // FORK v48 (v49: + the probe)
+    else if (!strcmp(key, "DM_FORK_ENC")) { g_enc_on = value && !strcmp(value, "on"); dm_fork_enc_on = g_enc_on; g_enc_census = g_enc_on; census_sync(); }   // FORK v48 (v49: + the probe)
     else if (!strncmp(key, "DM_FORK_CTX_", 12)) { int on = value && !strcmp(value, "on");   // FORK v47: the context switches
         if (!strcmp(key, "DM_FORK_CTX_DIALOGUE")) g_ctx_dlg = on; else if (!strcmp(key, "DM_FORK_CTX_MENU")) g_ctx_menu = on; else if (!strcmp(key, "DM_FORK_CTX_WORLD")) g_ctx_world = on;
         g_ctx_any = g_ctx_dlg || g_ctx_menu || g_ctx_world; g_ctx_over = -1; g_w = g_h = 0; census_sync(); }
@@ -733,10 +736,13 @@ static void prefs(void) {
 #include "fork_enc_types.h"   // FORK v52
 static const char *const k_enc_nature[25] = { "HARDY","LONELY","BRAVE","ADAMANT","NAUGHTY","BOLD","DOCILE","RELAXED","IMPISH","LAX","TIMID","HASTY","SERIOUS","JOLLY",
     "NAIVE","MODEST","MILD","QUIET","BASHFUL","RASH","CALM","GENTLE","SASSY","CAREFUL","QUIRKY" };
-static void otext(dm_ovl_item *it, int *n, int max, float x, float y, float ch, const char *s, float a) {   // (x, y: the first character's left edge and the line's centre)
+static void otext_c(dm_ovl_item *it, int *n, int max, float x, float y, float ch, const char *s, float a, int R, int G, int B);
+static void otext(dm_ovl_item *it, int *n, int max, float x, float y, float ch, const char *s, float a) { otext_c(it, n, max, x, y, ch, s, a, -1, 0, 0); }
+// (x, y: the first character's left edge and the line's centre; R < 0: white, else the text in that colour, v53)
+static void otext_c(dm_ovl_item *it, int *n, int max, float x, float y, float ch, const char *s, float a, int R, int G, int B) {
     float cw = ch * 0.6f;
     for (int i = 0; s[i]; i++) { int c = (unsigned char)s[i]; if (c >= 'a' && c <= 'z') c -= 32; if (c == ' ') continue; if (c < 33 || c > 95) c = '?';
-        dm_ovl_item *o = add(it, n, max, x + cw * (i + 0.5f), y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = c; o->gscale = 0.92f; o->galpha = a; } }
+        dm_ovl_item *o = add(it, n, max, x + cw * (i + 0.5f), y, ch * 0.5f, OVL_DISC, R < 0 ? 0 : R, G, B, 0); if (o) { o->glyph = c; o->gscale = 0.92f; o->galpha = a; o->gtint = R >= 0; } }
 }
 // FORK v52: the panel after Steven's sketch (Nov 15): the Poké Ball at the top left (the handle: tap folds the panel to it), a name ribbon running right from the ball,
 //   and the info box hanging below the ribbon. Folded: the ball alone (a gold star badge on a shiny). The area dex out of battle will use the same frame
@@ -785,7 +791,13 @@ static void enc_draw(dm_ovl_item *it, int *n, int max) {
     float x = g.bx0 + pad + g.r * 0.25f, y = g.by0 + pad + lh * 0.5f + g.rh * 0.15f;
     snprintf(ln, sizeof ln, "%-8s %.11s", k_enc_nature[e->nature % 25], e->ability >= 0 && e->ability < (int)(sizeof k_enc_ability / sizeof *k_enc_ability) ? k_enc_ability[e->ability] : "?"); otext(it, n, max, x, y, ch, ln, 0.92f);
     y += lh; otext(it, n, max, x, y, ch, "   HP AT DF SA SD SP", 0.6f);
-    y += lh; snprintf(ln, sizeof ln, "IV %2d %2d %2d %2d %2d %2d", e->iv[0], e->iv[1], e->iv[2], e->iv[3], e->iv[4], e->iv[5]); otext(it, n, max, x, y, ch, ln, 1.0f);
+    // v53: each IV in a loot-rarity colour, measured against this Pokémon's own IV average (m): 31 orange (perfect), m+8 and up purple, m+3 blue, m-2 green, m-7 white
+    //   (below its average), lower grey (its weak stat). The tint is the label's own colour (ovl.frag glyph.w)
+    y += lh; otext(it, n, max, x, y, ch, "IV", 1.0f);
+    { float m = 0; for (int i = 0; i < 6; i++) m += e->iv[i]; m /= 6.0f;
+      static const unsigned char rc[6][3] = { {157,157,157}, {255,255,255}, {30,255,0}, {40,140,255}, {190,90,255}, {255,140,0} };
+      for (int i = 0; i < 6; i++) { int v = e->iv[i]; float d = v - m; int t = v >= 31 ? 5 : d >= 8 ? 4 : d >= 3 ? 3 : d >= -2 ? 2 : d >= -7 ? 1 : 0;
+          char num[4]; snprintf(num, sizeof num, "%2d", v); otext_c(it, n, max, x + ch * 0.6f * (3 + 3 * i), y, ch, num, 1.0f, rc[t][0], rc[t][1], rc[t][2]); } }
     y += lh; snprintf(ln, sizeof ln, "EV%3d%3d%3d%3d%3d%3d", e->ev[0], e->ev[1], e->ev[2], e->ev[3], e->ev[4], e->ev[5]); otext(it, n, max, x, y, ch, ln, 0.75f);
 }
 int front_overlay(dm_ovl_item *it, int max, int width, int height) {

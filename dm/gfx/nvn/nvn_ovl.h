@@ -13,6 +13,7 @@ typedef struct {
     int shape; float ring;     // OVL_*; ring width as a fraction of the radius (OVL_RING)
     float radius;              // OVL_RRECT corner radius, fraction of the height
     int glyph; float gscale, galpha;   // OVL_G_* label, its size as a fraction of the control, its opacity
+    int gtint;                 // FORK v53: 1 = the label in the fill colour (r g b) instead of white (coloured text: the encounter panel's IVs)
 } dm_ovl_item;
 // Fills up to max items for a surface of width x height pixels; returns how many (0: nothing drawn)
 int front_overlay(dm_ovl_item *it, int max, int width, int height);
