@@ -613,6 +613,15 @@ public final class GameMenu {
         button(a, r, t(a, "Copy of the current slot"), false, () -> mk.accept(true));
         c.addView(text(a, t(a, "A copy takes the current slot's last save in the game."), 13, SUB, false));
     }
+    // where the save the export reads is (upstream: the app folder or Documents). FORK: always the fork's <game>/save, the active save slot (ForkSaves.java)
+    static File activeSave(Activity a, File files) {
+        if (Fork.shared(a)) return new File(files, "save");
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(new File(files, "save_place.txt")))) {
+            String l = r.readLine();
+            if (l != null && l.trim().equals("shared")) return new File("/storage/emulated/0/Documents/Galar Native/" + GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT) + "/save");
+        } catch (java.io.IOException e) { }
+        return new File(files, "save");
+    }
     private static void saves(Activity a) {
         slots(a);   // FORK v47
         heading(a, t(a, "Saves"));
@@ -620,7 +629,8 @@ public final class GameMenu {
                () -> pick(a, Intent.ACTION_CREATE_DOCUMENT, GameSettings.game(a)[2] + "-save.zip", REQ_EXPORT));
         action(a, t(a, "Import save data"), t(a, "Your current save is kept as a backup."), () -> pick(a, Intent.ACTION_OPEN_DOCUMENT, null, REQ_IMPORT));
         // where the save lives (android_main.c save_place, Arceus-Native-Android#8): Documents for a sync tool; copied over at the next start, the earlier save there kept as a backup
-        if (!Fork.shared(a)) choice(a, "DM_SAVE_SHARED", t(a, "Save folder"),   // FORK: not in fork builds (the fork's folder is shared storage already, and its save slots move <game>/save) new String[][] { { "", t(a, "App folder"), t(a, "App folder: Android/data, as before") },
+        // FORK: not in fork builds (the fork's folder is shared storage already, and its save slots move <game>/save)
+        if (!Fork.shared(a)) choice(a, "DM_SAVE_SHARED", t(a, "Save folder"), new String[][] { { "", t(a, "App folder"), t(a, "App folder: Android/data, as before") },
             { "1", t(a, "Documents"), t(a, "Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access", GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT)) } });
     }
     // Online room (hle_relay.c, dm/server): local play with players elsewhere through a room server someone hosts (their own Railway service, or any PC); everyone enters the

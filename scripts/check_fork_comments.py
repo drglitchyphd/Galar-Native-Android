@@ -13,8 +13,9 @@ for root in roots:
             if 'FORK' not in line or 'check: ok' in line: continue
             s = re.sub(r'"(\\.|[^"\\])*"', '""', line)   # strings out
             i = s.find('//')
-            if i < 0: continue
+            if i < 0 or not s[:i].strip(): continue   # (a comment-only line cannot swallow code)
             comment = s[i + 2:]
-            if code_after.search(comment) and comment.count(';') >= 2:
+            structural = sum(comment.count(ch) for ch in '{};=')   # (prose rarely has three of these; a swallowed statement or initializer does)
+            if (code_after.search(comment) and comment.count(';') >= 2) or structural >= 3 or re.search(r'\bnew \w+(\[\])*\s*[\(\{\[]', comment):
                 print(f'{p}:{n}: code inside a // comment? {line.strip()[:160]}'); hits += 1
 sys.exit(1 if hits else 0)
