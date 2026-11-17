@@ -20,7 +20,8 @@ final class ForkTouch {
     private static native boolean nativeEditing();
     private static native String nativeProfile();
     private static native String nativeSel(); private static native float nativeSelSize(); private static native void nativeSetSize(float f);   // the size slider
-    private static native int nativeShape();   // the Shape button: the selected control's next shape (-1: none selected)
+    private static native int nativeShape();
+    private static native int nativeOpacity(int pct); private static native int nativeFade(boolean toggle);   // v53: the selected control's opacity (pct < 5: read it) and auto-fade (toggle: flip it)   // the Shape button: the selected control's next shape (-1: none selected)
     private static PopupWindow pw;
 
     static String profileName(Activity a, String p) {
@@ -67,6 +68,19 @@ final class ForkTouch {
               shb.setText(r >= 0 && r < 4 ? T.t(a, "Shape") + ": " + shapes[r] : T.t(a, "Shape")); });
           sz.addView(shb); }
         col.addView(sz);
+        // v53: the selected control's own opacity and whether it fades when you stop touching
+        LinearLayout opr = new LinearLayout(a); opr.setOrientation(LinearLayout.HORIZONTAL); opr.setGravity(Gravity.CENTER_VERTICAL); opr.setPadding(p, 0, p, 0);
+        TextView opl = new TextView(a); opl.setTextColor(0xFFF2F3F5); opl.setTextSize(13); opl.setMinWidth((int) (150 * d)); opr.addView(opl);
+        android.widget.SeekBar ob = new android.widget.SeekBar(a); ob.setMax(95); opr.addView(ob, new LinearLayout.LayoutParams((int) (240 * d), LinearLayout.LayoutParams.WRAP_CONTENT));
+        ob.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(android.widget.SeekBar s, int v, boolean user) { if (user && !quiet[0]) try { nativeOpacity(v + 5); } catch (UnsatisfiedLinkError e) { } }
+            @Override public void onStartTrackingTouch(android.widget.SeekBar s) { }
+            @Override public void onStopTrackingTouch(android.widget.SeekBar s) { } });
+        Button fdb = new Button(a); fdb.setAllCaps(false); fdb.setTextColor(0xFFFFFFFF);
+        { GradientDrawable fbg = new GradientDrawable(); fbg.setColor(0xFF3A3F4A); fbg.setCornerRadius(14 * d); fdb.setBackground(fbg); fdb.setPadding(p, 0, p, 0);
+          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (int) (36 * d)); lp.leftMargin = p / 2; fdb.setLayoutParams(lp); }
+        fdb.setOnClickListener(v -> { try { nativeFade(true); } catch (UnsatisfiedLinkError e) { } });
+        opr.addView(fdb); col.addView(opr);
         pw = new PopupWindow(col, LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, false);
         pw.setTouchable(true); pw.setOutsideTouchable(false); pw.setFocusable(false);   // touches outside go on to the editor underneath
         View root = a.getWindow().getDecorView();
@@ -102,6 +116,11 @@ final class ForkTouch {
             sb.setEnabled(!sel.isEmpty());
             szl.setText(sel.isEmpty() ? T.t(a, "Size: touch a control") : T.t(a, "Size: %s", sel.toUpperCase(java.util.Locale.ROOT)));
             if (!sel.isEmpty() && !sb.isPressed()) { quiet[0] = true; sb.setProgress(Math.round(f * 1000) - 25); quiet[0] = false; }
+            int op = -1, fd = -1; if (!sel.isEmpty()) try { op = nativeOpacity(0); fd = nativeFade(false); } catch (UnsatisfiedLinkError e) { }   // (v53)
+            ob.setEnabled(op >= 0); fdb.setEnabled(fd >= 0);
+            opl.setText(op < 0 ? T.t(a, "Opacity: touch a control") : T.t(a, "Opacity: %d %%", op));
+            fdb.setText(fd < 0 ? T.t(a, "Fade") : fd == 1 ? T.t(a, "Fades: on") : T.t(a, "Fades: off"));
+            if (op >= 0 && !ob.isPressed()) { quiet[0] = true; ob.setProgress(op - 5); quiet[0] = false; }
             h.postDelayed(this, 300); } });
     }
     private static String profileNow() { try { return nativeProfile(); } catch (UnsatisfiedLinkError e) { return ""; } }

@@ -267,6 +267,9 @@ JNIEXPORT jfloat JNICALL Java_com_nxnative_ForkTouch_nativeSelSize(JNIEnv *env, 
 JNIEXPORT void JNICALL Java_com_nxnative_ForkTouch_nativeSetSize(JNIEnv *env, jclass c, jfloat f) { (void)env; (void)c; touch_ui_edit_size(f); }
 int touch_ui_edit_shape(void);   // FORK: the bar's Shape button
 JNIEXPORT jint JNICALL Java_com_nxnative_ForkTouch_nativeShape(JNIEnv *env, jclass c) { (void)env; (void)c; return touch_ui_edit_shape(); }
+int touch_ui_edit_opacity(int pct); int touch_ui_edit_fade(int toggle);   // FORK v53: the bar's opacity slider and fade toggle
+JNIEXPORT jint JNICALL Java_com_nxnative_ForkTouch_nativeOpacity(JNIEnv *env, jclass c, jint pct) { (void)env; (void)c; return touch_ui_edit_opacity(pct); }
+JNIEXPORT jint JNICALL Java_com_nxnative_ForkTouch_nativeFade(JNIEnv *env, jclass c, jboolean toggle) { (void)env; (void)c; return touch_ui_edit_fade(toggle ? 1 : 0); }
 JNIEXPORT jstring JNICALL Java_com_nxnative_ForkTouch_nativeProfile(JNIEnv *env, jclass c) { (void)c; return (*env)->NewStringUTF(env, touch_ui_profile()); }
 // Holding − on a controller for 3 s opens the controller buttons (front_open_menu(1)): a press starts a timer thread that checks the same press is still held
 uint64_t dm_nvn_frame_count(void) __attribute__((weak));   // (nvn: frames presented)

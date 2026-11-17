@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+# FORK: flags a FORK line whose // comment swallowed code: after the comment starts, something that looks like a C / Java statement (an assignment, a call ending
+# in ';', or a closing '}' followed by code). Run by build_fork.sh before building; a hit stops the build. False alarms: add "// check: ok" to the line.
+import os, re, sys, pathlib
+if len(sys.argv) < 2: os.chdir(pathlib.Path(__file__).resolve().parent.parent)   # (the repository root; a test passes a folder to run in place)
+roots = ['dm/android/app/jni', 'dm/gfx/nvn', 'dm/host', 'dm/android/app/java/com/nxnative']
+code_after = re.compile(r'(\b[A-Za-z_][\w\.\[\]>-]*\s*(=|\+=|-=)\s*[^=;]+;)|(\b[A-Za-z_]\w*\([^;]*\)\s*;)|(\}\s*[A-Za-z_]\w*[\s\(])')
+hits = 0
+for root in roots:
+    for p in pathlib.Path(root).rglob('*'):
+        if p.suffix not in ('.c', '.h', '.java') or 'third_party' in p.parts: continue
+        for n, line in enumerate(p.read_text(encoding='utf-8', errors='ignore').splitlines(), 1):
+            if 'FORK' not in line or 'check: ok' in line: continue
+            s = re.sub(r'"(\\.|[^"\\])*"', '""', line)   # strings out
+            i = s.find('//')
+            if i < 0: continue
+            comment = s[i + 2:]
+            if code_after.search(comment) and comment.count(';') >= 2:
+                print(f'{p}:{n}: code inside a // comment? {line.strip()[:160]}'); hits += 1
+sys.exit(1 if hits else 0)

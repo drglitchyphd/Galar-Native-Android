@@ -127,7 +127,9 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 // ---------- the player's layout (the in-game editor): position, size and visibility of each control, kept in <files>/touch_layout.txt ----------
 // One line per changed control: "<name> <x / width> <y / height> <radius / height> <shown>"; controls without a line keep the default layout
 static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all", "enc" };   // FORK: + ff, turbo
-static struct { int set; float fx, fy, fr; int shown, shape; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
+static struct { int set; float fx, fy, fr; int shown, shape, op, fade; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
+static float ctl_op(int c) { return g_ov[c].set && g_ov[c].op >= 5 && g_ov[c].op <= 100 ? g_ov[c].op / 100.0f : 1.0f; }   // FORK v53: a control's own opacity
+static int ctl_fades(int c) { return !g_ov[c].set || !g_ov[c].op || g_ov[c].fade; }   // FORK v53: and whether it fades when idle
 static char g_lay_path[1100]; static int g_lay_loaded;
 // FORK: one layout per screen and orientation: touch_layout_<profile>.txt (outer_landscape, inner_landscape, inner_portrait, outer_portrait), picked from the window's
 //   shape in layout(). A profile without its own file starts from the old single touch_layout.txt when there is one, else from the default layout
@@ -154,14 +156,16 @@ static void layout_load(void) {
     if (!f && strstr(g_lay_prof, "_battle")) { char base[1100]; snprintf(base, sizeof base, "%s/touch_layout_%.*s.txt", g_lay_dir, (int)(strstr(g_lay_prof, "_battle") - g_lay_prof), g_lay_prof); f = fopen(base, "r"); }   // FORK: the battle layout starts from this screen's own
     if (!f) { char old[1100]; snprintf(old, sizeof old, "%s/touch_layout.txt", g_lay_dir); f = fopen(old, "r"); }   // FORK: the old single layout as a start
     char ln[160], nm[32]; float fx, fy, fr; int sh;
-    int shp;
-    while (f && fgets(ln, sizeof ln, f)) { shp = 0; if (sscanf(ln, "%31s %f %f %f %d %d", nm, &fx, &fy, &fr, &sh, &shp) >= 5)
-        for (int c = 0; c < NCTL; c++) if (!strcmp(nm, CTL_NAME[c])) { g_ov[c].set = 1; g_ov[c].fx = fx; g_ov[c].fy = fy; g_ov[c].fr = fr; g_ov[c].shown = sh; g_ov[c].shape = shp & 3; } }   // FORK: shape
+    int shp, op, fd;   // FORK v53: + the control's own opacity (%, 7th field) and whether it fades when idle (8th); older files: 100 % and fading
+    while (f && fgets(ln, sizeof ln, f)) { shp = 0; op = 100; fd = 1; if (sscanf(ln, "%31s %f %f %f %d %d %d %d", nm, &fx, &fy, &fr, &sh, &shp, &op, &fd) >= 5)
+        for (int c = 0; c < NCTL; c++) if (!strcmp(nm, CTL_NAME[c])) { g_ov[c].set = 1; g_ov[c].fx = fx; g_ov[c].fy = fy; g_ov[c].fr = fr; g_ov[c].shown = sh; g_ov[c].shape = shp & 3;
+            g_ov[c].op = op < 5 || op > 100 ? 100 : op; g_ov[c].fade = fd != 0; } }   // FORK: shape, opacity, fade
     if (f) fclose(f);
 }
 static void layout_save(void) {
     if (!g_lay_path[0]) return; FILE *f = fopen(g_lay_path, "w"); if (!f) return;
-    for (int c = 0; c < NCTL; c++) if (g_ov[c].set) fprintf(f, "%s %.4f %.4f %.4f %d %d\n", CTL_NAME[c], g_ov[c].fx, g_ov[c].fy, g_ov[c].fr, g_ov[c].shown, g_ov[c].shape);   // FORK: + shape
+    for (int c = 0; c < NCTL; c++) if (g_ov[c].set) fprintf(f, "%s %.4f %.4f %.4f %d %d %d %d\n", CTL_NAME[c], g_ov[c].fx, g_ov[c].fy, g_ov[c].fr, g_ov[c].shown, g_ov[c].shape,
+                                                         g_ov[c].op ? g_ov[c].op : 100, g_ov[c].set && !g_ov[c].op ? 1 : g_ov[c].fade);   // FORK: + shape, opacity, fade (v53)
     fclose(f);
 }
 static void layout_apply(float w, float h) {
@@ -393,7 +397,7 @@ static int edit_hit(float x, float y) {   // the smallest control (shown or not)
     return best;
 }
 static int g_edit_sel = -1;   // FORK: the control last touched in the editor (the bar's size slider: ForkTouch.java)
-static void edit_store(int c) { g_ov[c].set = 1; g_ov[c].fx = g_c[c].cx / g_w; g_ov[c].fy = g_c[c].cy / g_h; g_ov[c].fr = g_c[c].r / g_h; g_ov[c].shown = g_c[c].shown; }
+static void edit_store(int c) { if (!g_ov[c].set) { g_ov[c].op = 100; g_ov[c].fade = 1; } g_ov[c].set = 1; g_ov[c].fx = g_c[c].cx / g_w; g_ov[c].fy = g_c[c].cy / g_h; g_ov[c].fr = g_c[c].r / g_h; g_ov[c].shown = g_c[c].shown; }   // (FORK v53: a control stored the first time: 100 %, fading)
 static void edit_event(const AInputEvent *e) {
     int32_t act = AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK;
     size_t idx = (size_t)((AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
@@ -455,6 +459,11 @@ int touch_ui_edit_shape(void) {   // FORK: the editor bar's Shape button: the se
     pthread_mutex_lock(&g_mu); int c = g_edit_sel, sh = -1;
     if (g_edit && c >= 0 && c != C_STICK && c != C_RSTICK && c != C_MENU && c != C_THROW) { edit_store(c); g_ov[c].shape = (g_ov[c].shape + 1) & 3; sh = g_ov[c].shape; click_locked(); }
     pthread_mutex_unlock(&g_mu); return sh; }
+// FORK v53: the editor bar's opacity slider (5-100 %) and fade toggle for the selected control; -1: nothing selected
+int touch_ui_edit_opacity(int pct) { pthread_mutex_lock(&g_mu); int c = g_edit_sel, r = -1;
+    if (g_edit && c >= 0) { edit_store(c); if (pct >= 5 && pct <= 100) g_ov[c].op = pct; r = g_ov[c].op; } pthread_mutex_unlock(&g_mu); return r; }
+int touch_ui_edit_fade(int toggle) { pthread_mutex_lock(&g_mu); int c = g_edit_sel, r = -1;
+    if (g_edit && c >= 0) { edit_store(c); if (toggle) { g_ov[c].fade = !g_ov[c].fade; click_locked(); } r = g_ov[c].fade; } pthread_mutex_unlock(&g_mu); return r; }
 void touch_ui_edit_size(float frac) { pthread_mutex_lock(&g_mu); int c = g_edit_sel;
     if (g_edit && c >= 0 && g_h > 0) { g_c[c].r = clampf(frac, 0.025f, 0.25f) * g_h; edit_store(c); } pthread_mutex_unlock(&g_mu); }
 // Android's Back while the layout editor is open (android_main.c): saved and left, as holding − does (Galar-Native-Android #200: no way out was found)
@@ -822,7 +831,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     if (g_visible && g_edit) {   // the editor: every control at full strength with a yellow ring, the hidden ones as ghosts
         for (int c = 0; c < NCTL; c++) { if (c == C_CAM || ctl_off(c)) continue; const ctl *k = &g_c[c];
             if (GESTURES_ON && !k->shown && !g_ov[c].set && c != C_PLUS && c != C_MINUS && c != C_STICK && c != C_MENU) continue;
-            float a = k->shown ? 1.0f : 0.3f;
+            float a = (k->shown ? 1.0f : 0.3f) * fmaxf(ctl_op(c), 0.15f);   // (FORK v53: the control's own opacity shows in the editor too)
             if (c == C_STICK || c == C_RSTICK) compass(it, &n, max, a, k->cx, k->cy, k->cx, k->cy, k->r);
             else if (c == C_THROW) pokeball(it, &n, max, k, 0, a); else if (c == C_MENU) menu_icon(it, &n, max, k, a); else { g_bshape = g_ov[c].set ? g_ov[c].shape : 0; bubble(it, &n, max, k, 0, 0, a); g_bshape = 0; }   // FORK: shape
             dm_ovl_item *o = add(it, &n, max, k->cx, k->cy, k->r * 1.12f, OVL_RING, 255, 210, 60, 0.95f * a); if (o) o->ring = clampf(4.0f * (g_h / 1080.0f) / (k->r * 1.12f), 0.02f, 0.3f); }
@@ -833,7 +842,8 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
         int faint = 0; (void)g_inner_t;   // FORK: the D-pad and the right stick fade with the rest (upstream: almost gone 2 s after their last touch)
         for (int c = C_A; c < NCTL; c++) { if (!g_c[c].shown || fork_hidden(c)) continue;   // FORK: battle_hidden
             int on = (g_btn & g_c[c].btn) != 0 || (c == C_FF && (g_ff_toggle || g_ff_hold)) || (c == C_TURBO && g_turbo_held) || (c == C_ALL && g_ctx_over >= 0);   // FORK: lit while on
-            float al = c >= C_UP && c <= C_RIGHT && faint && !on ? 0.25f : 1.0f; if (idle) al = fminf(al, ia);
+            float al = c >= C_UP && c <= C_RIGHT && faint && !on ? 0.25f : 1.0f; if (idle && ctl_fades(c)) al = fminf(al, ia);   // (FORK v53: a control set not to fade keeps its strength)
+            al *= ctl_op(c);   // FORK v53: the control's own opacity (the layout editor's slider)
             if (c == C_THROW) { pokeball(it, &n, max, &g_c[c], on, al); continue; }
             if (c == C_MENU) { menu_icon(it, &n, max, &g_c[c], idle ? fmaxf(al, 0.45f) : al); continue; }   // (never quite gone: it is how the settings are found)
             { ctl k = g_c[c];   // FORK: battle icons (Poké Ball on X: the quick ball; back on B; info on Y)
