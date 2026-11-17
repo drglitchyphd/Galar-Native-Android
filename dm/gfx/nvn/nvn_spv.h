@@ -33,6 +33,10 @@ uint32_t *spv_swap_out01(const uint32_t *code, size_t words, size_t *out_words);
 size_t spv_strip_unused(uint32_t *code, size_t words);
 // A SPIR-V 1.0 copy for Vulkan 1.0 drivers (unused subgroup capabilities dropped, extensions declared); NULL if it needs more than 1.0 or is 1.0 already
 uint32_t *spv_to_10(const uint32_t *code, size_t words, size_t *out_words);
+// Vulkan 1.0 without VK_KHR_maintenance1 (no negative viewport height): a vertex shader copy whose gl_Position.y is multiplied by the float specialization constant
+//   SPV_FLIP_Y_SPEC_ID (default 1; the pipeline gives -1 for NVN's upper-left origin). NULL if not a vertex shader or it has no position
+#define SPV_FLIP_Y_SPEC_ID 0x5946u
+uint32_t *spv_flip_y(const uint32_t *code, size_t words, size_t *out_words);
 // Fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
 void spv_frag_outputs(const uint32_t *code, size_t words, uint8_t cls[8]);
 // A copy whose float outputs at the locations in umask / smask hold the same bits as uint / int outputs (integer colour targets). NULL if nothing to do or not possible

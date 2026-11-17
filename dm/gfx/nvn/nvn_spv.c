@@ -929,3 +929,74 @@ uint32_t *spv_to_10(const uint32_t *code, size_t words, size_t *out_words) {
         i += n; }
     *out_words = w; return o;
 }
+
+// ---- Vulkan 1.0 without VK_KHR_maintenance1: no negative viewport height, so NVN's upper-left origin is made in the vertex shader instead ----
+// Before every return of the vertex entry point: gl_Position.y *= s, s a float specialization constant (SPV_FLIP_Y_SPEC_ID, default 1.0) that the pipeline sets to -1 while the
+// game's window origin is upper left. y_ndc -> -y_ndc under a positive viewport puts every pixel where the flipped viewport did (same rows, same winding, same gl_FragCoord)
+uint32_t *spv_flip_y(const uint32_t *code, size_t words, size_t *out_words) {
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint32_t entry = 0, posvar = 0, blk = 0, mem = 0, f32 = 0, v4 = 0, i32 = 0, pv4 = 0, cmem = 0;
+    int nret = 0, vertex = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return NULL; const uint32_t *x = code + i;
+        if (op == OpEntryPoint && n >= 3 && !entry) { entry = x[2]; vertex = x[1] == 0; }
+        else if (op == OpDecorate && n >= 4 && x[2] == DecBuiltIn && x[3] == 0 /* Position */) posvar = x[1];
+        else if (op == 72 /* OpMemberDecorate */ && n >= 5 && x[3] == DecBuiltIn && x[4] == 0) { blk = x[1]; mem = x[2]; }
+        i += n; }
+    if (!vertex || !entry || (!posvar && !blk)) return NULL;
+    if (blk) {   // the gl_PerVertex block: its Output variable, and the member's type
+        const uint32_t *s = def_of(code, words, blk); if (!s || (s[0] & 0xffff) != OpTypeStruct || 2 + mem >= (s[0] >> 16)) return NULL;
+        v4 = s[2 + mem];
+        for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+            if (op == OpVariable && n >= 4 && x[3] == SC_Output) { const uint32_t *p = def_of(code, words, x[1]); if (p && p[3] == blk) posvar = x[2]; }
+            i += n; }
+        if (!posvar) return NULL;
+    } else {
+        for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+            if (op == OpVariable && n >= 4 && x[2] == posvar) { const uint32_t *p = def_of(code, words, x[1]); if (p) v4 = p[3]; }
+            i += n; }
+    }
+    const uint32_t *v = def_of(code, words, v4); if (!v || (v[0] & 0xffff) != OpTypeVector || v[3] != 4) return NULL;
+    f32 = v[2];
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpTypePointer && n >= 4 && x[2] == SC_Output && x[3] == v4 && !pv4) pv4 = x[1];
+        if (op == OpTypeInt && n >= 4 && x[2] == 32 && !i32) i32 = x[1];
+        i += n; }
+    if (blk && i32) for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpConstant && n == 4 && x[1] == i32 && x[3] == mem) { cmem = x[2]; break; }
+        i += n; }
+    for (size_t i = 5, in = 0; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff;
+        if (op == 54 /* OpFunction */) in = code[i + 2] == entry; else if (op == 253 /* OpReturn */ && in) nret++;
+        i += n; }
+    if (!nret) return NULL;
+    uint32_t nb = bound, spec = nb++;
+    int add_i32 = blk && !i32, add_c = blk && !cmem, add_p = blk && !pv4;
+    if (add_i32) i32 = nb++;
+    if (add_c) cmem = nb++;
+    if (add_p) pv4 = nb++;
+    size_t cap = words + 4 + 16 + (size_t)nret * 28; uint32_t *o = malloc(4 * cap); if (!o) return NULL;   // per return: access chain 5, load 4, extract 5, multiply 5, insert 6, store 3
+    memcpy(o, code, 20); size_t w = 5; int dec = 0, decl = 0, in = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (!dec && ((op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == OpVariable)) {   // the SpecId decoration, after the other annotations
+            o[w++] = 4u << 16 | OpDecorate; o[w++] = spec; o[w++] = 1 /* SpecId */; o[w++] = SPV_FLIP_Y_SPEC_ID; dec = 1; }
+        if (!decl && op == 54) {   // the new types / constants, before the first function
+            if (add_i32) { o[w++] = 4u << 16 | OpTypeInt; o[w++] = i32; o[w++] = 32; o[w++] = 1; }
+            if (add_c) { o[w++] = 4u << 16 | OpConstant; o[w++] = i32; o[w++] = cmem; o[w++] = mem; }
+            if (add_p) { o[w++] = 4u << 16 | OpTypePointer; o[w++] = pv4; o[w++] = SC_Output; o[w++] = v4; }
+            o[w++] = 4u << 16 | 50 /* OpSpecConstant */; o[w++] = f32; o[w++] = spec; o[w++] = 0x3f800000u; decl = 1; }
+        if (op == 54) in = x[2] == entry;
+        if (op == 253 && in) {
+            uint32_t ptr = posvar;
+            if (blk) { ptr = nb++; o[w++] = 5u << 16 | OpAccessChain; o[w++] = pv4; o[w++] = ptr; o[w++] = posvar; o[w++] = cmem; }
+            uint32_t ld = nb++, y = nb++, ny = nb++, nv = nb++;
+            o[w++] = 4u << 16 | 61 /* OpLoad */; o[w++] = v4; o[w++] = ld; o[w++] = ptr;
+            o[w++] = 5u << 16 | 81 /* OpCompositeExtract */; o[w++] = f32; o[w++] = y; o[w++] = ld; o[w++] = 1;
+            o[w++] = 5u << 16 | 133 /* OpFMul */; o[w++] = f32; o[w++] = ny; o[w++] = y; o[w++] = spec;
+            o[w++] = 6u << 16 | 82 /* OpCompositeInsert */; o[w++] = v4; o[w++] = nv; o[w++] = ny; o[w++] = ld; o[w++] = 1;
+            o[w++] = 3u << 16 | 62 /* OpStore */; o[w++] = ptr; o[w++] = nv;
+        }
+        memcpy(o + w, x, 4 * n); w += n; i += n;
+    }
+    if (!dec || !decl) { free(o); return NULL; }
+    o[3] = nb; *out_words = w; return o;
+}
