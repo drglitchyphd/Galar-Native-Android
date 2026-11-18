@@ -21,7 +21,7 @@ static int g_fk_sq, g_fk_texmax, g_fk_ntex, g_fk_screenish; static VkViewport g_
 static int g_fk_shade_n, g_fk_spot;   // FORK v49: shading draws this frame; the spotted banner was drawn this frame
 static int g_fk_banner, g_fk_tw, g_fk_th; static float g_fk_ky, g_fk_kx;   // FORK v44: this draw samples the 1200x180 "spotted" banner; the image's size; the y scale
 static _Atomic int g_origin_ll;   // (nvn_vk.c, below: the game draws with a lower-left origin, so the screen's bottom is the image's row 0)
-static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++; if (w == 1200 && h == 180) g_fk_banner = 1; if (w == 128 && h == 4) g_fk_banner = 2;
+static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++; if (w == 1200 && h == 180) g_fk_banner = 1; if (w == 128 && h == 4) g_fk_banner = 2; if (w == 1024 && h == 8) g_fk_banner = 3;   // (3: the area name popup, v54)
     if (w >= 1280 && h >= 700 && w * 10 >= h * 16 && w * 10 <= h * 20) g_fk_screenish = 1;   // (a 16:9-ish image of the picture's size: the trainer-approach overlay, blurs, wipes)
     if ((int)w > g_fk_texmax) g_fk_texmax = (int)w; if ((int)h > g_fk_texmax) g_fk_texmax = (int)h; }
 static char g_fk_sqkey[17];   // the shrunk draw's vertex shader (the log below)
@@ -51,7 +51,7 @@ static void fork_ui_fill(VkCommandBuffer cb) {
     //   the corners, so they are now simply kept full size (the 16:9 picture's corners, stretched to the screen's), whatever their order: no anchoring
     int shading = g_fk_banner == 2 && !strncmp(g_fk_sqkey, "af0ef3ac", 8), shade = 0, shade2 = 0;
     if (shading) g_fk_shade_n++;
-    if (g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) g_fk_spot = 1;   // v49: the banner's frame is not a battle (fk_screen_frame)
+    if ((g_fk_banner == 1 || g_fk_banner == 3) && !strncmp(g_fk_sqkey, "b6ff050a", 8)) g_fk_spot = 1;   // v49: the banner's frame is not a battle (fk_screen_frame); v54: nor the area name popup's (1024x8 stripe, capture Nov 18)
     if (((g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) || shade || shade2) && g_fk_th > 0) {
         VkViewport v = g_fk_v0; VkRect2D sc = g_fk_sc0; float k = g_fk_ky, H = (float)g_fk_th; int ll = atomic_load(&g_origin_ll);
         // the screen's bottom edge, in the image; v48: the second shading draw is the TOP-LEFT fade (Steven Nov 13: anchored to the bottom it sat far down the
@@ -91,7 +91,9 @@ static int g_fk_census_fg;   // FORK v50: fork_fg.h wants the screen kind (frame
 static void fk_screen_frame(int comp) {
     // (FORK v49: b6ff050a also draws the trainer "spotted" banner: a frame where that was its draw is not a battle, unless ecacdb40 is there too; Steven Nov 13:
     //   the battle buttons came up as soon as a trainer saw him)
-    int bat = 0; for (int i = 0; i < g_fk_cn; i++) if ((!strncmp(g_fk_ck[i], "b6ff050a", 8) && !g_fk_spot) || !strncmp(g_fk_ck[i], "ecacdb40", 8)) bat = 1;
+    //   v54: the area name popup is b6ff050a too (a 1024x8 stripe: g_fk_spot). A frame that also draws the battle HUD's own 984a6ee4 / 7a2e9d4e still counts as a battle
+    int hud = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "984a6ee4", 8) || !strncmp(g_fk_ck[i], "7a2e9d4e", 8)) hud = 1;
+    int bat = 0; for (int i = 0; i < g_fk_cn; i++) if ((!strncmp(g_fk_ck[i], "b6ff050a", 8) && (!g_fk_spot || hud)) || !strncmp(g_fk_ck[i], "ecacdb40", 8)) bat = 1;
     // FORK v47: 3 = dialogue: 3D with the text-box shader 56af7f00 and no battle HUD (an NPC talking in the field). A guess: logged, and touch_ui.c has an
     //   "all buttons" override for when it is wrong
     int dlg = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) dlg = 1;

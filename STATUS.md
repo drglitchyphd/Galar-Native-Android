@@ -66,6 +66,8 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 
 - v51 panel WORKS (Steven's logs: Yamper 835, Chewtle 833, checksum ok; SysBot's offset holds, the v50 failure was the in-battle flag). Queued for v52 (compiles, not built): Poké Ball with a white lower half (atlas cell 19), ribbon in the type colours (fork_enc_types.h from PKHeX personal_swsh, forms included; 2 types = split ribbon; shiny = gold edge + ★); the Run button was tried and scrapped (Steven, Nov 16: no native run; a menu macro would need the cursor behaviour; atlas cell 20 kept unused). Mock: docs/encounter_panel_mock.png.
 
+- Area name popup triggered battle controls / panel (Steven, Nov 18): it is b6ff050a with a 1024x8 stripe (capture): that frame is not a battle unless 984a6ee4 / 7a2e9d4e (battle HUD) are drawn too (fork_ui.h). In the tree, not built.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).
