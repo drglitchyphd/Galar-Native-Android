@@ -1,6 +1,7 @@
 # STATUS
 
-**Build:** v53 (not tested yet): upstream main merged (to 5da50a2) keeping the fork's controls and storage + Steven's Nov 17 list:
+**Build:** v54 (not tested yet): v53 + the area name popup no longer counts as a battle (fork_ui.h: b6ff050a with the 1024x8 stripe). Upstream: nothing new.
+- v53: upstream main merged (to 5da50a2) keeping the fork's controls and storage + Steven's Nov 17 list:
 - Merge: shader translation update (the first start re-translates the shaders in place, a long one-off wait), FSR, colour modes, 3D render scale, widescreen camera option, crash fixes, setup speed-ups, editor Back saves. Kept: fork touch controls (upstream floating sticks → DM_FORK_TOUCH), fork folder + save slots (upstream's Documents save folder off in fork builds; export via activeSave = <game>/save), fork frame generation menu. Pacing: upstream's one-interval lead + the fork margin. Fast-forward scales upstream's constant step.
 - Encounter panel hides 1 s after the battle HUD (dm_fork_battle_age); IVs in rarity colours against the mon's own IV mean (31 orange, +8 purple, +3 blue, -2 green, -7 white, lower grey; tinted labels: dm_ovl_item.gtint, ovl.frag glyph.w).
 - Battle D-pad (DM_FORK_BATTLE_DPAD, off): in battles any touch not on a button = floating D-pad (2.5 % dead zone, 4-way), tap A, two fingers B; fixed D-pad / sticks hidden.
@@ -66,7 +67,7 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 
 - v51 panel WORKS (Steven's logs: Yamper 835, Chewtle 833, checksum ok; SysBot's offset holds, the v50 failure was the in-battle flag). Queued for v52 (compiles, not built): Poké Ball with a white lower half (atlas cell 19), ribbon in the type colours (fork_enc_types.h from PKHeX personal_swsh, forms included; 2 types = split ribbon; shiny = gold edge + ★); the Run button was tried and scrapped (Steven, Nov 16: no native run; a menu macro would need the cursor behaviour; atlas cell 20 kept unused). Mock: docs/encounter_panel_mock.png.
 
-- Area name popup triggered battle controls / panel (Steven, Nov 18): it is b6ff050a with a 1024x8 stripe (capture): that frame is not a battle unless 984a6ee4 / 7a2e9d4e (battle HUD) are drawn too (fork_ui.h). In the tree, not built.
+- Area name popup triggered battle controls / panel (Steven, Nov 18): it is b6ff050a with a 1024x8 stripe (capture): that frame is not a battle unless 984a6ee4 / 7a2e9d4e (battle HUD) are drawn too (fork_ui.h). In v54.
 
 ## Next
 1. Steven tests v47 (long run).
