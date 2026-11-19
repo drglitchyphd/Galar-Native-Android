@@ -27,7 +27,7 @@ static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)rd16(p) | (uint32_t)rd16(p + 2) << 16; }
 static uint64_t rd64(const uint8_t *p) { return (uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32; }
 static int g_lines;
-#define DLOG(...) do { if (g_lines < 120) { g_lines++; LOG(__VA_ARGS__); } } while (0)
+#define DLOG(...) do { if (g_lines < 200) { g_lines++; LOG(__VA_ARGS__); } } while (0)
 
 static uint8_t *read_file(const char *path, size_t *n) {
     FILE *f = fopen(path, "rb"); if (!f) return NULL;
@@ -170,22 +170,31 @@ static int load_save(void) {
     free(d); DLOG("[FORK] dex: save read: %d blocks, %d Pokédex blocks (%zu / %zu / %zu bytes)", blocks, found, g_zlen[0], g_zlen[1], g_zlen[2]);
     return found > 0;
 }
-// a Pokédex block in the heap: its busiest 32-byte entry starts (seen bits) are looked for, every hit checked against the whole block (90 % of the bytes the same:
-//   the player may have seen or caught more since the save)
+// a Pokédex block in the heap. v57: an early game's Pokédex is nearly all zeros (v56 log: nothing distinctive enough was found), so: the windows of 16 entries
+//   with the most non-zero bytes, in each the 8 bytes with the most non-zero ones as the anchor; each place in the heap holding the anchor is checked on the
+//   window's non-zero bytes, then on the whole block's (90 % the same: the player may have seen or caught more since the save). Zeros never count as a match
+static size_t nz_same(const uint8_t *q, const uint8_t *blk, size_t len, size_t *nz) { size_t same = 0; *nz = 0; for (size_t i = 0; i < len; i++) if (blk[i]) { (*nz)++; same += q[i] == blk[i]; } return same; }
 static uint64_t find_block(const uint8_t *blk, size_t len, uint64_t lo, uint64_t hi) {
-    uintptr_t b = dm_fork_heap_base(); if (!b || len < 0x60) return 0;
-    int best[4] = { -1, -1, -1, -1 }, bestc[4] = { 0 };
-    for (size_t e = 0; e + 0x30 <= len; e += 0x30) { int c = 0; for (int i = 0; i < 32; i++) c += blk[e + i] != 0;
-        for (int k = 0; k < 4; k++) if (c > bestc[k]) { for (int j = 3; j > k; j--) { best[j] = best[j - 1]; bestc[j] = bestc[j - 1]; } best[k] = (int)e; bestc[k] = c; break; } }
-    if (best[0] < 0 || bestc[0] < 8) return 0;   // (an almost empty Pokédex: nothing distinctive to look for)
+    uintptr_t b = dm_fork_heap_base(); if (!b || len < 0x300) return 0;
     if (hi > dm_fork_heap_size()) hi = dm_fork_heap_size();
-    for (int k = 0; k < 4 && best[k] >= 0; k++) {
-        const uint8_t *w = blk + best[k]; uint64_t w0 = rd64(w);
-        for (uint64_t off = lo; off + 32 <= hi; off += 8) {
-            const uint8_t *p = (const uint8_t *)(b + off); if (rd64(p) != w0 || memcmp(p, w, 32)) continue;
-            uint64_t base = off - (uint64_t)best[k]; if (base < lo || base + len > hi) continue;
-            const uint8_t *q = (const uint8_t *)(b + base); size_t same = 0; for (size_t i = 0; i < len; i++) same += q[i] == blk[i];
-            if (same * 10 >= len * 9) return base; } }
+    size_t W = 0x300; int best[3] = { -1, -1, -1 }, bestc[3] = { 0 };
+    for (size_t e = 0; e + W <= len; e += 0x30 * 4) { int c = 0; for (size_t i = 0; i < W; i++) c += blk[e + i] != 0;
+        for (int k = 0; k < 3; k++) if (c > bestc[k]) { for (int j = 2; j > k; j--) { best[j] = best[j - 1]; bestc[j] = bestc[j - 1]; } best[k] = (int)e; bestc[k] = c; break; } }
+    size_t tnz; nz_same(blk, blk, len, &tnz);
+    DLOG("[FORK] dex: Pokédex block of %zu bytes, %zu of them not zero; busiest window %d bytes", len, tnz, bestc[0]);
+    if (best[0] < 0 || bestc[0] < 3) return 0;
+    for (int k = 0; k < 3 && best[k] >= 0 && bestc[k] >= 3; k++) {
+        const uint8_t *w = blk + best[k]; size_t ao = 0; int an = -1;
+        for (size_t i = 0; i < W; i += 8) { int c = 0; for (int j = 0; j < 8; j++) c += w[i + j] != 0; if (c > an || (c == an && rd64(w + i) > rd64(w + ao))) { an = c; ao = i; } }
+        uint64_t v = rd64(w + ao); size_t wnz; nz_same(w, w, W, &wnz); int cands = 0;
+        for (uint64_t off = lo + 8; off + 8 <= hi; off += 8) {
+            if (*(const uint64_t *)(b + off) != v) continue;
+            uint64_t base = off - (uint64_t)best[k] - ao; if (base < lo || base + len > hi || (off - ao) < lo) continue; cands++;
+            size_t n1, s1 = nz_same((const uint8_t *)(b + off - ao), w, W, &n1); if (s1 * 10 < n1 * 9) continue;
+            size_t n2, s2 = nz_same((const uint8_t *)(b + base), blk, len, &n2); if (s2 * 10 < n2 * 9) continue;
+            DLOG("[FORK] dex: Pokédex block matched at heap + %#llx (%zu of %zu non-zero bytes the same; %d places held the anchor)", (unsigned long long)base, s2, n2, cands);
+            return base; }
+        DLOG("[FORK] dex: window %d: anchor %016llx at %d places, none matched", k, (unsigned long long)v, cands); }
     return 0;
 }
 static void locate_dex(void) {
@@ -207,32 +216,54 @@ static int dex_state(int sp) {
 enum { O_MAPHASH = 0x450613C0, NHITS = 16384, NCAND = 16 };
 static uint8_t g_zbits[8192];   // zone hashes by their top 16 bits (a quick filter)
 static uint64_t g_hit[NHITS], g_hitv[NHITS]; static int g_nhit;
-static struct { uint64_t off, val; int score, seen; } g_cand[NCAND]; static int g_ncand; static uint64_t g_lock;
+static struct { uint64_t off, val; int score, qn, tick; } g_cand[NCAND]; static int g_ncand; static uint64_t g_lock; static int g_guess = -1, g_ticks;
 static int is_zone(uint64_t v) { return v && (g_zbits[v >> 51] >> ((v >> 48) & 7) & 1) && zone_index(v) >= 0; }
 static void zone_scan(void) {
     uintptr_t b = dm_fork_heap_base(); uint64_t lim = dm_fork_heap_size(), t0 = now_ns(); int n = 0;
     for (uint64_t off = 0x1000; off + 8 <= lim; off += 8) { uint64_t v = *(const uint64_t *)(b + off); if (!is_zone(v)) continue;
         if (n < NHITS) { g_hit[n] = off; g_hitv[n] = v; n++; } }
     g_nhit = n; DLOG("[FORK] dex probe: %d zone hashes in memory (%.1f s)", n, (now_ns() - t0) / 1e9);
+    // v57: a guess while nothing has changed yet. Copies of tables list many zones close together (the spawn tables, maps): 128 KB stretches with 12 different zones
+    //   or more are left out; of the rest, the zone found most often is the guess (the loaded area's own data names it). Logged for the next step
+    static uint16_t cnt[NZONES]; memset(cnt, 0, sizeof cnt); int lone = 0, said = 0;
+    for (int i = 0, j0 = 0; i < n; i++) {
+        uint64_t bk = g_hit[i] >> 17; while (j0 < n && (g_hit[j0] >> 17) + 1 < bk) j0++;
+        int dz = 0; uint64_t seen[16];
+        for (int j = j0; j < n && (g_hit[j] >> 17) <= bk + 1 && dz < 12; j++) { int k = 0; while (k < dz && seen[k] != g_hitv[j]) k++; if (k == dz) seen[dz++] = g_hitv[j]; }
+        if (dz >= 12) continue;
+        int z = zone_index(g_hitv[i]); if (z < 0) continue; cnt[z]++; lone++;
+        if (said < 24 && g_lines < 150) { said++; DLOG("[FORK] dex probe: outside tables: heap + %#llx = %s", (unsigned long long)g_hit[i], k_zones[z].name); } }
+    int bz = -1, b2 = 0; for (int z = 0; z < NZONES; z++) { if (bz < 0 || cnt[z] > cnt[bz]) { if (bz >= 0) b2 = cnt[bz]; bz = z; } else if (cnt[z] > b2) b2 = cnt[z]; }
+    g_guess = bz >= 0 && cnt[bz] > b2 ? bz : -1;
+    DLOG("[FORK] dex probe: %d outside the tables; guess %s (%d, next %d)", lone, g_guess >= 0 ? k_zones[g_guess].name : "none", bz >= 0 ? cnt[bz] : 0, b2);
 }
 // after a popup: the listed places that now hold another zone hash
-static void zone_diff(void) {
+// v57: every 5 s (and 2 s after an area popup) the listed places are read again: each that now holds another zone hash is a candidate (changes counted, qn).
+//   At a popup, the candidates that changed in the 8 s before it score a point; one that scores twice and does not change much without popups (a counter running
+//   through zones would) is kept and read live from then on
+static void zone_diff(int popup) {
     uintptr_t b = dm_fork_heap_base(); int ch = 0;
     for (int i = 0; i < g_nhit; i++) { uint64_t v = *(const uint64_t *)(b + g_hit[i]); if (v == g_hitv[i] || !is_zone(v)) continue; ch++;
         int c = 0; while (c < g_ncand && g_cand[c].off != g_hit[i]) c++;
-        if (c == g_ncand) { if (g_ncand == NCAND) continue; g_ncand++; g_cand[c].off = g_hit[i]; g_cand[c].score = 0; }
-        g_cand[c].score++; g_cand[c].val = v; g_cand[c].seen = atomic_load(&dm_fork_area_popups);
-        DLOG("[FORK] dex probe: heap + %#llx changed %016llx -> %016llx (%s), %d times", (unsigned long long)g_hit[i], (unsigned long long)g_hitv[i], (unsigned long long)v, k_zones[zone_index(v)].name, g_cand[c].score); }
-    if (!ch) DLOG("[FORK] dex probe: area popup %d: no listed place changed", atomic_load(&dm_fork_area_popups));
-    if (!g_lock) for (int c = 0; c < g_ncand; c++) if (g_cand[c].score >= 2) { int tie = 0; for (int d = 0; d < g_ncand; d++) tie += d != c && g_cand[d].score >= g_cand[c].score;
+        if (c == g_ncand) { if (g_ncand == NCAND) continue; g_ncand++; g_cand[c].off = g_hit[i]; g_cand[c].score = 0; g_cand[c].qn = 0; }
+        g_cand[c].qn++; g_cand[c].val = v; g_cand[c].tick = g_ticks;
+        if (g_cand[c].qn <= 3) DLOG("[FORK] dex probe: heap + %#llx changed %016llx -> %016llx (%s), change %d", (unsigned long long)g_hit[i], (unsigned long long)g_hitv[i], (unsigned long long)v, k_zones[zone_index(v)].name, g_cand[c].qn);
+        g_hitv[i] = v; }
+    if (popup) { int m = 0;
+        for (int c = 0; c < g_ncand; c++) if (g_ticks - g_cand[c].tick <= 16) { g_cand[c].score++; m++;
+            DLOG("[FORK] dex probe: area popup %d: heap + %#llx changed with it (%s; %d popups, %d changes)", atomic_load(&dm_fork_area_popups), (unsigned long long)g_cand[c].off, k_zones[zone_index(g_cand[c].val)].name, g_cand[c].score, g_cand[c].qn); }
+        if (!m) DLOG("[FORK] dex probe: area popup %d: no listed place changed", atomic_load(&dm_fork_area_popups)); }
+    if (!g_lock) for (int c = 0; c < g_ncand; c++) if (g_cand[c].score >= 2 && g_cand[c].qn <= g_cand[c].score + 2) { int tie = 0;
+        for (int d = 0; d < g_ncand; d++) tie += d != c && g_cand[d].score >= g_cand[c].score && g_cand[d].qn <= g_cand[d].score + 2;
         if (!tie) { g_lock = g_cand[c].off; DLOG("[FORK] dex probe: the area is at heap + %#llx (it changed with each area popup)", (unsigned long long)g_lock); } }
 }
 static int current_zone(const char **how) {
     uintptr_t b = dm_fork_heap_base(); if (!b) return -1;
     if (g_lock) { int z = zone_index(*(const uint64_t *)(b + g_lock)); if (z >= 0) { *how = "live"; return z; } }
-    int best = -1; for (int c = 0; c < g_ncand; c++) if (best < 0 || g_cand[c].seen > g_cand[best].seen || (g_cand[c].seen == g_cand[best].seen && g_cand[c].score > g_cand[best].score)) best = c;
+    int best = -1; for (int c = 0; c < g_ncand; c++) if (g_cand[c].score >= 1 && g_cand[c].qn <= g_cand[c].score + 2 && (best < 0 || g_cand[c].tick > g_cand[best].tick)) best = c;
     if (best >= 0) { int z = zone_index(*(const uint64_t *)(b + g_cand[best].off)); if (z >= 0) { *how = "probe"; return z; } }
     if (dm_guest_heap_readable(b + O_MAPHASH, 8)) { int z = zone_index(*(const uint64_t *)(b + O_MAPHASH)); if (z >= 0) { *how = "saved"; return z; } }
+    if (g_guess >= 0) { *how = "guess"; return g_guess; }   // v57
     return -1;
 }
 
@@ -249,9 +280,9 @@ int dm_fork_dex_get(dm_fork_dex_info *o) {
 void dm_fork_dex_weather_next(void) { atomic_fetch_add(&g_wnext, 1); }
 static int base_len(const char *s) { const char *p = strstr(s, " ("); return p ? (int)(p - s) : (int)strlen(s); }
 static int same_place(int a, int b) { int la = base_len(k_zones[a].name), lb = base_len(k_zones[b].name); return la == lb && !strncmp(k_zones[a].name, k_zones[b].name, (size_t)la); }
-static void build(int z, int *wsel, int wtaps) {
+static void build(int z, int *wsel, int wtaps, int guessed) {
     dm_fork_dex_info e = { 0 }; e.active = 1; e.weather = -1;
-    snprintf(e.area, sizeof e.area, "%.*s", base_len(k_zones[z].name), k_zones[z].name);
+    snprintf(e.area, sizeof e.area, "%.*s%s", base_len(k_zones[z].name), k_zones[z].name, guessed ? "?" : "");   // (v57: "?": a guess)
     unsigned mask = 0; for (int i = 0; i < g_nslots; i++) if (same_place(g_slots[i].zone, z)) mask |= 1u << g_slots[i].sub;
     // the weather / kind shown: all (-1), then each one the place has, a tap at a time
     int opts[12], no = 0; opts[no++] = -1; for (int s = 0; s < 11; s++) if (mask >> s & 1) opts[no++] = s;
@@ -284,11 +315,14 @@ static void *worker(void *arg) {
         if (&dm_fork_dex_on && !dm_fork_dex_on) continue;
         int pc = &dm_fork_area_popups ? atomic_load(&dm_fork_area_popups) : 0;
         if (pc != seen) { seen = pc; due = 4; }   // (2 s after the popup: the area has been set by then)
-        if (due && !--due) { zone_diff(); if (!g_lock) zone_scan(); }
+        g_ticks++;
+        if (due && !--due) { zone_diff(1); if (!g_lock) zone_scan(); }
+        else if (!g_lock && g_ticks % 10 == 0) zone_diff(0);   // v57: every 5 s too
+        if (!g_lock && g_ticks % 120 == 0) zone_scan();   // (and a fresh list every minute)
         const char *how = ""; int z = current_zone(&how), t = atomic_exchange(&g_wnext, 0);
         if (z != lastz) { wsel = 0; DLOG("[FORK] dex: area %s (%s)", z >= 0 ? k_zones[z].name : "unknown", z >= 0 ? how : "-"); lastz = z; }
         if (z < 0) { status("AREA NOT KNOWN YET", "WALK TO A NEW AREA"); continue; }
-        taps += t; build(z, &wsel, taps); taps = 0;
+        taps += t; build(z, &wsel, taps, !strcmp(how, "guess")); taps = 0;
     }
     return NULL;
 }
