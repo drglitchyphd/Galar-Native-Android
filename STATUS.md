@@ -71,6 +71,9 @@ Upstream policy (Steven, Nov 13): merge from upstream `main` only, when needed. 
 
 - Encounter panel in the overworld (Steven, Nov 19, v54 log): the game's in-battle flag read "in battle" with no battle, and the search took a copy of his party (6 in a row, his Sobble first) as the wild one. Fix (fork_enc.c, in the tree, not built): battle only from the screen guess; party Pokémon (their encryption constants, read from the party block) skipped in the search and in the remembered spot.
 
+## Ideas (not started)
+- Companion screen (Steven, Nov 19): panels on a second display (AYN Thor and other dual-screen handhelds, Android Presentation API) or under the picture in Fold portrait: encounter info, party status (party block 0x450C68B0: HP 0x8A, stats 0x148+), area dex (after research), quick actions, DS-style touch controls on the second screen. Needs a Thor tester.
+
 ## Next
 1. Steven tests v47 (long run).
 2. If the `[FORK] enc` lines are right: the encounter info overlay (shown in wild battles; design with Steven).
