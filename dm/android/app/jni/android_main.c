@@ -1055,6 +1055,35 @@ void front_frame_work(uint64_t busy_ns, uint64_t period_ns) {
 // Loading (GameActivity polls this every 500 ms and tells Android 13+ through GameManager.setGameState, so the system can raise the clocks and the storage
 //   speed for it): the game reading its files at 8 MB/s or more; over once it reads under 1 MB/s for 2 s. A load also tells the hint session (Android 16:
 //   APerformanceHint_notifyWorkloadSpike) that this frame's CPU work jumps, before the governor sees the late frames. DM_LOAD_HINT=0: neither
+// A load's report (the white screen before a battle, 2026-11-19): every thread's CPU time over the load (/proc/self/task/<tid>/stat utime + stime), the core it was last
+//   on and that core's clock limit, and the time the game's file reads took: says whether a load waits on storage or on a thread's CPU work, and on which kind of core
+#include <dirent.h>
+typedef struct { int tid, cpu; uint64_t ticks; char name[20]; } thr_snap;
+static int thr_snapshot(thr_snap *o, int max) {
+    DIR *d = opendir("/proc/self/task"); if (!d) return 0; struct dirent *e; int n = 0;
+    while ((e = readdir(d)) && n < max) { int tid = atoi(e->d_name); if (tid <= 0) continue;
+        char p[64], b[512]; snprintf(p, sizeof p, "/proc/self/task/%d/stat", tid); FILE *f = fopen(p, "r"); if (!f) continue;
+        size_t k = fread(b, 1, sizeof b - 1, f); fclose(f); b[k] = 0;
+        char *lp = strchr(b, '('), *rp = strrchr(b, ')'); if (!lp || !rp) continue;
+        thr_snap *t = &o[n]; t->tid = tid; size_t nl = (size_t)(rp - lp - 1); if (nl > sizeof t->name - 1) nl = sizeof t->name - 1; memcpy(t->name, lp + 1, nl); t->name[nl] = 0;
+        char *q = rp + 2, *sv = NULL; unsigned long long ut = 0, st = 0; int cpu = -1, field = 3;   // (field 3 is the state, after the name)
+        for (char *tok = strtok_r(q, " ", &sv); tok; tok = strtok_r(NULL, " ", &sv), field++) { if (field == 14) ut = strtoull(tok, NULL, 10); else if (field == 15) st = strtoull(tok, NULL, 10); else if (field == 39) { cpu = atoi(tok); break; } }
+        t->ticks = ut + st; t->cpu = cpu; n++; }
+    closedir(d); return n;
+}
+static long core_max_khz(int c) { char p[96]; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c); FILE *f = fopen(p, "r"); long v = 0; if (f) { if (fscanf(f, "%ld", &v) != 1) v = 0; fclose(f); } return v; }
+static void load_report(const thr_snap *a, int na, uint64_t ns, uint64_t bytes, uint64_t read_ns) {
+    static thr_snap b[512]; int nb = thr_snapshot(b, 512); long hz = sysconf(_SC_CLK_TCK); if (hz <= 0) hz = 100;
+    struct { int i; uint64_t d; } top[8]; memset(top, 0, sizeof top);
+    for (int i = 0; i < nb; i++) { uint64_t was = 0; for (int j = 0; j < na; j++) if (a[j].tid == b[i].tid) { was = a[j].ticks; break; }
+        uint64_t d = b[i].ticks > was ? b[i].ticks - was : 0;
+        for (int k = 0; k < 8; k++) if (d > top[k].d) { for (int m = 7; m > k; m--) top[m] = top[m - 1]; top[k].i = i; top[k].d = d; break; } }
+    double secs = ns / 1e9 > 0.01 ? ns / 1e9 : 0.01;
+    fprintf(stderr, "[cpu] load report: %.2f s, %.1f MB read in %.2f s of file reads (all threads together); busiest threads (CPU s over the load, last core and its top clock):\n",
+            ns / 1e9, bytes / 1048576.0, read_ns / 1e9);
+    for (int k = 0; k < 8 && top[k].d; k++) { const thr_snap *t = &b[top[k].i];
+        fprintf(stderr, "[cpu]   %-16s tid %d: %.2f s CPU (%.0f %% of the load), core %d (%.2f GHz)\n", t->name, t->tid, (double)top[k].d / hz, 100.0 * (double)top[k].d / hz / secs, t->cpu, core_max_khz(t->cpu) / 1e6); }
+}
 JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env, jclass c) {
     (void)env; (void)c;
     static int off = -1; if (off < 0) { const char *e = getenv("DM_LOAD_HINT"); off = e && !strcmp(e, "0"); } if (off) return 0;
@@ -1063,11 +1092,14 @@ JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env,
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t t = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, b = atomic_load(&dm_fs_read_bytes);
     if (last_t && t > last_t) {
         double mbs = (double)(b - last_b) / 1048576.0 / ((double)(t - last_t) / 1e9);
+        static thr_snap ls[512]; static int nls; static uint64_t l_t0, l_b0, l_r0; extern _Atomic uint64_t dm_fs_read_ns __attribute__((weak));
         if (!loading && mbs >= 8.0) { loading = 1; quiet_since = 0; fprintf(stderr, "[cpu] loading (%.0f MB/s of game files): the system is told\n", mbs);
+            nls = thr_snapshot(ls, 512); l_t0 = last_t; l_b0 = last_b; l_r0 = &dm_fs_read_ns ? atomic_load(&dm_fs_read_ns) : 0;
             typedef int (*spike_fn)(void *, int, int, const char *); static spike_fn sp; static int looked;
             if (!looked) { looked = 1; void *lib = dlopen("libandroid.so", RTLD_NOW); sp = lib ? (spike_fn)dlsym(lib, "APerformanceHint_notifyWorkloadSpike") : NULL; }
             if (sp && g_hint) sp(g_hint, 1, 0, "load"); }
-        else if (loading && mbs < 1.0) { if (!quiet_since) quiet_since = t; else if (t - quiet_since >= 2000000000ull) { loading = 0; fprintf(stderr, "[cpu] loading over\n"); } }
+        else if (loading && mbs < 1.0) { if (!quiet_since) quiet_since = t; else if (t - quiet_since >= 2000000000ull) { loading = 0; fprintf(stderr, "[cpu] loading over\n");
+            load_report(ls, nls, quiet_since - l_t0, b - l_b0, (&dm_fs_read_ns ? atomic_load(&dm_fs_read_ns) : 0) - l_r0); } }
         else if (loading) quiet_since = 0;
     }
     last_b = b; last_t = t; return loading;
