@@ -112,9 +112,11 @@ static int g_dex_on = -1, g_dex_open, g_dex_page, g_dex_ready; static dm_fork_de
 static int dex_on(void) { if (g_dex_on < 0) { const char *e = getenv("DM_FORK_AREADEX"); g_dex_on = e && !strcmp(e, "on"); dm_fork_dex_on = g_dex_on; g_enc_census = g_enc_census || g_dex_on; census_sync(); } return g_dex_on; }
 static int dex_live(void) { return dex_on() && dm_fork_dex_get && g_dex_now.active && screen_kind() == 0 && !enc_live(); }
 static void dex_rect(float r4[4], int list_only);   // (below, with the drawing)
-static float enc_ch(void);
+static float pan_ch(int c);
 // the panels (encounter, area dex): which one a finger dragged, and from where
 static int g_pan_drag; static float g_pan_ox, g_pan_oy;
+// FORK v59 (Steven, Nov 19): two fingers on a panel resize it (its ball's radius, 2-10 % of the screen height; the text follows); saved in this screen's layout
+static int g_pp_c = -1, g_pp_swallow; static int32_t g_pp_id[2]; static float g_pp_d0, g_pp_r0;
 // FORK v53: the battle D-pad (DM_FORK_BATTLE_DPAD=on, default off). In a battle (the right stick does nothing there) every touch that is not on a button is a
 //   floating D-pad: where the finger lands is the centre, held a little away (2.5 % of the screen height) it presses the nearest of Up / Down / Left / Right (the game
 //   repeats a held direction itself); a quick tap is A, two fingers tapping together B. The fixed D-pad and the sticks hide in battles. ⊞ turns it off until the screen changes
@@ -539,10 +541,13 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
     if (act == AMOTION_EVENT_ACTION_CANCEL) for (int i = 0; i < 10; i++) g_ptr[i].id = -1;
     else if (act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_POINTER_DOWN) {
         size_t k = act == AMOTION_EVENT_ACTION_DOWN ? 0 : idx; float x = AMotionEvent_getX(e, k), y = AMotionEvent_getY(e, k);
-        if (act == AMOTION_EVENT_ACTION_DOWN) for (int i = 0; i < 10; i++) g_ptr[i].id = -1;
+        if (act == AMOTION_EVENT_ACTION_DOWN) { for (int i = 0; i < 10; i++) g_ptr[i].id = -1; g_pp_c = -1; g_pp_swallow = 0; }   // (FORK v59: + a resize left over)
         int t = target_at(x, y);
         if (t >= 0) for (int i = 0; i < 10; i++) if (g_ptr[i].id < 0) {
             if (t == C_STICK || t == C_CAM) for (int j = 0; j < 10; j++) if (g_ptr[j].id >= 0 && (g_ptr[j].target == C_STICK || g_ptr[j].target == C_CAM) && now_s() - g_ptr[j].t0 < 0.25) g_two_t = now_s();
+            if ((t == C_ENC || t == C_DEX) && g_pp_c < 0) for (int j = 0; j < 10; j++) if (g_ptr[j].id >= 0 && g_ptr[j].target == t) {   // FORK v59: a second finger on the panel: resize
+                float dx = x - g_ptr[j].x, dy = y - g_ptr[j].y; g_pp_c = t; g_pp_id[0] = g_ptr[j].id; g_pp_id[1] = AMotionEvent_getPointerId(e, k);
+                g_pp_d0 = sqrtf(dx * dx + dy * dy) + 1; g_pp_r0 = g_c[t].r; g_pan_drag = 0; g_pp_swallow = 2; break; }
             g_ptr[i].thr = g_ptr[i].lp = 0; g_ptr[i].id = AMotionEvent_getPointerId(e, k); g_ptr[i].target = t; g_ptr[i].x0 = g_ptr[i].x = g_ptr[i].lx = x; g_ptr[i].y0 = g_ptr[i].y = g_ptr[i].ly = y; g_ptr[i].lt = g_ptr[i].t0 = now_s();
             if (t >= C_A) g_held_until[t] = now_s() + 0.08;
             if (t == C_RSTICK || (t >= C_UP && t <= C_RIGHT)) g_inner_t = now_s();
@@ -570,13 +575,15 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (sb) { dm_input_press(sb, 80000000ull); click_locked(); g_cam_vx = g_cam_vy = 0; }
         }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_MENU && hit(C_MENU, g_ptr[i].x, g_ptr[i].y, 1.5f)) { click_locked(); front_open_menu(0); }
+        if (g_pp_c >= 0 && (id == g_pp_id[0] || id == g_pp_id[1])) { edit_store(g_pp_c); layout_save(); g_pp_c = -1; }   // FORK v59: the resize ends (saved)
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && (g_ptr[i].target == C_ENC || g_ptr[i].target == C_DEX)) {   // FORK v48: dropped: kept in this screen's layout; tapped: folds / opens
             int c = g_ptr[i].target;
+            if (g_pp_swallow > 0) { g_pp_swallow--; g_pan_drag = 0; continue; }   // (v59: the fingers that resized: no tap)
             if (g_pan_drag) { edit_store(c); layout_save(); }
             else if (c == C_ENC) { g_enc_open = !g_enc_open; click_locked(); }
             else { float r4[4]; dex_rect(r4, 1);   // v55: the area dex: a tap on the list = its next page, else fold / open
                 if (g_dex_open && g_ptr[i].x0 >= r4[0] && g_ptr[i].x0 <= r4[2] && g_ptr[i].y0 >= r4[1] && g_ptr[i].y0 <= r4[3]) {
-                    if (g_ptr[i].y0 < r4[1] + enc_ch() * 1.3f * 1.4f) { if (dm_fork_dex_weather_next) dm_fork_dex_weather_next(); g_dex_page = 0; } else g_dex_page++; }   // (the weather line / the list)
+                    if (g_ptr[i].y0 < r4[1] + pan_ch(C_DEX) * 1.3f * 1.4f) { if (dm_fork_dex_weather_next) dm_fork_dex_weather_next(); g_dex_page = 0; } else g_dex_page++; }   // (the weather line / the list)
                 else g_dex_open = !g_dex_open;
                 click_locked(); }
             g_pan_drag = 0; }
@@ -608,7 +615,7 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
                         g_cam_vx = g_cam_vx * 0.5f + vx * 0.5f; g_cam_vy = g_cam_vy * 0.5f + vy * 0.5f; g_cam_t = t;
                         g_ptr[i].lx = g_ptr[i].x; g_ptr[i].ly = g_ptr[i].y; g_ptr[i].lt = t; }
                 }
-                if ((g_ptr[i].target == C_ENC || g_ptr[i].target == C_DEX) && act == AMOTION_EVENT_ACTION_MOVE) {   // FORK v48: a panel follows the finger once it has moved (v55: + the area dex)
+                if ((g_ptr[i].target == C_ENC || g_ptr[i].target == C_DEX) && act == AMOTION_EVENT_ACTION_MOVE && g_pp_c < 0 && !g_pp_swallow) {   // FORK v48: a panel follows the finger once it has moved (v55: + the area dex)
                     int c = g_ptr[i].target;
                     if (!g_pan_drag && (fabsf(g_ptr[i].x - g_ptr[i].x0) > g_h * 0.02f || fabsf(g_ptr[i].y - g_ptr[i].y0) > g_h * 0.02f)) { g_pan_drag = 1; g_pan_ox = g_c[c].cx - g_ptr[i].x0; g_pan_oy = g_c[c].cy - g_ptr[i].y0; }
                     if (g_pan_drag) { g_c[c].cx = clampf(g_ptr[i].x + g_pan_ox, g_c[c].r, g_w - g_c[c].r); g_c[c].cy = clampf(g_ptr[i].y + g_pan_oy, g_c[c].r, g_h - g_c[c].r); } }
@@ -616,6 +623,10 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
                     for (int c = C_A; c <= C_Y; c++) if (c != g_ptr[i].target && hit(c, g_ptr[i].x, g_ptr[i].y, 1.0f)) { g_ptr[i].target = c; g_held_until[c] = now_s() + 0.08; break; }
             }
         }
+    if (g_pp_c >= 0 && act == AMOTION_EVENT_ACTION_MOVE) {   // FORK v59: the panel's size from the two fingers' distance
+        float px[2] = { 0 }, py[2] = { 0 }; int got = 0;
+        for (int j = 0; j < 10; j++) for (int q = 0; q < 2; q++) if (g_ptr[j].id >= 0 && g_ptr[j].id == g_pp_id[q]) { px[q] = g_ptr[j].x; py[q] = g_ptr[j].y; got |= 1 << q; }
+        if (got == 3) { float dx = px[0] - px[1], dy = py[0] - py[1]; g_c[g_pp_c].r = clampf(g_pp_r0 * (sqrtf(dx * dx + dy * dy) + 1) / g_pp_d0, g_h * 0.02f, g_h * 0.10f); } }
     recompute_locked();
     if (g_btn & ~before) click_locked();   // a new press: one click
     *btn = g_btn; s[0] = g_lx; s[1] = g_ly; s[2] = g_rx; s[3] = g_ry;
@@ -627,6 +638,7 @@ void touch_ui_hide(void) { pthread_mutex_lock(&g_mu); g_visible = 0; pthread_mut
 void touch_ui_release(void) {
     pthread_mutex_lock(&g_mu); int n = 0;
     for (int i = 0; i < 10; i++) { if (g_ptr[i].id >= 0) n++; g_ptr[i].id = -1; g_ep[i].id = -1; }
+    g_pp_c = -1; g_pp_swallow = 0;   // FORK v59
     g_pinch.active = 0; g_cam_vx = g_cam_vy = 0; g_stick_on = g_rstick_on = 0; for (int c = 0; c < NCTL; c++) g_held_until[c] = 0;
     recompute_locked(); dm_input_set(g_btn, g_lx, g_ly, g_rx, g_ry);
     pthread_mutex_unlock(&g_mu);
@@ -800,11 +812,11 @@ static void otext_c(dm_ovl_item *it, int *n, int max, float x, float y, float ch
 // FORK v52: the panel after Steven's sketch (Nov 15): the Poké Ball at the top left (the handle: tap folds the panel to it), a name ribbon running right from the ball,
 //   and the info box hanging below the ribbon. Folded: the ball alone (a gold star badge on a shiny). The area dex out of battle will use the same frame
 #define ENC_COLS 20
-static float enc_ch(void) { return g_h * 0.030f; }
+static float pan_ch(int c) { return g_h * 0.030f * clampf(g_c[c].r / (0.040f * g_h), 0.5f, 2.5f); }   // FORK v59: a panel's text grows with its ball (pinch to resize; the layout file keeps the size)
 // the parts, from the ball's centre (cx, cy) and radius r: ribbon x0..x1 at cy, box x0..x1, y0..y1; kept on screen by moving the whole panel
 typedef struct { float cx, cy, r, rx1, rh, bx0, by0, bx1, by1; } enc_geo;
 static enc_geo enc_layout(void) {
-    enc_geo g; float ch = enc_ch(), pad = ch * 0.5f, r = g_c[C_ENC].r, wtxt = ENC_COLS * ch * 0.6f + 2 * pad;
+    enc_geo g; float ch = pan_ch(C_ENC), pad = ch * 0.5f, r = g_c[C_ENC].r, wtxt = ENC_COLS * ch * 0.6f + 2 * pad;
     g.r = r; g.rh = fmaxf(r * 1.15f, ch * 1.6f);
     float w = r * 0.6f + wtxt, h = 4 * ch * 1.3f + 2 * pad;   // (the box: four lines)
     float cx = g_c[C_ENC].cx, cy = g_c[C_ENC].cy;
@@ -822,7 +834,7 @@ static void enc_draw(dm_ovl_item *it, int *n, int max) {
             add(it, n, max, bx, by, br, OVL_DISC, 240, 190, 40, 1.0f);
             o = add(it, n, max, bx, by, br, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_STAR; o->gscale = 0.8f; o->galpha = 1.0f; } }
         return; }
-    enc_geo g = enc_layout(); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f;
+    enc_geo g = enc_layout(); float ch = pan_ch(C_ENC), pad = ch * 0.5f, lh = ch * 1.3f;
     // the info box (under the ribbon), then the ribbon (a pill from the ball's middle to the right), then the ball over the ribbon's left end
     o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.84f); if (o) { o->x = g.bx0; o->y = g.by0; o->w = g.bx1 - g.bx0; o->h = g.by1 - g.by0; o->radius = 0.10f; }
     // v52: the ribbon in the Pokémon's type colours (two types: the second at the right end), a gold edge on a shiny
@@ -862,7 +874,7 @@ static const char *const k_dex_weather[11] = { "NORMAL", "OVERCAST", "RAIN", "TH
 static int dex_pages(void) { int n = g_dex_now.n; return n <= 0 ? 1 : (n + DEX_ROWS - 1) / DEX_ROWS; }
 typedef struct { float cx, cy, r, rx1, rh, bx0, by0, bx1, by1, ly0; } dex_geo;
 static dex_geo dex_layout(void) {
-    dex_geo g; float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, r = g_c[C_DEX].r, wtxt = DEX_COLS * ch * 0.6f + 2 * pad;
+    dex_geo g; float ch = pan_ch(C_DEX), pad = ch * 0.5f, lh = ch * 1.3f, r = g_c[C_DEX].r, wtxt = DEX_COLS * ch * 0.6f + 2 * pad;
     int rows = g_dex_now.msg[0][0] ? 2 : g_dex_now.n < DEX_ROWS ? (g_dex_now.n > 0 ? g_dex_now.n : 1) : DEX_ROWS;
     g.r = r; g.rh = fmaxf(r * 1.15f, ch * 1.6f);
     float w = r * 0.6f + wtxt, h = (rows + 1) * lh + 2 * pad;   // (+1: the weather / page line)
@@ -882,7 +894,7 @@ static void dex_draw(dm_ovl_item *it, int *n, int max) {
             for (int i = 0; i < 10; i++) { float a = (float)(i * 6.2831853 / 10), ph = (float)fmod(t * 1.25 - i / 10.0 + 10.0, 1.0);
                 add(it, n, max, k->cx + rr * cosf(a), k->cy + rr * sinf(a), dr * (0.6f + 0.4f * (1 - ph)), OVL_DISC, 255, 255, 255, 0.25f + 0.75f * (1 - ph)); } }
         return; }
-    dex_geo g = dex_layout(); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, rl = g.rx1 - g.cx;
+    dex_geo g = dex_layout(); float ch = pan_ch(C_DEX), pad = ch * 0.5f, lh = ch * 1.3f, rl = g.rx1 - g.cx;
     o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.84f); if (o) { o->x = g.bx0; o->y = g.by0; o->w = g.bx1 - g.bx0; o->h = g.by1 - g.by0; o->radius = 0.06f; }
     o = add(it, n, max, 0, 0, 1, OVL_RRECT, 206, 32, 41, 0.97f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = rl; o->h = g.rh; o->radius = 0.5f; }
     ctl ball = g_c[C_DEX]; ball.cx = g.cx; ball.cy = g.cy; pokeball(it, n, max, &ball, 0, 1.0f);

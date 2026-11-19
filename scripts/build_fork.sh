@@ -22,7 +22,7 @@ FORK_NAME=${FORK_NAME:-Galar Fork}
 FORK_DATA_DIR=${FORK_DATA_DIR:-GalarFork}
 FORK_ICON=${FORK_ICON:-2a6fdb 182040}
 FORK_ONLY_GAME=${FORK_ONLY_GAME-0100ABF008968000}
-FORK_VERSION=${FORK_VERSION:-58}
+FORK_VERSION=${FORK_VERSION:-59}
 # a // comment that swallowed code on a FORK line stops the build (it compiles silently when it only drops statements: v44 lost the shader name that way)
 python3 "$(dirname "$0")/check_fork_comments.py" || { echo "build_fork: fix the lines above (or mark a false alarm with // check: ok)"; exit 1; }
 FORK_LSFG=${FORK_LSFG:-1}

@@ -79,7 +79,7 @@ public final class GameMenu {
     // ---------- the panel ----------
     private static Dialog dlg; private static Activity act; private static LinearLayout rail, body; private static ScrollView scroll; private static TextView status;
     private static String page = "display"; private static final Set<String> RESTART = new HashSet<>();   // settings changed that apply from the next start
-    private static final String[][] TABS = { { "display", "Display" }, { "perf", "Performance" }, { "controls", "Controls" }, { "mods", "Mods" }, { "saves", "Saves" },
+    private static final String[][] TABS = { { "display", "Display" }, { "perf", "Performance" }, { "controls", "Controls" }, { "tweaks", "Tweaks" }, { "mods", "Mods" },   /* FORK v59: + Tweaks */ { "saves", "Saves" },
                                              { "online", "Online" }, { "system", "System" }, { "about", "About" } };
 
     // android_main.c: what 0 = the menu, 1 = the controller buttons
@@ -152,6 +152,7 @@ public final class GameMenu {
             case "display": display(a); break;
             case "perf": perf(a); break;
             case "controls": controls(a); break;
+            case "tweaks": tweaks(a); break;   // FORK v59
             case "remap": remap(a); break;
             case "mods": mods(a); break;
             case "order": order(a); break;
@@ -406,10 +407,6 @@ public final class GameMenu {
         choice(a, "DM_FORK_TOUCH_COLOR", t(a, "Colour"), new String[][] { { "", t(a, "Blue"), "" }, { "grey", t(a, "Grey"), "" }, { "white", t(a, "White"), "" },
             { "dark", t(a, "Dark"), "" }, { "red", t(a, "Red"), "" }, { "green", t(a, "Green"), "" }, { "purple", t(a, "Purple"), "" } });
         slider(a, t(a, "Size"), "DM_FORK_TOUCH_SIZE", 50, 150, 100, v -> v + " %");
-        choice(a, "DM_FORK_FF", t(a, "Fast-forward"), new String[][] { { "", t(a, "Off"), "" },
-            { "battle", t(a, "In battles"), t(a, "In battles: the ⏩ button shows during battles. Tap: on / off. Hold: fast while held") },
-            { "all", t(a, "Anywhere"), t(a, "Anywhere: the ⏩ button is always there (walking, hatching, battles)") } });
-        choice(a, "DM_FORK_FF_SPEED", t(a, "Fast-forward speed"), new String[][] { { "125", "1.25x", "" }, { "", "1.5x", "" }, { "200", "2x", "" }, { "300", "3x", "" } });
         choice(a, "DM_FORK_TURBO", t(a, "Turbo A"), new String[][] { { "", t(a, "Off"), "" },
             { "on", t(a, "On"), t(a, "On: hold the ⚡ button to press A again and again (text, buying, hatching)") } });
         slider(a, t(a, "Turbo speed"), "DM_FORK_TURBO_HZ", 3, 20, 10, v -> t(a, "%d presses a second", v));
@@ -421,12 +418,6 @@ public final class GameMenu {
         //   The ⊞ button brings every button back until the screen changes (the screen is a guess from what the game draws)
         choice(a, "DM_FORK_GESTURES", t(a, "Gesture shortcuts"), new String[][] { { "", t(a, "Off"), "" },   // FORK v47 (touch_ui.c gestures_event)
             { "on", t(a, "On"), t(a, "A quick three-finger tap opens this menu; two fingers swiped down together press X (the game's menu)") } });
-        // FORK v48: the encounter panel (touch_ui.c enc_draw, host/fork_enc.c)
-        choice(a, "DM_FORK_ENC", t(a, "Encounter info"), new String[][] { { "", t(a, "Off"), "" },
-            { "on", t(a, "On"), t(a, "In wild battles: a panel with the Pokémon's species, shiny, nature, ability, IVs and EVs. Drag it to move it; tap it to fold it to a Poké Ball (gold star = shiny)") } });
-        // FORK v55: the area dex panel (touch_ui.c dex_draw, host/fork_dex.c)
-        choice(a, "DM_FORK_AREADEX", t(a, "Area dex"), new String[][] { { "", t(a, "Off"), "" },
-            { "on", t(a, "On"), t(a, "In the overworld: the Pokémon of the area you are in, how often they appear, and whether you have seen or caught them. Drag it to move it; tap the ball or the title to fold it; tap the list for its next page") } });
         heading(a, t(a, "Context controls"));
         note(a, t(a, "The fork guesses the screen from what the game draws. If buttons you need are hidden, tap ⊞ (top centre) for every button until the screen changes. Arrange a screen's own layout with Move the touch controls while on it."));
         choice(a, "DM_FORK_CTX_DIALOGUE", t(a, "Dialogue"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
@@ -446,6 +437,22 @@ public final class GameMenu {
             slider(a, t(a, "Battle: fade after"), "DM_FORK_BATTLE_FADE", -1, 10, -1, v -> v < 0 ? t(a, "same as elsewhere") : v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v)); }
         action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Save, Reset or Cancel on the bar at the top. Each screen and orientation keeps its own layout."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); ForkTouch.bar(a); } catch (UnsatisfiedLinkError e) { } });   // FORK: ForkTouch.bar
+    }
+    // FORK v59 (Steven, Nov 19): Tweaks, the fork's changes that are not about the controls (performance and display settings stay on their own pages)
+    private static void tweaks(Activity a) {
+        heading(a, t(a, "Game speed"));
+        choice(a, "DM_FORK_FF", t(a, "Fast-forward"), new String[][] { { "", t(a, "Off"), "" },
+            { "battle", t(a, "In battles"), t(a, "In battles: the ⏩ button shows during battles. Tap: on / off. Hold: fast while held") },
+            { "all", t(a, "Anywhere"), t(a, "Anywhere: the ⏩ button is always there (walking, hatching, battles)") } });
+        choice(a, "DM_FORK_FF_SPEED", t(a, "Fast-forward speed"), new String[][] { { "125", "1.25x", "" }, { "", "1.5x", "" }, { "200", "2x", "" }, { "300", "3x", "" } });
+        heading(a, t(a, "Info panels"));
+        note(a, t(a, "Panels over the game: drag to move, pinch with two fingers to resize. Each screen and orientation keeps their place and size."));
+        // FORK v48: the encounter panel (touch_ui.c enc_draw, host/fork_enc.c)
+        choice(a, "DM_FORK_ENC", t(a, "Encounter info"), new String[][] { { "", t(a, "Off"), "" },
+            { "on", t(a, "On"), t(a, "In wild battles: a panel with the Pokémon's species, shiny, nature, ability, IVs and EVs. Drag it to move it, pinch it to resize it; tap it to fold it to a Poké Ball (gold star = shiny)") } });
+        // FORK v55: the area dex panel (touch_ui.c dex_draw, host/fork_dex.c)
+        choice(a, "DM_FORK_AREADEX", t(a, "Area dex"), new String[][] { { "", t(a, "Off"), "" },
+            { "on", t(a, "On"), t(a, "In the overworld: the Pokémon of the area you are in, how often they appear, and whether you have seen or caught them. Drag it to move it, pinch it to resize it; tap the ball or the title to fold it; tap the first line for another weather, the list for its next page") } });
     }
     // Remapping (PadMapping.java, DM_PAD_MAPPING): tap a Switch button, then press the controller key for it (the panel takes the key: remapKey)
     private static String capture;
