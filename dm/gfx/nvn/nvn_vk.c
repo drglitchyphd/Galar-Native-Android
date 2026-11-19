@@ -710,6 +710,12 @@ static int g_plast = -1;
 #define PS_SIZE(i) (g_pools[i].size)
 #include "pool_index.h"
 #include "pool_pages.h"
+// pages a freed pool could no longer read (pool_pages.h pages_copy, #281): said the first few times, with the running total
+static void pages_lost_note(uintptr_t base) {
+    static uint64_t said; static int n; uint64_t l = atomic_load(&pages_lost);
+    if (l != said && n < 8) { n++; VLOG("[RED] memory pool %p: pages no longer readable when it was freed (the driver had taken them back): given back as zeros (%llu KB so far)", (void *)base, (unsigned long long)(l >> 10)); }
+    said = l;
+}
 static int pp_hook(void *addr, int is_write, void *uc) { (void)is_write; (void)uc; return pp_fault(addr); }
 static void pp_hook_once(void) { static atomic_int done; if (!atomic_exchange(&done, 1)) dm_fault_hook_register(pp_hook); }
 // MREMAP_DONTUNMAP is tried until the kernel refuses it for the driver's mappings (errno 22, every log so far: Xclipse, Mali): a refused call has already unmapped its
@@ -980,6 +986,7 @@ void mtl_pool_del(const void *mem) {
         if (e.fdmapped) {   // the game's pages back as ordinary memory with the same content, in one step (pool_pages.h), then a plain free (the driver's own mapping was never touched)
             void *copy = pages_copy(e.base, e.size);
             if (copy == MAP_FAILED) VDIE("memory pool %p+%#llx: no memory to give its pages back (errno %d)", (void *)e.base, (unsigned long long)e.size, errno);
+            pages_lost_note(e.base);
             pages_back(e.base, e.size, copy);
             vkDestroyBuffer(g_dev, e.buf, NULL); vkFreeMemory(g_dev, e.mem, NULL);
             return;
@@ -990,6 +997,7 @@ void mtl_pool_del(const void *mem) {
             // them out again, so a later pool's vkMapMemory returned the placeholder's address and the first write there crashed (loading a save in Pokémon Shield)
             void *copy = pages_copy(e.base, e.size);   // (made first: the game's pages become it the moment the driver's leave, pool_pages.h)
             if (copy == MAP_FAILED) VDIE("memory pool %p+%#llx: no memory to give its pages back (errno %d)", (void *)e.base, (unsigned long long)e.size, errno);
+            pages_lost_note(e.base);
 #ifdef __linux__
             // one protection over the whole range first: the texture tracking's write protection splits it into several mappings, and mremap moves one (EFAULT otherwise)
             mprotect((void *)e.base, e.size, PROT_READ | PROT_WRITE);

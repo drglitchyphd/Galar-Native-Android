@@ -11,6 +11,10 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#ifdef __linux__
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 
 // The one moment left: between the driver's pages leaving the range and the copy arriving (two mremaps back to back; no single call does both). The range is marked
 // for it (pp_begin / pp_end), and a fault inside a marked range, or one that ended less than 100 ms ago, waits 50 µs and runs the faulting instruction again
@@ -37,10 +41,27 @@ static int pp_fault(void *addr) {   // async-signal-safe: atomics, clock_gettime
     return 0;
 }
 
-// a private copy of the pages at [base, base+size), for pages_back (MAP_FAILED when there is no memory for it)
+// a private copy of the pages at [base, base+size), for pages_back (MAP_FAILED when there is no memory for it).
+// Read with process_vm_readv, which reports a page it cannot read instead of faulting: Turnip (Adreno 660, #281) had taken back pages moved under a pool by the time
+//   the pool was freed, and the plain memcpy here crashed reading them (SIGSEGV in memcpy, mtl_pool_del, after minutes of play). Such a page stays zero in the copy:
+//   the pool is being freed, the game only gets its memory back. pages_lost counts them (said in the log by the caller)
+static _Atomic uint64_t pages_lost;
 static void *pages_copy(uintptr_t base, size_t size) {
     void *c = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (c != MAP_FAILED) memcpy(c, (void *)base, size);
+    if (c == MAP_FAILED) return c;
+#ifdef __linux__
+    size_t done = 0, pg = (size_t)sysconf(_SC_PAGESIZE); pid_t me = getpid();
+    while (done < size) {
+        struct iovec l = { (uint8_t *)c + done, size - done }, r = { (void *)(base + done), size - done };
+        ssize_t k = process_vm_readv(me, &l, 1, &r, 1, 0);
+        if (k > 0) { done += (size_t)k; continue; }
+        if (k < 0 && errno != EFAULT) { memcpy((uint8_t *)c + done, (void *)(base + done), size - done); break; }   // (the call refused here: the plain copy, as before)
+        size_t step = pg - ((base + done) & (pg - 1)); if (step > size - done) step = size - done;   // an unreadable page: left zero, the next one tried
+        done += step; atomic_fetch_add(&pages_lost, step);
+    }
+#else
+    memcpy(c, (void *)base, size);
+#endif
     return c;
 }
 // [base, base+size) becomes the copy (ordinary memory, readable and writable), whatever was mapped there; the copy's own address is gone afterwards.
