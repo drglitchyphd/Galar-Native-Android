@@ -18,7 +18,7 @@ uintptr_t dm_fork_heap_base(void);   // hle_svc.c (FORK)
 size_t dm_fork_heap_size(void);      // hle_svc.c (FORK)
 int dm_guest_heap_readable(uint64_t a, size_t n);   // hle_svc.c
 
-typedef struct { int16_t species, form; uint8_t pct, state, flags, pad; } dm_fork_dex_row;   // state: 0 not seen, 1 seen, 2 caught; flags 1 walking about, 2 hidden
+typedef struct { int16_t species, form; uint8_t pct, state, flags, icon; } dm_fork_dex_row;   // (v61: icon: its atlas cell, fork_icons.c; 255 none yet)   // state: 0 not seen, 1 seen, 2 caught; flags 1 walking about, 2 hidden
 typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; char msg[2][24]; int busy; } dm_fork_dex_info;   // (v58: busy: still working on it, the panel spins)   // (v56: msg: what the panel waits for, shown instead of the list)   // weather: -1 all, else the subtable (0-10)
 extern volatile int dm_fork_dex_on __attribute__((weak));   // touch_ui.c
 extern _Atomic int dm_fork_area_popups __attribute__((weak));   // gfx/nvn/fork_ui.h
@@ -280,6 +280,7 @@ int dm_fork_dex_get(dm_fork_dex_info *o) {
 void dm_fork_dex_weather_next(void) { atomic_fetch_add(&g_wnext, 1); }
 static int base_len(const char *s) { const char *p = strstr(s, " ("); return p ? (int)(p - s) : (int)strlen(s); }
 static int same_place(int a, int b) { int la = base_len(k_zones[a].name), lb = base_len(k_zones[b].name); return la == lb && !strncmp(k_zones[a].name, k_zones[b].name, (size_t)la); }
+int dm_fork_icon_cell(int sp, int form); void dm_fork_icons_work(void);   // fork_icons.c (v61)
 static void build(int z, int *wsel, int wtaps, int guessed) {
     dm_fork_dex_info e = { 0 }; e.active = 1; e.weather = -1;
     snprintf(e.area, sizeof e.area, "%.*s%s", base_len(k_zones[z].name), k_zones[z].name, guessed ? "?" : "");   // (v57: "?": a guess)
@@ -290,7 +291,7 @@ static void build(int z, int *wsel, int wtaps, int guessed) {
     int dexok = 0;
     for (int i = 0; i < g_nslots; i++) { const slot *s = &g_slots[i]; if (!same_place(s->zone, z) || (w >= 0 && s->sub != w)) continue;
         int r = 0; while (r < e.n && (e.row[r].species != s->species || e.row[r].form != s->form)) r++;
-        if (r == e.n) { if (e.n == 40) continue; e.n++; e.row[r] = (dm_fork_dex_row){ (int16_t)s->species, s->form, 0, 0, 0, 0 };
+        if (r == e.n) { if (e.n == 40) continue; e.n++; e.row[r] = (dm_fork_dex_row){ (int16_t)s->species, s->form, 0, 0, 0, 255 }; { int ic = dm_fork_icon_cell(s->species, s->form); if (ic >= 0) e.row[r].icon = (uint8_t)ic; }   // (v61)
             int st = dex_state(s->species); if (st >= 0) dexok = 1; e.row[r].state = (uint8_t)(st < 0 ? 1 : st); }
         if (s->prob > e.row[r].pct) e.row[r].pct = s->prob; e.row[r].flags |= s->kind ? 2 : 1; }
     e.dexok = dexok;
@@ -323,6 +324,7 @@ static void *worker(void *arg) {
         if (z != lastz) { wsel = 0; DLOG("[FORK] dex: area %s (%s)", z >= 0 ? k_zones[z].name : "unknown", z >= 0 ? how : "-"); lastz = z; }
         if (z < 0) { status("AREA NOT KNOWN YET", "WALK TO A NEW AREA", 1); continue; }
         taps += t; build(z, &wsel, taps, !strcmp(how, "guess")); taps = 0;
+        dm_fork_icons_work();   // v61: the icons the list asked for
     }
     return NULL;
 }

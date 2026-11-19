@@ -4757,7 +4757,11 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
 #include "overlay/ovl_font.h"
 __attribute__((weak)) int front_overlay(dm_ovl_item *it, int max, int width, int height) { (void)it; (void)max; (void)width; (void)height; return 0; }
 static struct { VkFormat fmt; VkPipeline pipe; VkPipelineLayout pl; VkDescriptorSetLayout dsl; VkDescriptorPool dp; VkDescriptorSet ds; VkSampler samp;
-                VkImage font; VkImageView fview; vmalloc_t fa, sa; VkBuffer stage; int font_ready, failed; } O;
+                VkImage font; VkImageView fview; vmalloc_t fa, sa; VkBuffer stage; int font_ready, failed;
+                VkImage icon; VkImageView iview; vmalloc_t ia, isa; VkBuffer istage; void *imap; unsigned igen; } O;   // FORK v61: + the Pokémon icon atlas (binding 1)
+// FORK v61: host/fork_icons.c: the icon atlas (1024 x 1024 RGBA8, 16 x 16 cells of 64 x 64) and its generation (a new one is uploaded when it changes)
+enum { OVL_ICON_W = 1024 };
+__attribute__((weak)) const uint8_t *dm_fork_icons(unsigned *gen) { (void)gen; return NULL; }
 typedef struct { float rect[4], color[4], shape[4], glyph[4], target[2], rot; } ovl_pc;
 static int ovl_setup(VkFormat fmt) {
     if (O.failed) return 0;
@@ -4772,15 +4776,24 @@ static int ovl_setup(VkFormat fmt) {
         VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, O.font, &rq); O.fa = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); vkBindImageMemory(g_dev, O.font, O.fa.b->mem, O.fa.off);
         VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = O.font, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8_UNORM, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
         vkCreateImageView(g_dev, &vci, NULL, &O.fview);
+        {   // FORK v61: the icon atlas
+            VkImageCreateInfo ic = ci; ic.format = VK_FORMAT_R8G8B8A8_UNORM; ic.extent = (VkExtent3D){ OVL_ICON_W, OVL_ICON_W, 1 };
+            ic.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            if (vkCreateImage(g_dev, &ic, NULL, &O.icon)) { O.failed = 1; RED_ONCE(72, "overlay: cannot create the icon atlas"); return 0; }
+            VkMemoryRequirements iq; vkGetImageMemoryRequirements(g_dev, O.icon, &iq); O.ia = vk_alloc(iq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); vkBindImageMemory(g_dev, O.icon, O.ia.b->mem, O.ia.off);
+            VkImageViewCreateInfo iv = vci; iv.image = O.icon; iv.format = VK_FORMAT_R8G8B8A8_UNORM; vkCreateImageView(g_dev, &iv, NULL, &O.iview);
+            O.istage = buf_make((size_t)OVL_ICON_W * OVL_ICON_W * 4, &O.isa, &O.imap);
+        }
         void *m; O.stage = buf_make(sizeof ovl_font, &O.sa, &m); memcpy(m, ovl_font, sizeof ovl_font);
-        VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b }; vkCreateDescriptorSetLayout(g_dev, &dli, NULL, &O.dsl);
-        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+        VkDescriptorSetLayoutBinding bb[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL }, { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };   // (FORK v61: + icons)
+        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = bb }; vkCreateDescriptorSetLayout(g_dev, &dli, NULL, &O.dsl);
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
         VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps }; vkCreateDescriptorPool(g_dev, &dpi, NULL, &O.dp);
         VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = O.dp, .descriptorSetCount = 1, .pSetLayouts = &O.dsl }; vkAllocateDescriptorSets(g_dev, &dai, &O.ds);
-        VkDescriptorImageInfo ii = { O.samp, O.fview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = O.ds, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii };
-        vkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+        VkDescriptorImageInfo ii = { O.samp, O.fview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }, ii2 = { O.samp, O.iview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = O.ds, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii },
+                                      { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = O.ds, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii2 } };
+        vkUpdateDescriptorSets(g_dev, 2, w, 0, NULL);
         VkPushConstantRange pr = { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ovl_pc) };
         VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &O.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
         vkCreatePipelineLayout(g_dev, &pli, NULL, &O.pl);
@@ -4825,7 +4838,22 @@ static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, Vk
         vkCmdCopyBufferToImage(cb, O.stage, O.font, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc);
         fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; fb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; fb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &fb);
-        O.font_ready = 1;
+        O.font_ready = 1; O.igen = ~0u;
+    }
+    {   // FORK v61: the icon atlas: cleared once, then copied in whenever host/fork_icons.c has a new one
+        unsigned gen = 0; const uint8_t *px = dm_fork_icons(&gen);
+        if (gen != O.igen) {
+            VkImageMemoryBarrier ibr = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = O.igen == ~0u ? 0 : VK_ACCESS_SHADER_READ_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = O.igen == ~0u ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = O.icon, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ibr);
+            if (px && O.imap) { memcpy(O.imap, px, (size_t)OVL_ICON_W * OVL_ICON_W * 4);
+                VkBufferImageCopy bc = { 0, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { OVL_ICON_W, OVL_ICON_W, 1 } };
+                vkCmdCopyBufferToImage(cb, O.istage, O.icon, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc); }
+            else { VkClearColorValue z = { { 0, 0, 0, 0 } }; VkImageSubresourceRange rr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }; vkCmdClearColorImage(cb, O.icon, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &rr); }
+            ibr.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; ibr.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; ibr.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; ibr.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &ibr);
+            O.igen = gen; }
     }
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,

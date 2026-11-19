@@ -103,7 +103,7 @@ static void enc_rect(float r4[4]);   // (below, with the drawing)
 //   they appear, not seen / seen / caught in the player's Pokédex). A control of its own like the encounter panel (C_DEX, "dex" in the layout file): dragged, it
 //   moves (kept in this screen's layout); a tap on the ball or the ribbon folds it to the ball and back; a tap on the first line (the weather) shows the next weather
 //   the area has (ALL first); a tap on the list shows its next page
-typedef struct { int16_t species, form; uint8_t pct, state, flags, pad; } dm_fork_dex_row;   // (as host/fork_dex.c) state: 0 not seen, 1 seen, 2 caught; flags 1: a symbol (seen walking), 2: hidden (in the grass "!")
+typedef struct { int16_t species, form; uint8_t pct, state, flags, icon; } dm_fork_dex_row;   // (v61: icon: the atlas cell, 255 none)   // (as host/fork_dex.c) state: 0 not seen, 1 seen, 2 caught; flags 1: a symbol (seen walking), 2: hidden (in the grass "!")
 typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; char msg[2][24]; int busy; } dm_fork_dex_info;   // (v58: busy)   // (v56: msg, what the panel waits for)   // weather: -1 all, else the subtable (0-10); dexok: the Pokédex was found
 int dm_fork_dex_get(dm_fork_dex_info *o) __attribute__((weak));
 void dm_fork_dex_weather_next(void) __attribute__((weak));
@@ -913,7 +913,10 @@ static void dex_draw(dm_ovl_item *it, int *n, int max) {
         const dm_fork_dex_row *r = &e->row[i]; y += lh;
         const char *nm = r->species > 0 && r->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[r->species] : "?";
         int R = !e->dexok || r->state == 2 ? 255 : r->state == 1 ? 170 : 85;
-        if (e->dexok && r->state == 2) { o = add(it, n, max, x + ch * 0.3f, y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_BALL; o->gscale = 1.0f; o->galpha = 1.0f; } }
+        if (e->dexok && r->state == 2 && r->icon == 255) { o = add(it, n, max, x + ch * 0.3f, y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_BALL; o->gscale = 1.0f; o->galpha = 1.0f; } }   // (v61: the ball mark when there is no icon)
+        if (r->icon != 255) {   // FORK v61: the Pokémon's icon left of its name (the player's own game files): a black silhouette not seen, faded seen, full colour caught
+            o = add(it, n, max, x + ch * 0.5f, y, ch * 0.66f, OVL_DISC, 0, 0, 0, 0);
+            if (o) { o->glyph = 1000 + r->icon; o->gscale = 1.0f; o->galpha = 1.0f; o->gtint = !e->dexok || r->state == 2 ? 0 : r->state == 1 ? 1 : 2; } }
         if (e->dexok && r->state == 0) nm = "???";   // FORK v60 (Steven, Nov 19): not seen yet: no name, as in the Pokédex
         snprintf(ln, sizeof ln, "%.12s%s", nm, r->flags & 2 && !(r->flags & 1) ? "!" : ""); otext_c(it, n, max, x + ch * 0.6f * 2, y, ch, ln, 1.0f, R, R, R);
         if (r->pct) { snprintf(ln, sizeof ln, "%3d%%", r->pct); otext_c(it, n, max, x + ch * 0.6f * (DEX_COLS - 5), y, ch, ln, 1.0f, R, R, R); }
