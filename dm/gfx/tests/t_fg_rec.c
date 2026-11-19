@@ -50,6 +50,29 @@ int main(void) {
     CHECK(strstr(t, "(SHOWN)") != NULL, "the shown image is marked");
     CHECK(strstr(t, "merge candidate") != NULL, "back-to-back passes of one size are merge candidates");
     CHECK(strstr(t, "last pass with depth (the 3D scene): pass 1; after it, into the shown image img3: pass 2 (1 draws) pass 3 (40 draws)") != NULL, "the scene / HUD split: the composite and HUD passes after the 3D pass");
+    {   // the held frame's verdict (fgr_fate_exact, DM_VK_FRAME_HOLD=2): what decides that a store can be left out
+        fgr_cont_start(); fgr_cont_reset();
+        static int X, Y;   // X a 1024x1024 depth image with two layers, Y a colour image
+        fgr_attin d0 = { &X, 1024, 1024, 126, 0, 0, 8, 1, 0 }, d0b = { &X, 1024, 1024, 126, 0, 1, 8, 1, 0 }, c = { &Y, 1024, 1024, 37, 0, 0, 0, 1, 0 };
+        fgr_pass_begin(NULL, 1024, 1024, 1, 1, &d0, 1); fgr_pass_end(NULL);       // 0: X layer 0 written
+        fgr_pass_begin(NULL, 1024, 1024, 1, 1, &d0b, 1); fgr_pass_end(NULL);      // 1: X layer 1 cleared (another layer)
+        fgr_pass_begin(NULL, 512, 512, 1, 1, &d0, 1); fgr_pass_end(NULL);         // 2: X layer 0 cleared over a quarter only
+        fgr_pass_begin(NULL, 1024, 1024, 1, 1, &d0, 1); fgr_pass_end(NULL);       // 3: X layer 0 cleared over all of it
+        fgr_pass_begin(NULL, 1024, 1024, 1, 1, &c, 1); fgr_pass_end(NULL);        // 4: Y written
+        fgr_read_img(&Y, 1024, 1024, 37, FGR_READ);                                  //    Y read
+        fgr_pass_begin(NULL, 1024, 1024, 1, 1, &c, 1); fgr_pass_end(NULL);        // 5: Y cleared
+        fgr_pass_begin(NULL, 1024, 1024, 1, 1, &d0b, 1); fgr_pass_end(NULL);      // 6: X layer 1 written, nothing after
+        pthread_mutex_lock(&g_fgrmu); fgr_rstart_build();
+        int f2 = fgr_fate_exact(2, &g_fgr.p[2].a[0]), f0 = fgr_fate_exact(0, &g_fgr.p[0].a[0]), f3 = fgr_fate_exact(3, &g_fgr.p[3].a[0]),
+            f4 = fgr_fate_exact(4, &g_fgr.p[4].a[0]), f6 = fgr_fate_exact(6, &g_fgr.p[6].a[0]), f1 = fgr_fate_exact(1, &g_fgr.p[1].a[0]);
+        pthread_mutex_unlock(&g_fgrmu);
+        CHECK(f0 == 0, "verdict: a later clear over only part of the image keeps the store (needed)");
+        CHECK(f2 == 1, "verdict: a later clear of the same level, layer and aspect over all of it: overwritten unread");
+        CHECK(f3 == 4, "verdict: another layer's clear (pass 6, layer 1) is not ours: unknown (stays stored)");
+        CHECK(f1 == 1, "verdict: layer 1's store, its layer cleared whole later (pass 6), passes on other layers between: overwritten unread");
+        CHECK(f4 == 0, "verdict: read before it is cleared: needed");
+        CHECK(f6 == 4, "verdict: the last pass, nothing after it: unknown");
+    }
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;
 }
