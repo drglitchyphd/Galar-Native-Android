@@ -104,7 +104,7 @@ static void enc_rect(float r4[4]);   // (below, with the drawing)
 //   moves (kept in this screen's layout); a tap on the ball or the ribbon folds it to the ball and back; a tap on the first line (the weather) shows the next weather
 //   the area has (ALL first); a tap on the list shows its next page
 typedef struct { int16_t species, form; uint8_t pct, state, flags, pad; } dm_fork_dex_row;   // (as host/fork_dex.c) state: 0 not seen, 1 seen, 2 caught; flags 1: a symbol (seen walking), 2: hidden (in the grass "!")
-typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; } dm_fork_dex_info;   // weather: -1 all, else the subtable (0-10); dexok: the Pokédex was found
+typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; char msg[2][24]; } dm_fork_dex_info;   // (v56: msg, what the panel waits for)   // weather: -1 all, else the subtable (0-10); dexok: the Pokédex was found
 int dm_fork_dex_get(dm_fork_dex_info *o) __attribute__((weak));
 void dm_fork_dex_weather_next(void) __attribute__((weak));
 volatile int dm_fork_dex_on;   // host/fork_dex.c reads game memory only while this is set
@@ -775,7 +775,8 @@ static void prefs(void) {
     if (g_opacity >= 0) return;
     const char *o = getenv("DM_TOUCH_OPACITY"), *f = getenv("DM_TOUCH_FADE");
     g_opacity = o ? clampf((float)atof(o) / 100.0f, 0.05f, 1.0f) : 1.0f;   // FORK: down to 5 %
-    { const char *tc = getenv("DM_FORK_TOUCH_COLOR"), *ts = getenv("DM_FORK_TOUCH_SIZE"); g_tint = tint_of(tc); if (ts && *ts) { g_tsize = clampf((float)atof(ts) / 100.0f, 0.5f, 1.5f); g_w = g_h = 0; } }   // FORK if (f) g_fade = fmaxf(0.0f, (float)atof(f));
+    { const char *tc = getenv("DM_FORK_TOUCH_COLOR"), *ts = getenv("DM_FORK_TOUCH_SIZE"); g_tint = tint_of(tc); if (ts && *ts) { g_tsize = clampf((float)atof(ts) / 100.0f, 0.5f, 1.5f); g_w = g_h = 0; } }   // FORK
+    if (f) g_fade = fmaxf(0.0f, (float)atof(f));   // FORK v56: this line had gone into the comment above in v34: the saved "Fade after" (never fade too) was lost at each start
     { const char *ft = getenv("DM_FORK_TOUCH"), *dz = getenv("DM_FORK_DEADZONE"); g_float = ft && !strcmp(ft, "float");   // FORK: the control scheme, the dead zone
       { const char *b = getenv("DM_FORK_BATTLE"), *bh = getenv("DM_FORK_BATTLE_HIDE"), *bl = getenv("DM_FORK_BATTLE_LAYOUT");   // FORK v46: battle mode (the old keys: before v46)
         battle_mode(b && *b ? !strcmp(b, "on") : (bh && !strcmp(bh, "on")) || (bl && !strcmp(bl, "on"))); }
@@ -862,7 +863,7 @@ static int dex_pages(void) { int n = g_dex_now.n; return n <= 0 ? 1 : (n + DEX_R
 typedef struct { float cx, cy, r, rx1, rh, bx0, by0, bx1, by1, ly0; } dex_geo;
 static dex_geo dex_layout(void) {
     dex_geo g; float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, r = g_c[C_DEX].r, wtxt = DEX_COLS * ch * 0.6f + 2 * pad;
-    int rows = g_dex_now.n < DEX_ROWS ? (g_dex_now.n > 0 ? g_dex_now.n : 1) : DEX_ROWS;
+    int rows = g_dex_now.msg[0][0] ? 2 : g_dex_now.n < DEX_ROWS ? (g_dex_now.n > 0 ? g_dex_now.n : 1) : DEX_ROWS;
     g.r = r; g.rh = fmaxf(r * 1.15f, ch * 1.6f);
     float w = r * 0.6f + wtxt, h = (rows + 1) * lh + 2 * pad;   // (+1: the weather / page line)
     float cx = g_c[C_DEX].cx, cy = g_c[C_DEX].cy;
@@ -889,6 +890,7 @@ static void dex_draw(dm_ovl_item *it, int *n, int max) {
       if (e->dexok) snprintf(ln, sizeof ln, "%-9.9s %2d/%-2d%s", e->weather >= 0 && e->weather < 11 ? k_dex_weather[e->weather] : "ALL", c, e->n, pg);
       else snprintf(ln, sizeof ln, "%-9.9s %2d%s", e->weather >= 0 && e->weather < 11 ? k_dex_weather[e->weather] : "ALL", e->n, pg);   // (no Pokédex: just how many)
       otext(it, n, max, x, y, ch, ln, 0.65f); }
+    if (e->msg[0][0]) { for (int k = 0; k < 2; k++) if (e->msg[k][0]) { y += lh; otext(it, n, max, x, y, ch, e->msg[k], 0.85f); } return; }   // v56: starting / no data / area not known yet
     if (e->n <= 0) { y += lh; otext(it, n, max, x, y, ch, "NO WILD POKEMON", 0.6f); return; }
     for (int i = g_dex_page * DEX_ROWS; i < e->n && i < (g_dex_page + 1) * DEX_ROWS; i++) {
         const dm_fork_dex_row *r = &e->row[i]; y += lh;

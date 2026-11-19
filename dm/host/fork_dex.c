@@ -19,7 +19,7 @@ size_t dm_fork_heap_size(void);      // hle_svc.c (FORK)
 int dm_guest_heap_readable(uint64_t a, size_t n);   // hle_svc.c
 
 typedef struct { int16_t species, form; uint8_t pct, state, flags, pad; } dm_fork_dex_row;   // state: 0 not seen, 1 seen, 2 caught; flags 1 walking about, 2 hidden
-typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; } dm_fork_dex_info;   // weather: -1 all, else the subtable (0-10)
+typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; char msg[2][24]; } dm_fork_dex_info;   // (v56: msg: what the panel waits for, shown instead of the list)   // weather: -1 all, else the subtable (0-10)
 extern volatile int dm_fork_dex_on __attribute__((weak));   // touch_ui.c
 extern _Atomic int dm_fork_area_popups __attribute__((weak));   // gfx/nvn/fork_ui.h
 
@@ -237,7 +237,10 @@ static int current_zone(const char **how) {
 }
 
 // ---------- what the panel shows ----------
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER; static dm_fork_dex_info g_info;
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER; static dm_fork_dex_info g_info = { .active = 1, .area = "AREA DEX", .msg = { "STARTING (1 MIN)", "" } };
+// v56: the panel always shows (Steven, Nov 19: v55 showed nothing at all), with what it waits for
+static void status(const char *a, const char *b) { pthread_mutex_lock(&g_mu); memset(&g_info, 0, sizeof g_info); g_info.active = 1; snprintf(g_info.area, sizeof g_info.area, "AREA DEX");
+    snprintf(g_info.msg[0], sizeof g_info.msg[0], "%s", a); snprintf(g_info.msg[1], sizeof g_info.msg[1], "%s", b); pthread_mutex_unlock(&g_mu); }
 static _Atomic int g_wnext;   // touch_ui.c: taps on the weather line
 int dm_fork_dex_get(dm_fork_dex_info *o) {
     static _Atomic int started; void dm_fork_dex_start(void); if (!atomic_exchange(&started, 1)) dm_fork_dex_start();
@@ -267,12 +270,13 @@ static void *worker(void *arg) {
     (void)arg; struct timespec ts = { 0, 500000000 };
     while (!dm_fork_heap_base() || !g_nmod) nanosleep(&ts, NULL);
     for (int i = 0; i < 90; i++) nanosleep(&ts, NULL);   // (45 s: the save is loaded and the player in the field)
-    if (!is_sword()) { DLOG("[FORK] dex: not Sword 1.3.2: off"); return NULL; }
+    if (!is_sword()) { DLOG("[FORK] dex: not Sword 1.3.2: off"); status("SWORD 1.3.2 ONLY", ""); return NULL; }
+    status("READING THE GAME", "");
     for (int i = 0; i < NZONES; i++) g_zbits[k_zones[i].hash >> 51] |= (uint8_t)(1 << ((k_zones[i].hash >> 48) & 7));
-    if (!load_tables()) return NULL;
+    if (!load_tables()) { status("NO SPAWN DATA", "(SEE THE LOG)"); return NULL; }
     load_personal(); if (load_save()) locate_dex();
     { uintptr_t b = dm_fork_heap_base(); uint64_t m = dm_guest_heap_readable(b + O_MAPHASH, 8) ? *(const uint64_t *)(b + O_MAPHASH) : 0; int z = zone_index(m);
-      DLOG("[FORK] dex: saved map hash %016llx: %s", (unsigned long long)m, z >= 0 ? k_zones[z].name : "not a zone"); }
+      DLOG("[FORK] dex: started, %d spawn slots", g_nslots); DLOG("[FORK] dex: saved map hash %016llx: %s", (unsigned long long)m, z >= 0 ? k_zones[z].name : "not a zone"); }
     zone_scan();
     int seen = &dm_fork_area_popups ? atomic_load(&dm_fork_area_popups) : 0, due = 0, lastz = -2, wsel = 0, taps = 0;
     for (;;) {
@@ -283,7 +287,7 @@ static void *worker(void *arg) {
         if (due && !--due) { zone_diff(); if (!g_lock) zone_scan(); }
         const char *how = ""; int z = current_zone(&how), t = atomic_exchange(&g_wnext, 0);
         if (z != lastz) { wsel = 0; DLOG("[FORK] dex: area %s (%s)", z >= 0 ? k_zones[z].name : "unknown", z >= 0 ? how : "-"); lastz = z; }
-        if (z < 0) { pthread_mutex_lock(&g_mu); g_info.active = 0; pthread_mutex_unlock(&g_mu); continue; }
+        if (z < 0) { status("AREA NOT KNOWN YET", "WALK TO A NEW AREA"); continue; }
         taps += t; build(z, &wsel, taps); taps = 0;
     }
     return NULL;
