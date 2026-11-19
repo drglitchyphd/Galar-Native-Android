@@ -104,6 +104,9 @@ void dm_res_scale_tick(void) {
     if (mode != was_mode) {
         if (nmode < 200 && (was_mode != -2 || mode != -1)) { nmode++; LOG("render scale: the game's mode %s → %s%s", dyn_name(was_mode), dyn_name(mode),
                                                                          lower ? "" : ": drawn at the game's own scale, the factor and the cap wait"); }
+        if (mode == 2 && was_mode == 1) {   // dynamic → fixed 0.8: a battle begins (Sword / Shield). DM_FG_ON_BATTLE=1: the frame recorder takes three short recordings of its transition
+            static int on = -1; if (on < 0) { const char *e = getenv("DM_FG_ON_BATTLE"); on = e && atoi(e) > 0; }
+            extern void nvn_fgr_arm_series(void) __attribute__((weak)); if (on && nvn_fgr_arm_series) nvn_fgr_arm_series(); }
         was_mode = mode;
     }
     float want = game;

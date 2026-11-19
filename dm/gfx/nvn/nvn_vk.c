@@ -5624,6 +5624,7 @@ static void seg_record_prim(sub_t *s) {
     pthread_mutex_unlock(&g_fgrmu);
     VKCHECK(vkEndCommandBuffer(s->prim)); s->nseg = 0;
 }
+void nvn_fgr_arm_series(void) { fgr_arm_series(atomic_load(&g_present_n)); }   // (hle_resscale.c: a battle begins)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (hold_on()) {
         if (hold_dec()) { vtex *sx = tex_res(t); if (sx) fgr_read_img(sx, sx->w, sx->h, (uint32_t)sx->fmt, FGR_SHOWN); }   // (shown: its last stores are needed)

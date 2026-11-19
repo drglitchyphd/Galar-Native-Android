@@ -33,6 +33,7 @@ static struct {
     int pending_write;              // the frames are done: written once the GPU has finished them
 } g_fgr;
 static pthread_mutex_t g_fgrmu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_fgr_series[4]; static int g_fgr_nser; static int g_fgr_named;   // a series armed by an event (a battle's transition): the presents each recording starts at; named: framegraph-<frame>.txt
 
 static int fgr_img_id(const void *x, uint32_t w, uint32_t h, uint32_t fmt, uint32_t mips, uint32_t layers) {
     for (int i = 0; i < g_fgr.ni; i++) if (g_fgr.im[i].x == x) return i;
@@ -104,7 +105,7 @@ static int fgr_fate(int k, const fgr_att *a) {
 }
 static void fgr_write(void) {
     const char *pc = getenv("DM_VK_PCACHE"); char dir[1024] = "."; if (pc) { snprintf(dir, sizeof dir, "%s", pc); char *sl = strrchr(dir, '/'); if (sl) *sl = 0; }
-    char path[1200]; snprintf(path, sizeof path, "%s/framegraph.txt", dir);
+    char path[1200]; if (g_fgr_named) snprintf(path, sizeof path, "%s/framegraph-%llu.txt", dir, (unsigned long long)g_fgr.frame0); else snprintf(path, sizeof path, "%s/framegraph.txt", dir);
     FILE *f = fopen(path, "w"); if (!f) { VLOG("[RED] frame recorder: cannot write %s", path); return; }
     if (g_fgr.qp) {   // the passes' GPU times (the GPU has finished: written after vkDeviceWaitIdle)
         for (int k = 0; k < g_fgr.np && (uint32_t)k * 2 + 1 < (uint32_t)g_fgr.qn; k++) { uint64_t t[2] = { 0, 0 };
@@ -147,7 +148,7 @@ static void fgr_write(void) {
         fputc('\n', f);
     }
     fclose(f);
-    const char *id = getenv("DM_PROGRAM_ID"); char dl[256]; snprintf(dl, sizeof dl, "/storage/emulated/0/Download/%s-framegraph.txt", id ? id : "game");
+    const char *id = getenv("DM_PROGRAM_ID"); char dl[256]; if (g_fgr_named) snprintf(dl, sizeof dl, "/storage/emulated/0/Download/%s-framegraph-%llu.txt", id ? id : "game", (unsigned long long)g_fgr.frame0); else snprintf(dl, sizeof dl, "/storage/emulated/0/Download/%s-framegraph.txt", id ? id : "game");
     { FILE *a = fopen(path, "r"), *b = a ? fopen(dl, "w") : NULL; char buf[8192]; size_t n; while (a && b && (n = fread(buf, 1, sizeof buf, a)) > 0) fwrite(buf, 1, n, b); if (a) fclose(a); if (b) fclose(b); }
     VLOG("frame recorder: %d frame(s), %d passes written to %s (and Download/)", g_fgr.done, g_fgr.np, path);
 }
@@ -170,15 +171,18 @@ static void fgr_present(uint64_t n, const void *shown, uint32_t w, uint32_t h, u
     int want = 0;
     { static long at = -2; static int frames; if (at == -2) { const char *e = getenv("DM_FG_RECORD"); at = e ? atol(e) : -1; const char *c = e ? strchr(e, ':') : NULL; frames = c ? atoi(c + 1) : 3; }
       if (at > 0 && (long)n == at) want = frames; }
+    { pthread_mutex_lock(&g_fgrmu); int hit = -1; for (int i = 0; i < g_fgr_nser; i++) if (g_fgr_series[i] <= n) hit = i;   // (an armed series: its next recording, 2 frames)
+      if (hit >= 0) { g_fgr_series[hit] = g_fgr_series[--g_fgr_nser]; want = 2; g_fgr_named = 1; }
+      pthread_mutex_unlock(&g_fgrmu); }
     static uint64_t req_at; static int req_want;   // a request with a wait (the menu's button: time to close the menu first)
-    if (!want && req_at && n >= req_at) { want = req_want; req_at = 0; }
+    if (!want && req_at && n >= req_at) { want = req_want; req_at = 0; g_fgr_named = 0; }
     if (!want && !req_at && n % 30 == 15) {
         const char *pc = getenv("DM_VK_PCACHE"); char req[1100]; if (!pc) return; snprintf(req, sizeof req, "%s", pc); char *sl = strrchr(req, '/'); if (!sl) return;
         snprintf(sl + 1, sizeof req - (size_t)(sl + 1 - req), "framegraph.req");
         FILE *f = fopen(req, "r");
         if (f) { int fr = 3, wait = 0; int k = fscanf(f, "%d %d", &fr, &wait); fclose(f); unlink(req); if (k < 1) fr = 3;   // "<frames> [<presents to wait>]"
             if (wait > 0) { req_at = n + (uint64_t)wait; req_want = fr; VLOG("frame recorder: asked for, in %d frames", wait); return; }
-            want = fr; }
+            want = fr; g_fgr_named = 0; }
     }
     if (want <= 0) return;
     if (want > FGR_FRAMES) want = FGR_FRAMES;
@@ -219,5 +223,12 @@ static int fgr_fate_exact(int k, const fgr_att *a) {
         }
     }
     return 4;
+}
+// three short recordings of what follows an event, at about 1, 3 and 5 s (30 / 90 / 150 presents later): a battle's transition (hle_resscale.c, DM_FG_ON_BATTLE)
+static void fgr_arm_series(uint64_t now) {
+    pthread_mutex_lock(&g_fgrmu);
+    if (!g_fgr_nser && !atomic_load(&g_fgr.on) && !g_fgr.cont) { g_fgr_series[0] = now + 30; g_fgr_series[1] = now + 90; g_fgr_series[2] = now + 150; g_fgr_nser = 3;
+        VLOG("frame recorder: an event at present %llu: recordings at +30, +90 and +150 presents", (unsigned long long)now); }
+    pthread_mutex_unlock(&g_fgrmu);
 }
 #endif
