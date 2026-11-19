@@ -68,6 +68,11 @@ static void enc_set(const uint8_t *d, int active) {
 //   does not) is decrypted in full and checksum-checked. The party and box block is skipped. A find is remembered (g_wild_off) and read first next time
 static _Atomic uint64_t g_wild_off; static _Atomic int g_scanning; static int g_battle_found, g_scan_tried; static uint64_t g_battle_t;
 static uint16_t g_scan_tid, g_scan_sid; static uint32_t g_scan_skip_ec;
+// v55: the player's own party (its encryption constants): a copy of it elsewhere in the heap carries the player's ID too, and the search took its first Pokémon as
+//   the wild one (Steven, Nov 19: his Sobble in the overworld). Read from the party block before each search and each check
+static uint32_t g_party_ec[6]; static int g_party_n;
+static void party_ecs(void) { g_party_n = 0; for (int i = 0; i < 6; i++) { uint8_t d[0x148]; if (read_pk8(O_PARTY + (uint64_t)i * 0x158, d) > 0) g_party_ec[g_party_n++] = rd32(d); } }
+static int is_party(uint32_t ec) { for (int i = 0; i < g_party_n; i++) if (g_party_ec[i] == ec) return 1; return 0; }
 static uint32_t g_jA[130], g_jC[130];   // the LCG stepped n times: seed_n = g_jA[n] * seed + g_jC[n]
 static void lcg_tables(void) { uint32_t a = 1, c = 0; for (int i = 0; i < 130; i++) { g_jA[i] = a; g_jC[i] = c; a *= 0x41C64E6Du; c = c * 0x41C64E6Du + 0x6073u; } }
 static int lines_g;
@@ -86,7 +91,7 @@ static void *find_wild(void *arg) {
         uint16_t sp = rd16(q) ^ (uint16_t)(s1 >> 16); if (!sp || sp > 898) continue;
         uint32_t s3 = g_jA[wi + 3] * ec + g_jC[wi + 3]; if ((uint16_t)(rd16(q + 4) ^ (uint16_t)(s3 >> 16)) != g_scan_tid) continue;
         uint32_t s4 = g_jA[wi + 4] * ec + g_jC[wi + 4]; if ((uint16_t)(rd16(q + 6) ^ (uint16_t)(s4 >> 16)) != g_scan_sid) continue;
-        uint8_t d[0x148]; if (read_pk8(off, d) <= 0) continue;
+        uint8_t d[0x148]; if (read_pk8(off, d) <= 0 || is_party(rd32(d))) continue;   // (v55: not one of the player's own party)
         hits++; LOG_LIMIT("[FORK] enc search: a Pokémon with your ID at heap + %#llx: species %u", (unsigned long long)off, rd16(d + 8));
         if (!best && rd32(d) != g_scan_skip_ec) best = off;
         if (hits >= 12) break;
@@ -111,16 +116,18 @@ void dm_fork_enc_tick(void) {
     }
     // v51: in a battle by the game's flag, or by the fork's screen guess (gfx/nvn/fork_ui.h dm_fork_screen 2)
     extern _Atomic int dm_fork_screen __attribute__((weak));
-    uint8_t fl; int in = (read_heap(O_INBATTLE, &fl, 1) && fl) || (&dm_fork_screen && atomic_load(&dm_fork_screen) == 2);
+    // v55: the game's in-battle flag (SysBot's offset) read "in battle" in the overworld on this host (Steven, Nov 19): only the fork's screen guess counts now
+    int in = &dm_fork_screen && atomic_load(&dm_fork_screen) == 2;
     if (!in) { if (was_in) { enc_set(NULL, 0); LOG_LIMIT("[FORK] enc: battle over"); } was_in = 0; g_battle_found = 0; return; }
     if (!was_in) { was_in = 1; g_battle_found = 0; g_scan_tried = 0; g_battle_t = n; }
     if (g_battle_found) return;
     // the wild Pokémon: the last place it was found (or SysBot's offset), then a search of the heap (find_wild, on its own thread)
     uint16_t tid, sid; if (!trainer_ids(&tid, &sid)) return;
     uint64_t offs[2] = { atomic_load(&g_wild_off), O_WILD };
-    int old = 0;
+    int old = 0; party_ecs();   // (v55)
     for (int k = 0; k < 2; k++) { uint8_t w[0x148]; if (!offs[k] || read_pk8(offs[k], w) <= 0) continue;
         uint32_t ec = rd32(w); if (rd16(w + 0x0C) != tid || rd16(w + 0x0E) != sid) continue;
+        if (is_party(ec)) { if (k == 0) atomic_store(&g_wild_off, 0); continue; }   // (v55: a party copy remembered by mistake: forgotten)
         if (ec == battle_ec) { old = 1; continue; }   // (the last battle's wild Pokémon still there: a trainer battle, or not written yet)
         battle_ec = ec; g_battle_found = 1; atomic_store(&g_wild_off, offs[k]); enc_set(w, 1);
         if (lines < 60) { lines++; LOG("[FORK] enc: the wild Pokémon at heap + %#llx", (unsigned long long)offs[k]); log_pk8("wild", w, 1); }
