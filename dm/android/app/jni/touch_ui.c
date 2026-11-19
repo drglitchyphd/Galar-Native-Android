@@ -29,7 +29,7 @@
 #include <string.h>
 #include <time.h>
 
-enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, C_ALL, C_ENC, NCTL };   /* FORK v48: C_ENC, the encounter panel (drag to move, tap to collapse) */   /* FORK v47: C_ALL, the context controls' "all buttons" override */   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
+enum { C_STICK, C_CAM, C_RSTICK, C_A, C_B, C_X, C_Y, C_L, C_R, C_ZL, C_ZR, C_PLUS, C_MINUS, C_UP, C_DOWN, C_LEFT, C_RIGHT, C_THROW, C_MENU, C_L3, C_R3, C_FF, C_TURBO, C_ALL, C_ENC, C_DEX, NCTL };   /* FORK v55: C_DEX, the area dex panel */   /* FORK v48: C_ENC, the encounter panel (drag to move, tap to collapse) */   /* FORK v47: C_ALL, the context controls' "all buttons" override */   /* FORK: C_FF (fast-forward), C_TURBO (turbo A) */   // (C_MENU: the ☰ button, the in-game settings; C_L3 / C_R3: pressing the sticks)
 typedef struct { float cx, cy, r; int glyph, shown; uint64_t btn; } ctl;
 static ctl g_c[NCTL];
 static float g_w, g_h;
@@ -91,13 +91,27 @@ static void battle_mode(int on) { g_bmode = on; bhide_set(on); g_bicons = on; g_
 //   A control of its own (C_ENC: its place in the layout file as "enc"): dragged, it moves (saved in this screen's layout); tapped, it folds to a Poké Ball and back
 typedef struct { int active, species, shiny, nature, ability, iv[6], ev[6], form; } dm_fork_enc_info;   // (as host/fork_enc.c)
 int dm_fork_enc_get(dm_fork_enc_info *o) __attribute__((weak));
-static int g_enc_on = -1, g_enc_open = 1, g_enc_drag; static float g_enc_ox, g_enc_oy; static dm_fork_enc_info g_enc_now;
+static int g_enc_on = -1, g_enc_open = 1; static dm_fork_enc_info g_enc_now;
 volatile int dm_fork_enc_on;   // FORK v49: host/fork_enc.c reads game memory only while this is set
-static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); dm_fork_enc_on = g_enc_on; g_enc_census = g_enc_on; census_sync(); } return g_enc_on; }
+static int dex_on(void);   // (v55, below)
+static int enc_on(void) { if (g_enc_on < 0) { const char *e = getenv("DM_FORK_ENC"); g_enc_on = e && !strcmp(e, "on"); dm_fork_enc_on = g_enc_on; g_enc_census = g_enc_on || dex_on(); census_sync(); } return g_enc_on; }
 extern _Atomic int dm_fork_battle_age __attribute__((weak));   // gfx/nvn/fork_ui.h
 // v53 (Steven: close faster after a battle): hidden once the battle HUD has been gone 1 s (30 frames); it may blink off during a long battle message and come back
 static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.active && (!&dm_fork_battle_age || atomic_load(&dm_fork_battle_age) <= 30); }
 static void enc_rect(float r4[4]);   // (below, with the drawing)
+// FORK v55: the area dex panel (DM_FORK_AREADEX=on, default off): in the overworld, the Pokémon of the area the player is in (host/fork_dex.c: species, how often
+//   they appear, not seen / seen / caught in the player's Pokédex). A control of its own like the encounter panel (C_DEX, "dex" in the layout file): dragged, it
+//   moves (kept in this screen's layout); a tap on the ball or the ribbon folds it to the ball and back; a tap on the list shows its next page
+typedef struct { int16_t species, form; uint8_t pct, state, flags, pad; } dm_fork_dex_row;   // (as host/fork_dex.c) state: 0 not seen, 1 seen, 2 caught; flags 1: a symbol (seen walking), 2: hidden (in the grass "!")
+typedef struct { int active, n, weather; char area[32]; dm_fork_dex_row row[40]; } dm_fork_dex_info;
+int dm_fork_dex_get(dm_fork_dex_info *o) __attribute__((weak));
+volatile int dm_fork_dex_on;   // host/fork_dex.c reads game memory only while this is set
+static int g_dex_on = -1, g_dex_open = 1, g_dex_page; static dm_fork_dex_info g_dex_now;
+static int dex_on(void) { if (g_dex_on < 0) { const char *e = getenv("DM_FORK_AREADEX"); g_dex_on = e && !strcmp(e, "on"); dm_fork_dex_on = g_dex_on; g_enc_census = g_enc_census || g_dex_on; census_sync(); } return g_dex_on; }
+static int dex_live(void) { return dex_on() && dm_fork_dex_get && g_dex_now.active && screen_kind() == 0 && !enc_live(); }
+static void dex_rect(float r4[4], int list_only);   // (below, with the drawing)
+// the panels (encounter, area dex): which one a finger dragged, and from where
+static int g_pan_drag; static float g_pan_ox, g_pan_oy;
 // FORK v53: the battle D-pad (DM_FORK_BATTLE_DPAD=on, default off). In a battle (the right stick does nothing there) every touch that is not on a button is a
 //   floating D-pad: where the finger lands is the centre, held a little away (2.5 % of the screen height) it presses the nearest of Up / Down / Left / Right (the game
 //   repeats a held direction itself); a quick tap is A, two fingers tapping together B. The fixed D-pad and the sticks hide in battles. ⊞ turns it off until the screen changes
@@ -107,6 +121,7 @@ static int bdpad_now(void) { return bdpad_on() && in_battle() && g_ctx_over != 2
 static int fork_hidden(int c) {
     if (bdpad_now() && ((c >= C_UP && c <= C_RIGHT) || c == C_STICK || c == C_RSTICK || c == C_L3 || c == C_R3)) return 1;   // v53: the battle D-pad replaces them
     if (c == C_ENC) return !enc_live();
+    if (c == C_DEX) return !dex_live();   // v55
     if (c == C_FF) return !g_ffscope || (g_ffscope == 1 && !in_battle());
     if (c == C_TURBO) return !g_turbo_on;
     if (c == C_ALL) { int k = screen_kind(); return !ctx_on(k); }   // FORK v47: only where a context mode applies (lit while its override is on)
@@ -126,7 +141,7 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 
 // ---------- the player's layout (the in-game editor): position, size and visibility of each control, kept in <files>/touch_layout.txt ----------
 // One line per changed control: "<name> <x / width> <y / height> <radius / height> <shown>"; controls without a line keep the default layout
-static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all", "enc" };   // FORK: + ff, turbo
+static const char *const CTL_NAME[NCTL] = { "stick", "camera", "rstick", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "up", "down", "left", "right", "throw", "menu", "l3", "r3", "ff", "turbo", "all", "enc", "dex" };   // FORK: + ff, turbo
 static struct { int set; float fx, fy, fr; int shown, shape, op, fade; } g_ov[NCTL];   // FORK: shape (0 circle, 1 rounded square, 2 square, 3 pill), a 6th field in the file
 static float ctl_op(int c) { return g_ov[c].set && g_ov[c].op >= 5 && g_ov[c].op <= 100 ? g_ov[c].op / 100.0f : 1.0f; }   // FORK v53: a control's own opacity
 static int ctl_fades(int c) { return !g_ov[c].set || !g_ov[c].op || g_ov[c].fade; }   // FORK v53: and whether it fades when idle
@@ -220,6 +235,7 @@ static void layout(float w, float h) {
     g_c[C_FF] = (ctl){ w * 0.5f + 0.24f * s, 0.06f * s, mr, OVL_G_FF, 1, 0 };
     g_c[C_ALL] = (ctl){ w * 0.5f + 0.36f * s, 0.06f * s, mr * 0.85f, OVL_G_ALL, 1, 0 };
     g_c[C_ENC] = (ctl){ 0.06f * w + mr, 0.20f * h, mr, OVL_G_BALL, 1, 0 };
+    g_c[C_DEX] = (ctl){ 0.06f * w + mr, 0.20f * h, mr, OVL_G_INFO, 1, 0 };   // FORK v55 (the overworld: never at the same time as the encounter panel)
     g_c[C_TURBO] = (ctl){ w - 0.12f * s, h - 0.50f * s, 0.05f * s, OVL_G_TURBO, 1, 0 };   // FORK: turbo A, above-right of A (only when Turbo A is on)
     // touch-first games (Legends: Arceus): only the movement stick and − / + on screen; everything else is touch on the game itself (touch_ui_event's gestures, touch_menu.c)
     if (GESTURES_ON) for (int c = C_RSTICK; c < NCTL; c++) if (c != C_PLUS && c != C_MINUS && c != C_MENU) g_c[c].shown = 0;
@@ -253,16 +269,18 @@ static int g_cam_pct = -1, g_cam_stick = -1, g_rs_off = -1;
 static int cam_pct(void) { if (g_cam_pct < 0) { const char *e = getenv("DM_TOUCH_CAM_SENS"); int v = e ? atoi(e) : 100; g_cam_pct = v < 25 || v > 300 ? 100 : v; } return g_cam_pct; }
 static int cam_stick(void) { if (g_cam_stick < 0) { const char *e = getenv("DM_TOUCH_CAMERA"); g_cam_stick = e && !strcmp(e, "stick"); } return g_cam_stick; }
 static int rs_off(void) { if (g_rs_off < 0) { const char *e = getenv("DM_TOUCH_RSTICK"); g_rs_off = e && !strcmp(e, "off"); } return g_rs_off; }
-static int ctl_off(int c) { return ((c == C_L3 || c == C_R3) && !l3r3_on()) || ((c == C_RSTICK || c == C_R3) && rs_off()) || (c == C_THROW && !GESTURES_ON) || (c == C_ENC && !enc_on()); }   // FORK v48: + the encounter panel only when it is on   // FORK v48: + the throw button (Legends: Arceus only) out of Sword's editor   // left out entirely, the layout editor too (FORK v47: + rs_off)
+static int ctl_off(int c) { return ((c == C_L3 || c == C_R3) && !l3r3_on()) || ((c == C_RSTICK || c == C_R3) && rs_off()) || (c == C_THROW && !GESTURES_ON) || (c == C_ENC && !enc_on()) || (c == C_DEX && !dex_on()); }   // FORK v48: + the encounter panel only when it is on   // FORK v48: + the throw button (Legends: Arceus only) out of Sword's editor   // left out entirely, the layout editor too (FORK v47: + rs_off)
 static int hit(int c, float x, float y, float slack) {
     if (fork_hidden(c)) return 0;   // FORK
     const ctl *k = &g_c[c]; float dx = x - k->cx, dy = y - k->cy, r = k->r * slack;
     if (g_ov[c].set && g_ov[c].shape == 3) dx /= 1.7f;   // FORK: a pill is wider
-    if (c == C_ENC && g_enc_open && !g_edit) { float r4[4]; enc_rect(r4); return x >= r4[0] && x <= r4[2] && y >= r4[1] && y <= r4[3]; }   // FORK v48: the open panel's rectangle
+    if (c == C_ENC && g_enc_open && !g_edit) { float r4[4]; enc_rect(r4); return x >= r4[0] && x <= r4[2] && y >= r4[1] && y <= r4[3]; }
+    if (c == C_DEX && g_dex_open && !g_edit) { float r4[4]; dex_rect(r4, 0); return x >= r4[0] && x <= r4[2] && y >= r4[1] && y <= r4[3]; }   // v55   // FORK v48: the open panel's rectangle
     return k->shown && dx * dx + dy * dy <= r * r;
 }
 static int target_at(float x, float y) {
     if (g_float <= 0 && hit(C_RSTICK, x, y, 1.3f)) return C_RSTICK;   // FORK: floating sticks: the fixed right stick is not there
+    if (hit(C_ENC, x, y, 1.3f)) return C_ENC; if (hit(C_DEX, x, y, 1.3f)) return C_DEX;   // FORK v55: the panels lie over the buttons
     for (int c = C_A; c < NCTL; c++) if (hit(c, x, y, 1.3f)) return c;   // thumbs miss: touch areas 1.3 times the drawing
     if (bdpad_now()) return C_STICK;   // FORK v53: the battle D-pad, anywhere not on a button
     if (g_float > 0) return x < g_w * 0.5f ? C_STICK : C_CAM;   // FORK: floating sticks, each on its own half
@@ -549,9 +567,14 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (sb) { dm_input_press(sb, 80000000ull); click_locked(); g_cam_vx = g_cam_vy = 0; }
         }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_MENU && hit(C_MENU, g_ptr[i].x, g_ptr[i].y, 1.5f)) { click_locked(); front_open_menu(0); }
-        for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_ENC) {   // FORK v48: dropped: kept in this screen's layout; tapped: folds / opens
-            if (g_enc_drag) { edit_store(C_ENC); layout_save(); } else { g_enc_open = !g_enc_open; click_locked(); }
-            g_enc_drag = 0; }
+        for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && (g_ptr[i].target == C_ENC || g_ptr[i].target == C_DEX)) {   // FORK v48: dropped: kept in this screen's layout; tapped: folds / opens
+            int c = g_ptr[i].target;
+            if (g_pan_drag) { edit_store(c); layout_save(); }
+            else if (c == C_ENC) { g_enc_open = !g_enc_open; click_locked(); }
+            else { float r4[4]; dex_rect(r4, 1);   // v55: the area dex: a tap on the list = its next page, else fold / open
+                if (g_dex_open && g_ptr[i].x0 >= r4[0] && g_ptr[i].x0 <= r4[2] && g_ptr[i].y0 >= r4[1] && g_ptr[i].y0 <= r4[3]) g_dex_page++; else g_dex_open = !g_dex_open;
+                click_locked(); }
+            g_pan_drag = 0; }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_ALL && hit(C_ALL, g_ptr[i].x, g_ptr[i].y, 1.5f)) {   // FORK v47: ⊞ all buttons, until the screen changes
             int k = screen_kind(); g_ctx_over = g_ctx_over == k ? -1 : k; g_w = g_h = 0; click_locked();
             fprintf(stderr, "[FORK] [touch] all buttons %s (screen %d)\n", g_ctx_over >= 0 ? "on" : "off", k); }
@@ -580,9 +603,10 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
                         g_cam_vx = g_cam_vx * 0.5f + vx * 0.5f; g_cam_vy = g_cam_vy * 0.5f + vy * 0.5f; g_cam_t = t;
                         g_ptr[i].lx = g_ptr[i].x; g_ptr[i].ly = g_ptr[i].y; g_ptr[i].lt = t; }
                 }
-                if (g_ptr[i].target == C_ENC && act == AMOTION_EVENT_ACTION_MOVE) {   // FORK v48: the encounter panel follows the finger once it has moved
-                    if (!g_enc_drag && (fabsf(g_ptr[i].x - g_ptr[i].x0) > g_h * 0.02f || fabsf(g_ptr[i].y - g_ptr[i].y0) > g_h * 0.02f)) { g_enc_drag = 1; g_enc_ox = g_c[C_ENC].cx - g_ptr[i].x0; g_enc_oy = g_c[C_ENC].cy - g_ptr[i].y0; }
-                    if (g_enc_drag) { g_c[C_ENC].cx = clampf(g_ptr[i].x + g_enc_ox, g_c[C_ENC].r, g_w - g_c[C_ENC].r); g_c[C_ENC].cy = clampf(g_ptr[i].y + g_enc_oy, g_c[C_ENC].r, g_h - g_c[C_ENC].r); } }
+                if ((g_ptr[i].target == C_ENC || g_ptr[i].target == C_DEX) && act == AMOTION_EVENT_ACTION_MOVE) {   // FORK v48: a panel follows the finger once it has moved (v55: + the area dex)
+                    int c = g_ptr[i].target;
+                    if (!g_pan_drag && (fabsf(g_ptr[i].x - g_ptr[i].x0) > g_h * 0.02f || fabsf(g_ptr[i].y - g_ptr[i].y0) > g_h * 0.02f)) { g_pan_drag = 1; g_pan_ox = g_c[c].cx - g_ptr[i].x0; g_pan_oy = g_c[c].cy - g_ptr[i].y0; }
+                    if (g_pan_drag) { g_c[c].cx = clampf(g_ptr[i].x + g_pan_ox, g_c[c].r, g_w - g_c[c].r); g_c[c].cy = clampf(g_ptr[i].y + g_pan_oy, g_c[c].r, g_h - g_c[c].r); } }
                 if (g_ptr[i].target >= C_A && g_ptr[i].target <= C_Y)   // sliding across the face buttons
                     for (int c = C_A; c <= C_Y; c++) if (c != g_ptr[i].target && hit(c, g_ptr[i].x, g_ptr[i].y, 1.0f)) { g_ptr[i].target = c; g_held_until[c] = now_s() + 0.08; break; }
             }
@@ -712,7 +736,8 @@ void touch_ui_setting(const char *key, const char *value) {
     else if (!strcmp(key, "DM_FORK_BATTLE")) battle_mode(value && !strcmp(value, "on"));   // FORK v46
     else if (!strcmp(key, "DM_FORK_GESTURES")) g_gest = value && !strcmp(value, "on");   // FORK v47
     else if (!strcmp(key, "DM_FORK_BATTLE_DPAD")) { g_bdpad = value && !strcmp(value, "on"); g_w = g_h = 0; }   // FORK v53
-    else if (!strcmp(key, "DM_FORK_ENC")) { g_enc_on = value && !strcmp(value, "on"); dm_fork_enc_on = g_enc_on; g_enc_census = g_enc_on; census_sync(); }   // FORK v48 (v49: + the probe)
+    else if (!strcmp(key, "DM_FORK_ENC")) { g_enc_on = value && !strcmp(value, "on"); dm_fork_enc_on = g_enc_on; g_enc_census = g_enc_on || dex_on(); census_sync(); }
+    else if (!strcmp(key, "DM_FORK_AREADEX")) { g_dex_on = value && !strcmp(value, "on"); dm_fork_dex_on = g_dex_on; g_enc_census = enc_on() || g_dex_on; census_sync(); g_w = g_h = 0; }   // FORK v55   // FORK v48 (v49: + the probe)
     else if (!strncmp(key, "DM_FORK_CTX_", 12)) { int on = value && !strcmp(value, "on");   // FORK v47: the context switches
         if (!strcmp(key, "DM_FORK_CTX_DIALOGUE")) g_ctx_dlg = on; else if (!strcmp(key, "DM_FORK_CTX_MENU")) g_ctx_menu = on; else if (!strcmp(key, "DM_FORK_CTX_WORLD")) g_ctx_world = on;
         g_ctx_any = g_ctx_dlg || g_ctx_menu || g_ctx_world; g_ctx_over = -1; g_w = g_h = 0; census_sync(); }
@@ -822,6 +847,51 @@ static void enc_draw(dm_ovl_item *it, int *n, int max) {
           char num[4]; snprintf(num, sizeof num, "%2d", v); otext_c(it, n, max, x + ch * 0.6f * (3 + 3 * i), y, ch, num, 1.0f, rc[t][0], rc[t][1], rc[t][2]); } }
     y += lh; snprintf(ln, sizeof ln, "EV%3d%3d%3d%3d%3d%3d", e->ev[0], e->ev[1], e->ev[2], e->ev[3], e->ev[4], e->ev[5]); otext(it, n, max, x, y, ch, ln, 0.75f);
 }
+// FORK v55: the area dex panel, in the encounter panel's frame: the ball (the handle), a Pokédex-red ribbon with the area's name, and the list below it, a page
+//   of DEX_ROWS at a time: each Pokémon's name and how often it appears (its share of the area's spawns in this weather). Caught: white with a ball mark; seen: grey;
+//   not seen yet: dark (as the Pokédex's silhouettes). A "!" after the name: it only appears in the grass's hidden encounters
+#define DEX_ROWS 8
+#define DEX_COLS 20
+static const char *const k_dex_weather[10] = { "", "CLEAR", "CLOUDY", "RAIN", "THUNDER", "SNOW", "BLIZZARD", "SUN", "SANDSTORM", "FOG" };
+static int dex_pages(void) { int n = g_dex_now.n; return n <= 0 ? 1 : (n + DEX_ROWS - 1) / DEX_ROWS; }
+typedef struct { float cx, cy, r, rx1, rh, bx0, by0, bx1, by1, ly0; } dex_geo;
+static dex_geo dex_layout(void) {
+    dex_geo g; float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, r = g_c[C_DEX].r, wtxt = DEX_COLS * ch * 0.6f + 2 * pad;
+    int rows = g_dex_now.n < DEX_ROWS ? (g_dex_now.n > 0 ? g_dex_now.n : 1) : DEX_ROWS;
+    g.r = r; g.rh = fmaxf(r * 1.15f, ch * 1.6f);
+    float w = r * 0.6f + wtxt, h = (rows + 1) * lh + 2 * pad;   // (+1: the weather / page line)
+    float cx = g_c[C_DEX].cx, cy = g_c[C_DEX].cy;
+    float right = cx + w, bottom = cy + r * 0.55f + h;
+    if (right > g_w) cx -= right - g_w; if (bottom > g_h) cy -= bottom - g_h; if (cx - r < 0) cx = r; if (cy - r < 0) cy = r;
+    g.cx = cx; g.cy = cy; g.rx1 = cx + w; g.bx0 = cx - r * 0.35f; g.bx1 = cx + w - r * 0.15f; g.by0 = cy + r * 0.55f; g.by1 = g.by0 + h; g.ly0 = g.by0 + g.rh * 0.45f;
+    return g;
+}
+// the whole panel (list_only 0), or just the list (1: a tap there turns the page)
+static void dex_rect(float r4[4], int list_only) { dex_geo g = dex_layout(); r4[0] = list_only ? g.bx0 : g.cx - g.r; r4[1] = list_only ? g.ly0 : g.cy - g.r; r4[2] = list_only ? g.bx1 : g.rx1; r4[3] = g.by1; }
+static void dex_draw(dm_ovl_item *it, int *n, int max) {
+    const dm_fork_dex_info *e = &g_dex_now; dm_ovl_item *o;
+    if (!g_dex_open) { pokeball(it, n, max, &g_c[C_DEX], 0, 1.0f); return; }
+    dex_geo g = dex_layout(); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, rl = g.rx1 - g.cx;
+    o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.84f); if (o) { o->x = g.bx0; o->y = g.by0; o->w = g.bx1 - g.bx0; o->h = g.by1 - g.by0; o->radius = 0.06f; }
+    o = add(it, n, max, 0, 0, 1, OVL_RRECT, 206, 32, 41, 0.97f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = rl; o->h = g.rh; o->radius = 0.5f; }
+    ctl ball = g_c[C_DEX]; ball.cx = g.cx; ball.cy = g.cy; pokeball(it, n, max, &ball, 0, 1.0f);
+    char ln[64]; float nch = fminf(ch * 1.05f, g.rh * 0.65f);
+    snprintf(ln, sizeof ln, "%.16s", e->area[0] ? e->area : "?"); otext(it, n, max, g.cx + g.r * 1.15f, g.cy, nch, ln, 1.0f);
+    int pages = dex_pages(); if (g_dex_page >= pages || g_dex_page < 0) g_dex_page = 0;
+    float x = g.bx0 + pad + g.r * 0.25f, y = g.by0 + pad + lh * 0.5f + g.rh * 0.15f;
+    { int c = 0; for (int i = 0; i < e->n; i++) c += e->row[i].state == 2;
+      char pg[12] = ""; if (pages > 1) snprintf(pg, sizeof pg, " %d/%d", g_dex_page + 1, pages);
+      snprintf(ln, sizeof ln, "%-9.9s %2d/%-2d%s", e->weather > 0 && e->weather < 10 ? k_dex_weather[e->weather] : "", c, e->n, pg); otext(it, n, max, x, y, ch, ln, 0.65f); }
+    if (e->n <= 0) { y += lh; otext(it, n, max, x, y, ch, "NO WILD POKEMON", 0.6f); return; }
+    for (int i = g_dex_page * DEX_ROWS; i < e->n && i < (g_dex_page + 1) * DEX_ROWS; i++) {
+        const dm_fork_dex_row *r = &e->row[i]; y += lh;
+        const char *nm = r->species > 0 && r->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[r->species] : "?";
+        int R = r->state == 2 ? 255 : r->state == 1 ? 170 : 85;
+        if (r->state == 2) { o = add(it, n, max, x + ch * 0.3f, y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_BALL; o->gscale = 1.0f; o->galpha = 1.0f; } }
+        snprintf(ln, sizeof ln, "%.12s%s", nm, r->flags & 2 && !(r->flags & 1) ? "!" : ""); otext_c(it, n, max, x + ch * 0.6f * 2, y, ch, ln, 1.0f, R, R, R);
+        if (r->pct) { snprintf(ln, sizeof ln, "%3d%%", r->pct); otext_c(it, n, max, x + ch * 0.6f * (DEX_COLS - 5), y, ch, ln, 1.0f, R, R, R); }
+    }
+}
 int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     pthread_mutex_lock(&g_mu); prefs();
     { static int was = -1; int b = g_blayout && in_battle(); if (b != was) { was = b; if (!g_edit) g_w = g_h = 0; } ff_publish(); }   // FORK: battle layout in / out; FF scope
@@ -863,7 +933,11 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     if (!g_edit && enc_on() && dm_fork_enc_get) {   // FORK v48: the encounter panel, over the controls and at full strength (also while a controller hides them)
         int was = g_enc_now.active; dm_fork_enc_get(&g_enc_now);
         if (g_enc_now.active && !was) fprintf(stderr, "[FORK] [touch] encounter panel: species %d%s\n", g_enc_now.species, g_enc_now.shiny ? " (shiny)" : "");
-        if (g_enc_now.active) enc_draw(it, &n, max); }
+        if (enc_live()) enc_draw(it, &n, max); }
+    if (!g_edit && dex_on() && dm_fork_dex_get) {   // FORK v55: the area dex panel (the overworld)
+        char was[32]; memcpy(was, g_dex_now.area, sizeof was); int wn = g_dex_now.n; dm_fork_dex_get(&g_dex_now);
+        if (g_dex_now.active && (strcmp(was, g_dex_now.area) || wn != g_dex_now.n)) { g_dex_page = 0; fprintf(stderr, "[FORK] [touch] area dex: %s, %d Pokémon\n", g_dex_now.area, g_dex_now.n); }
+        if (dex_live()) dex_draw(it, &n, max); }   // (v55: drawn only where it can be touched too: before, a panel left over outside a battle could not be moved or folded)
     pthread_mutex_unlock(&g_mu);
     return n;
 }
