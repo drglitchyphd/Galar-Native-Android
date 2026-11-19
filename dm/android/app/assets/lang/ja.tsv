@@ -382,3 +382,7 @@ Updating the shaders	シェーダーを更新中
 3D render scale	3D描画スケール
 Auto: what the Graphics setting gives, lowered by itself when the phone is hot	自動：グラフィック設定に従い、端末が熱いと自動で下げます
 50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50%：3Dを半分のサイズで描画。最も涼しく速い（文字とメニューは鮮明なまま）
+Quit the game	ゲームを終了
+Closes the game completely	ゲームを完全に閉じます
+Quit the game? Progress you have not saved in the game is lost, as on the console.	ゲームを終了しますか？ゲーム内でセーブしていない進行状況は、本体と同じく失われます。
+Quit	終了

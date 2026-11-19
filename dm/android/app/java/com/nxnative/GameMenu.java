@@ -471,10 +471,11 @@ public final class GameMenu {
         button(a, r, t(a, "Save"), true, () -> { try (FileWriter fw = new FileWriter(new File(m, "notes.txt"))) { fw.write(e.getText().toString()); } catch (IOException x) { } go("order"); });
         button(a, r, t(a, "Cancel"), false, () -> go("order"));
     }
-    private static void confirm(Activity a, String q, Runnable yes) {   // asked in a card at the top of the page, not a pop-up
+    private static void confirm(Activity a, String q, Runnable yes) { confirm(a, q, t(a, "Delete"), yes); }
+    private static void confirm(Activity a, String q, String yesLabel, Runnable yes) {   // asked in a card at the top of the page, not a pop-up
         LinearLayout c = new LinearLayout(a); c.setOrientation(LinearLayout.VERTICAL); c.setBackground(round(CARD, dp(a, 16), dp(a, 2), WARN)); c.setPadding(dp(a, 16), dp(a, 12), dp(a, 16), dp(a, 12));
         c.addView(text(a, q, 15, TEXT, true)); LinearLayout r = new LinearLayout(a); c.addView(r);
-        button(a, r, t(a, "Delete"), true, yes); button(a, r, t(a, "Cancel"), false, () -> go(page));
+        button(a, r, yesLabel, true, yes); button(a, r, t(a, "Cancel"), false, () -> go(page));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = dp(a, 10); body.addView(c, 0, lp); scroll.scrollTo(0, 0);
     }
 
@@ -561,6 +562,10 @@ public final class GameMenu {
         heading(a, t(a, "Background"));
         choice(a, "DM_BACKGROUND", t(a, "Leaving the game"), new String[][] { { "", t(a, "Keep playing"), t(a, "Keep playing: the game and its sound go on in the background") },
             { "off", t(a, "Pause"), t(a, "Pause: the game stops while it is not on screen") } });
+        // Quit (#317): the app otherwise stays in memory. Saves are committed atomically (hle_fs.c), so stopping at any moment keeps the last save the game made,
+        //   as turning the console off does; what was not saved in the game is lost, which the card says
+        action(a, t(a, "Quit the game"), t(a, "Closes the game completely"), () -> confirm(a, t(a, "Quit the game? Progress you have not saved in the game is lost, as on the console."),
+            t(a, "Quit"), () -> { a.finishAndRemoveTask(); android.os.Process.killProcess(android.os.Process.myPid()); }));
         // the replay on its own thread (hle_nvn.c DM_NVN_ASYNC): the game's thread hands each frame's graphics work over instead of translating it itself (about a quarter
         //   of a frame on a slow CPU, #99). Off by default until players have run it on many phones
         heading(a, t(a, "Performance"));

@@ -382,3 +382,7 @@ Updating the shaders	Mise à jour des shaders
 3D render scale	Échelle du rendu 3D
 Auto: what the Graphics setting gives, lowered by itself when the phone is hot	Auto : ce que donne le réglage Graphismes, abaissé tout seul quand le téléphone chauffe
 50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50 % : la 3D à moitié de sa taille, le plus frais et le plus rapide (le texte et les menus restent nets)
+Quit the game	Quitter le jeu
+Closes the game completely	Ferme complètement le jeu
+Quit the game? Progress you have not saved in the game is lost, as on the console.	Quitter le jeu ? La progression non sauvegardée dans le jeu est perdue, comme sur la console.
+Quit	Quitter

@@ -382,3 +382,7 @@ Updating the shaders	Atualizando os shaders
 3D render scale	Escala de renderização 3D
 Auto: what the Graphics setting gives, lowered by itself when the phone is hot	Auto: o que a configuração de Gráficos dá, reduzido sozinho quando o celular esquenta
 50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50 %: o 3D na metade do tamanho, o mais fresco e rápido (o texto e os menus continuam nítidos)
+Quit the game	Sair do jogo
+Closes the game completely	Fecha o jogo completamente
+Quit the game? Progress you have not saved in the game is lost, as on the console.	Sair do jogo? O progresso que você não salvou no jogo é perdido, como no console.
+Quit	Sair
