@@ -399,3 +399,6 @@ Setting up	Installation
 Keep the phone cooler: half the workers (setup takes longer)	Garder le téléphone plus frais : moitié moins de processus (l'installation est plus longue)
 3D render scale	Échelle de rendu 3D
 Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	À gauche : Auto, la résolution du jeu lui-même. Plus bas : plus frais et plus rapide, la 3D plus douce ; le texte et les menus restent nets.
+Record the frame's passes	Enregistrer les passes de l’image
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Pour les scènes lentes : fermez ce menu dans les 3 secondes et restez là où le jeu ralentit. Les passes de rendu de trois images, avec leur temps GPU si le téléphone le donne, sont enregistrées dans Téléchargements (un fichier finissant par framegraph.txt). Joignez-le à votre issue.
+Recording in 3 seconds: close the menu.	Enregistrement dans 3 secondes : fermez le menu.

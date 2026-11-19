@@ -386,3 +386,6 @@ Setting up	セットアップ
 Keep the phone cooler: half the workers (setup takes longer)	端末を熱くしにくくする：ワーカーを半分にします（セットアップに時間がかかります）
 3D render scale	3D描画スケール
 Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	左端：自動（ゲーム本来の解像度）。下げるほど発熱が減り速くなり、3Dはやわらかくなります。文字やメニューはくっきりのままです。
+Record the frame's passes	フレームのパスを記録
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	重い場面向け：3秒以内にこのメニューを閉じ、ゲームが重い場所にとどまってください。3フレーム分の描画パス（端末が対応していればGPU時間付き）がダウンロードに保存されます（framegraph.txt で終わるファイル）。issue に添付してください。
+Recording in 3 seconds: close the menu.	3秒後に記録します：メニューを閉じてください。
