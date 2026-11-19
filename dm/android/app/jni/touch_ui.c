@@ -914,6 +914,7 @@ static void dex_draw(dm_ovl_item *it, int *n, int max) {
         const char *nm = r->species > 0 && r->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[r->species] : "?";
         int R = !e->dexok || r->state == 2 ? 255 : r->state == 1 ? 170 : 85;
         if (e->dexok && r->state == 2) { o = add(it, n, max, x + ch * 0.3f, y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_BALL; o->gscale = 1.0f; o->galpha = 1.0f; } }
+        if (e->dexok && r->state == 0) nm = "???";   // FORK v60 (Steven, Nov 19): not seen yet: no name, as in the Pokédex
         snprintf(ln, sizeof ln, "%.12s%s", nm, r->flags & 2 && !(r->flags & 1) ? "!" : ""); otext_c(it, n, max, x + ch * 0.6f * 2, y, ch, ln, 1.0f, R, R, R);
         if (r->pct) { snprintf(ln, sizeof ln, "%3d%%", r->pct); otext_c(it, n, max, x + ch * 0.6f * (DEX_COLS - 5), y, ch, ln, 1.0f, R, R, R); }
     }
