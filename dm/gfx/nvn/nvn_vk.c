@@ -1202,8 +1202,10 @@ static void completion_start(void) {
     pthread_t t; pthread_create(&t, NULL, completion_main, NULL); pthread_detach(t);
 }
 uint64_t mtl_last_fence(void) { return g_fence; }
+static void hold_flush(int why); static _Atomic uint64_t g_submitted; static _Atomic int g_nheld;   // (the whole frame held: below)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
     if (atomic_load(&g_done) >= fence) return 1;
+    if (fence > atomic_load(&g_submitted) && atomic_load(&g_nheld)) hold_flush(1);   // waited on (or polled): held work goes to the GPU now
     uint64_t end = timeout_ns == UINT64_MAX ? UINT64_MAX : mono_ns() + timeout_ns;
     pthread_mutex_lock(&g_cmu);
     while (atomic_load(&g_done) < fence) {
@@ -1446,6 +1448,23 @@ static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFe
     if (r && g_heapmap > 0 && heap_import_mark(1)) VLOG("[RED] vkQueueSubmit failed with dma-buf pools: the next start moves the driver's mappings instead");
     if (r) VDIE("vkQueueSubmit failed: %d", r);
 }
+// ================= The whole frame held (renderer phase 2, DM_VK_FRAME_HOLD=1; off by default until measured on phones) =================
+// A finished submission is not handed to the GPU at once: the frame's submissions wait until the frame is presented, so the frame is known whole before any of it runs
+// (phase 2 decides each pass's stores from that, fg_rec.h). A submission gets its fence value when it is recorded (as before: deferred destruction keys on it), and a
+// held one is submitted, in order, the moment anything needs it: a wait on its fence (a game sync, a slot reused, a pool freed), a one-off submission, the present, or
+// NSUB - 1 held. Submitting needs no recording (the command buffers are finished), so any thread can do it under g_cmu. Costs up to a frame of latency
+typedef struct { sub_t *s; VkCommandBuffer cbs[2]; uint32_t n; uint64_t f; } held_t;
+static held_t g_held[NSUB]; static _Atomic int g_nheld; static _Atomic uint64_t g_submitted;   // g_submitted: the last fence value given to the GPU
+static uint64_t g_hold_frames, g_hold_split;   // frames submitted whole at their present, early flushes (the present line)
+static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e && atoi(e) > 0;
+    VLOG("frames: %s", v ? "held whole until presented (DM_VK_FRAME_HOLD): up to a frame later on screen" : "submitted as recorded"); } return v; }
+static void hold_flush_locked(int why) {   // caller holds g_cmu; why 0 the present, 1 something waited on held work
+    int n = atomic_load(&g_nheld); if (!n) return;
+    for (int i = 0; i < n; i++) { held_t *h = &g_held[i]; queue_submit(h->cbs, h->n, h->f, h->s->vf); g_inflight[g_nin++] = h->s; atomic_store(&g_submitted, h->f); }
+    atomic_store(&g_nheld, 0); pthread_cond_broadcast(&g_ccv);
+    if (why) g_hold_split++; else g_hold_frames++;
+}
+static void hold_flush(int why) { if (!atomic_load(&g_nheld)) return; pthread_mutex_lock(&g_cmu); hold_flush_locked(why); pthread_mutex_unlock(&g_cmu); }
 // Fence values are handed out under g_cmu so the present thread's submissions (screenshots) and the game's stay in order on the timeline
 static uint64_t submit_tracked(sub_t *s, VkCommandBuffer *cbs, uint32_t n) {
     pthread_mutex_lock(&g_cmu);
@@ -1454,7 +1473,15 @@ static uint64_t submit_tracked(sub_t *s, VkCommandBuffer *cbs, uint32_t n) {
         if (s->vf) vkDestroyFence(g_dev, s->vf, NULL);
         VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; s->vf = VK_NULL_HANDLE; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &s->vf));
     }
-    queue_submit(cbs, n, f, s->vf);
+    if (hold_on() && n <= 2) {   // held until the present (or until something waits on it)
+        int k = atomic_load(&g_nheld); held_t *h = &g_held[k]; h->s = s; h->n = n; h->f = f; for (uint32_t i = 0; i < n; i++) h->cbs[i] = cbs[i];
+        atomic_store(&g_nheld, k + 1);
+        if (k + 1 >= NSUB - 1) hold_flush_locked(1);   // (the ring would need a held slot next)
+        pthread_mutex_unlock(&g_cmu);
+        return f;
+    }
+    hold_flush_locked(1);   // (anything held goes first: the timeline in order)
+    queue_submit(cbs, n, f, s->vf); atomic_store(&g_submitted, f);
     g_inflight[g_nin++] = s; pthread_cond_broadcast(&g_ccv);
     pthread_mutex_unlock(&g_cmu);
     return f;
@@ -1532,6 +1559,7 @@ static void once_end(VkCommandBuffer cb) {   // ordered after everything submitt
     barrier_all(cb); barrier_host(cb); VKCHECK(vkEndCommandBuffer(cb));
     VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence f; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &f));
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+    hold_flush(1);   // (held work first: this one is ordered after everything recorded so far)
     shadow_sync();
     pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, f); pthread_mutex_unlock(&g_qmu);
     if (r) VDIE("one-off submit failed: %d", r);
@@ -5484,6 +5512,7 @@ __attribute__((weak)) void front_frame_work(uint64_t busy_ns, uint64_t target_ns
 _Atomic uint64_t g_nvn_game_work_ns;   // hle_nvn.c: the game thread's time per frame (DM_NVN_ASYNC: not the presenting thread's)
 _Atomic uint64_t g_nvn_game_work_avg_ns;   // its average over about 16 frames (android_main.c: the fps guard tells a CPU-bound slowdown from a GPU-bound one)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
+    if (hold_on()) hold_flush(0);   // the whole frame to the GPU, before it is shown
     if (sk_on()) { vtex *px = tex_res(t); if (px) { pthread_mutex_lock(&g_skmu); px->presented = 1; pthread_mutex_unlock(&g_skmu); sk_read(px); } }   // shown: never skips its stores
     uint64_t n = atomic_fetch_add(&g_present_n, 1) + 1;
     cap_present(n);
@@ -5530,6 +5559,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
              "stores skipped %llu (read after all %llu), depth / stencil begun store-none %llu (written after all %llu)", (unsigned long long)n,
              (unsigned long long)g_bar_full, (unsigned long long)g_bar_narrow, (unsigned long long)g_bar_none, (unsigned long long)g_ubd_deferred, (unsigned long long)g_ubd_conflicts,
              (unsigned long long)g_sk_skipped, (unsigned long long)g_sk_wrong, (unsigned long long)g_ro_passes, (unsigned long long)g_ro_wrong);
+    if (n % 300 == 0 && hold_on()) VLOG("present %llu: frames held whole %llu, flushed early by a wait %llu times", (unsigned long long)n, (unsigned long long)g_hold_frames, (unsigned long long)g_hold_split);
     if (n % 300 == 0) { pso_evict(); vk_trim(); }   // (pipelines kept: Arm's driver, phones under 7.5 GB; empty device blocks given back)
     if (n % 300 == 0 && g_dsc_hits + g_dsc_new) VLOG("present %llu: descriptor sets written %llu, reused %llu (%.0f %%)", (unsigned long long)n, (unsigned long long)g_dsc_new, (unsigned long long)g_dsc_hits, 100.0 * (double)g_dsc_hits / (double)(g_dsc_hits + g_dsc_new));
     if (n % 1800 == 0 && (g_nanmm || g_clampzero || g_exact || g_initloc)) VLOG("shaders changed so far: %d for NaN in min / max / saturate, %d for Arm erratum 3779215, %d for Maxwell's special-function edge cases, %d with registers starting at zero",
