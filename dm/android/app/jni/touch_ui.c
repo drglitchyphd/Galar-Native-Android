@@ -82,7 +82,8 @@ static int ctx_hidden(int c) {
 }
 static int g_ctx_any;   // FORK v47: a context switch is on (census_sync)
 static int g_enc_census;   // FORK v53: the encounter panel needs the screen kind too
-static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0 || g_ctx_any || g_enc_census; }
+static int menudiag_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FORK_MENU_DIAG"); v = e && !strcmp(e, "on"); } return v; }   // FORK v62 (host/fork_menudiag.c needs the screen kind)
+static void census_sync(void) { if (&dm_fork_census_want) dm_fork_census_want = menudiag_on() || g_bhide || g_bicons || g_blayout || g_bopacity > 0 || g_ffscope == 1 || g_bfade >= 0 || g_ctx_any || g_enc_census; }
 static void bhide_set(int on) { g_bhide = on; census_sync(); }
 // FORK v46: one switch, "Battle controls: Battle mode" (DM_FORK_BATTLE=on): unused buttons hidden, battle icons, the battle's own layout. Set before v46 (no
 //   DM_FORK_BATTLE yet), the old DM_FORK_BATTLE_HIDE / _LAYOUT still turn it on, so a player's battle setup carries over

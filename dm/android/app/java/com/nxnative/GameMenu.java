@@ -445,6 +445,10 @@ public final class GameMenu {
             { "battle", t(a, "In battles"), t(a, "In battles: the ⏩ button shows during battles. Tap: on / off. Hold: fast while held") },
             { "all", t(a, "Anywhere"), t(a, "Anywhere: the ⏩ button is always there (walking, hatching, battles)") } });
         choice(a, "DM_FORK_FF_SPEED", t(a, "Fast-forward speed"), new String[][] { { "125", "1.25x", "" }, { "", "1.5x", "" }, { "200", "2x", "" }, { "300", "3x", "" } });
+        heading(a, t(a, "Research"));
+        // FORK v62: menu touch, step 1 (host/fork_menudiag.c): log only
+        choice(a, "DM_FORK_MENU_DIAG", t(a, "Menu touch: look at the menus"), new String[][] { { "", t(a, "Off"), "" },
+            { "on", t(a, "Log only"), t(a, "From the next start: when a full-screen menu has shown 3 s, how the game builds its menus goes into the log (4 times a run). Changes nothing; may stutter for a second each time") } });
         heading(a, t(a, "Info panels"));
         note(a, t(a, "Panels over the game: drag to move, pinch with two fingers to resize. Each screen and orientation keeps their place and size."));
         // FORK v48: the encounter panel (touch_ui.c enc_draw, host/fork_enc.c)

@@ -1642,6 +1642,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     { void dm_fork_aspect_tick(void); dm_fork_aspect_tick(); }   // FORK: Picture "Fill, corrected", the camera (host/fork_aspect.c)
     { void dm_fork_ff_tick(void); dm_fork_ff_tick(); }   // FORK: fast-forward (host/fork_ff.c)
     { void dm_fork_enc_tick(void); dm_fork_enc_tick(); }   // FORK v47: encounter info probe, log only (host/fork_enc.c)
+    { void dm_fork_menudiag_tick(void); dm_fork_menudiag_tick(); }   // FORK v62: menu touch research, log only (host/fork_menudiag.c)
     if (dm_fps_state) { static int was; int c = fps_step_cap(); if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? " (prerendered movie)" : ""); was = c; } }
     { extern void dm_fps_tick(void) __attribute__((weak)); if (dm_fps_tick) dm_fps_tick(); }   // (loader.c: the 60 fps patch deferred to a field area goes in)
     if (fstep_on()) fstep_tick(o); else if (vstep_on()) vstep_tick(o); else if (dyn_on()) dyn_tick(o);

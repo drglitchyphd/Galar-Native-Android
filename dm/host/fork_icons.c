@@ -46,13 +46,16 @@ static void index_dir(void) {
         if (g_nfiles == cap) { cap = cap ? cap * 2 : 2048; void *n = realloc(g_files, (size_t)cap * 96); if (!n) break; g_files = n; }
         snprintf(g_files[g_nfiles++], 96, "%s", e->d_name); }
     if (D) closedir(D);
-    ILOG("[FORK] icons: %d icon files in %s (e.g. %s)", g_nfiles, g_dir, g_nfiles ? g_files[0] : "-");
+    ILOG("[FORK] icons: %d icon files in %s", g_nfiles, g_dir);
+    for (int i = 0; i < g_nfiles && i < 8; i++) ILOG("[FORK] icons: file %s", g_files[i * (g_nfiles / 8 + 1) % g_nfiles]);   // (v62: a spread of names)
 }
-// the file for a species / form: poke_icon_SSSS_FFF_..., not shiny (ends _n.bntx) first, the male / both-gender one first
+// the file for a species / form. v62: Sword names them poke_icon_SSSS_FFg_x.bntx (Steven's v61 log: "poke_icon_0000_00s_n.bntx": a 2-digit form, then the
+//   gender (s both / m / f), then n (normal; g Gigantamax?)): the m / s one, then any
 static const char *icon_file(int sp, int form) {
-    char pre[32]; snprintf(pre, sizeof pre, "poke_icon_%04d_%03d_", sp, form); size_t L = strlen(pre); const char *best = NULL; int bs = -1;
+    char pre[32]; snprintf(pre, sizeof pre, "poke_icon_%04d_%02d", sp, form); size_t L = strlen(pre); const char *best = NULL; int bs = -1;
     for (int i = 0; i < g_nfiles; i++) { const char *f = g_files[i]; if (strncmp(f, pre, L)) continue;
-        int s = 0; size_t n = strlen(f); if (n > 7 && !strcmp(f + n - 7, "_n.bntx")) s += 4; if (strstr(f + L, "mf_") == f + L || strstr(f + L, "md_") == f + L) s += 2; if (strstr(f, "_g_") == NULL) s += 1;
+        char gch = f[L]; if (gch >= '0' && gch <= '9') continue;   // (a longer form number: another form)
+        int s = 0; size_t n = strlen(f); if (n > 7 && !strcmp(f + n - 7, "_n.bntx")) s += 4; if (gch == 's' || gch == 'm') s += 2;
         if (s > bs) { bs = s; best = f; } }
     return best;
 }
