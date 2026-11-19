@@ -18,7 +18,8 @@ static uint64_t g_fk_ui;   // UI draws shrunk (logged now and then)
 // flashing bars). So a shrunk draw whose textures are all 4x4 or smaller gets its full viewport and scissor back once its textures are known (fork_ui_fill, after
 // nvn_vk.c's push_stage; fork_ui_tex notes their sizes from tex_view_for)
 static int g_fk_sq, g_fk_texmax, g_fk_ntex, g_fk_screenish; static VkViewport g_fk_v0; static VkRect2D g_fk_sc0; static uint64_t g_fk_fills;   // FORK v38: g_fk_screenish (it samples a picture-sized image: a full-screen effect)
-static int g_fk_shade_n, g_fk_spot;   // FORK v49: shading draws this frame; the spotted banner was drawn this frame
+static int g_fk_shade_n, g_fk_spot, g_fk_area;   // FORK v55: g_fk_area: the area name popup drawn this frame
+_Atomic int dm_fork_area_popups;   // FORK v55: how many times the area name popup has come up (host/fork_dex.c: the player changed area)   // FORK v49: shading draws this frame; the spotted banner was drawn this frame
 static int g_fk_banner, g_fk_tw, g_fk_th; static float g_fk_ky, g_fk_kx;   // FORK v44: this draw samples the 1200x180 "spotted" banner; the image's size; the y scale
 static _Atomic int g_origin_ll;   // (nvn_vk.c, below: the game draws with a lower-left origin, so the screen's bottom is the image's row 0)
 static void fork_ui_tex(uint32_t w, uint32_t h) { if (!g_fk_sq) return; g_fk_ntex++; if (w == 1200 && h == 180) g_fk_banner = 1; if (w == 128 && h == 4) g_fk_banner = 2; if (w == 1024 && h == 8) g_fk_banner = 3;   // (3: the area name popup, v54)
@@ -51,7 +52,7 @@ static void fork_ui_fill(VkCommandBuffer cb) {
     //   the corners, so they are now simply kept full size (the 16:9 picture's corners, stretched to the screen's), whatever their order: no anchoring
     int shading = g_fk_banner == 2 && !strncmp(g_fk_sqkey, "af0ef3ac", 8), shade = 0, shade2 = 0;
     if (shading) g_fk_shade_n++;
-    if ((g_fk_banner == 1 || g_fk_banner == 3) && !strncmp(g_fk_sqkey, "b6ff050a", 8)) g_fk_spot = 1;   // v49: the banner's frame is not a battle (fk_screen_frame); v54: nor the area name popup's (1024x8 stripe, capture Nov 18)
+    if ((g_fk_banner == 1 || g_fk_banner == 3) && !strncmp(g_fk_sqkey, "b6ff050a", 8)) { g_fk_spot = 1; if (g_fk_banner == 3) g_fk_area = 1; }   // (v55: + g_fk_area)   // v49: the banner's frame is not a battle (fk_screen_frame); v54: nor the area name popup's (1024x8 stripe, capture Nov 18)
     if (((g_fk_banner == 1 && !strncmp(g_fk_sqkey, "b6ff050a", 8)) || shade || shade2) && g_fk_th > 0) {
         VkViewport v = g_fk_v0; VkRect2D sc = g_fk_sc0; float k = g_fk_ky, H = (float)g_fk_th; int ll = atomic_load(&g_origin_ll);
         // the screen's bottom edge, in the image; v48: the second shading draw is the TOP-LEFT fade (Steven Nov 13: anchored to the bottom it sat far down the
@@ -97,7 +98,8 @@ static void fk_screen_frame(int comp) {
     // FORK v47: 3 = dialogue: 3D with the text-box shader 56af7f00 and no battle HUD (an NPC talking in the field). A guess: logged, and touch_ui.c has an
     //   "all buttons" override for when it is wrong
     int dlg = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) dlg = 1;
-    { static int age; age = bat ? 0 : age < 100000 ? age + 1 : age; atomic_store(&dm_fork_battle_age, age); }   // FORK v53: frames since the battle HUD was last drawn (the encounter panel's 1 s close)
+    { static int age; age = bat ? 0 : age < 100000 ? age + 1 : age; atomic_store(&dm_fork_battle_age, age); }
+    { static int gone = 1000; if (g_fk_area && gone > 90) atomic_fetch_add(&dm_fork_area_popups, 1); gone = g_fk_area ? 0 : gone + 1; }   // FORK v55: a popup after 3 s without one: a new area   // FORK v53: frames since the battle HUD was last drawn (the encounter panel's 1 s close)
     int k = !comp && g_fk_cn ? 1 : comp && bat ? 2 : comp && dlg ? 3 : 0; static int cand = -1, held;
     if (k != cand) { cand = k; held = 0; return; }
     // (out of a battle only after 3 s without its HUD, to the world or dialogue: its text phases hide the HUD for a moment. To a full-screen menu (the Bag in a
@@ -132,7 +134,7 @@ static void fork_ui_frame(void) {
         g_fk_capped = 1; atomic_store(&g_cap, 1); VLOG("[FORK] capture: the frame after %s", sw ? "a switch from 3D to UI only" : "an unknown shader drawn full size"); }
     if (dm_aspect() == DM_ASPECT_FIX || dm_fork_census_want || g_fk_census_fg) fk_census_frame(g_fk_comp);   // (FORK v50: + g_fk_census_fg)
     g_fk_prev_comp = g_fk_comp; g_fk_comp = 0; g_fk_clear = 0; g_fk_inimg = 0; g_fk_uimode = 0; g_fk_odd = 0;
-    g_fk_shade_n = 0; g_fk_spot = 0;   // FORK v49 (after the census used them)
+    g_fk_shade_n = 0; g_fk_spot = 0; g_fk_area = 0;   // FORK v49 (after the census used them)
 }
 static void fork_ui_draw(const char *vkey, const void *img, VkCommandBuffer cb, VkViewport *v, VkRect2D *sc, uint32_t tw, uint32_t th) {
     if (!vkey || !img) return;

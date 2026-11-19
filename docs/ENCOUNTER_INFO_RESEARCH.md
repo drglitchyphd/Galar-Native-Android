@@ -172,3 +172,12 @@ may fix all `0x450xxxxx` offsets, but the battle-side ones (`0x8...`) would need
 - Horde / double wild battles: only one wild slot is documented.
 - Whether our host's heap layout matches hardware (section 3) is the main risk.
 - Atmosphere dmnt's `heap` base source was not re-read (sys-botbase's was).
+
+## Area dex (v55, Nov 19)
+
+Sources: PKHeX (Zukan8, SwishCrypto, SaveBlockAccessor8SWSH), pkNX (GFPack, EncounterArchive.fbs, SWSHInfo), Sys-EncounterBot.NET / PyNXReader (KCoordinates).
+
+- **Spawns:** RomFS `bin/archive/field/resident/data_table.gfpak` (GFLXPACK; entries found by FNV-1a 64 of the file name in the folder tables; LZ4 block) holds `encount_symbol_k.bin` (walking about) and `encount_k.bin` (hidden). FlatBuffers: archive {u32, tables[]}; table {ZoneID u64, subtables[11]}; subtable {lvmin, lvmax, slots[]}; slot {probability u8, species i32, form u8}. Subtable = weather: 0 normal, 1 overcast, 2 rain, 3 thunder, 4 sun, 5 snow, 6 snowstorm, 7 sandstorm, 8 fog, 9 shaking trees, 10 fishing. Read on the phone (host/fork_dex.c), never shipped.
+- **Zones:** pkNX SWSHInfo.cs → `dm/host/fork_zones.h` (`dm/fork/tools/fork_zones.py`).
+- **Pokédex:** save blocks KZukan 0x4716C404, KZukanR1 0x3F936BA9, KZukanR2 0x3C9366F0; 0x30 per entry at (dex no. - 1) * 0x30; seen = any u64 at +0..0x1F, caught = bit 0 of u32 at +0x20. Dex numbers: personal_total.bin (0xB0 per species; +0x5C Galar, +0xAC Armor, +0xAE Crown). No published RAM address: fork_dex.c decodes the save (SwishCrypto: pad period 0x7F, xorshift per block) and finds the blocks in the heap by their contents.
+- **Current area:** KCoordinates at heap 0x4505B3C0 (map hash u64 at +0x6000 = 0x450613C0) is written only when the game saves. No live address published; no weather address either. fork_dex.c probes: the heap's zone-hash values are listed, and at each area name popup the ones that changed become candidates (`[FORK] dex probe` lines).

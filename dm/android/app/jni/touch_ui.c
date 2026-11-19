@@ -101,15 +101,18 @@ static int enc_live(void) { return enc_on() && dm_fork_enc_get && g_enc_now.acti
 static void enc_rect(float r4[4]);   // (below, with the drawing)
 // FORK v55: the area dex panel (DM_FORK_AREADEX=on, default off): in the overworld, the Pokémon of the area the player is in (host/fork_dex.c: species, how often
 //   they appear, not seen / seen / caught in the player's Pokédex). A control of its own like the encounter panel (C_DEX, "dex" in the layout file): dragged, it
-//   moves (kept in this screen's layout); a tap on the ball or the ribbon folds it to the ball and back; a tap on the list shows its next page
+//   moves (kept in this screen's layout); a tap on the ball or the ribbon folds it to the ball and back; a tap on the first line (the weather) shows the next weather
+//   the area has (ALL first); a tap on the list shows its next page
 typedef struct { int16_t species, form; uint8_t pct, state, flags, pad; } dm_fork_dex_row;   // (as host/fork_dex.c) state: 0 not seen, 1 seen, 2 caught; flags 1: a symbol (seen walking), 2: hidden (in the grass "!")
-typedef struct { int active, n, weather; char area[32]; dm_fork_dex_row row[40]; } dm_fork_dex_info;
+typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; } dm_fork_dex_info;   // weather: -1 all, else the subtable (0-10); dexok: the Pokédex was found
 int dm_fork_dex_get(dm_fork_dex_info *o) __attribute__((weak));
+void dm_fork_dex_weather_next(void) __attribute__((weak));
 volatile int dm_fork_dex_on;   // host/fork_dex.c reads game memory only while this is set
 static int g_dex_on = -1, g_dex_open = 1, g_dex_page; static dm_fork_dex_info g_dex_now;
 static int dex_on(void) { if (g_dex_on < 0) { const char *e = getenv("DM_FORK_AREADEX"); g_dex_on = e && !strcmp(e, "on"); dm_fork_dex_on = g_dex_on; g_enc_census = g_enc_census || g_dex_on; census_sync(); } return g_dex_on; }
 static int dex_live(void) { return dex_on() && dm_fork_dex_get && g_dex_now.active && screen_kind() == 0 && !enc_live(); }
 static void dex_rect(float r4[4], int list_only);   // (below, with the drawing)
+static float enc_ch(void);
 // the panels (encounter, area dex): which one a finger dragged, and from where
 static int g_pan_drag; static float g_pan_ox, g_pan_oy;
 // FORK v53: the battle D-pad (DM_FORK_BATTLE_DPAD=on, default off). In a battle (the right stick does nothing there) every touch that is not on a button is a
@@ -572,7 +575,9 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             if (g_pan_drag) { edit_store(c); layout_save(); }
             else if (c == C_ENC) { g_enc_open = !g_enc_open; click_locked(); }
             else { float r4[4]; dex_rect(r4, 1);   // v55: the area dex: a tap on the list = its next page, else fold / open
-                if (g_dex_open && g_ptr[i].x0 >= r4[0] && g_ptr[i].x0 <= r4[2] && g_ptr[i].y0 >= r4[1] && g_ptr[i].y0 <= r4[3]) g_dex_page++; else g_dex_open = !g_dex_open;
+                if (g_dex_open && g_ptr[i].x0 >= r4[0] && g_ptr[i].x0 <= r4[2] && g_ptr[i].y0 >= r4[1] && g_ptr[i].y0 <= r4[3]) {
+                    if (g_ptr[i].y0 < r4[1] + enc_ch() * 1.3f * 1.4f) { if (dm_fork_dex_weather_next) dm_fork_dex_weather_next(); g_dex_page = 0; } else g_dex_page++; }   // (the weather line / the list)
+                else g_dex_open = !g_dex_open;
                 click_locked(); }
             g_pan_drag = 0; }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_ALL && hit(C_ALL, g_ptr[i].x, g_ptr[i].y, 1.5f)) {   // FORK v47: ⊞ all buttons, until the screen changes
@@ -852,7 +857,7 @@ static void enc_draw(dm_ovl_item *it, int *n, int max) {
 //   not seen yet: dark (as the Pokédex's silhouettes). A "!" after the name: it only appears in the grass's hidden encounters
 #define DEX_ROWS 8
 #define DEX_COLS 20
-static const char *const k_dex_weather[10] = { "", "CLEAR", "CLOUDY", "RAIN", "THUNDER", "SNOW", "BLIZZARD", "SUN", "SANDSTORM", "FOG" };
+static const char *const k_dex_weather[11] = { "NORMAL", "OVERCAST", "RAIN", "THUNDER", "SUN", "SNOW", "SNOWSTORM", "SANDSTORM", "FOG", "TREES", "FISHING" };   // (pkNX SWSHEncounterType)
 static int dex_pages(void) { int n = g_dex_now.n; return n <= 0 ? 1 : (n + DEX_ROWS - 1) / DEX_ROWS; }
 typedef struct { float cx, cy, r, rx1, rh, bx0, by0, bx1, by1, ly0; } dex_geo;
 static dex_geo dex_layout(void) {
@@ -881,13 +886,15 @@ static void dex_draw(dm_ovl_item *it, int *n, int max) {
     float x = g.bx0 + pad + g.r * 0.25f, y = g.by0 + pad + lh * 0.5f + g.rh * 0.15f;
     { int c = 0; for (int i = 0; i < e->n; i++) c += e->row[i].state == 2;
       char pg[12] = ""; if (pages > 1) snprintf(pg, sizeof pg, " %d/%d", g_dex_page + 1, pages);
-      snprintf(ln, sizeof ln, "%-9.9s %2d/%-2d%s", e->weather > 0 && e->weather < 10 ? k_dex_weather[e->weather] : "", c, e->n, pg); otext(it, n, max, x, y, ch, ln, 0.65f); }
+      if (e->dexok) snprintf(ln, sizeof ln, "%-9.9s %2d/%-2d%s", e->weather >= 0 && e->weather < 11 ? k_dex_weather[e->weather] : "ALL", c, e->n, pg);
+      else snprintf(ln, sizeof ln, "%-9.9s %2d%s", e->weather >= 0 && e->weather < 11 ? k_dex_weather[e->weather] : "ALL", e->n, pg);   // (no Pokédex: just how many)
+      otext(it, n, max, x, y, ch, ln, 0.65f); }
     if (e->n <= 0) { y += lh; otext(it, n, max, x, y, ch, "NO WILD POKEMON", 0.6f); return; }
     for (int i = g_dex_page * DEX_ROWS; i < e->n && i < (g_dex_page + 1) * DEX_ROWS; i++) {
         const dm_fork_dex_row *r = &e->row[i]; y += lh;
         const char *nm = r->species > 0 && r->species < (int)(sizeof k_enc_species / sizeof *k_enc_species) ? k_enc_species[r->species] : "?";
-        int R = r->state == 2 ? 255 : r->state == 1 ? 170 : 85;
-        if (r->state == 2) { o = add(it, n, max, x + ch * 0.3f, y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_BALL; o->gscale = 1.0f; o->galpha = 1.0f; } }
+        int R = !e->dexok || r->state == 2 ? 255 : r->state == 1 ? 170 : 85;
+        if (e->dexok && r->state == 2) { o = add(it, n, max, x + ch * 0.3f, y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_BALL; o->gscale = 1.0f; o->galpha = 1.0f; } }
         snprintf(ln, sizeof ln, "%.12s%s", nm, r->flags & 2 && !(r->flags & 1) ? "!" : ""); otext_c(it, n, max, x + ch * 0.6f * 2, y, ch, ln, 1.0f, R, R, R);
         if (r->pct) { snprintf(ln, sizeof ln, "%3d%%", r->pct); otext_c(it, n, max, x + ch * 0.6f * (DEX_COLS - 5), y, ch, ln, 1.0f, R, R, R); }
     }
