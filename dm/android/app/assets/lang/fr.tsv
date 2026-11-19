@@ -391,3 +391,6 @@ Balanced	Équilibré
 Balanced: the best picture this phone holds at a steady frame rate	Équilibré : la meilleure image que ce téléphone tient à une fréquence d’images stable
 Battery saver	Économie de batterie
 Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up	Économie de batterie : un téléphone plus frais et plus d’autonomie : 30 i/s en Auto, une image plus légère, et il ralentit plus tôt quand le téléphone chauffe
+Record the frame's passes	Enregistrer les passes de l’image
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Pour les scènes lentes : fermez ce menu dans les 3 secondes et restez là où le jeu ralentit. Les passes de rendu de trois images, avec leur temps GPU si le téléphone le donne, sont enregistrées dans Téléchargements (un fichier finissant par framegraph.txt). Joignez-le à votre issue.
+Recording in 3 seconds: close the menu.	Enregistrement dans 3 secondes : fermez le menu.
