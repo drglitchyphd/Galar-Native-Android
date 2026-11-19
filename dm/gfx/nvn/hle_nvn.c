@@ -1346,6 +1346,13 @@ static void tpush(int k, double v) { g_tw[k][g_tn[k]++ % TWIN] = v; }
 // Thermal attribution (iOS DM_HEAT): per-frame GPU milliseconds are kept in a separate ring, taking the mean / p95 "since the last read" (at most the last HRN frames), without interfering with the timing summary's 300-frame window
 #define HRN 1024
 static double g_hr[HRN]; static uint64_t g_hn, g_hn_read;
+// The GPU's average time per frame over the last n frames measured (ms; -1 when the driver gives no timestamps): android_main.c graphics_auto tells a GPU-bound
+//   slowdown from a CPU-bound one with it (read from the log thread; a sample torn by the present thread only shifts the average a little)
+double dm_gpu_avg_ms(int n) {
+    uint64_t h = g_hn; if (!h || n <= 0) return -1; if ((uint64_t)n > h) n = (int)h; if (n > HRN) n = HRN;
+    double s = 0; for (int i = 1; i <= n; i++) s += g_hr[(h - (uint64_t)i) % HRN];
+    return s / n;
+}
 static int dcmp(const void *a, const void *b);
 void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {
     uint64_t hi = g_hn, lo = g_hn_read > hi ? hi : g_hn_read; if (hi - lo > HRN) lo = hi - HRN; g_hn_read = hi;
