@@ -1084,6 +1084,39 @@ static void load_report(const thr_snap *a, int na, uint64_t ns, uint64_t bytes, 
     for (int k = 0; k < 8 && top[k].d; k++) { const thr_snap *t = &b[top[k].i];
         fprintf(stderr, "[cpu]   %-16s tid %d: %.2f s CPU (%.0f %% of the load), core %d (%.2f GHz)\n", t->name, t->tid, (double)top[k].d / hz, 100.0 * (double)top[k].d / hz / secs, t->cpu, core_max_khz(t->cpu) / 1e6); }
 }
+// Loads on the fast cores (the white screen before a battle: one thread's CPU work, 2.7 s of a 4 s load on a Galaxy S25+, file reads 0.18 s). While a load runs, every
+//   poll (500 ms) the threads that used a quarter of a core or more since the last one and are not pinned already (g_pin_tid) go to the phone's fast cores (a clock
+//   limit of 70 % of the fastest or more: the little cores left out, nothing changes on a phone without slow ones) and a little higher priority (nice -4); all of
+//   them back as they were when the load is over. DM_LOAD_BOOST=0 leaves the scheduler to it
+static void load_boost(int loading, uint64_t t) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_LOAD_BOOST"); on = !(e && !strcmp(e, "0")); } if (!on) return;
+    static thr_snap prev[512]; static int nprev; static uint64_t prev_t; static int btid[16], bnice[16], nb; static cpu_set_t fast, all; static int masks;
+    if (!masks) { masks = 1; long top = 0, f[32]; CPU_ZERO(&fast); CPU_ZERO(&all);
+        for (int c = 0; c < 32; c++) { f[c] = core_max_khz(c); if (f[c] > top) top = f[c]; }
+        for (int c = 0; c < 32; c++) if (f[c]) { CPU_SET(c, &all); if (f[c] * 10 >= top * 7) CPU_SET(c, &fast); } }
+    if (!loading) {
+        if (nb) { for (int i = 0; i < nb; i++) { sched_setaffinity(btid[i], sizeof all, &all); setpriority(PRIO_PROCESS, (id_t)btid[i], bnice[i]); }
+            fprintf(stderr, "[cpu] load over: %d thread(s) back to every core\n", nb); nb = 0; }
+        nprev = 0; return;
+    }
+    static thr_snap cur[512]; int nc = thr_snapshot(cur, 512); long hz = sysconf(_SC_CLK_TCK); if (hz <= 0) hz = 100;
+    if (nprev && t > prev_t) {
+        double win = (double)(t - prev_t) / 1e9; char said[256] = ""; size_t sl = 0;
+        for (int i = 0; i < nc && nb < 16; i++) {
+            uint64_t was = 0; int seen = 0; for (int j = 0; j < nprev; j++) if (prev[j].tid == cur[i].tid) { was = prev[j].ticks; seen = 1; break; }
+            if (!seen || cur[i].ticks <= was || (double)(cur[i].ticks - was) / hz < 0.25 * win) continue;
+            int skip = 0; for (int k = 0; k < g_pin_n; k++) if (g_pin_tid[k] == cur[i].tid) skip = 1;
+            for (int k = 0; k < nb; k++) if (btid[k] == cur[i].tid) skip = 1;
+            if (skip) continue;
+            errno = 0; int nice_was = getpriority(PRIO_PROCESS, (id_t)cur[i].tid); if (errno) nice_was = 0;
+            sched_setaffinity(cur[i].tid, sizeof fast, &fast); if (nice_was > -4) setpriority(PRIO_PROCESS, (id_t)cur[i].tid, -4);
+            btid[nb] = cur[i].tid; bnice[nb] = nice_was; nb++;
+            if (sl < sizeof said - 24) sl += (size_t)snprintf(said + sl, sizeof said - sl, " %s", cur[i].name);
+        }
+        if (sl) fprintf(stderr, "[cpu] load: busy thread(s) to the fast cores:%s\n", said);
+    }
+    memcpy(prev, cur, sizeof *cur * (size_t)nc); nprev = nc; prev_t = t;
+}
 JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env, jclass c) {
     (void)env; (void)c;
     static int off = -1; if (off < 0) { const char *e = getenv("DM_LOAD_HINT"); off = e && !strcmp(e, "0"); } if (off) return 0;
@@ -1101,6 +1134,7 @@ JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env,
         else if (loading && mbs < 1.0) { if (!quiet_since) quiet_since = t; else if (t - quiet_since >= 2000000000ull) { loading = 0; fprintf(stderr, "[cpu] loading over\n");
             load_report(ls, nls, quiet_since - l_t0, b - l_b0, (&dm_fs_read_ns ? atomic_load(&dm_fs_read_ns) : 0) - l_r0); } }
         else if (loading) quiet_since = 0;
+        load_boost(loading, t);
     }
     last_b = b; last_t = t; return loading;
 }
