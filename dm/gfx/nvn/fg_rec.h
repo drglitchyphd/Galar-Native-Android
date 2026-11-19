@@ -22,6 +22,7 @@ typedef struct { const void *x; uint32_t w, h, fmt, mips, layers; } fgr_img;
 static struct {
     _Atomic int on;                 // recording now
     int want, done, armed_at;       // frames asked for, frames finished, the present it starts at (DM_FG_RECORD)
+    int cont, overflow;             // cont: recording all the time for the held frame's store decisions (nvn_vk.c hold_dec); overflow: a list was full since the last reset
     uint64_t frame0;                // the first recorded frame's number
     fgr_pass p[FGR_MAXP]; int np, open;
     fgr_read r[FGR_MAXR]; int nr;
@@ -35,14 +36,17 @@ static pthread_mutex_t g_fgrmu = PTHREAD_MUTEX_INITIALIZER;
 
 static int fgr_img_id(const void *x, uint32_t w, uint32_t h, uint32_t fmt, uint32_t mips, uint32_t layers) {
     for (int i = 0; i < g_fgr.ni; i++) if (g_fgr.im[i].x == x) return i;
-    if (g_fgr.ni >= FGR_MAXI) return -1;
+    if (g_fgr.ni >= FGR_MAXI) { g_fgr.overflow = 1; return -1; }
     g_fgr.im[g_fgr.ni] = (fgr_img){ x, w, h, fmt, mips, layers }; return g_fgr.ni++;
 }
 // a pass begins (before its vkCmdBeginRendering, nothing open: the timestamp and, at the first pass, the reset go into cb)
-static void fgr_pass_begin(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t layers, uint32_t samples, const fgr_attin *a, int na) {
-    if (!atomic_load(&g_fgr.on)) return;
+// returns the pass's index in the recording (-1: not recorded)
+static int fgr_pass_begin(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t layers, uint32_t samples, const fgr_attin *a, int na) {
+    if (!atomic_load(&g_fgr.on)) return -1;
+    int idx = -1;
     pthread_mutex_lock(&g_fgrmu);
-    if (g_fgr.np < FGR_MAXP) {
+    if (g_fgr.np >= FGR_MAXP) g_fgr.overflow = 1;
+    else {
         fgr_pass *p = &g_fgr.p[g_fgr.np];
         memset(p, 0, sizeof *p); p->w = w; p->h = h; p->layers = layers; p->samples = samples; p->frame = (uint32_t)g_fgr.done; p->after_disp = g_fgr.disp; g_fgr.disp = 0;
         p->natt = (uint32_t)(na > 10 ? 10 : na);
@@ -51,9 +55,10 @@ static void fgr_pass_begin(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t 
             if (!g_fgr.np) vkCmdResetQueryPool(cb, g_fgr.qp, 0, (uint32_t)g_fgr.qn);
             if ((uint32_t)g_fgr.np * 2 + 1 < (uint32_t)g_fgr.qn) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_fgr.qp, (uint32_t)g_fgr.np * 2);
         }
-        g_fgr.open = 1; g_fgr.np++;
+        g_fgr.open = 1; idx = g_fgr.np++;
     }
     pthread_mutex_unlock(&g_fgrmu);
+    return idx;
 }
 static void fgr_pass_end(VkCommandBuffer cb) {   // (after vkCmdEndRendering)
     if (!atomic_load(&g_fgr.on) || !g_fgr.open) return;
@@ -69,6 +74,7 @@ static void fgr_read_img(const void *x, uint32_t w, uint32_t h, uint32_t fmt, ui
     pthread_mutex_lock(&g_fgrmu);
     if (g_fgr.nr < FGR_MAXR) { int id = fgr_img_id(x, w, h, fmt, 0, 0);
         g_fgr.r[g_fgr.nr++] = (fgr_read){ (uint32_t)g_fgr.np, (uint32_t)g_fgr.open, (uint32_t)g_fgr.done, id, kind }; }
+    else g_fgr.overflow = 1;   // (a read not kept: the decisions until the next reset store everything)
     pthread_mutex_unlock(&g_fgrmu);
 }
 
@@ -147,6 +153,7 @@ static void fgr_write(void) {
 }
 // at every present, after the frame's work was built: arms, counts frames, ends, and writes once the GPU is done
 static void fgr_present(uint64_t n, const void *shown, uint32_t w, uint32_t h, uint32_t fmt) {
+    if (g_fgr.cont) return;   // (recording for the held frames' decisions: no recordings asked for meanwhile)
     if (atomic_load(&g_fgr.on)) {
         fgr_read_img(shown, w, h, fmt, FGR_SHOWN);
         pthread_mutex_lock(&g_fgrmu);
@@ -184,5 +191,33 @@ static void fgr_present(uint64_t n, const void *shown, uint32_t w, uint32_t h, u
     atomic_store(&g_fgr.on, 1);
     pthread_mutex_unlock(&g_fgrmu);
     VLOG("frame recorder: recording the next %d frame(s)%s", want, g_fgr.qp ? ", with each pass's GPU time" : " (no GPU timestamps on this GPU)");
+}
+// ---- continuous recording for the held frame (nvn_vk.c, DM_VK_FRAME_HOLD=2): each pass's stores decided from what the rest of the held work does ----
+static void fgr_cont_start(void) { pthread_mutex_lock(&g_fgrmu); g_fgr.cont = 1; g_fgr.want = 1 << 30; atomic_store(&g_fgr.on, 1); pthread_mutex_unlock(&g_fgrmu); }
+static void fgr_cont_reset(void) {   // the held work was submitted and nothing is held or being recorded: a fresh window
+    pthread_mutex_lock(&g_fgrmu); g_fgr.np = g_fgr.nr = g_fgr.ni = 0; g_fgr.open = 0; g_fgr.disp = 0; g_fgr.overflow = 0; pthread_mutex_unlock(&g_fgrmu);
+}
+static void fgr_rstart_build(void) { for (int j = 0, i = 0; j <= g_fgr.np + 2; j++) { while (i < g_fgr.nr && (int)g_fgr.r[i].pass < j) i++; g_fgr_rstart[j] = i; } }   // (caller holds g_fgrmu)
+// What pass k's attachment a holds when the work recorded so far ends, exactly for its own subresource and aspect: 0 read (by a read of the image, or a later pass
+//   loading it or clearing it only in part), 1 overwritten unread (a later pass clears that same level, layer and aspect over the whole of it), 4 nothing yet (unknown).
+//   Any read of the image counts, whatever level or layer it reads (on the safe side). Caller holds g_fgrmu, rstart built
+static int fgr_fate_exact(int k, const fgr_att *a) {
+    if (a->img < 0) return 0;
+    const fgr_img *im = &g_fgr.im[a->img]; uint32_t lw = im->w >> a->lv ? im->w >> a->lv : 1, lh = im->h >> a->lv ? im->h >> a->lv : 1;
+    int cls = a->slot < 8 ? 0 : a->slot;   // colour, depth or stencil
+    for (int j = k + 1; j <= g_fgr.np; j++) {
+        for (int i = g_fgr_rstart[j]; i < g_fgr_rstart[j + 1]; i++) { const fgr_read *r = &g_fgr.r[i];
+            if (r->img != a->img) continue;
+            if (j == k + 1 && r->in_pass) continue;   // (read while pass k was open: what was there before it)
+            return 0; }
+        if (j == g_fgr.np) break;
+        const fgr_pass *q = &g_fgr.p[j];
+        for (uint32_t t = 0; t < q->natt; t++) { const fgr_att *b = &q->a[t];
+            if (b->img != a->img || (b->slot < 8 ? 0 : b->slot) != cls) continue;
+            if (b->lv != a->lv || b->ly != a->ly) continue;   // another level or layer of it: not ours
+            return b->clear && q->w >= lw && q->h >= lh && q->layers == 1 ? 1 : 0;
+        }
+    }
+    return 4;
 }
 #endif

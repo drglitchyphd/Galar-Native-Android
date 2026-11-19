@@ -1078,8 +1078,14 @@ void mtl_alias_drop_pool(const void *pool);   // textures (section below)
 // in submission order, before the fence value is published (games wait on either)
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; } post_op;
 typedef struct { VkBuffer buf; vmalloc_t a; uint8_t *map; VkDeviceSize used, size; } arena_blk;
+// A held submission whose stores are decided at its flush (DM_VK_FRAME_HOLD=2): its work in pieces, in order. A gap (no pass open: barriers, copies, dispatches) and each
+//   pass's contents are secondary command buffers; the flush records one primary that runs the gaps and, around each pass's secondary, begins and ends the pass with
+//   the store ops decided then. Vulkan's render pass compatibility leaves load / store ops out, so a pass's contents recorded against its first ops run under the
+//   decided ones (dynamic rendering: formats and samples inherited, the same)
+typedef struct { int pass, fgp; VkCommandBuffer cb; VkRenderingInfo ri; VkRenderingAttachmentInfo ca[8], da, sa; uint32_t cf[8], dsfmt, samples; } seg_t;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, ucb; int ucb_open; uint64_t fence;
+    VkCommandBuffer prim; VkCommandBuffer *sec; int nsec, csec; int dec; seg_t *seg; int nseg, cseg; seg_t cur;   // (the held frame's pieces: above; prim the submission's own primary)
     post_op *post; int npost, cpost;
     arena_blk *ar; int nar, car;   // this submission's arena blocks (host-visible): driver segments, converted indices, upload staging
     wb_t *wb; int nwb, cwb;        // mirrored pools: ranges the GPU writes in this submission (copied back to the game's pages at completion)
@@ -1251,6 +1257,7 @@ static void state_reset(void);
 static uint64_t g_frame_no;
 static uint64_t g_dsc_gen = 1;   // descriptor pools reset (desc_flush's reuse: a set from an older generation is gone)
 static uint64_t g_wait_ring_ns;   // DM_VK_PROF: waits for a free submission slot (the GPU 6 submissions behind)
+static int hold_dec(void); static void seg_gap_begin(sub_t *s);   // (the held frame's pieces: below)
 void mtl_sub_begin(void) {
     mtl_init();
     if (g_sub) VDIE("submit re-entered");
@@ -1262,7 +1269,9 @@ void mtl_sub_begin(void) {
     for (int i = 0; i < s->ndp; i++) vkResetDescriptorPool(g_dev, s->dp[i], 0); s->cdp = 0; g_dsc_gen++;   // (desc_flush's reused sets were in these pools)
     s->npost = 0; s->ucb_open = 0;
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
-    VKCHECK(vkBeginCommandBuffer(s->cb, &bi));
+    if (!s->prim) s->prim = s->cb;   // (the submission's own primary: allocated with it)
+    s->dec = hold_dec(); s->nsec = 0; s->nseg = 0;
+    if (s->dec) seg_gap_begin(s); else { s->cb = s->prim; VKCHECK(vkBeginCommandBuffer(s->cb, &bi)); }
     if (g_tsq) { int i = (int)(s - g_subs); s->frame = g_frame_no; unsigned k = s->frame % GRING;
         if (atomic_load(&g_gpu[k].frame) != s->frame) { atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].frame, s->frame); }
         atomic_fetch_add(&g_gpu[k].pending, 1);
@@ -1368,7 +1377,42 @@ static VkFramebuffer fbc_create(VkRenderPass rp, const VkImageView *views, uint3
 static int fbc_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_FB_CACHE"); on = !e || atoi(e) != 0; } return on; }
 // Begins a pass described as dynamic rendering. cf: each colour slot's format (a slot with no view: ignored), dsfmt: the depth / stencil attachment's format,
 //   samples: the attachments' sample count; swapchain: the one colour attachment is a swapchain image (framebuffer kept, see g_scfb)
+static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain, int secondary);
+static int g_seg_in, g_seg_fgp = -1;   // a pass of a decided submission is open (its contents go to a secondary); the frame recorder's index for the pass about to begin
+static VkRenderPass rp_compat(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples);
+static VkCommandBuffer seg_new_cb(sub_t *s) {
+    if (s->nsec == s->csec) { int add = 32; s->sec = realloc(s->sec, sizeof *s->sec * (size_t)(s->csec + add));
+        VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = s->pool, .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY, .commandBufferCount = (uint32_t)add };
+        VKCHECK(vkAllocateCommandBuffers(g_dev, &ai, s->sec + s->csec)); s->csec += add; }
+    return s->sec[s->nsec++];
+}
+static void seg_push(sub_t *s, seg_t g) { if (s->nseg == s->cseg) { s->cseg = s->cseg ? s->cseg * 2 : 64; s->seg = realloc(s->seg, sizeof *s->seg * (size_t)s->cseg); } s->seg[s->nseg++] = g; }
+static void seg_gap_begin(sub_t *s) {   // a new gap: work outside passes
+    VkCommandBuffer cb = seg_new_cb(s); VkCommandBufferInheritanceInfo inh = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, .pInheritanceInfo = &inh };
+    VKCHECK(vkBeginCommandBuffer(cb, &bi)); s->cb = cb;
+}
+static void seg_pass_begin(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples) {   // the gap ends; the pass's contents go to a secondary
+    sub_t *s = g_sub; VKCHECK(vkEndCommandBuffer(s->cb)); seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb });
+    seg_t *g = &s->cur; memset(g, 0, sizeof *g); g->pass = 1; g->fgp = g_seg_fgp; g->ri = *ri; g->dsfmt = dsfmt; g->samples = samples ? samples : 1;
+    for (uint32_t i = 0; i < ri->colorAttachmentCount && i < 8; i++) { g->ca[i] = ri->pColorAttachments[i]; g->cf[i] = cf && ri->pColorAttachments[i].imageView ? cf[i] : 0; }
+    if (ri->pDepthAttachment) g->da = *ri->pDepthAttachment;
+    if (ri->pStencilAttachment) g->sa = *ri->pStencilAttachment;
+    VkFormat fm[8]; for (int i = 0; i < 8; i++) fm[i] = (VkFormat)g->cf[i];
+    VkCommandBufferInheritanceRenderingInfo ir = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO, .colorAttachmentCount = ri->colorAttachmentCount, .pColorAttachmentFormats = fm,
+        .depthAttachmentFormat = ri->pDepthAttachment && ri->pDepthAttachment->imageView ? (VkFormat)dsfmt : VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = ri->pStencilAttachment && ri->pStencilAttachment->imageView ? (VkFormat)dsfmt : VK_FORMAT_UNDEFINED, .rasterizationSamples = (VkSampleCountFlagBits)g->samples };
+    VkCommandBufferInheritanceInfo inh = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = g_dynren ? &ir : NULL, .renderPass = g_dynren ? VK_NULL_HANDLE : rp_compat(ri, cf, dsfmt, samples) };
+    VkCommandBuffer cb = seg_new_cb(s);
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT, .pInheritanceInfo = &inh };
+    VKCHECK(vkBeginCommandBuffer(cb, &bi)); g->cb = cb; s->cb = cb; g_seg_in = 1;
+}
 static void rend_begin(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain) {
+    if (g_sub && g_sub->dec && cb == g_sub->cb && !g_seg_in && !swapchain) { seg_pass_begin(ri, cf, dsfmt, samples); g_seg_fgp = -1; return; }
+    g_seg_fgp = -1;
+    rend_begin_ex(cb, ri, cf, dsfmt, samples, swapchain, 0);
+}
+static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain, int secondary) {
     if (g_dynren) { vkCmdBeginRendering(cb, ri); return; }
     rpkey k; memset(&k, 0, sizeof k); k.n = (uint8_t)ri->colorAttachmentCount; k.samples = (uint8_t)(samples ? samples : 1);
     VkImageView views[9]; VkClearValue cv[9]; uint32_t nv = 0;
@@ -1405,9 +1449,22 @@ static void rend_begin(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint
         if (!kept) defer_add((dfr){ .kind = DF_FRAMEBUFFER, .h.fb = fb });
     }
     VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = ri->renderArea, .clearValueCount = nv, .pClearValues = cv };
-    vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(cb, &bi, secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
 }
-static void rend_end(VkCommandBuffer cb) { if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb); }
+static void rend_end(VkCommandBuffer cb) {
+    if (g_sub && g_sub->dec && g_seg_in && cb == g_sub->cb) { VKCHECK(vkEndCommandBuffer(cb)); seg_push(g_sub, g_sub->cur); g_seg_in = 0; seg_gap_begin(g_sub); return; }   // (the pass's secondary ends; a new gap)
+    if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb);
+}
+// the render pass a secondary's contents are recorded against: the one rend_begin_ex would begin for ri (compatibility leaves the load / store ops out)
+static VkRenderPass rp_compat(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples) {
+    rpkey k; memset(&k, 0, sizeof k); k.n = (uint8_t)ri->colorAttachmentCount; k.samples = (uint8_t)(samples ? samples : 1);
+    for (uint32_t i = 0; i < k.n && i < 8; i++) { const VkRenderingAttachmentInfo *c = &ri->pColorAttachments[i]; if (!c->imageView) continue;
+        k.cfmt[i] = cf[i]; k.cop[i] = c->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1; k.cst[i] = rp_store_code(c->storeOp); if (c->imageLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) k.optimal = 1; }
+    const VkRenderingAttachmentInfo *d = ri->pDepthAttachment && ri->pDepthAttachment->imageView ? ri->pDepthAttachment : NULL, *s = ri->pStencilAttachment && ri->pStencilAttachment->imageView ? ri->pStencilAttachment : NULL;
+    if (d || s) { k.dsfmt = dsfmt; k.dop = d && d->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1; k.sop = s && s->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1;
+        k.dst = d ? rp_store_code(d->storeOp) : 1; k.sst = s ? rp_store_code(s->storeOp) : 1; }
+    return rp_get(&k);
+}
 
 // The marker of a submission that failed with imported pools (see mtl_init): set = 1 writes it, 0 tells whether it is there
 static int host_import_mark(int set) {
@@ -1456,11 +1513,14 @@ static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFe
 typedef struct { sub_t *s; VkCommandBuffer cbs[2]; uint32_t n; uint64_t f; } held_t;
 static held_t g_held[NSUB]; static _Atomic int g_nheld; static _Atomic uint64_t g_submitted;   // g_submitted: the last fence value given to the GPU
 static uint64_t g_hold_frames, g_hold_split;   // frames submitted whole at their present, early flushes (the present line)
-static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e && atoi(e) > 0;
-    VLOG("frames: %s", v ? "held whole until presented (DM_VK_FRAME_HOLD): up to a frame later on screen" : "submitted as recorded"); } return v; }
+static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : 0; if (v < 0 || v > 2) v = 0;
+    VLOG("frames: %s", v == 2 ? "held whole until presented, each pass's stores decided from the whole frame (DM_VK_FRAME_HOLD=2): up to a frame later on screen"
+                       : v ? "held whole until presented (DM_VK_FRAME_HOLD=1): up to a frame later on screen" : "submitted as recorded"); } return v; }
+static uint64_t g_dec_dc, g_dec_fix, g_dec_passes;   // stores left out (overwritten unread), stores put back (read after all: a guess elsewhere was wrong), passes decided
+static void seg_record_prim(sub_t *s);   // (below, with the passes)
 static void hold_flush_locked(int why) {   // caller holds g_cmu; why 0 the present, 1 something waited on held work
     int n = atomic_load(&g_nheld); if (!n) return;
-    for (int i = 0; i < n; i++) { held_t *h = &g_held[i]; queue_submit(h->cbs, h->n, h->f, h->s->vf); g_inflight[g_nin++] = h->s; atomic_store(&g_submitted, h->f); }
+    for (int i = 0; i < n; i++) { held_t *h = &g_held[i]; if (h->s->dec) seg_record_prim(h->s); queue_submit(h->cbs, h->n, h->f, h->s->vf); g_inflight[g_nin++] = h->s; atomic_store(&g_submitted, h->f); }
     atomic_store(&g_nheld, 0); pthread_cond_broadcast(&g_ccv);
     if (why) g_hold_split++; else g_hold_frames++;
 }
@@ -1527,10 +1587,12 @@ static uint64_t g_vp_c;
 uint64_t mtl_sub_commit(void) {
     sub_t *s = g_sub; if (!s) return g_fence;
     pass_end();
+    if (s->dec && g_seg_in) rend_end(s->cb);   // (a pass still open: its secondary closed, a gap after it)
     shadow_sync_ordered(s);   // (into the upload command buffer, which runs before this submission's work)
     if (g_tsq) vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, (uint32_t)(s - g_subs) * 2 + 1);
     barrier_host(s->cb);
     VKCHECK(vkEndCommandBuffer(s->cb));
+    if (s->dec) { seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb }); s->cb = s->prim; }   // (the primary is recorded at the flush: seg_record_prim)
     VkCommandBuffer cbs[2]; uint32_t n = 0;
     if (s->ucb_open) { barrier_all(s->ucb); VKCHECK(vkEndCommandBuffer(s->ucb)); cbs[n++] = s->ucb; s->ucb_open = 0; }
     cbs[n++] = s->cb;
@@ -2816,8 +2878,10 @@ static void cap_write(void) {
     g_cap_img = VK_NULL_HANDLE; g_cap_buf = VK_NULL_HANDLE;
 }
 // at every present: the request file / DM_VK_CAPTURE_AT arm it; a recorded frame is written once the GPU has finished it
+static int hold_dec(void);
 static void cap_present(uint64_t n) {
     int st = atomic_load(&g_cap);
+    if (st == 0 && hold_dec()) return;   // (not with DM_VK_FRAME_HOLD=2: the capture ends a pass and records into its command buffer)
     if (st == 0) {
         static long at = -2; if (at == -2) { const char *e = getenv("DM_VK_CAPTURE_AT"); at = e ? atol(e) : -1; }
         int wait = -1;
@@ -3085,7 +3149,7 @@ static int pass_begin(void) {
     uint64_t pt2 = prof ? mono_ns() : 0;
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {tw, th}}, .layerCount = nlay ? nlay : 1, .colorAttachmentCount = (uint32_t)ncol, .pColorAttachments = ca,
                            .pDepthAttachment = P.hd ? &da : NULL, .pStencilAttachment = P.hs ? &sa : NULL };
-    if (!P_tf) fgr_pass_begin(CB(), tw, th, nlay ? nlay : 1, P.samples, fga, fgn);   // (the transform feedback capture passes are ours, not the game's)
+    if (!P_tf) g_seg_fgp = fgr_pass_begin(CB(), tw, th, nlay ? nlay : 1, P.samples, fga, fgn);   // (the held frame decides this pass's stores by it)   // (the transform feedback capture passes are ours, not the game's)
     rend_begin(CB(), &ri, P.cfmt, P.hd ? P.dfmt : P.hs ? P.sfmt : 0, P.samples, 0); g_stat_begins++;
     if (prof) { uint64_t pt3 = mono_ns(); g_pb_ns[0] += pt1 - pt0; g_pb_ns[1] += pt2 - pt1; g_pb_ns[2] += pt3 - pt2; }
     {   // a pass onto exactly the attachments of the one a target change just ended (the same views, size and layers): one that could have gone on (g_pass_samev)
@@ -5511,8 +5575,48 @@ static void mem_report(void) {
 __attribute__((weak)) void front_frame_work(uint64_t busy_ns, uint64_t target_ns) { (void)busy_ns; (void)target_ns; }   // (no front end report: nothing)
 _Atomic uint64_t g_nvn_game_work_ns;   // hle_nvn.c: the game thread's time per frame (DM_NVN_ASYNC: not the presenting thread's)
 _Atomic uint64_t g_nvn_game_work_avg_ns;   // its average over about 16 frames (android_main.c: the fps guard tells a CPU-bound slowdown from a GPU-bound one)
+// ---- the held frame's stores (DM_VK_FRAME_HOLD=2) ----
+static int hold_dec(void) {
+    static int v = -1; if (v >= 0) return v;
+    v = hold_on() >= 2; if (v) { fgr_cont_start(); VLOG("frames held: each pass's stores decided from the whole frame (overwritten unread: left out; read: kept)"); }
+    return v;
+}
+// One pass's attachments: a store whose content is overwritten unread before anything reads it is left out (DON'T CARE); a store left out elsewhere (the learnt skips,
+//   DM_VK_SKIP_STORES; depth discards) whose content is read is put back. Unknown (nothing touches it again in the held work): as it was. Caller holds g_fgrmu
+static void seg_decide(seg_t *g) {
+    if (g->fgp < 0 || g->fgp >= g_fgr.np || g_fgr.overflow) return;
+    const fgr_pass *p = &g_fgr.p[g->fgp]; g_dec_passes++;
+    for (uint32_t t = 0; t < p->natt; t++) { const fgr_att *a = &p->a[t];
+        VkRenderingAttachmentInfo *ai = a->slot < 8 ? &g->ca[a->slot] : a->slot == 8 ? &g->da : &g->sa;
+        if (!ai->imageView || ai->storeOp == VK_ATTACHMENT_STORE_OP_NONE) continue;
+        int fate = fgr_fate_exact(g->fgp, a);
+        if (fate == 1 && ai->storeOp == VK_ATTACHMENT_STORE_OP_STORE) { ai->storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; g_dec_dc++; }
+        else if (fate == 0 && ai->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE) { ai->storeOp = VK_ATTACHMENT_STORE_OP_STORE; g_dec_fix++; }
+    }
+}
+// At the flush (caller holds g_cmu): the submission's primary runs its pieces in order, each pass begun and ended around its secondary with the stores decided now
+static void seg_record_prim(sub_t *s) {
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+    VKCHECK(vkBeginCommandBuffer(s->prim, &bi));
+    pthread_mutex_lock(&g_fgrmu); fgr_rstart_build();
+    for (int i = 0; i < s->nseg; i++) { seg_t *g = &s->seg[i];
+        if (!g->pass) { vkCmdExecuteCommands(s->prim, 1, &g->cb); continue; }
+        seg_decide(g);
+        g->ri.pColorAttachments = g->ca; g->ri.pDepthAttachment = g->ri.pDepthAttachment ? &g->da : NULL; g->ri.pStencilAttachment = g->ri.pStencilAttachment ? &g->sa : NULL;
+        g->ri.flags |= VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
+        rend_begin_ex(s->prim, &g->ri, g->cf, g->dsfmt, g->samples, 0, 1);
+        vkCmdExecuteCommands(s->prim, 1, &g->cb);
+        if (g_dynren) vkCmdEndRendering(s->prim); else vkCmdEndRenderPass(s->prim);
+    }
+    pthread_mutex_unlock(&g_fgrmu);
+    VKCHECK(vkEndCommandBuffer(s->prim)); s->nseg = 0;
+}
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
-    if (hold_on()) hold_flush(0);   // the whole frame to the GPU, before it is shown
+    if (hold_on()) {
+        if (hold_dec()) { vtex *sx = tex_res(t); if (sx) fgr_read_img(sx, sx->w, sx->h, (uint32_t)sx->fmt, FGR_SHOWN); }   // (shown: its last stores are needed)
+        hold_flush(0);   // the whole frame to the GPU, before it is shown
+        if (hold_dec() && !g_sub && !atomic_load(&g_nheld)) fgr_cont_reset();
+    }
     if (sk_on()) { vtex *px = tex_res(t); if (px) { pthread_mutex_lock(&g_skmu); px->presented = 1; pthread_mutex_unlock(&g_skmu); sk_read(px); } }   // shown: never skips its stores
     uint64_t n = atomic_fetch_add(&g_present_n, 1) + 1;
     cap_present(n);
@@ -5559,7 +5663,8 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
              "stores skipped %llu (read after all %llu), depth / stencil begun store-none %llu (written after all %llu)", (unsigned long long)n,
              (unsigned long long)g_bar_full, (unsigned long long)g_bar_narrow, (unsigned long long)g_bar_none, (unsigned long long)g_ubd_deferred, (unsigned long long)g_ubd_conflicts,
              (unsigned long long)g_sk_skipped, (unsigned long long)g_sk_wrong, (unsigned long long)g_ro_passes, (unsigned long long)g_ro_wrong);
-    if (n % 300 == 0 && hold_on()) VLOG("present %llu: frames held whole %llu, flushed early by a wait %llu times", (unsigned long long)n, (unsigned long long)g_hold_frames, (unsigned long long)g_hold_split);
+    if (n % 300 == 0 && hold_on()) VLOG("present %llu: frames held whole %llu, flushed early by a wait %llu times; passes decided %llu: stores left out %llu, put back %llu", (unsigned long long)n,
+                                       (unsigned long long)g_hold_frames, (unsigned long long)g_hold_split, (unsigned long long)g_dec_passes, (unsigned long long)g_dec_dc, (unsigned long long)g_dec_fix);
     if (n % 300 == 0) { pso_evict(); vk_trim(); }   // (pipelines kept: Arm's driver, phones under 7.5 GB; empty device blocks given back)
     if (n % 300 == 0 && g_dsc_hits + g_dsc_new) VLOG("present %llu: descriptor sets written %llu, reused %llu (%.0f %%)", (unsigned long long)n, (unsigned long long)g_dsc_new, (unsigned long long)g_dsc_hits, 100.0 * (double)g_dsc_hits / (double)(g_dsc_hits + g_dsc_new));
     if (n % 1800 == 0 && (g_nanmm || g_clampzero || g_exact || g_initloc)) VLOG("shaders changed so far: %d for NaN in min / max / saturate, %d for Arm erratum 3779215, %d for Maxwell's special-function edge cases, %d with registers starting at zero",
