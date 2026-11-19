@@ -74,6 +74,7 @@ static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds
 //   0 where the driver lacks them (Arm's r3x drivers for Mali-G57 / G68 / G77 / G78, Vulkan 1.1: A25 5G); DM_VK_NO_DYNREN=1 / DM_VK_NO_EDS=1 force 0 on any driver
 static int g_dynren = 1, g_eds = 1;
 static int g_bar_clean, g_after_pass, g_game_bar;   // the barrier state of the submission's command buffer (barrier_all)
+static int32_t g_game_bits;   // the game's barrier bits since the last draw pass began (NVN_BARRIER_*: pass_begin narrows by them)
 static int g_store_none;   // VK_ATTACHMENT_STORE_OP_NONE usable (Vulkan 1.3, VK_KHR / VK_EXT_load_store_op_none): skip stores' read-only depth / stencil
 // The Arceus engine's three passes (androidswithy 84fb5df: relaxed barriers between passes, uniform updates deferred inside a pass, learnt attachment stores) are on by
 //   default for Legends: Arceus, where they were measured; off for Sword / Shield until measured there. Each has its switch (DM_VK_BARRIER, DM_VK_UB_DEFER, DM_VK_SKIP_STORES)
@@ -1306,6 +1307,10 @@ static void barrier_host(VkCommandBuffer cb) {
 // pass's rendering. NVN asks the game for a barrier before results of rendering are read as vertices, indices, indirect arguments or by a vertex shader, so only those reads
 // rely on the game's own barriers. DM_VK_BARRIER=full: a full barrier before every pass as before (=relaxed: on for a game where it is off by default)
 static uint64_t g_bar_full, g_bar_narrow, g_bar_none;   // barriers before draw passes (mtl_barrier_stats)
+static uint64_t g_bar_full_game, g_bar_full_work, g_bar_bits_narrow, g_bar_bits_hist[8];   // full ones for a game barrier / after other work; game barriers narrowed by their bits; bits seen in full ones
+int dm_ab(const char *key) __attribute__((weak));   // (android_main.c: a switch alternated in one run)
+static int barrier_bits_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BARRIER_BITS"); v = !(e && !strcmp(e, "0")); }
+    int ab = dm_ab ? dm_ab("barbits") : -1; return ab >= 0 ? ab : v; }
 // (relaxed only on Adreno unless DM_VK_BARRIER says otherwise, as Galar: measured there, where each full barrier idles the GPU. On Xclipse, PowerVR and Mali shadows
 //   flickered and surfaces broke up with them on, Arceus-Native-Android #20 #31 #32: a full barrier before each pass there)
 static int barrier_relaxed(void) { static int v = -1; if (v < 0) { v = arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") && (getenv("DM_VK_BARRIER") || g_props.vendorID == 0x5143); VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
@@ -1525,7 +1530,10 @@ static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFe
 typedef struct { sub_t *s; VkCommandBuffer cbs[2]; uint32_t n; uint64_t f; } held_t;
 static held_t g_held[NSUB]; static _Atomic int g_nheld; static _Atomic uint64_t g_submitted;   // g_submitted: the last fence value given to the GPU
 static uint64_t g_hold_frames, g_hold_split;   // frames submitted whole at their present, early flushes (the present line)
-static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : 0; if (v < 0 || v > 2) v = 0;
+// Default (the user's choice after the S25+ test, 2026-11-19: mode 2 looked better): mode 2 where the replay has a thread of its own (hle_nvn.c DM_NVN_ASYNC, Auto: Adreno),
+//   whose ~7 ms more a frame then stays off the game's thread; off where the replay runs on the game's thread
+int nvn_async_on(void) __attribute__((weak));
+static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : nvn_async_on && nvn_async_on() ? 2 : 0; if (v < 0 || v > 2) v = 0;
     VLOG("frames: %s", v == 2 ? "held whole until presented, each pass's stores decided from the whole frame (DM_VK_FRAME_HOLD=2): up to a frame later on screen"
                        : v ? "held whole until presented (DM_VK_FRAME_HOLD=1): up to a frame later on screen" : "submitted as recorded"); } return v; }
 static uint64_t g_dec_dc, g_dec_fix, g_dec_passes;   // stores left out (overwritten unread), stores put back (read after all: a guess elsewhere was wrong), passes decided
@@ -3163,10 +3171,15 @@ static int pass_begin(void) {
     P.tw = tw; P.th = th; P.ncolor = ncol; P.layers = nlay ? nlay : 1;
     P.dkey = dkey; P.skey = skey; P.dnone = dnone; P.snone = snone; P.dwrote = R.clear_d; P.swrote = R.clear_s; g_ro_passes += dnone + snone;
     uint64_t pt1 = prof ? mono_ns() : 0;
+    // The game's own barrier, by its bits: ORDER_FRAGMENTS (0x2) / _TILED (0x4) and the cache invalidations (texture 0x10, shader 0x20, descriptors 0x40, ZCull 0x80) ask only that
+    //   the earlier passes' fragments land before this pass's fragments read them, which the pass-to-pass barrier gives (the vertex work still overlaps); ORDER_PRIMITIVES (0x1)
+    //   and ORDER_INDIRECT_DATA (0x8), results read as vertices, indices, indirect arguments or by a vertex shader, keep the full one. Every game barrier was a full one before
+    //   (about 58 a frame in Shield's field on a Galaxy S25+). DM_VK_BARRIER_BITS=0: as before; DM_AB=<frames>:barbits alternates the two in one run
+    int narrow_ok = g_game_bar && !(g_game_bits & 0x9) && barrier_bits_on();
     if (g_bar_clean && barrier_relaxed()) g_bar_none++;
-    else if (g_after_pass && !g_game_bar && barrier_relaxed()) { barrier_pass(CB()); g_bar_narrow++; }
-    else { barrier_all(CB()); g_bar_full++; }
-    g_game_bar = 0; g_bar_clean = g_after_pass = 0;
+    else if (g_after_pass && barrier_relaxed() && (!g_game_bar || narrow_ok)) { barrier_pass(CB()); if (g_game_bar) g_bar_bits_narrow++; else g_bar_narrow++; }
+    else { barrier_all(CB()); g_bar_full++; if (g_game_bar) { g_bar_full_game++; for (int b = 0; b < 8; b++) if (g_game_bits >> b & 1) g_bar_bits_hist[b]++; } else g_bar_full_work++; }
+    g_game_bar = 0; g_game_bits = 0; g_bar_clean = g_after_pass = 0;
     uint64_t pt2 = prof ? mono_ns() : 0;
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {tw, th}}, .layerCount = nlay ? nlay : 1, .colorAttachmentCount = (uint32_t)ncol, .pColorAttachments = ca,
                            .pDepthAttachment = P.hd ? &da : NULL, .pStencilAttachment = P.hs ? &sa : NULL };
@@ -4464,7 +4477,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_DISPATCH: dispatch((const p_dispatch *)a); fgr_dispatch(); break;
-            case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); if (bits) g_game_bar = 1; break; }   // ordered at the next draw pass (pass_begin)
+            case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); if (bits) { g_game_bar = 1; g_game_bits |= bits; } break; }   // ordered at the next draw pass (pass_begin)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: break;
             default: state_op(h.op, a); break;
         }
@@ -5437,6 +5450,9 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
           if (left == g_tfchk_n / 4) VLOG("[RED] transform feedback check: the captures wrote nothing on this driver (the marker is still there 60 frames later): skinned and swaying models get no vertices");
           else VLOG("transform feedback check: the captures write their vertices (%u of %u marker words replaced)", g_tfchk_n / 4 - left, g_tfchk_n / 4);
           g_tfchk_at = 0; } }
+    if (n % 300 == 0 && barrier_relaxed()) VLOG("present %llu: full barriers before passes %llu: for a game barrier %llu (bits primitives %llu, fragments %llu, tiled %llu, indirect %llu, texture %llu, shader %llu), after other work %llu; game barriers narrowed by their bits %llu",
+        (unsigned long long)n, (unsigned long long)g_bar_full, (unsigned long long)g_bar_full_game, (unsigned long long)g_bar_bits_hist[0], (unsigned long long)g_bar_bits_hist[1], (unsigned long long)g_bar_bits_hist[2],
+        (unsigned long long)g_bar_bits_hist[3], (unsigned long long)g_bar_bits_hist[4], (unsigned long long)g_bar_bits_hist[5], (unsigned long long)g_bar_full_work, (unsigned long long)g_bar_bits_narrow);
     if (n % 300 == 0 && hold_on()) VLOG("present %llu: frames held whole %llu, flushed early by a wait %llu times; passes decided %llu: stores left out %llu, put back %llu", (unsigned long long)n,
                                        (unsigned long long)g_hold_frames, (unsigned long long)g_hold_split, (unsigned long long)g_dec_passes, (unsigned long long)g_dec_dc, (unsigned long long)g_dec_fix);
     if (n % 300 == 0) { pso_evict(); vk_trim(); }   // (pipelines kept: Arm's driver, phones under 7.5 GB; empty device blocks given back)
