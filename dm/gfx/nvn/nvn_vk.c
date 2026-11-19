@@ -711,6 +711,13 @@ static int g_plast = -1;
 #define PS_SIZE(i) (g_pools[i].size)
 #include "pool_index.h"
 #include "pool_pages.h"
+// threads named for the load reports and profilers (android_main.c load_report): "Thread-4" for all of them said nothing
+#ifdef __linux__
+#include <sys/prctl.h>
+#define DM_THREAD_NAME(n) prctl(PR_SET_NAME, (n), 0, 0, 0)
+#else
+#define DM_THREAD_NAME(n) ((void)0)
+#endif
 // pages a freed pool could no longer read (pool_pages.h pages_copy, #281): said the first few times, with the running total
 static void pages_lost_note(uintptr_t base) {
     static uint64_t said; static int n; uint64_t l = atomic_load(&pages_lost);
@@ -1160,7 +1167,7 @@ static VkResult vk_wait(const VkSemaphoreWaitInfo *wi, VkFence f, uint64_t timeo
         left = timeout == UINT64_MAX ? UINT64_MAX : timeout - el;
     }
 }
-static void *completion_main(void *unused) {
+static void *completion_main(void *unused) { DM_THREAD_NAME("dm-complete");
     (void)unused;
     for (;;) {
         pthread_mutex_lock(&g_cmu);
@@ -2053,7 +2060,7 @@ static long pre_budget(void) {
     b = mb << 20; VLOG("packaged textures: up to %ld MB uploaded ahead and not drawn yet", mb); return b;
 }
 static int pre_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREUPLOAD"); v = !(e && !strcmp(e, "0")); VLOG("packaged textures: %s", v ? "uploaded ahead by a worker as the game creates them" : "uploaded at their first use (DM_VK_PREUPLOAD=0)"); } return v; }
-static void *pre_main(void *unused) {
+static void *pre_main(void *unused) { DM_THREAD_NAME("dm-texupload");
     (void)unused; setpriority(PRIO_PROCESS, (id_t)gettid(), 4);   // (below the game's threads: it only saves them work)
     for (;;) {
         pthread_mutex_lock(&g_pre_mu);
@@ -3368,7 +3375,7 @@ static pthread_cond_t g_apso_dcv = PTHREAD_COND_INITIALIZER; static _Atomic int6
 static struct { vprog *pr; pkey k; } g_apso[APSO_N]; static int g_apso_h, g_apso_n; static pthread_mutex_t g_apso_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_apso_cv = PTHREAD_COND_INITIALIZER; static nvn_hmap g_pso_pend = {.klen = sizeof(pkey)}; static _Atomic uint64_t g_apso_done, g_apso_skipped;
 static VkPipeline pso_lookup(vprog *pr, const pkey *k, int record);
-static void *apso_main(void *a) {
+static void *apso_main(void *a) { DM_THREAD_NAME("dm-pipelines");
     (void)a;
     for (;;) {
         pthread_mutex_lock(&g_apso_mu); while (!g_apso_n) pthread_cond_wait(&g_apso_cv, &g_apso_mu);
@@ -3504,7 +3511,7 @@ static void *prewarm_static(void) {
     pcache_save();
     return NULL;
 }
-static void *prewarm_main(void *arg) {
+static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm");
     (void)arg; uint64_t t0 = mono_ns(); int waits = 0;
     if (!g_eds) return prewarm_static();   // the shared lists leave out the draw state this driver needs built in: this phone's own list instead
     pso_rec *rs = NULL; int n = 0;
@@ -5288,7 +5295,7 @@ static void fg_flush_one_locked(void) {   // the oldest waiting picture
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { FGE.pending = 0; swap_destroy(); }
 }
 static void fg_flush_locked(void) { while (FGE.pending) fg_flush_one_locked(); }
-static void *fg_thread(void *a) {
+static void *fg_thread(void *a) { DM_THREAD_NAME("dm-framegen");
     (void)a;
     for (;;) {
         sem_wait(&FGE.wake);

@@ -1083,7 +1083,13 @@ static void rq_wait(const char *who) {
         static int n; if (n++ < 20) LOG("[RED] %s has waited 5 s on the replay thread: it is at %s, queue %llu..%llu, %d presents, caller lr %p", who, g_rq_at, (unsigned long long)g_rq_tail, (unsigned long long)g_rq_head, g_rq_presents, __builtin_return_address(0));
     }
 }
-static void *rq_main(void *a) {
+#ifdef __linux__
+#include <sys/prctl.h>
+#define DM_THREAD_NAME(n) prctl(PR_SET_NAME, (n), 0, 0, 0)
+#else
+#define DM_THREAD_NAME(n) ((void)0)
+#endif
+static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
     (void)a;
     for (;;) {
         pthread_mutex_lock(&g_rq_mu);

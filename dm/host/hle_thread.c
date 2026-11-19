@@ -11,6 +11,9 @@
 // All waits hang on one global lock G, with one condition variable per thread; correctness first, performance to be measured later.
 #include "dm.h"
 #include <errno.h>
+#ifdef __linux__
+#include <sys/prctl.h>   // (guest threads named by their entry point: thread_main)
+#endif
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -257,6 +260,8 @@ static void *thread_main(void *p) {
     t->mport = pthread_mach_thread_np(pthread_self()); t->host_work = &dm_host_work;
 #ifdef __linux__
     t->ltid = (int)gettid();
+    { module_t *m = module_of((void *)(uintptr_t)t->entry); char nm[16]; if (m) snprintf(nm, sizeof nm, "%c+%llx", m->name[0], (unsigned long long)(t->entry - (uint64_t)(uintptr_t)m->base)); else snprintf(nm, sizeof nm, "g%#llx", (unsigned long long)t->entry);
+      prctl(PR_SET_NAME, nm, 0, 0, 0); }   // (named by its entry point: the load report names the game's busy threads, android_main.c)
 #endif
     crash_thread_init();
     guest_thread_init();
