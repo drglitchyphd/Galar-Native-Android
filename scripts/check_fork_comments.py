@@ -17,6 +17,7 @@ for root in roots:
             comment = s[i + 2:]
             structural = sum(comment.count(ch) for ch in '{};=')   # (prose rarely has three of these; a swallowed statement or initializer does)
             if (code_after.search(comment) and comment.count(';') >= 2) or structural >= 3 or re.search(r'\bnew \w+(\[\])*\s*[\(\{\[]', comment) \
-               or (code_after.search(comment) and comment.rstrip().endswith(';')) or re.search(r'\bif\s*\([^)]*\)\s*[A-Za-z_][\w\.]*\s*(=|\()', comment):   # (v56: + a single statement at the end, an if: the v34 fade line)
+               or (code_after.search(comment) and comment.rstrip().endswith(';')) or re.search(r'\bif\s*\([^)]*\)\s*[A-Za-z_][\w\.]*\s*(=|\()', comment) \
+               or re.search(r'\bstatic\s+[A-Za-z_][\w ]*\s\**[A-Za-z_]\w*\s*(\[[^\]]*\])?\s*(=[^;]*)?;\s*$', comment):   # (v56: + a single statement at the end, an if: the v34 fade line; v58: + a declaration)
                 print(f'{p}:{n}: code inside a // comment? {line.strip()[:160]}'); hits += 1
 sys.exit(1 if hits else 0)

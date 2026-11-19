@@ -104,11 +104,11 @@ static void enc_rect(float r4[4]);   // (below, with the drawing)
 //   moves (kept in this screen's layout); a tap on the ball or the ribbon folds it to the ball and back; a tap on the first line (the weather) shows the next weather
 //   the area has (ALL first); a tap on the list shows its next page
 typedef struct { int16_t species, form; uint8_t pct, state, flags, pad; } dm_fork_dex_row;   // (as host/fork_dex.c) state: 0 not seen, 1 seen, 2 caught; flags 1: a symbol (seen walking), 2: hidden (in the grass "!")
-typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; char msg[2][24]; } dm_fork_dex_info;   // (v56: msg, what the panel waits for)   // weather: -1 all, else the subtable (0-10); dexok: the Pokédex was found
+typedef struct { int active, n, weather, dexok; char area[32]; dm_fork_dex_row row[40]; char msg[2][24]; int busy; } dm_fork_dex_info;   // (v58: busy)   // (v56: msg, what the panel waits for)   // weather: -1 all, else the subtable (0-10); dexok: the Pokédex was found
 int dm_fork_dex_get(dm_fork_dex_info *o) __attribute__((weak));
 void dm_fork_dex_weather_next(void) __attribute__((weak));
 volatile int dm_fork_dex_on;   // host/fork_dex.c reads game memory only while this is set
-static int g_dex_on = -1, g_dex_open = 1, g_dex_page; static dm_fork_dex_info g_dex_now;
+static int g_dex_on = -1, g_dex_open, g_dex_page, g_dex_ready; static dm_fork_dex_info g_dex_now;   // (v58: folded until there is a list: it opens by itself once, then taps decide)
 static int dex_on(void) { if (g_dex_on < 0) { const char *e = getenv("DM_FORK_AREADEX"); g_dex_on = e && !strcmp(e, "on"); dm_fork_dex_on = g_dex_on; g_enc_census = g_enc_census || g_dex_on; census_sync(); } return g_dex_on; }
 static int dex_live(void) { return dex_on() && dm_fork_dex_get && g_dex_now.active && screen_kind() == 0 && !enc_live(); }
 static void dex_rect(float r4[4], int list_only);   // (below, with the drawing)
@@ -876,7 +876,12 @@ static dex_geo dex_layout(void) {
 static void dex_rect(float r4[4], int list_only) { dex_geo g = dex_layout(); r4[0] = list_only ? g.bx0 : g.cx - g.r; r4[1] = list_only ? g.ly0 : g.cy - g.r; r4[2] = list_only ? g.bx1 : g.rx1; r4[3] = g.by1; }
 static void dex_draw(dm_ovl_item *it, int *n, int max) {
     const dm_fork_dex_info *e = &g_dex_now; dm_ovl_item *o;
-    if (!g_dex_open) { pokeball(it, n, max, &g_c[C_DEX], 0, 1.0f); return; }
+    if (!g_dex_open) { pokeball(it, n, max, &g_c[C_DEX], 0, 1.0f);
+        if (e->busy && e->msg[0][0]) {   // v58 (Steven, Nov 19): still working (reading the game, area not known yet): a ring of dots turning round the folded ball
+            const ctl *k = &g_c[C_DEX]; double t = now_s(); float rr = k->r * 1.28f, dr = k->r * 0.13f;
+            for (int i = 0; i < 10; i++) { float a = (float)(i * 6.2831853 / 10), ph = (float)fmod(t * 1.25 - i / 10.0 + 10.0, 1.0);
+                add(it, n, max, k->cx + rr * cosf(a), k->cy + rr * sinf(a), dr * (0.6f + 0.4f * (1 - ph)), OVL_DISC, 255, 255, 255, 0.25f + 0.75f * (1 - ph)); } }
+        return; }
     dex_geo g = dex_layout(); float ch = enc_ch(), pad = ch * 0.5f, lh = ch * 1.3f, rl = g.rx1 - g.cx;
     o = add(it, n, max, 0, 0, 1, OVL_RRECT, 18, 22, 30, 0.84f); if (o) { o->x = g.bx0; o->y = g.by0; o->w = g.bx1 - g.bx0; o->h = g.by1 - g.by0; o->radius = 0.06f; }
     o = add(it, n, max, 0, 0, 1, OVL_RRECT, 206, 32, 41, 0.97f); if (o) { o->x = g.cx; o->y = g.cy - g.rh * 0.5f; o->w = rl; o->h = g.rh; o->radius = 0.5f; }
@@ -945,6 +950,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
         if (enc_live()) enc_draw(it, &n, max); }
     if (!g_edit && dex_on() && dm_fork_dex_get) {   // FORK v55: the area dex panel (the overworld)
         char was[32]; memcpy(was, g_dex_now.area, sizeof was); int wn = g_dex_now.n; dm_fork_dex_get(&g_dex_now);
+        { int ready = g_dex_now.active && !g_dex_now.msg[0][0]; if (ready != g_dex_ready) { g_dex_ready = ready; g_dex_open = ready; } }   // v58: pops open when the list is there, folds when it is gone
         if (g_dex_now.active && (strcmp(was, g_dex_now.area) || wn != g_dex_now.n)) { g_dex_page = 0; fprintf(stderr, "[FORK] [touch] area dex: %s, %d Pokémon\n", g_dex_now.area, g_dex_now.n); }
         if (dex_live()) dex_draw(it, &n, max); }   // (v55: drawn only where it can be touched too: before, a panel left over outside a battle could not be moved or folded)
     pthread_mutex_unlock(&g_mu);
