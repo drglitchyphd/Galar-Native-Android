@@ -853,6 +853,7 @@ static void mem_by(void) {
     FILE *f = fopen("/proc/self/smaps", "r"); if (!f) return;
     enum { GUEST, GPU, LIBS, APP, NB }; static const char *const NM[NB] = { "game", "GPU-shared", "libraries", "app" };
     long rss[NB] = { 0 }, swp[NB] = { 0 }; int cur = APP; char ln[512];
+    enum { NN = 48 }; static struct { char name[64]; long kb; } top[NN]; int ntop = 0, slot = -1;   // (the "app" part by mapping name: the malloc heap, the driver, mapped files)
     while (fgets(ln, sizeof ln, f)) {
         unsigned long lo, hi;
         if (sscanf(ln, "%lx-%lx ", &lo, &hi) == 2 && strchr(ln, ' ')) {
@@ -860,9 +861,15 @@ static void mem_by(void) {
             cur = dm_guest_as_contains && dm_guest_as_contains((uintptr_t)lo) ? GUEST
                 : (path && (strstr(path, "kgsl") || strstr(path, "dmabuf") || strstr(path, "/dev/"))) || (anon && strstr(anon, "dmabuf")) ? GPU
                 : path && strstr(path, ".so") ? LIBS : APP;
+            slot = -1;
+            if (cur == APP) { char nm[64]; const char *src = anon ? anon : path ? path : "[anonymous]"; const char *sl = path && !anon ? strrchr(path, '/') : NULL;
+                snprintf(nm, sizeof nm, "%s", sl ? sl + 1 : src); nm[strcspn(nm, "\n")] = 0;
+                { char *d = nm; while (*d && !(*d >= '0' && *d <= '9' && d > nm && d[-1] == ':')) d++; }   // (names kept whole)
+                for (int i = 0; i < ntop; i++) if (!strcmp(top[i].name, nm)) { slot = i; break; }
+                if (slot < 0 && ntop < NN) { slot = ntop++; snprintf(top[slot].name, sizeof top[slot].name, "%s", nm); top[slot].kb = 0; } }
             continue; }
         long kb;
-        if (sscanf(ln, "Rss: %ld kB", &kb) == 1) rss[cur] += kb;
+        if (sscanf(ln, "Rss: %ld kB", &kb) == 1) { rss[cur] += kb; if (cur == APP && slot >= 0) top[slot].kb += kb; }
         else if (sscanf(ln, "Swap: %ld kB", &kb) == 1) swp[cur] += kb;
     }
     fclose(f);
@@ -870,6 +877,11 @@ static void mem_by(void) {
     for (int i = 0; i < NB; i++) n += snprintf(out + n, sizeof out - (size_t)n, " %s %ld MB%s", NM[i], rss[i] / 1024, swp[i] >= 1024 ? "" : ""),
                                   n += swp[i] >= 1024 ? snprintf(out + n, sizeof out - (size_t)n, " (+%ld swapped)", swp[i] / 1024) : 0;
     if (dm_vk_mem_stats) { double b, u; dm_vk_mem_stats(&b, &u); n += snprintf(out + n, sizeof out - (size_t)n, "; engine GPU memory %.0f MB in blocks (%.0f MB in use)", b, u); }
+    fprintf(stderr, "%s\n", out);
+    n = snprintf(out, sizeof out, "[mem-by] app's largest:");
+    for (int k = 0; k < 6; k++) { int b = -1; for (int i = 0; i < ntop; i++) if (top[i].kb > 0 && (b < 0 || top[i].kb > top[b].kb)) b = i;
+        if (b < 0 || top[b].kb < 1024) break; n += snprintf(out + n, sizeof out - (size_t)n, " %s %ld MB;", top[b].name, top[b].kb / 1024); top[b].kb = -top[b].kb; }
+    for (int i = 0; i < ntop; i++) if (top[i].kb < 0) top[i].kb = 0;
     fprintf(stderr, "%s\n", out);
 }
 static void pin_update(void);
