@@ -840,6 +840,34 @@ static void graphics_auto(void) {
         fprintf(stderr, "graphics auto: %s: TV mode (1080p)\n", g_fps_guard ? "steady and cool" : "cooled down");
     }
 }
+// Where the memory goes (4 / 6 GB phones, the user 2026-11-20), once a minute in the log: /proc/self/smaps's resident and swapped sizes by kind: the game's own memory
+//   (the guest address space, hle_svc.c), GPU-shared mappings (kgsl / dma-buf: the game's memory pools mapped for the GPU, driver buffers), native libraries, the
+//   rest of the app (heap, the driver's own, Python); plus the engine's device memory (dm_vk_mem_stats: images and buffers the GPU alone sees, not in smaps)
+int dm_guest_as_contains(uintptr_t a) __attribute__((weak));
+void dm_vk_mem_stats(double *blocks_mb, double *used_mb) __attribute__((weak));
+static void mem_by(void) {
+    FILE *f = fopen("/proc/self/smaps", "r"); if (!f) return;
+    enum { GUEST, GPU, LIBS, APP, NB }; static const char *const NM[NB] = { "game", "GPU-shared", "libraries", "app" };
+    long rss[NB] = { 0 }, swp[NB] = { 0 }; int cur = APP; char ln[512];
+    while (fgets(ln, sizeof ln, f)) {
+        unsigned long lo, hi;
+        if (sscanf(ln, "%lx-%lx ", &lo, &hi) == 2 && strchr(ln, ' ')) {
+            const char *path = strchr(ln, '/'); const char *anon = strstr(ln, "[anon:");
+            cur = dm_guest_as_contains && dm_guest_as_contains((uintptr_t)lo) ? GUEST
+                : (path && (strstr(path, "kgsl") || strstr(path, "dmabuf") || strstr(path, "/dev/"))) || (anon && strstr(anon, "dmabuf")) ? GPU
+                : path && strstr(path, ".so") ? LIBS : APP;
+            continue; }
+        long kb;
+        if (sscanf(ln, "Rss: %ld kB", &kb) == 1) rss[cur] += kb;
+        else if (sscanf(ln, "Swap: %ld kB", &kb) == 1) swp[cur] += kb;
+    }
+    fclose(f);
+    char out[512]; int n = snprintf(out, sizeof out, "[mem-by]");
+    for (int i = 0; i < NB; i++) n += snprintf(out + n, sizeof out - (size_t)n, " %s %ld MB%s", NM[i], rss[i] / 1024, swp[i] >= 1024 ? "" : ""),
+                                  n += swp[i] >= 1024 ? snprintf(out + n, sizeof out - (size_t)n, " (+%ld swapped)", swp[i] / 1024) : 0;
+    if (dm_vk_mem_stats) { double b, u; dm_vk_mem_stats(&b, &u); n += snprintf(out + n, sizeof out - (size_t)n, "; engine GPU memory %.0f MB in blocks (%.0f MB in use)", b, u); }
+    fprintf(stderr, "%s\n", out);
+}
 static void pin_update(void);
 static void *log_mirror(void *p) {
     (void)p; char src[1200]; snprintf(src, sizeof src, "%s/log.txt", g_files);
@@ -848,6 +876,7 @@ static void *log_mirror(void *p) {
         char th[64];
         if (!n) { char t0[64]; thermal_text(t0, sizeof t0); }   // looks the thermal functions up
         graphics_auto(); pin_update();
+        if (n % 12 == 6) mem_by();
         if (n % 6 == 0) fprintf(stderr, "[mem] app %ld MB resident (%ld MB swapped), phone %ld MB available of %ld MB; heat %s\n", kb_of("/proc/self/status", "VmRSS:") / 1024,
                                 kb_of("/proc/self/status", "VmSwap:") / 1024, kb_of("/proc/meminfo", "MemAvailable:") / 1024, kb_of("/proc/meminfo", "MemTotal:") / 1024, thermal_text(th, sizeof th));
         { static char d[256]; if (!d[0]) dl_name(d, sizeof d, "log"); copy_file(src, d); }

@@ -706,6 +706,13 @@ static void fr_add(vblock *b, VkDeviceSize off, VkDeviceSize size) {   // insert
     if (b->nfree == b->cfree) { b->cfree = b->cfree ? b->cfree * 2 : 16; b->fr = realloc(b->fr, b->cfree * sizeof *b->fr); }
     memmove(b->fr + i + 1, b->fr + i, (b->nfree - i) * sizeof *b->fr); b->fr[i].off = off; b->fr[i].size = size; b->nfree++;
 }
+// The engine's own device memory (android_main.c mem_by): the blocks vk_alloc has made, MB, and how much of them is handed out (images, buffers, staging); the game's
+//   memory pools are not in here (they are the game's own pages, mapped for the GPU: /proc/self/smaps sees them)
+void dm_vk_mem_stats(double *blocks_mb, double *used_mb) {
+    double t = 0, u = 0; pthread_mutex_lock(&g_amu);
+    for (int k = 0; k < g_nblocks; k++) { vblock *b = g_blocks[k]; double fr = 0; for (int i = 0; i < b->nfree; i++) fr += (double)b->fr[i].size; t += (double)b->size; u += (double)b->size - fr; }
+    pthread_mutex_unlock(&g_amu); *blocks_mb = t / 1048576.0; *used_mb = u / 1048576.0;
+}
 static vmalloc_t vk_alloc(VkMemoryRequirements rq, VkMemoryPropertyFlags want, int map) {
     int t = mem_type(rq.memoryTypeBits, want, map ? 0 : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     if (t < 0) VDIE("no memory type for bits %#x flags %#x", rq.memoryTypeBits, want);
