@@ -5748,7 +5748,9 @@ static void seg_record_prim(sub_t *s) {
 }
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     uint64_t hp_scene = g_hp_scene_seq == g_hp_seq + 1;   // (HUD-free: this frame's scene copy was made; read before hp_learn starts the next frame)
-    hp_learn(tex_res(t)); g_hp_scene_ok = hp_scene;
+    // (the copy was taken at the pass learnt from the frame before; this frame's own split can differ (a title screen's passes change from frame to frame):
+    //   then the copy is not this frame's scene and this frame goes without HUD-free; S25+, Legends: Arceus's title screen split, 2026-11-20)
+    { vtex *oF = g_hp_F; int ok = g_hp_k; hp_learn(tex_res(t)); g_hp_scene_ok = hp_scene && g_hp_F == oF && g_hp_k == ok; }
     if (hold_on()) {
         if (hold_dec()) { vtex *sx = tex_res(t); if (sx) fgr_read_img(sx, sx->w, sx->h, (uint32_t)sx->fmt, FGR_SHOWN); }   // (shown: its last stores are needed)
         hold_flush(0);   // the whole frame to the GPU, before it is shown
