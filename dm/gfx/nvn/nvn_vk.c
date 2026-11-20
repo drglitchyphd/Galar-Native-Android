@@ -494,6 +494,12 @@ void mtl_init(void) {
     nvn_fmt_vk_bc(f2.features.textureCompressionBC);
     // without BC: re-encoded as ETC2 / EAC / ASTC on upload instead (etc_encode.h), the same size as BC in memory, not 4–8 times it as plain texels;
     // DM_VK_BC_TRANSCODE=off keeps the plain decode
+    // PowerVR (Imagination): BC textures decoded to plain RGBA, not transcoded to ETC2 / EAC / ASTC. On a Tensor G5 (PowerVR D-Series, Arceus-Native-Android #32)
+    //   static world meshes came out flat lavender with the textures transcoded both ways (the BC layer's compute in v0.35-37, the CPU in v0.39); our encoders match
+    //   an independent decoder (tests/etc_check.py), so what is left is how this driver samples them. The plain decode is Mali's path. DM_VK_BC_TRANSCODE=on: transcoded
+    if (g_props.vendorID == 0x1010) { const char *tc = getenv("DM_VK_BC_TRANSCODE");
+        if (!tc) setenv("DM_VK_BC_TRANSCODE", "off", 0);
+        VLOG("PowerVR: BC textures %s (DM_VK_BC_TRANSCODE=%s, %s)", tc && strcmp(tc, "off") ? "transcoded to ETC2 / ASTC" : "decoded to RGBA", tc ? tc : "off", tc ? "env.txt" : "default here"); }
     { const char *tc = getenv("DM_VK_BC_TRANSCODE"); nvn_fmt_vk_etc(!f2.features.textureCompressionBC && f2.features.textureCompressionETC2 && !(tc && !strcmp(tc, "off")), f2.features.textureCompressionASTC_LDR); }
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_qf, .queueCount = 1, .pQueuePriorities = &prio };
