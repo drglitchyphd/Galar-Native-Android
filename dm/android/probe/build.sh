@@ -21,8 +21,8 @@ OUT=${1:-$HERE/out/nxnative-probe.apk}
 W=$HERE/out/work; rm -rf "$W"; mkdir -p "$W/lib/arm64-v8a" "$W/classes" "$(dirname "$OUT")"
 
 "$NDK/toolchains/llvm/prebuilt/$HOST/bin/clang" --target=aarch64-linux-android30 -O2 -Wall -shared -fPIC \
-    -I"$GFX/tex" -I"$GFX/nvn" -Wl,-z,max-page-size=16384 -o "$W/lib/arm64-v8a/libprobe.so" \
-    "$HERE/jni/probe.c" "$HERE/jni/selftest.c" "$GFX/tex/bc_gpu.c" "$GFX/tex/bc_decode.c" "$GFX/tex/etc_encode.c" "$GFX/nvn/nvn_spv.c" \
+    -I"$GFX/tex" -I"$GFX/nvn" -I"$HERE/jni" -Wl,-z,max-page-size=16384 -o "$W/lib/arm64-v8a/libprobe.so" \
+    "$HERE/jni/probe.c" "$HERE/jni/selftest.c" "$HERE/jni/probe_vk.c" "$GFX/tex/bc_gpu.c" "$GFX/tex/bc_decode.c" "$GFX/tex/etc_encode.c" "$GFX/nvn/nvn_spv.c" \
     -lvulkan -llog -lnativewindow -lm
 javac -source 11 -target 11 -classpath "$JAR" -d "$W/classes" "$HERE"/src/com/nxnative/probe/*.java 2>&1 | grep -v "warning: \[options\]" || true
 "$BT/d8" --min-api 30 --lib "$JAR" --output "$W" $(find "$W/classes" -name '*.class')

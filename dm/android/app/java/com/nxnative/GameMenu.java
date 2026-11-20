@@ -624,6 +624,9 @@ public final class GameMenu {
         action(a, t(a, "Record the frame's passes"), t(a, "For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue."),
                () -> { try (java.io.FileWriter w = new java.io.FileWriter(new File(GameSettings.dir(a), "framegraph.req"))) { w.write("3 90"); } catch (IOException e) { }
                        android.widget.Toast.makeText(a, t(a, "Recording in 3 seconds: close the menu."), android.widget.Toast.LENGTH_LONG).show(); });
+        // the driver check (DriverCheck.java) again at the next start: its results dropped
+        action(a, t(a, "Check the graphics driver again"), t(a, "The few-second graphics driver check runs again the next time the game starts (it runs by itself after a system update or a driver change)."),
+               () -> { DriverCheck.forget(GameSettings.dir(a)); android.widget.Toast.makeText(a, t(a, "The driver is checked again at the next start."), android.widget.Toast.LENGTH_LONG).show(); });
         // Mali's white scenes (#47 #53 #64 #68 #69 #72 #75): switches the engine has for narrowing it down, which players could only set by editing env.txt; each one a
         //   tester tries (with a capture) rules a cause in or out. Shown on Mali phones only
         if (DriverPackages.gpu(a).contains("mali")) {

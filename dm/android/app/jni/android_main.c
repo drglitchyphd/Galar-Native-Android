@@ -1108,6 +1108,8 @@ static void host_start(void) {
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
     snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p);
+    // the driver check's settings for this driver (DriverCheck.java, the app's self-tests before Play): under env.txt, over the phone profile; DM_DRIVER_CHECK=0: not read
+    if (!(getenv("DM_DRIVER_CHECK") && !atoi(getenv("DM_DRIVER_CHECK")))) { snprintf(p, sizeof p, "%s/driver-check.env", g_files); env_file(p); }
     // The allocator's cache of large blocks, made big enough for the GPU driver's: on a Galaxy S25+ (Adreno 830) a third of the game thread's time went to the driver
     //   mapping and unmapping memory, calloc → mmap and free → munmap in every vkCmdBeginRendering (about 250 a frame) and in every command pool reset, because its
     //   blocks were larger than scudo's secondary cache keeps (simpleperf, 2026-11-09). Cached, they are reused; the pages go back to the system on Android's own

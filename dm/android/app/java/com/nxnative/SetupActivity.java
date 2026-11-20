@@ -942,5 +942,6 @@ public final class SetupActivity extends Activity {
         try (FileWriter w = new FileWriter(stamp)) { w.write(ver + "\n"); }
         return to;
     }
-    private void startGame() { GameActivity.viaSetup = true; startActivity(new Intent(this, GameActivity.class)); finish(); }
+    // (the driver check first, once per driver: DriverCheck.java)
+    private void startGame() { DriverCheck.thenRun(this, () -> { GameActivity.viaSetup = true; startActivity(new Intent(this, GameActivity.class)); finish(); }); }
 }
