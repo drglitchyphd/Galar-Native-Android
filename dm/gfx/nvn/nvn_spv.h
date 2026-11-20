@@ -33,6 +33,8 @@ uint32_t *spv_probe(const uint32_t *code, size_t words, size_t *out_words, unsig
 uint32_t *spv_swap_out01(const uint32_t *code, size_t words, size_t *out_words);   // fragment outputs at locations 0 and 1 swapped (dual-source blending emulated)
 // Drops capabilities / extensions / execution modes a shader declares but never uses (Float64, fragment shader interlock), in place; returns the new length in words
 size_t spv_strip_unused(uint32_t *code, size_t words);
+// A SPIR-V 1.0 copy for Vulkan 1.0 drivers (unused subgroup capabilities dropped, extensions declared); NULL if it needs more than 1.0 or is 1.0 already
+uint32_t *spv_to_10(const uint32_t *code, size_t words, size_t *out_words);
 // Fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
 void spv_frag_outputs(const uint32_t *code, size_t words, uint8_t cls[8]);
 // A copy whose float outputs at the locations in umask / smask hold the same bits as uint / int outputs (integer colour targets). NULL if nothing to do or not possible

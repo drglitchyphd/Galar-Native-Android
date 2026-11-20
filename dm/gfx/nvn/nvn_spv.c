@@ -956,3 +956,41 @@ none:
     #undef KIND
     #undef SCRUB
 }
+
+// ---- SPIR-V 1.0, for Vulkan 1.0 drivers ----
+// The translator writes SPIR-V 1.3 and declares capabilities every shader of a stage gets: the subgroup ones (GroupNonUniform, Vote, Ballot, Shuffle), which only Vulkan 1.1
+//   has. Of 1,543 Sword / Shield shaders every one declared them and none used a subgroup instruction; nothing else in them is newer than SPIR-V 1.0 but draw parameters
+//   (an extension on Vulkan 1.0). A copy here: version 1.0, the unused subgroup capabilities dropped, OpExtension "SPV_KHR_shader_draw_parameters" added where DrawParameters is
+//   declared and "SPV_KHR_storage_buffer_storage_class" where that storage class is used. NULL when the module really uses something 1.0 cannot have (a subgroup instruction or
+//   built-in, an instruction from a later version), or is already 1.0
+static size_t spv_str_words(const char *s) { return (strlen(s) + 4) / 4; }
+uint32_t *spv_to_10(const uint32_t *code, size_t words, size_t *out_words) {
+    if (words < 5 || code[0] != 0x07230203u || code[1] <= 0x00010000u) return NULL;
+    int drawp = 0, sbsc = 0, has_dp_ext = 0, has_sb_ext = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return NULL; const uint32_t *x = code + i;
+        if (op >= 333 && op <= 366) return NULL;                                   // OpGroupNonUniform*: really used
+        if (op == 330 || op == 331 || op == 332 || (op >= 400 && op <= 403) || op == 4421 || op == 4428) return NULL;   // instructions from SPIR-V 1.1+ / subgroup extensions
+        if (op == OpDecorate && n >= 4 && x[2] == 11 /* BuiltIn */ && ((x[3] >= 36 && x[3] <= 41) || (x[3] >= 4416 && x[3] <= 4420))) return NULL;   // subgroup built-ins
+        if (op == 17 && n == 2 && x[1] == 4427) drawp = 1;                          // DrawParameters
+        if (op == OpVariable && n >= 4 && x[3] == 12) sbsc = 1;                      // StorageBuffer storage class
+        if (op == OpTypePointer && n >= 4 && x[2] == 12) sbsc = 1;
+        if (op == 10 && n >= 2) { const char *s = (const char *)(x + 1);
+            if (!strncmp(s, "SPV_KHR_shader_draw_parameters", 4 * (n - 1))) has_dp_ext = 1;
+            if (!strncmp(s, "SPV_KHR_storage_buffer_storage_class", 4 * (n - 1))) has_sb_ext = 1; }
+        i += n; }
+    const char *add[2]; int nadd = 0;
+    if (drawp && !has_dp_ext) add[nadd++] = "SPV_KHR_shader_draw_parameters";
+    if (sbsc && !has_sb_ext) add[nadd++] = "SPV_KHR_storage_buffer_storage_class";
+    size_t extra = 0; for (int k = 0; k < nadd; k++) extra += 1 + spv_str_words(add[k]);
+    uint32_t *o = malloc(4 * (words + extra)); if (!o) return NULL;
+    memcpy(o, code, 20); o[1] = 0x00010000u;
+    size_t w = 5; int added = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (!added && op != 17) {   // the new extensions right after the last OpCapability (OpExtension comes next in the layout)
+            for (int k = 0; k < nadd; k++) { size_t sw = spv_str_words(add[k]); o[w] = (uint32_t)(1 + sw) << 16 | 10; memset(o + w + 1, 0, 4 * sw); memcpy(o + w + 1, add[k], strlen(add[k])); w += 1 + sw; }
+            added = 1; }
+        int drop = op == 17 && n == 2 && ((x[1] >= 61 && x[1] <= 66) || x[1] == 4423 || x[1] == 4431);   // the subgroup capabilities, unused (checked above)
+        if (!drop) { memcpy(o + w, x, 4 * n); w += n; }
+        i += n; }
+    *out_words = w; return o;
+}
