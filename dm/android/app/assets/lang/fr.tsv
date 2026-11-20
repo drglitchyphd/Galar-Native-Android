@@ -413,3 +413,12 @@ Auto: as the Graphics setting decides	Auto : ce que décide le réglage Graphism
 Quality	Qualité
 Quality: docked: 1080p and the game's full effects	Qualité : sur le dock : 1080p et tous les effets du jeu
 Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Performances : portable : 720p et les réglages plus légers du jeu : plus frais et plus stable
+Draw distance	Distance d'affichage
+Near	Proche
+Default	Par défaut
+Far	Loin
+Very far	Très loin
+Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)	Proche : arbres et détails plus proches, moins de personnes et de Pokémon chargés : plus léger (au prochain lancement)
+Default: as the game draws it	Par défaut : comme le jeu le dessine
+Far: trees, terrain detail and animation half as far again (from the next start)	Loin : arbres, détail du terrain et animation 50 % plus loin (au prochain lancement)
+Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	Très loin : arbres, détail du terrain et animation deux fois plus loin : plus lourd pour le GPU (au prochain lancement)

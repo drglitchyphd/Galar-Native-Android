@@ -588,6 +588,83 @@ static void lowspec(void) {
     setenv("DM_ROMFS_OVERLAY", all, 1);
     fprintf(stderr, "boot: lower specs %d: shorter draw distance, %s (RomFS overlay %s)\n", lv, lv == 2 ? "no shadows" : "lighter shadows", root);
 }
+// "Draw distance" (the settings' DM_ARC_DRAW: near / far / veryfar; Default: none): the player's OWN config files, read from their RomFS, with the distance values
+//   rewritten, laid over the RomFS like Lower specs (nothing of the game's comes with the app). The files are FlatBuffers of named settings, each {name, type, ?, min,
+//   max, values: a vector of strings}: a value is changed by appending its new string at the end of the buffer and pointing the vector's slot at it (offsets point
+//   forward, so the rest stays valid). Changed: bin/misc/app_config/field_common_config.bin kTreeVisibleDistance [0, 200], kTreeFadeDistanceFar [180, 200],
+//   kDistanceOfCameraToTerrainLodPoint 7 (and for Near the people / Pokémon load radii 60 / 40), field_anime_framerate_config.bin distanceBaseValue 60 (where animation
+//   slows down); each times the setting's factor, never over the setting's own max. Read at start: a change applies at the next start
+typedef struct { unsigned char *d; size_t n, cap; } cfgbuf;
+static uint32_t cb_u32(const cfgbuf *b, size_t o) { uint32_t v; memcpy(&v, b->d + o, 4); return v; }
+static int32_t cb_s32(const cfgbuf *b, size_t o) { int32_t v; memcpy(&v, b->d + o, 4); return v; }
+static uint16_t cb_u16(const cfgbuf *b, size_t o) { uint16_t v; memcpy(&v, b->d + o, 2); return v; }
+static int cb_str(const cfgbuf *b, size_t o, char *out, size_t n) {   // the FlatBuffer string at o, 0 if none
+    if (o + 4 > b->n) return 0; uint32_t L = cb_u32(b, o); if (L == 0 || L >= n || o + 4 + L >= b->n || b->d[o + 4 + L]) return 0;
+    memcpy(out, b->d + o + 4, L); out[L] = 0; return 1;
+}
+// the entry table named `name`: its values vector (*vec) and its max (*mx); 0 if not found
+static int cb_entry(const cfgbuf *b, const char *name, size_t *vec, double *mx) {
+    size_t L = strlen(name);
+    for (size_t so = 0; so + 4 + L < b->n; so += 4) {
+        if (cb_u32(b, so) != L || memcmp(b->d + so + 4, name, L) || b->d[so + 4 + L]) continue;
+        for (size_t p = 0; p + 4 <= so; p += 4) {
+            if (p + cb_u32(b, p) != so) continue;   // the slot pointing at the name
+            for (size_t t = p >= 64 ? p - 64 : 0; t <= p; t += 4) {   // the table whose field 0 is that slot
+                int64_t vt = (int64_t)t - cb_s32(b, t); if (vt < 0 || (size_t)vt + 16 > b->n) continue;
+                uint16_t vsz = cb_u16(b, (size_t)vt); if (vsz < 16 || (size_t)vt + vsz > b->n) continue;
+                if (t + cb_u16(b, (size_t)vt + 4) != p) continue;
+                uint16_t fmx = cb_u16(b, (size_t)vt + 4 + 8), fv = cb_u16(b, (size_t)vt + 4 + 10); if (!fv) return 0;
+                char m[32]; *mx = fmx && cb_str(b, t + fmx + cb_u32(b, t + fmx), m, sizeof m) ? atof(m) : 1e9;
+                size_t va = t + fv; *vec = va + cb_u32(b, va); return *vec + 4 <= b->n; } } }
+    return 0;
+}
+static int cb_append(cfgbuf *b, const char *s) {   // a new string at the end (4-aligned); its offset, or -1
+    size_t L = strlen(s), need = 4 + L + 1, at = (b->n + 3) & ~(size_t)3, end = (at + need + 3) & ~(size_t)3;
+    if (end > b->cap) { size_t c = end + 256; unsigned char *d = realloc(b->d, c); if (!d) return -1; b->d = d; b->cap = c; }
+    memset(b->d + b->n, 0, end - b->n); uint32_t l32 = (uint32_t)L; memcpy(b->d + at, &l32, 4); memcpy(b->d + at + 4, s, L); b->n = end; return (int)at;
+}
+// every value of the entry times k, as an integer if `whole`, never over its max; the count changed
+static int cb_scale(cfgbuf *b, const char *name, double k, int whole) {
+    size_t vec; double mx; if (!cb_entry(b, name, &vec, &mx)) return 0;
+    uint32_t cnt = cb_u32(b, vec); int n = 0;
+    for (uint32_t i = 0; i < cnt && i < 8; i++) {
+        size_t es = vec + 4 + 4 * i; char v[32]; if (!cb_str(b, es + cb_u32(b, es), v, sizeof v)) continue;
+        double x = atof(v) * k; if (x > mx) x = mx;
+        char o[32]; if (whole) snprintf(o, sizeof o, "%d", (int)(x + (x >= 0 ? 0.5 : -0.5))); else snprintf(o, sizeof o, "%g", x);
+        int at = cb_append(b, o); if (at < 0) return n;
+        uint32_t rel = (uint32_t)((size_t)at - es); memcpy(b->d + es, &rel, 4); n++;
+    }
+    return n;
+}
+static int cb_load(const char *path, cfgbuf *b) {
+    FILE *f = fopen(path, "rb"); if (!f) return 0;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 16 || n > (1 << 20)) { fclose(f); return 0; }
+    b->d = malloc((size_t)n + 512); b->cap = (size_t)n + 512; b->n = (size_t)n;
+    int ok = b->d && fread(b->d, 1, (size_t)n, f) == (size_t)n; fclose(f); return ok;
+}
+static void draw_distance(void) {
+    const char *e = getenv("DM_ARC_DRAW"); if (!e || !*e) return;
+    double k = !strcmp(e, "near") ? 0.75 : !strcmp(e, "far") ? 1.5 : !strcmp(e, "veryfar") ? 2.0 : 1.0; if (k == 1.0) return;
+    const char *ls = getenv("DM_LOWSPEC"); if (ls && atoi(ls) > 0) { fprintf(stderr, "boot: draw distance %s left out: Lower specs is on (its own files)\n", e); return; }
+    const char *rf = getenv("DM_ROMFS"); char rom[1100]; snprintf(rom, sizeof rom, "%s", rf && *rf ? rf : ""); if (!*rom) snprintf(rom, sizeof rom, "%s/RomFS", g_game);
+    char root[1100], in[1300], out[1300]; snprintf(root, sizeof root, "%s/drawdist/romfs", g_files);
+    int nc = 0, na = 0; cfgbuf b = { 0 };
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_common_config.bin", rom);
+    if (cb_load(in, &b)) {
+        nc += cb_scale(&b, "kTreeVisibleDistance", k, 0); nc += cb_scale(&b, "kTreeFadeDistanceFar", k, 0); nc += cb_scale(&b, "kDistanceOfCameraToTerrainLodPoint", k, 0);
+        if (k < 1) { nc += cb_scale(&b, "kArea00NpcLoadRadius", k, 1); nc += cb_scale(&b, "kArea00NpcPokeLoadRadius", k, 1); }   // (Near: fewer people and Pokémon loaded too)
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_common_config.bin", root); if (nc && !write_all(out, b.d, b.n)) nc = -1; free(b.d); }
+    memset(&b, 0, sizeof b);
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_anime_framerate_config.bin", rom);
+    if (cb_load(in, &b)) { na = cb_scale(&b, "distanceBaseValue", k, 0);
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_anime_framerate_config.bin", root); if (na && !write_all(out, b.d, b.n)) na = -1; free(b.d); }
+    if (nc <= 0 && na <= 0) { fprintf(stderr, "boot: [RED] draw distance %s: the player's config files could not be read or changed (%s)\n", e, rom); return; }
+    const char *o = getenv("DM_ROMFS_OVERLAY"); char all[4096];
+    snprintf(all, sizeof all, "%s%s%s", root, o && *o ? ":" : "", o && *o ? o : "");   // (ahead of the other overlays)
+    setenv("DM_ROMFS_OVERLAY", all, 1);
+    fprintf(stderr, "boot: draw distance %s (x%.2f): %d value(s) in field_common_config, %d in field_anime_framerate_config, from the player's own files (RomFS overlay %s)\n", e, k, nc, na, root);
+}
 // "Style move effects" (the settings' DM_ARC_STYLE_FX: off unless 1): the strong / agile style moves' start effects replaced by the No More Styles 1.2 mod's nearly
 //   empty ones (nostyles_files.h), laid over the game's RomFS like Lower specs. With the game's own effects, grey boxes covered the screen on Adreno and Xclipse
 //   (Arceus-Native-Android #14 #15 #20); the moves and their power are unchanged, only the full-screen animation as they start goes
@@ -606,6 +683,7 @@ static void style_fx(void) {
 #else
 static void lowspec(void) { }
 static void style_fx(void) { }
+static void draw_distance(void) { }
 #endif
 // "No reflections" (profile key flat_normals, the menu's DM_FLAT_NORMALS, on unless 0): the game's terrain packs with their ground and bark normal maps made flat, made by
 //   the setup from the player's own files (dm/android/tools/flat_normals.py) into <game>/flat_normals, laid over the RomFS after every mod (hle_fs.c DM_ROMFS_OVERLAY, first
@@ -1007,6 +1085,7 @@ static void host_start(void) {
     mods_romfs(p);
     lowspec();   // Legends: Arceus's "Lower specs" (DM_LOWSPEC): its RomFS files first in the overlay (after the mods: mods_romfs takes a set DM_ROMFS_OVERLAY for env.txt's choice)
     style_fx();   // Legends: Arceus's "Style move effects" (off unless DM_ARC_STYLE_FX=1): the No More Styles start effects first in the overlay
+    draw_distance();   // Legends: Arceus's "Draw distance" (DM_ARC_DRAW): the player's own config files with the distances changed, first in the overlay
     flat_normals();   // Legends: Arceus's "No reflections": its flat normal maps last in the overlay, under any mod
     SETP("DM_VK_PSO_RECORD", "vk_pipelines.bin"); SETP("DM_VK_PCACHE", "vk_pipeline_cache.bin"); SETG("DM_VK_PSO_SEED", "vk_pipelines_seed.bin");
     snprintf(q, sizeof q, "%s/shaders.pak", g_game); if (!stat(q, &st)) setenv("DM_SPV_PAK", q, 0);   // the packed shader set, else vk/b-<chain>/

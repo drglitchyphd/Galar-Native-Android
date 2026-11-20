@@ -329,6 +329,12 @@ public final class GameMenu {
         if (GameSettings.arceus(a)) choice(a, "DM_LOWSPEC", t(a, "Lower specs"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", t(a, p[8].isEmpty() ? "Off" : "On")) },
             { "0", t(a, "Off"), t(a, "Off: the world as the game draws it") },
             { "1", t(a, "On"), t(a, "On: shorter draw distance for Pokémon, people and trees, lighter shadows") }, { "2", t(a, "Lowest"), t(a, "Lowest: shorter draw distance and no shadows") } });
+        // Legends: Arceus: how far trees, terrain detail and animation reach (android_main.c draw_distance: the player's own config files, changed at start)
+        if (GameSettings.arceus(a)) choice(a, "DM_ARC_DRAW", t(a, "Draw distance"), new String[][] {
+            { "near", t(a, "Near"), t(a, "Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)") },
+            { "", t(a, "Default"), t(a, "Default: as the game draws it") },
+            { "far", t(a, "Far"), t(a, "Far: trees, terrain detail and animation half as far again (from the next start)") },
+            { "veryfar", t(a, "Very far"), t(a, "Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)") } });
         // Legends: Arceus: the strong / agile style moves' start effects (android_main.c style_fx, the No More Styles 1.2 mod): off by default, they covered the screen with grey boxes
         if (GameSettings.arceus(a)) choice(a, "DM_ARC_STYLE_FX", t(a, "Style move effects"), new String[][] { { "", t(a, "Off"), t(a, "Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before") },
             { "1", t(a, "On"), t(a, "On: the game's own animation (grey boxes on some phones)") } });
