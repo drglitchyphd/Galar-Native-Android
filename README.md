@@ -23,7 +23,7 @@
 
 ## Requirements
 
-- Android 12+, arm64, Vulkan 1.1+.
+- Android 12+, arm64, Vulkan 1.0 or later.
 - Free space for the game's files plus about 1 GB of translated shaders.
 - 8 GB of RAM or more is best. On weaker phones, **Lower specs** turns on by itself.
 
@@ -37,27 +37,25 @@
 
 ## What's new
 
-- **Setup fixes from Galar Native (v0.44).** Setup no longer stops on a captured shader that's damaged or also in the game files. 4 GB phones run fewer setup workers, so Android doesn't end setup partway. The shader pack is compressed on every core. New on the setup screen: **Keep the phone cooler** (half the workers, slower).
+**v0.45**
 
-- **Crash fixes (v0.42).** The engine's own code no longer runs on a game thread's small 16 KB stack: it crashed there on some phones (#46). A GPU crash ("device lost") now counts as a crash, so the next start offers the safe options instead of failing the same way again.
+- **A steady 30 fps.** When the phone can't keep up, the game steps to lighter settings until it can: a smaller 3D picture first, then the game's own handheld mode, and as a last step a shorter draw distance from the next start. It steps back up once things calm down.
+- **Heat guard.** When the phone gets hot, the picture gets lighter before the phone throttles itself, on every Graphics setting.
+- **Resolution: 720p, 1080p or 1440p.** 1440p works again: the game's own memory now grows with it.
+- **Draw distance slider** (50–200 %), and **Mode: Quality or Performance** (docked or handheld), changed while you play.
+- **Frame rate: Auto, 30, 60 or Dynamic**, changed while you play.
+- **Frame generation** draws the in-between pictures without the HUD, uses depth to keep characters clean, and follows the game's own camera on fast turns.
+- **Touch:** push the stick past its ring to dash; swipe the **+** button left or right to change your ride Pokémon. Quick camera swipes no longer switch the selected item.
+- **Lower specs and Style move effects** are now made from your own game files.
+- **Fixes for more phones:** Vulkan 1.0 drivers, older Snapdragon drivers (exploding polygons), PowerVR textures, older ARMv8.0 CPUs, Chinese text (with the console's shared fonts), Mali phones whose driver refuses the screen setup, and fixes found by Vulkan's own validation checks.
 
-- **1440p off again (v0.41).** v0.40's 1440p made the game close at every start: the game's own memory for render targets is sized for 1080p. v0.41 ignores the setting, so players who picked it can play again with nothing to change. New for older Adreno phones with exploding polygons: ☰ → Model tests (Adreno) → **Copy shared data on the GPU**, a test (#34, #46). Each start now draws two test squares off-screen and checks their shape; a driver that misreads per-draw vertex sizes (the exploding polygons of #34) gets the safe vertex mode by itself.
-
-- **Widescreen, 1440p and mods (v0.40).** ☰ → Picture → **Widescreen** widens the game's camera to your screen's own shape, with the HUD kept 16:9 in the middle; nothing is stretched. Off by default. Fl4sh's `.pchtxt` mods that keep data or code of their own (Dynamic FPS, the Ultrawide mods) no longer crash the game. Controls no longer stop working when the phone gets hot and Graphics Auto switches modes (#49). ☰ → Performance → **Barriers between passes** lets Xclipse, Mali and PowerVR players trade steady shadows for speed (#48).
-
-- **Graphics fixes (v0.39).** Exploded and stretched polygons on older Adreno drivers (Vulkan 1.1) are fixed: vertex sizes are now built into each pipeline there (`DM_VK_NO_EDS=0` goes back). Background pipeline building (`DM_VK_ASYNC_PSO`) is now off everywhere, as it left objects missing for frames. Relaxed barriers are Adreno-only (dark, flickering shadows on Xclipse, PowerVR and Mali). PowerVR converts BC textures on the CPU (purple objects).
-
-- **Mali crash fix (v0.21).** Arm's driver makes more screen buffers than the game asks for (14 for 8 on a Mali-G57). The game had room for 8, so on some Mali phones the driver closed it a few frames in. It now has room for 32 and uses the count the driver reports.
-- **Multiply by zero as on the Switch (Mali test, v0.21).** On the Switch's GPU, 0 × infinity is 0. On phones it's NaN, which can show as white, black or missing surfaces. Turning on ☰ → White screen tests (Mali) → *Multiply by zero as on the Switch* rewrites each shader's SPIR-V as it loads so that every multiply follows the Switch's rule. Off by default and a little slower; tell us in an issue if it changes your screen.
-- **CPU pinning (v0.22).** The game keeps its two busiest threads on the phone's fastest cores. When a hot phone slows those cores down, the threads are now never squeezed onto fewer cores than there are threads. A hot Galaxy Z Flip5 had put both on one slowed core.
-- **Two speed-ups, on for Adreno (v0.23).** `DM_VK_PASS_DEFER` keeps the current render pass open when the game changes targets in a way that needs no new pass. `DM_VK_ASYNC_PSO` builds pipelines the shader lists didn't have in the background instead of pausing the frame. Both are on by default on Adreno and off on Mali and the rest. Put `=0` or `=1` in `env.txt` to override, and tell us what changed.
-- **Link-time optimization (v0.23).** The engine is compiled as a whole instead of file by file. It should take less CPU time per frame; not yet measured on a phone.
+**Earlier:** setup fixes and a cooler setup option (v0.44), crash fixes (v0.42), Widescreen with the HUD kept 16:9 (v0.40), the Mali crash fix and the Mali test switches (v0.21), and faster pipelines on Adreno (v0.23). The [releases page](https://github.com/simipoB/Arceus-Native-Android/releases) has each version's notes.
 
 ## Playing
 
 Arceus is played by touch the way the game invites: only the movement stick, **−**, **+** and **☰** (settings) are on screen, and the rest happens on the game itself.
 
-- **In the world:** tap to interact (A), swipe up to throw. The **Poké Ball button** aims and throws, and the **lock-on button** sits above it.
+- **In the world:** tap to interact (A), swipe up to throw. The **Poké Ball button** aims and throws, and the **lock-on button** sits above it. Push the stick past its ring to dash; swipe **+** left or right to change your ride Pokémon.
 - **In menus:** tap items directly. The game's own **B Back** prompt is the back button. On the map, drag to pan and pinch to zoom.
 - **Controllers:** hide the touch controls automatically. Hold **−** and **+** together for 1 s for ☰, or **−** for 3 s to remap buttons.
 - **Touch controls:** frosted grey so they sit on the picture, and they fade when untouched. Move them, or switch on L3 / R3, in ☰ → Controls.
@@ -67,19 +65,24 @@ Arceus is played by touch the way the game invites: only the movement stick, **�
 
 | Setting | Choices |
 | --- | --- |
-| Picture | 16:9, fill screen, 20:9 |
+| Picture | 16:9, fill screen, widescreen (the HUD stays 16:9) |
+| Resolution | 720p, 1080p, 1440p (from the next start) |
+| 3D render scale | 50–100 % |
 | Upscaling | Auto, Sharp, SGSR, Smooth |
-| Frame generation | Off, On (experimental), Lossless Scaling (after **Import Lossless.dll**) |
-| Graphics | Auto, High (1080p), Low (720p), Adaptive |
+| Frame rate | Auto, 30, 60, Dynamic (changes while you play) |
+| Frame generation | Off, On, Lossless Scaling (after **Import Lossless.dll**) |
+| Graphics | Auto, High, Low, Adaptive |
+| Mode | Auto, Quality (docked), Performance (handheld) |
+| Draw distance | 50–200 % (from the next start) |
 | No reflections | On (default): smooth ground lighting, no purple shadows. Off: the ground's full lighting detail |
 | Lower specs | Auto, Off, On (shorter draw distance, lighter shadows), Lowest |
-| Textures | Auto, Full, Half; texture format (compact on Mali / Xclipse / PowerVR) |
-| Controls | Button layout, remapping, touch look and layout, rumble, vibrate on press |
+| Textures | Auto, Full, Half |
+| Controls | Button layout, remapping, touch look and layout, edge-run, ride button, rumble, vibrate on press |
 | Performance overlay | fps, temperature, GPU, free memory, battery |
 | Mods, saves | Import, switch, order and annotate mods; export / import saves |
 | Language | English, Español, Português, Français, 日本語 (Auto: the phone's) |
 
-**Auto** rates the phone's CPU, GPU and RAM and picks graphics, textures and filtering from that. The menu shows what it picked. When the phone runs hot, the 3D resolution drops to about 720p until it cools, so the frame rate holds.
+**Auto** rates the phone's CPU, GPU and RAM and picks graphics, textures and filtering from that; while you play it keeps the frame rate steady and the phone cool. The menu shows what it picked.
 
 ## Frame generation
 
