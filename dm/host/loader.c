@@ -797,9 +797,28 @@ void run_module_inits(void) {
 //   4x4 column-major (main+0x29fb138: the scene's constant buffer takes them from there). Each read through process_vm_readv: a pointer that is not (yet) valid
 //   while a scene loads fails the read instead of faulting. 1: vp = projection x view
 static int peek(uint64_t a, void *o, size_t n) { struct iovec l = { o, n }, r = { (void *)(uintptr_t)a, n }; return a && process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n; }
+// Sword and Shield 1.3.2 (the same data and struct offsets in both): the graphics system S = *(main+0x26365b8) (hle_resscale's global), its render-pipeline holder
+//   *(S+0x88), the render manager *(holder+0x58), the main 3D render view *(manager+0x160) (the game's own GetMainRenderView, Shield main+0xf67310 / Sword +0xf672e0),
+//   and that view's camera object V = *(view+0x128), which main+0x607670 (the Widescreen patch's function) rebuilds each update from the active camera: view at
+//   V+0x60, projection +0xa0, view-projection +0xe0, 4x4 column-major, GL form. A perspective camera has projection col2.w = -1 and col3.w = 0 (an orthographic one
+//   is skipped), the view's bottom row (0,0,0,1)
+static int galar_cam_viewproj(uint8_t *base, float vp[16]) {
+    uint64_t S, X, M, RV, V; float m[48];
+    if (!peek((uint64_t)(uintptr_t)(base + 0x26365b8), &S, 8) || !peek(S + 0x88, &X, 8) || !peek(X + 0x58, &M, 8) || !peek(M + 0x160, &RV, 8) || !peek(RV + 0x128, &V, 8)) return 0;
+    if (!peek(V + 0x60, m, sizeof m)) return 0;   // view, projection, view-projection
+    for (int i = 0; i < 48; i++) if (!__builtin_isfinite(m[i])) return 0;
+    if (m[16 + 11] != -1.0f || m[16 + 15] != 0.0f) return 0;                                  // perspective only
+    if (m[3] != 0.0f || m[7] != 0.0f || m[11] != 0.0f || m[15] != 1.0f) return 0;            // a rigid view
+    for (int c = 0; c < 3; c++) { float l = m[c * 4] * m[c * 4] + m[c * 4 + 1] * m[c * 4 + 1] + m[c * 4 + 2] * m[c * 4 + 2]; if (l < 0.998f || l > 1.002f) return 0; }
+    memcpy(vp, m + 32, 64);
+    return 1;
+}
 int dm_cam_viewproj(float vp[16]) {
-    static uint8_t *base; static int tried;
-    if (!tried) { tried = 1; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") && !strncasecmp(g_mod[i].build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) base = g_mod[i].base; }
+    static uint8_t *base, *galar; static int tried;
+    if (!tried) { tried = 1; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+        if (!strncasecmp(g_mod[i].build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) base = g_mod[i].base;
+        else if (!strncasecmp(g_mod[i].build_id, "a16802625e7826bf83b6f9708e475b91", 32) || !strncasecmp(g_mod[i].build_id, "a3b75bcd3311385aeed67fbeeb79cbb7", 32)) galar = g_mod[i].base; } }
+    if (galar) return galar_cam_viewproj(galar, vp);
     if (!base) return 0;
     const uint64_t key = 0x6723799257d05608ull; uint64_t R, n, bk, node;
     if (!peek((uint64_t)(uintptr_t)(base + 0x42ef5a8), &R, 8) || !peek(R + 0xa0, &n, 8) || !n || n > (1u << 20)) return 0;
