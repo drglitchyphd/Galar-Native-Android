@@ -2082,7 +2082,11 @@ NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, in
 // Handle for texel fetches only (Monster Hunter Rise): a fetch reads the texture descriptor and no sampler, so the handle is the texture ID with sampler ID 0
 NVN(nvnDeviceGetTexelFetchHandle, NVNtextureHandle, const NVNdevice *d, int tex) { (void)d; return (NVNtextureHandle)(uint64_t)(uint32_t)tex; }
 // Counter timestamps are 19.2 MHz GPU ticks (nvn_mtl.m gpu_ticks: ns × 12 / 625); convert back to ns. They used to be returned as is, about 52 times smaller than GetCurrentTimestampInNanoseconds, so subtracting one from the other gave garbage
-NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return c->timestamp * 625 / 12; }
+// DM_GPU_TS=614 (a test switch for the stadium-crowd flicker at 60; off by default): counter timestamps in the Switch GPU's own 614.4 MHz ticks (ns x 384 / 625), as
+//   the hardware writes them. Sword / Shield read the two timestamps of a frame straight from memory and convert them as 614.4 MHz ticks, so on the 19.2 MHz clock
+//   the GPU time they measure is 32 times too small (their step index, main+0x5df360). This conversion follows the same switch
+int dm_gpu_ts614(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_GPU_TS"); v = e && !strcmp(e, "614"); } return v; }
+NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return dm_gpu_ts614() ? c->timestamp * 625 / 384 : c->timestamp * 625 / 12; }
 // Current GPU time (ns): the same clock as the counter timestamps -- the guest clock (guest_ns, nvn_mtl.m gpu_ticks)
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) { (void)d; return guest_ns(); }
 NVN(nvnDeviceRegisterFastClearColor, NVNboolean, NVNdevice *d, const float *c, NVNformat f) { (void)d; (void)c; (void)f; return 1; }

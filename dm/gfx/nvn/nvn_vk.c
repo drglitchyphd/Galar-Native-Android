@@ -1243,7 +1243,8 @@ static sub_t *g_inflight[NSUB * 2]; static int g_nin;   // submitted, not yet co
 static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
 static int on_sub_thread(void) { return atomic_load(&g_sub_thread_set) && pthread_equal(pthread_self(), g_sub_thread); }
 
-static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) g = mono_ns(); return g * 12 / 625; }
+int dm_gpu_ts614(void);   // (hle_nvn.c: DM_GPU_TS=614, the Switch GPU's 614.4 MHz ticks)
+static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) g = mono_ns(); return dm_gpu_ts614() ? g * 384 / 625 : g * 12 / 625; }
 static void wb_apply(sub_t *s) {
     for (int i = 0; i < s->nwb; i++) {
         pthread_mutex_lock(&g_mu); int k = pool_find(s->wb[i].addr, s->wb[i].n); pool_ent e = k >= 0 ? g_pools[k] : (pool_ent){0}; pthread_mutex_unlock(&g_mu);

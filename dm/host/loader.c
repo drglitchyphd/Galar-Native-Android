@@ -635,6 +635,21 @@ static int galar_shadow_patch(module_t *m, int64_t p0, int64_t p1) {
     LOG("%s: shadows %s for %s: shadow maps 512 x 512%s (DM_SHADOWS)", m->name, e, g, lowest ? ", the near cascade only" : "");
     return lowest ? 6 : 4;
 }
+// Step pin (DM_STEP_PIN=1, a test switch for the stadium-crowd flicker at 60; off by default) for Sword and Shield 1.3.2. The game picks its step each frame from its
+//   frame-time table (main+0x203eeb0: 16.7, 33.3, 50, 66.7, 83.3 ms) by an index it derives from its own measured CPU / GPU time (main+0x5df360 / main+0x5df4b0,
+//   CSEL W2 ... at +0x5df460 and +0x5df508). Only entry 1 (+0x203eeb8) is the step word the host feeds at 60 (hle_nvn.c vstep_tick); the other entries are the
+//   game's own. Pinned, both selects give index 1 (MOV W2, #1): the step is always that word -- 33.3 ms at the game's own 30, the host's real step at 60. Same
+//   addresses in Sword and Shield (this part of the code is not shifted)
+static int galar_step_pin(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_STEP_PIN"); int64_t d;
+    if (!e || strcmp(e, "1")) return 0;
+    int gi = galar_shift(m, &d); if (!gi) return 0;
+    uint64_t so[2] = { 0x5df460, 0x5df508 }; const uint32_t ow[2] = { 0x1a89c2c2u, 0x1a8bc122u }, nw = 0x52800022u;
+    if (!words_are(m, p0, p1, so, ow, 2)) { LOG("[RED] %s: step pin not applied (the step code differs)", m->name); return 0; }
+    for (int i = 0; i < 2; i++) memcpy(m->base + so[i], &nw, 4);
+    LOG("%s: step pin for %s: the game's step is always the step word (DM_STEP_PIN, test switch)", m->name, gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2");
+    return 2;
+}
 // Draw distance (DM_DRAW_DIST, percent 50-200, Graphics → Draw distance; from the next start) for Sword and Shield 1.3.2: the terrain detail layers (grass and the other
 //   instanced field objects, terrain_draw_setting's visible distance and fade bands, main+0xccb000) are shown by a squared camera distance computed once per layer in
 //   main+0xccec80 (FADDP V2.2S at +0xcced80, stored and reused by every comparison). That one is scaled by 1 / k^2 in a small cave at the end of the rewriter's code area:
@@ -666,7 +681,7 @@ static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, in
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
     n += wide_patch(m, lim, p0, p1);
-    n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1);
+    n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1) + galar_step_pin(m, p0, p1);
     n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
     n += wide_render_patch(m, p0, p1);
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));

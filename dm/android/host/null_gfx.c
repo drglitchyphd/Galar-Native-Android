@@ -8,7 +8,8 @@
 #include <time.h>
 
 static _Atomic uint64_t g_fence, g_present_n;
-static uint64_t ticks(void) { uint64_t g = guest_ns(); if (!g) g = now_ns(); return g * 12 / 625; }
+int dm_gpu_ts614(void);   // (hle_nvn.c: DM_GPU_TS=614)
+static uint64_t ticks(void) { uint64_t g = guest_ns(); if (!g) g = now_ns(); return dm_gpu_ts614() ? g * 384 / 625 : g * 12 / 625; }
 
 void mtl_init(void) {}
 void mtl_set_depth_zero(int on) { (void)on; }
