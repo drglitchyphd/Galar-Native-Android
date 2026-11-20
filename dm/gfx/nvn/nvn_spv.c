@@ -273,6 +273,66 @@ size_t spv_strip_unused(uint32_t *code, size_t words) {
     return w;
 }
 
+// Unused ClipDistance / CullDistance members of the per-vertex block, dropped. The translator declares every vertex shader's gl_PerVertex with ClipDistance[8] and
+//   CullDistance[1], written by none of them (Shield's 18,300): 9 is over the 8 of maxCombinedClipAndCullDistances most GPUs have (VUID-RuntimeSpirv-00710), and the
+//   CullDistance capability needs shaderCullDistance, which some drivers lack. Only when they are the block's last members and nothing reaches them: every use of a
+//   variable of the block is an access chain whose first index is a constant naming another member (else the shader is left as it is). Their capabilities go
+//   when no ClipDistance / CullDistance is left. In place; the new word count
+size_t spv_strip_clipcull(uint32_t *code, size_t words) {
+    enum { OpMemberName = 6, OpFunctionCall = 57, OpLoad = 61, OpStore = 62, OpCopyMemory = 63, OpAccessChain = 65, OpInBoundsAccessChain = 66, OpPtrAccessChain = 67,
+           OpMemberDecorate = 72, OpCopyObject = 83, OpSelect = 169, OpPhi = 245, MAXS = 4 };
+    if (words < 5 || code[0] != 0x07230203u) return words;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return words;
+    uint32_t sid[MAXS], smask[MAXS], skeep[MAXS], sbits[MAXS][2]; int ns = 0, var_clip = 0, var_cull = 0;   // sbits: the members that are ClipDistance / CullDistance
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return words; const uint32_t *x = code + i;
+        if (op == OpMemberDecorate && n >= 5 && x[3] == DecBuiltIn && (x[4] == 3 || x[4] == 4)) {
+            if (x[2] >= 32) return words;
+            int k = 0; while (k < ns && sid[k] != x[1]) k++;
+            if (k == ns) { if (ns == MAXS) return words; sid[ns] = x[1]; smask[ns] = sbits[ns][0] = sbits[ns][1] = 0; skeep[ns] = 32; ns++; }
+            smask[k] |= 1u << x[2]; sbits[k][x[4] - 3] |= 1u << x[2]; }
+        else if (op == OpDecorate && n >= 4 && x[2] == DecBuiltIn) { if (x[3] == 3) var_clip = 1; else if (x[3] == 4) var_cull = 1; }
+        i += n; }
+    if (!ns) return words;
+    uint8_t *of = calloc(bound, 1); uint32_t *cv = calloc(bound, 4);   // of: 1 + the struct's index for its pointer types and variables (bit 7: a variable); cv: constants + 1
+    if (!of || !cv) { free(of); free(cv); return words; }
+    int ok = 1, seen = 0;
+    for (size_t i = 5; i < words && ok;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpTypeStruct && n >= 2) {
+            for (int k = 0; k < ns; k++) if (sid[k] == x[1]) {   // the dropped members must be the last ones
+                uint32_t cnt = n - 2, lo = 0; while (lo < cnt && !(smask[k] >> lo & 1)) lo++;
+                if (cnt > 32 || !lo || lo == cnt || smask[k] != (uint32_t)(((uint64_t)1 << cnt) - ((uint64_t)1 << lo))) ok = 0;
+                skeep[k] = lo; seen++; }
+            for (uint32_t m = 2; m < n; m++) for (int k = 0; k < ns; k++) if (x[m] == sid[k]) ok = 0;   // (nested in another struct)
+        }
+        else if ((op == OpTypeArray || op == OpTypeRuntimeArray) && n >= 3) { for (int k = 0; k < ns; k++) if (x[2] == sid[k]) ok = 0; }   // (arrays of it: geometry / tessellation)
+        else if (op == OpTypePointer && n >= 4 && x[1] < bound) { for (int k = 0; k < ns; k++) if (x[3] == sid[k]) of[x[1]] = (uint8_t)(1 + k); }
+        else if (op == OpConstant && n == 4 && x[2] < bound) cv[x[2]] = x[3] + 1;
+        else if (op == OpVariable && n >= 4 && x[1] < bound && x[2] < bound && of[x[1]]) of[x[2]] = (uint8_t)(of[x[1]] | 0x80);
+        else if ((op == OpAccessChain || op == OpInBoundsAccessChain) && n >= 4 && x[3] < bound && (of[x[3]] & 0x80)) {
+            int k = (of[x[3]] & 0x7f) - 1;
+            if (n < 5 || x[4] >= bound || !cv[x[4]] || cv[x[4]] - 1 >= skeep[k]) ok = 0; }
+        else {   // any other use of such a variable: left as it is
+            uint32_t a = 0, b = 0;
+            switch (op) { case OpLoad: case OpCopyObject: case OpPtrAccessChain: a = 3; b = 4; break; case OpStore: a = 1; b = 2; break; case OpCopyMemory: a = 1; b = 3; break;
+                          case OpFunctionCall: case OpSelect: a = 4; b = n; break; case OpPhi: a = 3; b = n; break; default: break; }
+            for (uint32_t m = a; m < b && m < n; m++) if (x[m] < bound && (of[x[m]] & 0x80)) ok = 0;
+        }
+        i += n; }
+    free(of); free(cv);
+    if (!ok || seen != ns) return words;
+    int left_clip = var_clip, left_cull = var_cull;
+    for (int k = 0; k < ns; k++) { uint32_t keep = (1u << skeep[k]) - 1; if (sbits[k][0] & keep) left_clip = 1; if (sbits[k][1] & keep) left_cull = 1; }
+    size_t w = 5;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i; int drop = 0; uint32_t nn = n;
+        int k = -1; if ((op == OpTypeStruct || op == OpMemberDecorate || op == OpMemberName) && n >= 2) for (int j = 0; j < ns; j++) if (sid[j] == x[1]) k = j;
+        if (k >= 0 && op == OpTypeStruct) nn = 2 + skeep[k];
+        else if (k >= 0 && n >= 3 && x[2] >= skeep[k]) drop = 1;   // (their member decorations and names)
+        if (op == 17 /* OpCapability */ && n == 2 && ((x[1] == 32 && !left_clip) || (x[1] == 33 && !left_cull))) drop = 1;
+        if (!drop) { memmove(code + w, x, 4 * nn); code[w] = nn << 16 | op; w += nn; }
+        i += n; }
+    return w;
+}
+
 // The component class of each fragment output location: 0 float, 1 uint, 2 sint, 255 none
 void spv_frag_outputs(const uint32_t *code, size_t words, uint8_t cls[8]) {
     memset(cls, 255, 8);

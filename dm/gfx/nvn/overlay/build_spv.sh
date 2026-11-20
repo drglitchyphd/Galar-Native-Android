@@ -59,3 +59,15 @@ for n in ("fsr_easu", "fsr_rcas"):
 open(sys.argv[2], "w").write(s); print("fsr_spv.h")
 PY
 rm -rf "$W"
+# The depth / stencil texture copy (nvn_vk.c zcopy_draw): zcopy.vert + zcopy_d.frag / zcopy_s.frag → zcopy_spv.h, for Vulkan 1.0
+W=$(mktemp -d)
+for f in zcopy.vert zcopy_d.frag zcopy_s.frag; do $GC -O --target-env=vulkan1.0 "$O/$f" -o "$W/$f.spv"; done
+python3 - "$W" "$O/zcopy_spv.h" <<'PY'
+import struct, sys
+s = "// Generated from zcopy.vert / zcopy_d.frag / zcopy_s.frag (glslc -O --target-env=vulkan1.0; build_spv.sh): the depth / stencil texture copy\n"
+for n, f in (("zcopy_vert", "zcopy.vert"), ("zcopy_d_frag", "zcopy_d.frag"), ("zcopy_s_frag", "zcopy_s.frag")):
+    b = open(sys.argv[1] + "/" + f + ".spv", "rb").read(); w = struct.unpack("<%dI" % (len(b) // 4), b)
+    s += "static const uint32_t %s_spv[] = {%s};\n" % (n, ",".join(hex(x) for x in w))
+open(sys.argv[2], "w").write(s); print("zcopy_spv.h")
+PY
+rm -rf "$W"

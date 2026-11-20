@@ -33,6 +33,7 @@ uint32_t *spv_probe(const uint32_t *code, size_t words, size_t *out_words, unsig
 uint32_t *spv_swap_out01(const uint32_t *code, size_t words, size_t *out_words);   // fragment outputs at locations 0 and 1 swapped (dual-source blending emulated)
 // Drops capabilities / extensions / execution modes a shader declares but never uses (Float64, fragment shader interlock), in place; returns the new length in words
 size_t spv_strip_unused(uint32_t *code, size_t words);
+size_t spv_strip_clipcull(uint32_t *code, size_t words);   // the per-vertex block's unused ClipDistance / CullDistance members (in place, the new word count)
 // A SPIR-V 1.0 copy for Vulkan 1.0 drivers (unused subgroup capabilities dropped, extensions declared); NULL if it needs more than 1.0 or is 1.0 already
 uint32_t *spv_to_10(const uint32_t *code, size_t words, size_t *out_words);
 // Devices without draw parameters: DrawParameters dropped; BaseVertex / BaseInstance / DrawIndex read from push constants at SPV_DRAWP_PC_OFFSET (*mode 1) or as 0 in a
