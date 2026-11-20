@@ -21,6 +21,7 @@
 #endif
 #include <dlfcn.h>
 #include "vk_dispatch.h"
+#include "xf_learn.h"   // renderer stage 3: depth / stencil stores the next frame overwrites unread, learnt
 #include <pthread.h>
 #include <sys/resource.h>
 #include <semaphore.h>
@@ -196,6 +197,41 @@ static PFN_vkVoidFunction vk_dev_fn(const char *name) {   // a device function; 
     return NULL;
 }
 #define VK_LOAD_D(f) f = (PFN_##f)vk_dev_fn(#f);
+// Renderer phase 3: the held frame's open gap (seg_gap_begin) and how many commands that do work went into it. Each such command goes through a wrapper that counts
+//   it there and calls the driver's; state and bindings (pipelines, descriptor sets, push constants, dynamic state) are not work (a pass's secondary sets its own)
+static VkCommandBuffer g_gap_cb; static uint32_t g_gap_work;
+#define GAPW(name, params, args) static PFN_##name r_##name; static VKAPI_ATTR void VKAPI_CALL w_##name params { if (cb == g_gap_cb) g_gap_work++; r_##name args; }
+GAPW(vkCmdPipelineBarrier, (VkCommandBuffer cb, VkPipelineStageFlags a, VkPipelineStageFlags b, VkDependencyFlags c, uint32_t d, const VkMemoryBarrier *e, uint32_t f, const VkBufferMemoryBarrier *g, uint32_t h, const VkImageMemoryBarrier *i), (cb, a, b, c, d, e, f, g, h, i))
+GAPW(vkCmdCopyBuffer, (VkCommandBuffer cb, VkBuffer a, VkBuffer b, uint32_t c, const VkBufferCopy *d), (cb, a, b, c, d))
+GAPW(vkCmdCopyBufferToImage, (VkCommandBuffer cb, VkBuffer a, VkImage b, VkImageLayout c, uint32_t d, const VkBufferImageCopy *e), (cb, a, b, c, d, e))
+GAPW(vkCmdCopyImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, VkImage c, VkImageLayout d, uint32_t e, const VkImageCopy *f), (cb, a, b, c, d, e, f))
+GAPW(vkCmdCopyImageToBuffer, (VkCommandBuffer cb, VkImage a, VkImageLayout b, VkBuffer c, uint32_t d, const VkBufferImageCopy *e), (cb, a, b, c, d, e))
+GAPW(vkCmdBlitImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, VkImage c, VkImageLayout d, uint32_t e, const VkImageBlit *f, VkFilter g), (cb, a, b, c, d, e, f, g))
+GAPW(vkCmdResolveImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, VkImage c, VkImageLayout d, uint32_t e, const VkImageResolve *f), (cb, a, b, c, d, e, f))
+GAPW(vkCmdFillBuffer, (VkCommandBuffer cb, VkBuffer a, VkDeviceSize b, VkDeviceSize c, uint32_t d), (cb, a, b, c, d))
+GAPW(vkCmdClearColorImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, const VkClearColorValue *c, uint32_t d, const VkImageSubresourceRange *e), (cb, a, b, c, d, e))
+GAPW(vkCmdClearDepthStencilImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, const VkClearDepthStencilValue *c, uint32_t d, const VkImageSubresourceRange *e), (cb, a, b, c, d, e))
+GAPW(vkCmdClearAttachments, (VkCommandBuffer cb, uint32_t a, const VkClearAttachment *b, uint32_t c, const VkClearRect *d), (cb, a, b, c, d))
+GAPW(vkCmdDispatch, (VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c), (cb, a, b, c))
+GAPW(vkCmdDispatchIndirect, (VkCommandBuffer cb, VkBuffer a, VkDeviceSize b), (cb, a, b))
+GAPW(vkCmdDraw, (VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c, uint32_t d), (cb, a, b, c, d))
+GAPW(vkCmdDrawIndexed, (VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c, int32_t d, uint32_t e), (cb, a, b, c, d, e))
+GAPW(vkCmdDrawIndirect, (VkCommandBuffer cb, VkBuffer a, VkDeviceSize b, uint32_t c, uint32_t d), (cb, a, b, c, d))
+GAPW(vkCmdDrawIndexedIndirect, (VkCommandBuffer cb, VkBuffer a, VkDeviceSize b, uint32_t c, uint32_t d), (cb, a, b, c, d))
+GAPW(vkCmdResetQueryPool, (VkCommandBuffer cb, VkQueryPool a, uint32_t b, uint32_t c), (cb, a, b, c))
+GAPW(vkCmdWriteTimestamp, (VkCommandBuffer cb, VkPipelineStageFlagBits a, VkQueryPool b, uint32_t c), (cb, a, b, c))
+GAPW(vkCmdBeginRendering, (VkCommandBuffer cb, const VkRenderingInfo *a), (cb, a))
+GAPW(vkCmdEndRendering, (VkCommandBuffer cb), (cb))
+GAPW(vkCmdBeginRenderPass, (VkCommandBuffer cb, const VkRenderPassBeginInfo *a, VkSubpassContents b), (cb, a, b))
+GAPW(vkCmdEndRenderPass, (VkCommandBuffer cb), (cb))
+GAPW(vkCmdExecuteCommands, (VkCommandBuffer cb, uint32_t a, const VkCommandBuffer *b), (cb, a, b))
+#define GAPW_SET(name) if (name) { r_##name = name; name = w_##name; }
+static void gap_wrap(void) {
+    GAPW_SET(vkCmdPipelineBarrier) GAPW_SET(vkCmdCopyBuffer) GAPW_SET(vkCmdCopyBufferToImage) GAPW_SET(vkCmdCopyImage) GAPW_SET(vkCmdCopyImageToBuffer) GAPW_SET(vkCmdBlitImage)
+    GAPW_SET(vkCmdResolveImage) GAPW_SET(vkCmdFillBuffer) GAPW_SET(vkCmdClearColorImage) GAPW_SET(vkCmdClearDepthStencilImage) GAPW_SET(vkCmdClearAttachments) GAPW_SET(vkCmdDispatch)
+    GAPW_SET(vkCmdDispatchIndirect) GAPW_SET(vkCmdDraw) GAPW_SET(vkCmdDrawIndexed) GAPW_SET(vkCmdDrawIndirect) GAPW_SET(vkCmdDrawIndexedIndirect) GAPW_SET(vkCmdResetQueryPool)
+    GAPW_SET(vkCmdWriteTimestamp) GAPW_SET(vkCmdBeginRendering) GAPW_SET(vkCmdEndRendering) GAPW_SET(vkCmdBeginRenderPass) GAPW_SET(vkCmdEndRenderPass) GAPW_SET(vkCmdExecuteCommands)
+}
 const char *nvn_vk_gpu_name(void) { return g_dev ? g_props.deviceName : NULL; }   // android_main.c boot_guard
 void mtl_init(void) {
     if (g_dev) return;
@@ -431,6 +467,7 @@ void mtl_init(void) {
     VKCHECK(vkCreateDevice(g_pd, &dci, NULL, &g_dev));
     { extern void dm_boot_device_up(void) __attribute__((weak)); if (dm_boot_device_up) dm_boot_device_up(); }   // (android_main.c boot_state: a crash from here on counts as the driver's)
     VK_DEVICE(VK_LOAD_D)
+    gap_wrap();   // (renderer phase 3: a held frame's gaps know whether anything went into them)
     vkGetDeviceQueue(g_dev, g_qf, 0, &g_q);
     p_push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(g_dev, "vkCmdPushDescriptorSetKHR");
     if (compctl && fic.imageCompressionControl) p_layout2 = (PFN_vkGetImageSubresourceLayout2EXT)vkGetDeviceProcAddr(g_dev, "vkGetImageSubresourceLayout2EXT");
@@ -1064,7 +1101,9 @@ typedef struct { VkBuffer buf; vmalloc_t a; uint8_t *map; VkDeviceSize used, siz
 //   pass's contents are secondary command buffers; the flush records one primary that runs the gaps and, around each pass's secondary, begins and ends the pass with
 //   the store ops decided then. Vulkan's render pass compatibility leaves load / store ops out, so a pass's contents recorded against its first ops run under the
 //   decided ones (dynamic rendering: formats and samples inherited, the same)
-typedef struct { int pass, fgp; VkCommandBuffer cb; VkRenderingInfo ri; VkRenderingAttachmentInfo ca[8], da, sa; uint32_t cf[8], dsfmt, samples; } seg_t;
+// (work: a gap's commands that do something, counted by the gap_* wrappers; a gap with none, or only the barrier that stands for the Switch's own order between passes
+//   on the same targets, lets the passes on either side run as one: renderer phase 3, seg_record_prim)
+typedef struct { int pass, fgp; VkCommandBuffer cb; VkRenderingInfo ri; VkRenderingAttachmentInfo ca[8], da, sa; uint32_t cf[8], dsfmt, samples, work; } seg_t;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, ucb; int ucb_open; uint64_t fence;
     VkCommandBuffer prim; VkCommandBuffer *sec; int nsec, csec; int dec; seg_t *seg; int nseg, cseg; seg_t cur;   // (the held frame's pieces: above; prim the submission's own primary)
@@ -1408,10 +1447,10 @@ static void seg_push(sub_t *s, seg_t g) { if (s->nseg == s->cseg) { s->cseg = s-
 static void seg_gap_begin(sub_t *s) {   // a new gap: work outside passes
     VkCommandBuffer cb = seg_new_cb(s); VkCommandBufferInheritanceInfo inh = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, .pInheritanceInfo = &inh };
-    VKCHECK(vkBeginCommandBuffer(cb, &bi)); s->cb = cb;
+    VKCHECK(vkBeginCommandBuffer(cb, &bi)); s->cb = cb; g_gap_cb = cb; g_gap_work = 0;
 }
 static void seg_pass_begin(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples) {   // the gap ends; the pass's contents go to a secondary
-    sub_t *s = g_sub; VKCHECK(vkEndCommandBuffer(s->cb)); seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb });
+    sub_t *s = g_sub; VKCHECK(vkEndCommandBuffer(s->cb)); seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb, .work = g_gap_work }); g_gap_cb = VK_NULL_HANDLE;
     seg_t *g = &s->cur; memset(g, 0, sizeof *g); g->pass = 1; g->fgp = g_seg_fgp; g->ri = *ri; g->dsfmt = dsfmt; g->samples = samples ? samples : 1;
     for (uint32_t i = 0; i < ri->colorAttachmentCount && i < 8; i++) { g->ca[i] = ri->pColorAttachments[i]; g->cf[i] = cf && ri->pColorAttachments[i].imageView ? cf[i] : 0; }
     if (ri->pDepthAttachment) g->da = *ri->pDepthAttachment;
@@ -1615,7 +1654,7 @@ uint64_t mtl_sub_commit(void) {
     if (g_rtq) { report_ts_flush(s->cb, s); vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rtq, (uint32_t)(s - g_subs) * RQ_PER + RQ_END); }
     barrier_host(s->cb);
     VKCHECK(vkEndCommandBuffer(s->cb));
-    if (s->dec) { seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb }); s->cb = s->prim; }   // (the primary is recorded at the flush: seg_record_prim)
+    if (s->dec) { seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb, .work = ~0u }); s->cb = s->prim; g_gap_cb = VK_NULL_HANDLE; }   // (the primary is recorded at the flush: seg_record_prim)
     VkCommandBuffer cbs[2]; uint32_t n = 0;
     if (s->ucb_open) { barrier_all(s->ucb); VKCHECK(vkEndCommandBuffer(s->ucb)); cbs[n++] = s->ucb; s->ucb_open = 0; }
     cbs[n++] = s->cb;
@@ -1675,6 +1714,7 @@ typedef struct vtex {
     _Atomic int pre;                       // uploaded ahead (mtl_tex_preupload) and not drawn yet: counted in g_pre_unused
     struct { uint64_t key, frame; uint16_t lv, ly; uint8_t asp, dc; } sk[8]; int nsk; int presented;   // stores of its attachments not yet read or overwritten (sk_*); shown in the window
     uint64_t hp_stamp;                     // HUD-free frame generation: g_hp_seq + 1 of the frame it was last a render target in (hp_*)
+    xf_t xf;                               // renderer stage 3 (xf_learn.h): its frame-end depth / stencil store, learnt from the next frames (under g_fgrmu)
 } vtex;
 // the queue family takes timestamps (the frame recorder's pass times, fg_rec.h); looked up once
 static int g_tsq_ok(void) {
@@ -1683,6 +1723,11 @@ static int g_tsq_ok(void) {
     v = g_qf < nq && qp[g_qf].timestampValidBits && g_props.limits.timestampPeriod > 0; return v;
 }
 #include "fg_rec.h"   // renderer phase 1: the frame recorder (records only)
+// Renderer stage 3 (xf_learn.h) and phase 3 (seg_record_prim): on with the held frame's decisions (DM_VK_FRAME_HOLD=2); DM_VK_XFRAME=0 / DM_VK_PASS_MERGE=0 leave each out
+static int hold_dec(void);
+static uint64_t g_xf_dc, g_xf_bad, g_merge_n;   // frame-end stores left out, left-out stores needed after all, passes run as one with the one before
+static int xf_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_XFRAME"); v = !(e && !strcmp(e, "0")); } return v && hold_dec(); }
+static int merge_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_MERGE"); v = !(e && !strcmp(e, "0")); } return v && barrier_relaxed(); }
 // ================= HUD-free frame generation: the scene / HUD split learnt each frame (fg_rec.h's rule, kept small) =================
 // The final image is what the pass drawing the shown image reads when it copies one image rendered this frame (Sword / Shield: img2, copied into the shown one); of
 // the passes drawing into it, one reading anything rendered this frame is the scene or post-processing, one reading only textures not rendered this frame is the HUD.
@@ -1831,7 +1876,11 @@ static void sk_resolve_locked(vtex *x, uint32_t lv, uint32_t ly, int asp, int ov
         x->sk[i] = x->sk[--x->nsk];
     }
 }
-static void sk_read(vtex *x) { if (x) { fgr_read_img(x, x->w, x->h, (uint32_t)x->fmt, FGR_READ); hp_read(x); } if (!x || !x->nsk) return; pthread_mutex_lock(&g_skmu); sk_resolve_locked(x, ~0u, ~0u, 0, 0); pthread_mutex_unlock(&g_skmu); }
+static void sk_read(vtex *x) { if (x) { fgr_read_img(x, x->w, x->h, (uint32_t)x->fmt, FGR_READ); hp_read(x); }
+    if (x && (x->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && xf_on()) {   // (stage 3: a depth / stencil image read is never left out)
+        pthread_mutex_lock(&g_fgrmu);
+        if (xf_read(&x->xf)) { g_xf_bad++; RED_ONCE(62, "a depth store left out at a frame's end was read (%ux%u, format %d): stored again for good", x->w, x->h, (int)x->fmt); }
+        pthread_mutex_unlock(&g_fgrmu); } if (!x || !x->nsk) return; pthread_mutex_lock(&g_skmu); sk_resolve_locked(x, ~0u, ~0u, 0, 0); pthread_mutex_unlock(&g_skmu); }
 // A pass begins with x's subresource as attachment slot (0-7 colour, 8 depth, 9 stencil), cleared or loaded: what was pending resolves, and whether this pass stores comes back
 static uint64_t g_sk_sig, g_sk_last;   // the pass's key so far (pass_begin); the key sk_attach made last
 static int sk_attach(vtex *x, uint32_t lv, uint32_t ly, int asp, int slot, int cleared) {
@@ -3213,7 +3262,7 @@ static int pass_begin(void) {
     memset(&P, 0, sizeof P); uint32_t tw = 16384, th = 16384, nlay = 0; int any = 0, ncol = 0;   // nlay: the fewest layers of the attachments (a layered pass over a 3D target)
     uint64_t dkey = 0, skey = 0; int dnone = 0, snone = 0;
     fgr_attin fga[10]; int fgn = 0;   // (the frame recorder, while it records)
-    vtex *hp_c0 = NULL, *hp_z = NULL; int hp_zclr = 0; float hp_zcd = 0;   // (HUD-free: the pass's first colour target; depth guidance: its depth target, cleared to what)
+    vtex *hp_c0 = NULL, *hp_z = NULL; int hp_zclr = 0; float hp_zcd = 0; vtex *xf_x = NULL; int xf_clr = 0;   // (HUD-free: the pass's first colour target; depth guidance: its depth target, cleared to what)
     for (int i = 0; i < 8; i++) { ca[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO }; }
     if (sk_on()) {   // this pass's key for the store learning (sk_attach): its render targets and how many times they were set before in this frame
         static struct { uint64_t sig; uint32_t n; } occ[256]; static uint64_t occ_frame = ~0ull;
@@ -3261,6 +3310,7 @@ static int pass_begin(void) {
                 if (sa.storeOp == VK_ATTACHMENT_STORE_OP_STORE && g_store_none && sk_ro(skey, R.clear_s)) { sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE; snone = 1; }
                 sa.loadOp = R.clear_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; sa.clearValue.depthStencil.stencil = R.cs; P.hs = 1; P.sfmt = (uint32_t)x->fmt; }
             P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1; x->hp_stamp = g_hp_seq + 1;
+            xf_x = x; xf_clr = (!(x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || (P.hd && R.clear_d)) && (!(x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) || (P.hs && R.clear_s));
             if (atomic_load(&g_fgr.on) && fgn < 9) { if (P.hd) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)x->fmt, (uint16_t)dl, (uint16_t)dy, 8, (uint8_t)(da.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(da.storeOp) };
                 if (P.hs) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)x->fmt, (uint16_t)dl, (uint16_t)dy, 9, (uint8_t)(sa.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(sa.storeOp) }; }
         }
@@ -3290,12 +3340,17 @@ static int pass_begin(void) {
     //   (about 58 a frame in Shield's field on a Galaxy S25+). DM_VK_BARRIER_BITS=0: as before; DM_AB=<frames>:barbits alternates the two in one run
     int narrow_ok = g_game_bar && !(g_game_bits & 0x9) && barrier_bits_on();
     if (g_bar_clean && barrier_relaxed()) g_bar_none++;
-    else if (g_after_pass && barrier_relaxed() && (!g_game_bar || narrow_ok)) { barrier_pass(CB()); if (g_game_bar) g_bar_bits_narrow++; else g_bar_narrow++; }
+    else if (g_after_pass && barrier_relaxed() && (!g_game_bar || narrow_ok)) { barrier_pass(CB()); if (g_game_bar) g_bar_bits_narrow++; else g_bar_narrow++;
+        if (!g_game_bar && CB() == g_gap_cb && g_gap_work) g_gap_work--; }   // (phase 3: only the order between passes, which one pass keeps by itself; the game asked for none)
     else { barrier_all(CB()); g_bar_full++; if (g_game_bar) { g_bar_full_game++; for (int b = 0; b < 8; b++) if (g_game_bits >> b & 1) g_bar_bits_hist[b]++; } else g_bar_full_work++; }
     g_game_bar = 0; g_game_bits = 0; g_bar_clean = g_after_pass = 0;
     uint64_t pt2 = prof ? mono_ns() : 0;
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {tw, th}}, .layerCount = nlay ? nlay : 1, .colorAttachmentCount = (uint32_t)ncol, .pColorAttachments = ca,
                            .pDepthAttachment = P.hd ? &da : NULL, .pStencilAttachment = P.hs ? &sa : NULL };
+    if (xf_x && xf_on()) {   // (stage 3: its frame-end store pending from an earlier frame resolves: cleared whole, or loaded)
+        pthread_mutex_lock(&g_fgrmu);
+        if (xf_attach(&xf_x->xf, xf_clr && tw >= xf_x->w && th >= xf_x->h && (nlay ? nlay : 1) == 1)) { g_xf_bad++; RED_ONCE(61, "a depth store left out at a frame's end was loaded by a later pass (%ux%u, format %d): stored again for good", xf_x->w, xf_x->h, (int)xf_x->fmt); }
+        pthread_mutex_unlock(&g_fgrmu); }
     if (!P_tf) { hp_pass_begin(CB(), hp_c0); g_hpc.z = hp_z; g_hpc.zclr = (uint8_t)hp_zclr; g_hpc.zcd = hp_zcd; }   // (HUD-free frame generation: the scene copy before the first HUD pass)
     if (!P_tf) g_seg_fgp = fgr_pass_begin(CB(), tw, th, nlay ? nlay : 1, P.samples, fga, fgn);   // (the held frame decides this pass's stores by it)   // (the transform feedback capture passes are ours, not the game's)
     rend_begin(CB(), &ri, P.cfmt, P.hd ? P.dfmt : P.hs ? P.sfmt : 0, P.samples, 0); g_stat_begins++;
@@ -5502,9 +5557,31 @@ static void seg_decide(seg_t *g) {
         VkRenderingAttachmentInfo *ai = a->slot < 8 ? &g->ca[a->slot] : a->slot == 8 ? &g->da : &g->sa;
         if (!ai->imageView || ai->storeOp == VK_ATTACHMENT_STORE_OP_NONE) continue;
         int fate = fgr_fate_exact(g->fgp, a);
+        if (fate == 4 && a->slot >= 8 && a->img >= 0 && xf_on()) {   // stage 3: a frame-end depth / stencil store, learnt from the next frames (a plain 2D image, never shown)
+            vtex *x = (vtex *)(uintptr_t)g_fgr.im[a->img].x;
+            if (x && x->levels <= 1 && x->layers <= 1 && !x->is3d && !x->presented) {
+                int dc = ai->storeOp == VK_ATTACHMENT_STORE_OP_STORE && xf_skip(&x->xf);
+                if (dc) { ai->storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; g_xf_dc++; }
+                if (a->slot == 8 || !(x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) xf_pending(&x->xf, dc); }
+            continue; }
         if (fate == 1 && ai->storeOp == VK_ATTACHMENT_STORE_OP_STORE) { ai->storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; g_dec_dc++; }
         else if (fate == 0 && ai->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE) { ai->storeOp = VK_ATTACHMENT_STORE_OP_STORE; g_dec_fix++; }
     }
+}
+// Phase 3: pass h can run inside pass g: the same attachments (views, formats, samples, area, layers), h loads all of them (no clear, which would need one inside),
+//   and g resolves nothing at its end (a resolve there would move to h's end)
+static int seg_same(const seg_t *g, const seg_t *h) {
+    const VkRenderingInfo *a = &g->ri, *b = &h->ri;
+    if (a->colorAttachmentCount != b->colorAttachmentCount || a->layerCount != b->layerCount || a->viewMask != b->viewMask || g->samples != h->samples || g->dsfmt != h->dsfmt ||
+        a->renderArea.offset.x != b->renderArea.offset.x || a->renderArea.offset.y != b->renderArea.offset.y || a->renderArea.extent.width != b->renderArea.extent.width ||
+        a->renderArea.extent.height != b->renderArea.extent.height || !a->pDepthAttachment != !b->pDepthAttachment || !a->pStencilAttachment != !b->pStencilAttachment) return 0;
+    for (uint32_t t = 0; t < a->colorAttachmentCount && t < 8; t++) {
+        if (g->ca[t].imageView != h->ca[t].imageView || g->cf[t] != h->cf[t]) return 0;
+        if (h->ca[t].imageView && h->ca[t].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) return 0;
+        if (g->ca[t].resolveImageView || g->ca[t].resolveMode) return 0; }
+    if (a->pDepthAttachment && (g->da.imageView != h->da.imageView || (h->da.imageView && h->da.loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) || g->da.resolveImageView)) return 0;
+    if (a->pStencilAttachment && (g->sa.imageView != h->sa.imageView || (h->sa.imageView && h->sa.loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) || g->sa.resolveImageView)) return 0;
+    return 1;
 }
 // At the flush (caller holds g_cmu): the submission's primary runs its pieces in order, each pass begun and ended around its secondary with the stores decided now
 static void seg_record_prim(sub_t *s) {
@@ -5514,11 +5591,18 @@ static void seg_record_prim(sub_t *s) {
     for (int i = 0; i < s->nseg; i++) { seg_t *g = &s->seg[i];
         if (!g->pass) { vkCmdExecuteCommands(s->prim, 1, &g->cb); continue; }
         seg_decide(g);
+        int last = i;   // phase 3: the passes after it on the same targets, nothing but the order between passes in the gaps, run in it (their stores: the last one's)
+        while (merge_on() && last + 2 < s->nseg && !s->seg[last + 1].pass && !s->seg[last + 1].work && s->seg[last + 2].pass && seg_same(g, &s->seg[last + 2])) {
+            last += 2; seg_decide(&s->seg[last]); g_merge_n++; }
+        seg_t *e = &s->seg[last];
+        for (int t = 0; t < 8; t++) g->ca[t].storeOp = e->ca[t].storeOp;
+        g->da.storeOp = e->da.storeOp; g->sa.storeOp = e->sa.storeOp;
         g->ri.pColorAttachments = g->ca; g->ri.pDepthAttachment = g->ri.pDepthAttachment ? &g->da : NULL; g->ri.pStencilAttachment = g->ri.pStencilAttachment ? &g->sa : NULL;
         g->ri.flags |= VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
         rend_begin_ex(s->prim, &g->ri, g->cf, g->dsfmt, g->samples, 0, 1);
-        vkCmdExecuteCommands(s->prim, 1, &g->cb);
+        for (int j = i; j <= last; j += 2) vkCmdExecuteCommands(s->prim, 1, &s->seg[j].cb);
         if (g_dynren) vkCmdEndRendering(s->prim); else vkCmdEndRenderPass(s->prim);
+        i = last;
     }
     pthread_mutex_unlock(&g_fgrmu);
     VKCHECK(vkEndCommandBuffer(s->prim)); s->nseg = 0;
@@ -5585,8 +5669,9 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (n % 300 == 0 && barrier_relaxed()) VLOG("present %llu: full barriers before passes %llu: for a game barrier %llu (bits primitives %llu, fragments %llu, tiled %llu, indirect %llu, texture %llu, shader %llu), after other work %llu; game barriers narrowed by their bits %llu",
         (unsigned long long)n, (unsigned long long)g_bar_full, (unsigned long long)g_bar_full_game, (unsigned long long)g_bar_bits_hist[0], (unsigned long long)g_bar_bits_hist[1], (unsigned long long)g_bar_bits_hist[2],
         (unsigned long long)g_bar_bits_hist[3], (unsigned long long)g_bar_bits_hist[4], (unsigned long long)g_bar_bits_hist[5], (unsigned long long)g_bar_full_work, (unsigned long long)g_bar_bits_narrow);
-    if (n % 300 == 0 && hold_on()) VLOG("present %llu: frames held whole %llu, flushed early by a wait %llu times; passes decided %llu: stores left out %llu, put back %llu", (unsigned long long)n,
-                                       (unsigned long long)g_hold_frames, (unsigned long long)g_hold_split, (unsigned long long)g_dec_passes, (unsigned long long)g_dec_dc, (unsigned long long)g_dec_fix);
+    if (n % 300 == 0 && hold_on()) VLOG("present %llu: frames held whole %llu, flushed early by a wait %llu times; passes decided %llu: stores left out %llu, put back %llu; frame-end depth stores left out %llu (needed after all %llu); passes run as one with the one before %llu", (unsigned long long)n,
+                                       (unsigned long long)g_hold_frames, (unsigned long long)g_hold_split, (unsigned long long)g_dec_passes, (unsigned long long)g_dec_dc, (unsigned long long)g_dec_fix,
+                                       (unsigned long long)g_xf_dc, (unsigned long long)g_xf_bad, (unsigned long long)g_merge_n);
     if (n % 300 == 0) { pso_evict(); vk_trim(); }   // (pipelines kept: Arm's driver, phones under 7.5 GB; empty device blocks given back)
     if (n % 300 == 0 && g_dsc_hits + g_dsc_new) VLOG("present %llu: descriptor sets written %llu, reused %llu (%.0f %%)", (unsigned long long)n, (unsigned long long)g_dsc_new, (unsigned long long)g_dsc_hits, 100.0 * (double)g_dsc_hits / (double)(g_dsc_hits + g_dsc_new));
     if (n == 1 || n % 300 == 0) VLOG("present %llu: %llu render target sets (%llu kept the open pass, %llu passes begun), %llu draws so far; textures uploaded %llu (re-uploaded %llu, %.1f MB)%s", (unsigned long long)n, (unsigned long long)g_stat_passes, (unsigned long long)g_stat_rt_same, (unsigned long long)g_stat_begins,
