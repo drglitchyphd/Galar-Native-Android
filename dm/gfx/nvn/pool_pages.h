@@ -42,23 +42,24 @@ static int pp_fault(void *addr) {   // async-signal-safe: atomics, clock_gettime
 }
 
 // a private copy of the pages at [base, base+size), for pages_back (MAP_FAILED when there is no memory for it).
-// Read with process_vm_readv, which reports a page it cannot read instead of faulting: Turnip (Adreno 660, #281) had taken back pages moved under a pool by the time
-//   the pool was freed, and the plain memcpy here crashed reading them (SIGSEGV in memcpy, mtl_pool_del, after minutes of play). Such a page stays zero in the copy:
-//   the pool is being freed, the game only gets its memory back. pages_lost counts them (said in the log by the caller)
+// Only the parts /proc/self/maps shows mapped readable are copied: Turnip (Adreno 660, #281) had taken back pages moved under a pool by the time the pool was freed,
+//   and the plain memcpy here crashed reading them (SIGSEGV in memcpy, mtl_pool_del, after minutes of play). What is not mapped readable stays zero in the copy:
+//   the pool is being freed, the game only gets its memory back. pages_lost counts it (said in the log by the caller). (process_vm_readv, tried first, cannot read
+//   the driver's own mappings at all, VM_PFNMAP: on Adreno's own driver it gave readable pools back as zeros, S25+ 2026-11-19)
 static _Atomic uint64_t pages_lost;
 static void *pages_copy(uintptr_t base, size_t size) {
     void *c = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (c == MAP_FAILED) return c;
 #ifdef __linux__
-    size_t done = 0, pg = (size_t)sysconf(_SC_PAGESIZE); pid_t me = getpid();
-    while (done < size) {
-        struct iovec l = { (uint8_t *)c + done, size - done }, r = { (void *)(base + done), size - done };
-        ssize_t k = process_vm_readv(me, &l, 1, &r, 1, 0);
-        if (k > 0) { done += (size_t)k; continue; }
-        if (k < 0 && errno != EFAULT) { memcpy((uint8_t *)c + done, (void *)(base + done), size - done); break; }   // (the call refused here: the plain copy, as before)
-        size_t step = pg - ((base + done) & (pg - 1)); if (step > size - done) step = size - done;   // an unreadable page: left zero, the next one tried
-        done += step; atomic_fetch_add(&pages_lost, step);
-    }
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (!m) { memcpy(c, (void *)base, size); return c; }   // (no map to look at: the plain copy, as before)
+    char ln[512]; size_t covered = 0; uintptr_t end = base + size;
+    while (fgets(ln, sizeof ln, m)) { unsigned long s0, e0; char pr[8] = "";
+        if (sscanf(ln, "%lx-%lx %7s", &s0, &e0, pr) != 3 || e0 <= base || s0 >= end || pr[0] != 'r') continue;
+        uintptr_t a = s0 > base ? s0 : base, b = e0 < end ? e0 : end;
+        memcpy((uint8_t *)c + (a - base), (void *)a, b - a); covered += b - a; }
+    fclose(m);
+    if (covered < size) atomic_fetch_add(&pages_lost, size - covered);
 #else
     memcpy(c, (void *)base, size);
 #endif
