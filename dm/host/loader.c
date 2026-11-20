@@ -546,6 +546,7 @@ static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
 //     x' = x + (w - w') / 2), so the HUD keeps its shape in the middle of the wider picture. Fl4sh's writes a fixed box for 1080p; this follows the box the game
 //     gives, at any resolution. That page is kept writable and executable (mod_pages_open), as the emulators run it.
 //   Every word is checked first (the cameras' 16:9, the LDP, the gap's zeros); a build or code that differs is left alone
+static int arc_wide_cull(module_t *m, uint64_t lim, int64_t p0, int64_t p1, double ratio);
 static int arc_wide(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     const char *e = getenv("DM_ASPECT"); if (!e || strcmp(e, "wide")) return 0;
     const char *r = getenv("DM_WIDE_RATIO"); double ratio = r ? atof(r) : 0;
@@ -576,7 +577,43 @@ static int arc_wide(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     memcpy(m->base + cave, c, sizeof c); mod_page_note(m, cave, sizeof c);
     uint32_t br = 0x14000000u | (uint32_t)(((int64_t)cave - (int64_t)hook) >> 2 & 0x3ffffff); memcpy(m->base + hook, &br, 4); mod_page_note(m, hook, 4);
     LOG("%s: widescreen for Legends: Arceus 1.1.1: camera aspect %.4f (%08x), HUD kept to 16:9 in the middle (x %.3f of the width)", m->name, ratio, bits, (double)k);
+    { const char *wc = getenv("DM_WIDE_CULL"); if (!(wc && !strcmp(wc, "0"))) return 8 + arc_wide_cull(m, lim, p0, p1, ratio); }   // (DM_WIDE_CULL=0: the game's culling as it is)
     return 8;
+}
+// Widescreen culling for Legends: Arceus 1.1.1 (with arc_wide; characters and objects popped in and out at the sides of the wider picture). Two parts, every word checked:
+//   - the two 16:9 defaults arc_wide's six cameras miss (the Main camera's ctor, main+0x2992488 / +0x299248c, and the camera registry entry's, +0x2a10de0 / +0x2a10de4:
+//     MOVK Xd, #0x8e39, LSL #32; MOVK Xd, #0x3fe3, LSL #48 = {fov, 1.7778f}) take the screen's aspect: a Main camera made by the fallback path (0x19b1b6c) is no longer 16:9;
+//   - the horizontal planes of both CPU culls (the render views' frustum, main+0x2abce48: FDIV S2, S0, S2 at +0x2abceb4; the terrain's, +0x246dc04: FDIV S2, S7, S1 at
+//     +0x246dc9c; perspective only, their orthographic branches come first) are widened by 1/k, k = (16/9) / aspect, in code added in the same gap of zeros as the
+//     HUD's (+0x38c8540..+0x38c8563): a little more is drawn off the sides, nothing visible pops. V16 is scratch in both functions
+static int arc_wide_cull(module_t *m, uint64_t lim, int64_t p0, int64_t p1, double ratio) {
+    static const uint64_t def[4] = { 0x2992488, 0x299248c, 0x2a10de0, 0x2a10de4 };
+    static const uint32_t defw[4] = { 0xf2d1c729u, 0xf2e7fc69u, 0xf2d1c728u, 0xf2e7fc68u };
+    const uint64_t s1 = 0x2abceb4, s2 = 0x246dc9c, cave = 0x38c8540; const uint32_t o1 = 0x1e221802u, o2 = 0x1e2118e2u;
+    int ok = cave + 0x24 <= lim;
+    for (int i = 0; ok && i < 4; i++) { uint32_t w; memcpy(&w, m->base + def[i], 4); ok = def[i] + 4 <= m->text_end && w == defw[i] && !overlaps_rewrite(m, def[i], 4, p0, p1); }
+    uint32_t w; if (ok) { memcpy(&w, m->base + s1, 4); ok = w == o1 && !overlaps_rewrite(m, s1, 4, p0, p1); }
+    if (ok) { memcpy(&w, m->base + s2, 4); ok = w == o2 && !overlaps_rewrite(m, s2, 4, p0, p1); }
+    for (int i = 0; ok && i < 9; i++) { memcpy(&w, m->base + cave + 4 * i, 4); ok = !w; }
+    if (!ok) { LOG("[RED] %s: widescreen culling not applied (Legends: Arceus 1.1.1's camera or culling code differs, or was rewritten)", m->name); return 0; }
+    float f = (float)ratio; uint32_t bits; memcpy(&bits, &f, 4); uint32_t lo = bits & 0xffff, hi = bits >> 16;
+    for (int i = 0; i < 4; i++) { uint32_t nw = (i & 1 ? 0xf2e00000u | hi << 5 : 0xf2c00000u | lo << 5) | (defw[i] & 31); memcpy(m->base + def[i], &nw, 4); mod_page_note(m, def[i], 4); }
+    float k = (float)(16.0 / 9.0 / ratio);
+    uint32_t c[9] = { 0x1c000110u,   // LDR S16, k             (+0x20)
+                      0x1e300842u,   // FMUL S2, S2, S16
+                      o1,            // FDIV S2, S0, S2        (the game's own)
+                      0x14000000u | (uint32_t)(((int64_t)s1 + 4 - (int64_t)(cave + 12)) >> 2 & 0x3ffffff),
+                      0x1c000090u,   // LDR S16, k             (+0x20 from cave, +0x10 from here)
+                      0x1e300821u,   // FMUL S1, S1, S16
+                      o2,            // FDIV S2, S7, S1        (the game's own)
+                      0x14000000u | (uint32_t)(((int64_t)s2 + 4 - (int64_t)(cave + 28)) >> 2 & 0x3ffffff),
+                      0 };
+    memcpy(&c[8], &k, 4);
+    memcpy(m->base + cave, c, sizeof c); mod_page_note(m, cave, sizeof c);
+    uint32_t b1 = 0x14000000u | (uint32_t)(((int64_t)cave - (int64_t)s1) >> 2 & 0x3ffffff), b2 = 0x14000000u | (uint32_t)(((int64_t)(cave + 16) - (int64_t)s2) >> 2 & 0x3ffffff);
+    memcpy(m->base + s1, &b1, 4); mod_page_note(m, s1, 4); memcpy(m->base + s2, &b2, 4); mod_page_note(m, s2, 4);
+    LOG("%s: widescreen culling: default cameras at the screen's aspect, both culls %.0f %% wider", m->name, 100.0 / k);
+    return 6;
 }
 // The render-target pool of Legends: Arceus 1.1.1, grown for a bigger render size (1440p, the screen's shape). The config builder (main+0x277d798) sets three NVN pools that
 //   graphics setup (main+0x29d6a64 → 0x2aa24c4 → the pool ctor main+0x2a8cf9c) creates: config+0x28 300 MB general, config+0x30 250 MB render targets (CPU no access,
