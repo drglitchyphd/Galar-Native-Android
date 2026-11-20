@@ -1721,7 +1721,10 @@ static int g_tsq_ok(void) {
 static int hold_dec(void);
 static uint64_t g_xf_dc, g_xf_bad, g_merge_n;   // frame-end stores left out, left-out stores needed after all, passes run as one with the one before
 static int xf_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_XFRAME"); v = !(e && !strcmp(e, "0")); } return v && hold_dec(); }
-static int merge_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_MERGE"); v = !(e && !strcmp(e, "0")); } return v && barrier_relaxed(); }
+// (DM_AB=<frames>:r3 alternates both, leaving out and merging, in one run; what stage 3 learns is tracked on both sides)
+int dm_ab(const char *key) __attribute__((weak));
+static int r3_ab(void) { return dm_ab ? dm_ab("r3") : -1; }
+static int merge_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_MERGE"); v = !(e && !strcmp(e, "0")); } return v && barrier_relaxed() && r3_ab() != 0; }
 // ================= HUD-free frame generation: the scene / HUD split learnt each frame (fg_rec.h's rule, kept small) =================
 // The final image is what the pass drawing the shown image reads when it copies one image rendered this frame (Sword / Shield: img2, copied into the shown one); of
 // the passes drawing into it, one reading anything rendered this frame is the scene or post-processing, one reading only textures not rendered this frame is the HUD.
@@ -3917,12 +3920,13 @@ static void desc_flush(VkPipelineBindPoint bp, VkPipelineLayout pl, VkDescriptor
     vkCmdBindDescriptorSets(CB(), bp, pl, 0, 1, &ds, 0, NULL);
     D.n = 0;
 }
-static void push_stage(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineLayout pl) {
+// (held: the caller holds g_rmu already: a draw takes it once for its five stages instead of once a stage, an idea from a fork's v0.98)
+static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineLayout pl, int held) {
     if (!s || !s->nres) return;
     VkWriteDescriptorSet w_[64]; VkDescriptorBufferInfo bi_[64]; VkDescriptorImageInfo ii_[64]; VkBufferView bv_[64]; uint32_t nw = 0;
     VkWriteDescriptorSet *w = w_; VkDescriptorBufferInfo *bi = bi_; VkDescriptorImageInfo *ii = ii_; VkBufferView *bv = bv_;
     if (g_np) { if (D.n + 64 > 320) D.n = 320 - 64; w = D.w + D.n; bi = D.bi + D.n; ii = D.ii + D.n; bv = D.bv + D.n; }
-    pthread_mutex_lock(&g_rmu);
+    if (!held) pthread_mutex_lock(&g_rmu);
     for (int i = 0; i < s->nres; i++) {
         const spv_res *r = &s->res[i]; const vres_how *h = &s->how[i];
         w[nw] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = r->binding + s->shift, .descriptorCount = 1, .descriptorType = desc_type(r->kind) };
@@ -4025,10 +4029,11 @@ static void push_stage(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineLay
             }
         }
     }
-    pthread_mutex_unlock(&g_rmu);
+    if (!held) pthread_mutex_unlock(&g_rmu);
     if (g_np) D.n += nw;
     else if (nw) p_push(CB(), bp, pl, 0, nw, w);
 }
+static void push_stage(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineLayout pl) { push_stage_h(s, st, bp, pl, 0); }
 
 // ================= Draws =================
 // DM_VK_PROF: where the replay's CPU time goes per draw (pass + pipeline, dynamic state + vertex streams, descriptors, flush + draw), logged every 300 presents
@@ -4204,7 +4209,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     else vkCmdBindVertexBuffers(cb, 0, 17, vb, vo);   // (the strides are in the pipeline: sst)
     if (mark) mark[2] = mono_ns();
     VkPipelineLayout pl = prog_layout(pr, 0); g_np = pr->np[0];
-    for (int st = 0; st < 5; st++) push_stage(pr->sh[st], st, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
+    { int any = 0; for (int st = 0; st < 5; st++) any |= pr->sh[st] && pr->sh[st]->nres;
+      if (any) { pthread_mutex_lock(&g_rmu); for (int st = 0; st < 5; st++) push_stage_h(pr->sh[st], st, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 1); pthread_mutex_unlock(&g_rmu); } }
     if (mark) mark[3] = mono_ns();
     if (tfcap) {   // the capture buffers, then the draw, then its writes made visible to what reads them (vertex streams, shaders, copies)
         VkWriteDescriptorSet w_[4]; VkDescriptorBufferInfo bi_[4]; uint32_t nw = 0;
@@ -5798,7 +5804,7 @@ static void seg_decide(seg_t *g) {
         if (fate == 4 && a->slot >= 8 && a->img >= 0 && xf_on()) {   // stage 3: a frame-end depth / stencil store, learnt from the next frames (a plain 2D image, never shown)
             vtex *x = (vtex *)(uintptr_t)g_fgr.im[a->img].x;
             if (x && x->levels <= 1 && x->layers <= 1 && !x->is3d && !x->presented) {
-                int dc = ai->storeOp == VK_ATTACHMENT_STORE_OP_STORE && xf_skip(&x->xf);
+                int dc = ai->storeOp == VK_ATTACHMENT_STORE_OP_STORE && xf_skip(&x->xf) && r3_ab() != 0;
                 if (dc) { ai->storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; g_xf_dc++; }
                 if (a->slot == 8 || !(x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) xf_pending(&x->xf, dc); }
             continue; }
