@@ -423,3 +423,5 @@ Tap only	タップのみ
 720p: lightest, for phones that cannot hold 30 (from the next start)	720p：最も軽い、30を保てない端末向け（次回起動から）
 1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p：より鮮明だがGPU負荷が増加（fps低下・発熱、次回起動から）
 the game's own (100 %)	ゲーム本来（100 %）
+Dynamic	ダイナミック
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます

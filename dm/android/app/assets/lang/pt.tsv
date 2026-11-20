@@ -433,3 +433,5 @@ Tap only	Só tocar
 720p: lightest, for phones that cannot hold 30 (from the next start)	720p: o mais leve, para celulares que não mantêm 30 (a partir do próximo início)
 1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p: mais nítido, mas mais pesado para a GPU (menos fps, celular mais quente; a partir do próximo início)
 the game's own (100 %)	o do jogo (100 %)
+Dynamic	Dinâmico
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinâmico: 60 onde o celular consegue, 30 onde não, com a imagem completa; a velocidade do jogo fica certa
