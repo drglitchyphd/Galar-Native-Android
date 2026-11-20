@@ -532,6 +532,27 @@ static const struct { const char *build, *game; uint64_t cull; } WIDE_SITES[] = 
     { "a16802625e7826bf83b6f9708e475b91", "Shield 1.3.2", 0xd93444 },
     { "a3b75bcd3311385aeed67fbeeb79cbb7", "Sword 1.3.2", 0xd93414 },
 };
+// The HUD kept 16:9 in the middle with Widescreen (DM_WIDE_HUD=0: stretched as before). Every ui2d layout's 2D camera takes its projection from a param block
+//   {u32 type, l, r, b, t, near, far} (SetProjection main+0x6851c0 → matrix main+0x684ef0, type 2 = orthographic, one path for every 2D camera): nine HUD blocks
+//   {2, -960, 960, -540, 540, 0.1, 800} and the default {2, -640, 640, -360, 360, ...} at main+0x203fac8, in read-only data at the same addresses in Sword and Shield
+//   1.3.2. Their left / right times k = the screen's ratio / (16/9): the layout lands 16:9 in the middle of the wider picture, whether the game renders 16:9 (stretched
+//   to the screen) or the screen's own shape (DM_WIDE_RENDER). Each block's 28 bytes are checked first. Not yet seen on a phone: full-screen fades and menu
+//   backgrounds now cover the middle 16:9 only
+static int wide_hud_patch(module_t *m, double ratio, const char *game) {
+    const char *e = getenv("DM_WIDE_HUD"); if (e && !strcmp(e, "0")) return 0;
+    static const uint64_t B[10] = { 0x205f484, 0x2060404, 0x2060420, 0x2060458, 0x20604d4, 0x20620b0, 0x2062724, 0x2068a88, 0x2074650, 0x203fac8 };
+    static const float P1080[7] = { 0, -960.0f, 960.0f, -540.0f, 540.0f, 0.1f, 800.0f }, P720[7] = { 0, -640.0f, 640.0f, -360.0f, 360.0f, 0.1f, 800.0f };
+    float k = (float)(ratio / (16.0 / 9.0)); int n = 0;
+    for (unsigned i = 0; i < 10; i++) {
+        const float *want = i == 9 ? P720 : P1080; uint8_t *p = m->base + B[i]; uint32_t type;
+        if (B[i] + 28 > m->size) continue;
+        memcpy(&type, p, 4); if (type != 2 || memcmp(p + 4, want + 1, 24)) continue;
+        float lr[2] = { want[1] * k, want[2] * k }; memcpy(p + 4, lr, 8); n++;
+    }
+    if (n == 10) LOG("%s: widescreen HUD for %s: kept 16:9 in the middle (the 2D layouts' projection x %.4f)", m->name, game, (double)k);
+    else LOG("[RED] %s: widescreen HUD for %s: %d of 10 layout projections matched (the rest stay stretched)", m->name, game, n);
+    return n;
+}
 static int wide_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     const char *e = getenv("DM_ASPECT"); if (!e || strcmp(e, "wide")) return 0;
     const char *r = getenv("DM_WIDE_RATIO"); double ratio = r ? atof(r) : 0;
@@ -552,7 +573,7 @@ static int wide_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     memcpy(m->base + cave, w, 12); memcpy(m->base + ld, &br, 4); memcpy(m->base + def, dw, 8); memcpy(m->base + cull, &cw, 4);
     LOG("%s: widescreen camera for %s: aspect %.4f (%08x), culling %.4f, at +%#llx / +%#llx / +%#llx", m->name, WIDE_SITES[si].game, ratio, b,
         (double)({ uint32_t c = hc << 16; float g; memcpy(&g, &c, 4); g; }), (unsigned long long)ld, (unsigned long long)def, (unsigned long long)cull);
-    return 4;
+    return 4 + wide_hud_patch(m, ratio, WIDE_SITES[si].game);
 }
 // True aspect ratio (experimental, DM_WIDE_RENDER=1 with Widescreen): the game renders at the screen's own shape instead of 16:9 stretched to it, so pixels stay
 //   square. The graphics config's constructor (main+0x5e85e0, and an inlined copy at +0x5e86e0; the same in both games) packs each window size into one register:
