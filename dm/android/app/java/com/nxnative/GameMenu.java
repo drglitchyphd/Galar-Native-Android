@@ -610,6 +610,9 @@ public final class GameMenu {
         // the debug report (DebugBundle): logs, Android's crash records, phone / GPU / driver details in one ZIP in Download, and a pre-filled GitHub issue
         action(a, t(a, "Make a debug report"), t(a, "Logs, Android's crash records and this phone's GPU and driver details in one file in Download (a ZIP ending in debug-report.zip), and a GitHub issue with them filled in. No game files or saves."),
                () -> DebugBundle.run(a));
+        // the driver check (DriverCheck.java) again at the next start: its results dropped
+        action(a, t(a, "Check the graphics driver again"), t(a, "The few-second graphics driver check runs again the next time the game starts (it runs by itself after a system update or a driver change)."),
+               () -> { DriverCheck.forget(GameSettings.dir(a)); android.widget.Toast.makeText(a, t(a, "The driver is checked again at the next start."), android.widget.Toast.LENGTH_LONG).show(); });
         // GPU crash tracing (vk_crumbs.h, DM_VK_BREADCRUMBS): the GPU marks each pass it finishes, so a device lost names the pass it stopped in. Slower: off by default
         choice(a, "DM_VK_BREADCRUMBS", t(a, "GPU crash tracing"), new String[][] { { "", t(a, "Off"), "" },
             { "1", t(a, "On"), t(a, "On: the GPU notes each step it finishes, so when the graphics crash the log says where. A little slower: turn it on only to reproduce a crash, then make a debug report") } });

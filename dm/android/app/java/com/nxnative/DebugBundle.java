@@ -61,6 +61,7 @@ final class DebugBundle {
             String env; try { env = env(c).toString(2); } catch (Exception e) { env = "{\"error\": \"" + e + "\"}"; }
             text(z, "env.json", env);
             file(z, "settings.txt", new File(dir, "env.txt"));
+            for (String n : new String[] { "driver-check.txt", "driver-check.log", "driver-check.env" }) file(z, "driver-check/" + n, new File(dir, n));   // (DriverCheck.java)
             file(z, "logs/log.txt", new File(dir, "log.txt"));
             file(z, "logs/log.prev.txt", new File(dir, "log.prev.txt"));
             file(z, "logs/setup.log", new File(new File(dir, "setup_work"), "setup.log"));

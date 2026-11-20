@@ -27,7 +27,7 @@ final class DriverPackages {
         return out;
     }
     private static void setAll(Context c, String key, String value) {
-        for (File d : gameDirs(c)) { d.mkdirs(); GameSettings.setIn(new File(d, "env.txt"), key, value); new File(d, "vk_pipeline_cache.bin").delete(); }
+        for (File d : gameDirs(c)) { d.mkdirs(); GameSettings.setIn(new File(d, "env.txt"), key, value); new File(d, "vk_pipeline_cache.bin").delete(); DriverCheck.forget(d); }
     }
     static String current(Context c) { return GameSettings.get(c, "DM_VK_DRIVER"); }
     static String label(String lib) { if (lib == null || lib.isEmpty()) return "the phone's own driver"; File f = new File(lib); return f.getParentFile().getName() + " (" + f.getName() + ")"; }

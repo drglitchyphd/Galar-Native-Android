@@ -1,0 +1,13 @@
+#version 450
+// int-view (selftest.c t_int_view): an integer texture read through a view of another class, as the engine's tex_view_for does for a shader that reads it so
+//   (nvn_vk.c fmt_as_class): R32_UINT texels through an R32_SFLOAT view (the same bits as floats), R16G16B16A16_UINT texels through an R16G16B16A16_SINT view
+layout(local_size_x = 4) in;
+layout(set = 0, binding = 0) uniform sampler2D f32;     // R32_UINT image, R32_SFLOAT view
+layout(set = 0, binding = 1) uniform isampler2D s16;    // R16G16B16A16_UINT image, R16G16B16A16_SINT view
+layout(set = 0, binding = 2) buffer O { uint o[]; };
+void main() {
+    int i = int(gl_LocalInvocationID.x);
+    o[i] = floatBitsToUint(texelFetch(f32, ivec2(i, 0), 0).r);
+    ivec4 v = texelFetch(s16, ivec2(i, 0), 0);
+    o[4 + i * 4 + 0] = uint(v.x); o[4 + i * 4 + 1] = uint(v.y); o[4 + i * 4 + 2] = uint(v.z); o[4 + i * 4 + 3] = uint(v.w);
+}

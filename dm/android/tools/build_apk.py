@@ -121,6 +121,7 @@ def main():
                   android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|smallestScreenSize|density">
             <meta-data android:name="android.app.lib_name" android:value="nxnative" />
         </activity>
+        <service android:name="com.nxnative.DriverCheckService" android:process=":drvcheck" android:exported="false" />
     </application>
 </manifest>
 ''')
