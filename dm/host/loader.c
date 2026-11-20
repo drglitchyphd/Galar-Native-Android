@@ -490,6 +490,7 @@ static int pchtxt_dir(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
 // Built-in patches. (No built-in 20:9 camera: the 16:9 that PR #48 patched, MOVK X9, #0x8e39 / #0x3fe3 at +0x607de8, is a camera object's default aspect, which
 // the game replaces for the gameplay camera; patched, the picture was unchanged. DM_ASPECT=20:9 is the presentation alone, for a 20:9 .pchtxt mod.)
 int dm_step_hz; uint8_t *dm_step_word;   // the high frame rate below: its rate and the game's step word, which hle_nvn.c vstep_tick rewrites every frame
+uint8_t *dm_step_table;   // the game's whole frame-time table (5 u64 ns, intervals 1-5), when it holds the game's own values: vstep_tick writes the real step into all of it
 static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1);
 // Built-in community mods (builtin_mods.h, from dm/games/*/builtin_mods/*.pchtxt), each behind a setting: Scarlet / Violet 4.0.0's dynamic frame rate (Fl4sh's ASM
 // "Dynamic FPS": up to 60, the game's step from the time each frame really took) with DM_FPS_TARGET=60, their 2048×2048 shadow maps (Fl4sh's "2K Shadows") with
@@ -498,8 +499,12 @@ static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1);
 static int bmod_wanted(const char *name) {
     if (!strcmp(name, "dynamic_fps")) { const char *e = getenv("DM_FPS_TARGET"); return e && atoi(e) >= 60; }
     if (!strcmp(name, "shadows_2k")) { const char *e = getenv("DM_SHADOWS"); return e && !strcasecmp(e, "2k"); }   // (test only: not offered in the menu)
+    // DM_SHADOWS=low: the same site as 2K, 512×512 instead of the game's 1024 (a quarter of the shadow map's pixels; a smaller map also leaves the game's GPU
+    //   pool more room, where a bigger one takes it from streaming). Not offered in the menu until seen on a phone
+    if (!strcmp(name, "shadows_low")) { const char *e = getenv("DM_SHADOWS"); return e && !strcasecmp(e, "low"); }
     return 0;
 }
+int dm_shadow_off;   // nvn_vk.c draw: DM_SHADOWS=off on Scarlet / Violet 4.0.0's main, the sun shadow pass's draws dropped
 static int g_bmod_fps;   // the frame rate came from a built-in mod: the Sword / Shield patch below is not this game's
 int dm_dynfps;   // hle_nvn.c dyn_tick: Scarlet / Violet's Dynamic FPS is in, presentation is paced in steps of 30 / 60
 static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
@@ -507,6 +512,8 @@ static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     for (unsigned i = 0; i < sizeof BUILTIN_MODS / sizeof *BUILTIN_MODS; i++) {
         const bmod *b = &BUILTIN_MODS[i]; int hit = 0;
         for (int k = 0; b->builds[k]; k++) if (!strncasecmp(m->build_id, b->builds[k], 32)) hit = 1;
+        if (hit && !strcmp(b->name, "shadows_2k") && !dm_shadow_off) { const char *e = getenv("DM_SHADOWS");   // (the 2K mod's builds are Scarlet / Violet 4.0.0)
+            if (e && !strcasecmp(e, "off")) { dm_shadow_off = 1; LOG("%s: shadows off (DM_SHADOWS=off): the sun shadow pass's draws are dropped", m->name); } }
         if (!hit || !bmod_wanted(b->name)) continue;
         int bad = -1;
         for (int s = 0; s < b->n && bad < 0; s++) { const bmod_site *t = &b->sites[s];
@@ -537,6 +544,27 @@ static const struct { const char *build; uint64_t itv, dt; const char *game; } F
 //   dm_fps_live (30 or 60), which the in-game menu changes while playing (android_main.c nativeSetting): at 30 every frame is held 2 slots and the game told
 //   interval 2, as the game itself does at 30 (hle_nvn.c vstep_tick, reported_hold); at 60 the hold is 1, 2 when frames run late. 90 / 120 (env.txt) stay fixed
 int dm_fps_live;   // 0: not live (the game's own 30, or a fixed 90 / 120)
+// The stadium crowd at 30 (DM_CROWD_30, on unless "0"): the crowd's flipbook (models ob0041..ob0044 stadiumcrowda..d, in the new-game intro in Rose's stadium after the
+//   name entry) flickers at 60, and no fix in the frame step has cured it yet. When the game opens one of those models the live rate drops to 30; when it next loads a
+//   zone's scripts (bin/script/amx/z_*.amx: play has moved to a field area) the rate it had comes back, unless the menu changed it meanwhile. hle_fs.c h_fs_OpenFile
+static pthread_mutex_t g_crowd_mu = PTHREAD_MUTEX_INITIALIZER; static int g_crowd_saved;   // the live rate before the hold, 0: no hold
+void dm_fps_scene_file(const char *path) {
+    if (!path || !__atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED)) return;
+    int crowd = strstr(path, "_stadiumcrowd") != NULL, zone = !crowd && strstr(path, "/script/amx/z_") != NULL;
+    if (!crowd && !zone) return;
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_CROWD_30"); on = !(e && !strcmp(e, "0")); }
+    if (!on) return;
+    pthread_mutex_lock(&g_crowd_mu);
+    int cur = __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED);
+    if (crowd && !g_crowd_saved && cur != 30) {
+        g_crowd_saved = cur; __atomic_store_n(&dm_fps_live, 30, __ATOMIC_RELAXED);
+        LOG("frame rate: the stadium crowd is loading (%s): 30 fps until play moves to a field area (its flipbook flickers at %d)", path, cur); }
+    else if (zone && g_crowd_saved) {
+        if (cur == 30) { __atomic_store_n(&dm_fps_live, g_crowd_saved, __ATOMIC_RELAXED); LOG("frame rate: a field area loads (%s): %d fps again", path, g_crowd_saved); }
+        else LOG("frame rate: a field area loads (%s): the menu set %d meanwhile, kept", path, cur);
+        g_crowd_saved = 0; }
+    pthread_mutex_unlock(&g_crowd_mu);
+}
 static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     const char *e = getenv("DM_FPS_TARGET"), *lv = getenv("DM_FPS_LIVE"); int live = !(lv && !strcmp(lv, "0"));
     int want = e && *e ? atoi(e) : 0;
@@ -551,6 +579,15 @@ static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
         LOG("[RED] %s: %d fps patch not applied (%s: the step word lies in code, or that code was rewritten)", m->name, fps, FPS_SITES[si].game); return 0; }
     uint32_t wi, wd; memcpy(&wi, m->base + itv, 4); memcpy(&wd, m->base + dt, 4);
     if ((wi != 0x2a1503e1u && wi != 0x52800041u) || wd != 33333334u) { LOG("[RED] %s: %d fps patch not applied (unexpected words %08x %u)", m->name, fps, wi, wd); return 0; }
+    // The game does not take its step from the interval alone: once a frame (Shield FUN_006ea110 / FUN_006df360 in Ghidra, image +0x5ea110 / +0x5df360) it
+    //   measures its own frame cost, max(CPU work without its waits, the GPU time between two timestamp counter reports), rounds it up to whole vsyncs and
+    //   picks that entry of this table (16.7 / 33.3 / 50 / 66.7 / 83.3 ms). On this engine both measures miss time: the waits it subtracts are where our
+    //   translation and a throttled phone make it wait, and the timestamps of one submission are equal (written when it completes), so the game advanced
+    //   33 ms for frames that took 40-62 ms: the world, its animations above all, in slow motion. With the whole table found, every entry gets the real step
+    {   static const uint64_t own[5] = { 16666667, 33333334, 50000000, 66666667, 83333334 }; uint64_t t[5];
+        if (dt >= 8 && dt - 8 >= m->text_end && dt + 32 <= lim) { memcpy(t, m->base + dt - 8, sizeof t);
+            if (!memcmp(t, own, sizeof t)) dm_step_table = m->base + dt - 8; }
+        if (!dm_step_table) LOG("%s: the frame-time table around +%#llx is not the game's own: only its interval-2 entry follows the real step", m->name, (unsigned long long)dt); }
     wi = 0x52800021u; wd = (uint32_t)((1000000000ull + (uint64_t)fps - 1) / (uint64_t)fps);
     memcpy(m->base + itv, &wi, 4); memcpy(m->base + dt, &wd, 4);
     dm_step_hz = fps; dm_step_word = m->base + dt;

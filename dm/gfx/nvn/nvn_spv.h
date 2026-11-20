@@ -28,6 +28,9 @@ uint32_t *spv_drop_inputs(const uint32_t *code, size_t words, uint64_t drop, siz
 // A copy in which every user vector output of the entry point starts at the value an unwritten Maxwell attribute reads, (0, 0, 0, 1): vertex / tessellation evaluation
 // shaders that write only some components (or none) of an output the next stage reads (dmsh_build.py vs_init / vs_pad on the Metal side). NULL if nothing to do
 uint32_t *spv_init_outputs(const uint32_t *code, size_t words, size_t *out_words);
+enum { PROBE_SAMPLES = 1, PROBE_INPUTS = 2, PROBE_DIV = 4 };
+uint32_t *spv_probe(const uint32_t *code, size_t words, size_t *out_words, unsigned mask);   // diagnostic clamps in fragment shaders (DM_VK_PROBE)
+uint32_t *spv_swap_out01(const uint32_t *code, size_t words, size_t *out_words);   // fragment outputs at locations 0 and 1 swapped (dual-source blending emulated)
 // Drops capabilities / extensions / execution modes a shader declares but never uses (Float64, fragment shader interlock), in place; returns the new length in words
 size_t spv_strip_unused(uint32_t *code, size_t words);
 // Fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
@@ -47,6 +50,8 @@ uint32_t *spv_float_controls(const uint32_t *code, size_t words, size_t *out_wor
 uint32_t *spv_nan_minmax(const uint32_t *code, size_t words, size_t *out_words);
 // The same rule written as OpIsNan + OpSelect after each float min / max / clamp, for a driver that does not honour the N forms (Arm's own). NULL when the module has none
 uint32_t *spv_nan_select(const uint32_t *code, size_t words, size_t *out_words);
+// A copy in which every 32-bit float multiply (OpFMul, GLSL.std.450 Fma) gives 0 when an operand is 0, as Maxwell's FMZ does (0 x inf / NaN = 0); NULL when it has none
+uint32_t *spv_fmz(const uint32_t *code, size_t words, size_t *out_words);
 // A copy in which a constant-zero limit of a min / max / clamp of a value selected between constants is a zero the compiler cannot fold (Arm erratum 3779215, see nvn_spv.c).
 // NULL if there is none
 uint32_t *spv_clamp_zero(const uint32_t *code, size_t words, size_t *out_words);

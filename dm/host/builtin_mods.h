@@ -318,7 +318,13 @@ static const bmod_site bm_shadows_2k[] = {
     { 0x146e80c, 4, bm_shadows_2k_0_o, bm_shadows_2k_0_m },
 };
 
+static const uint8_t bm_shadows_low_0_o[] = { 0x08, 0x80, 0x80, 0x52 }, bm_shadows_low_0_m[] = { 0x08, 0x40, 0x80, 0x52 };
+static const bmod_site bm_shadows_low[] = {
+    { 0x146e80c, 4, bm_shadows_low_0_o, bm_shadows_low_0_m },
+};
+
 static const bmod BUILTIN_MODS[] = {
     { "dynamic_fps", { "421c5411b487eb4d049dd065fec95477", "709bfd66115298640155fcc4979dba15", NULL }, bm_dynamic_fps, 153 },
     { "shadows_2k", { "421c5411b487eb4d049dd065fec95477", "709bfd66115298640155fcc4979dba15", NULL }, bm_shadows_2k, 1 },
+    { "shadows_low", { "421c5411b487eb4d049dd065fec95477", "709bfd66115298640155fcc4979dba15", NULL }, bm_shadows_low, 1 },
 };

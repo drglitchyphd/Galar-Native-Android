@@ -82,6 +82,8 @@ final class GameSettings {
     // the frame-rate setting: Sword / Shield 1.3.2 (loader.c fps_patch), Scarlet / Violet 4.0.0 (loader.c's built-in Dynamic FPS mod)
     static final boolean AUTO_60 = false;
     static boolean has60(Context c) { String id = game(c)[0]; return "01008DB008C2C000".equalsIgnoreCase(id) || "0100ABF008968000".equalsIgnoreCase(id) || paldea(c); }
+    // Frame generation and Faster rendering are locked off for now (android_main.c forces them off); env.txt DM_UNLOCK_EXPERIMENTS=1 lifts the lock (development)
+    static boolean experimentsUnlocked(Context c) { return get(c, "DM_UNLOCK_EXPERIMENTS").equals("1"); }
     static boolean paldea(Context c) { String id = game(c)[0]; return "0100A3D008C5C000".equalsIgnoreCase(id) || "01008F6008C5E000".equalsIgnoreCase(id); }
 
     // What Auto gives this phone, from what it is rather than a list of models: { chip family, a description, graphics, textures, anisotropic filtering, frame rate, upscaler }.
@@ -127,6 +129,13 @@ final class GameSettings {
     }
     // whether the mods folder holds a switched-on HD texture pack: a mod whose romfs is 100 MB or more with at least 3/4 of its bytes under a path naming
     //   "texture" (the same test as android_main.c texture_pack); the menu offers the HD textures setting only then
+    // The player's Lossless Scaling shaders are in place (files/lsfg: the 25 the chain uses, converted from their Lossless.dll; android_main.c DM_LSFG_DIR)
+    static boolean hasLsfg(Context c) {
+        java.io.File d = new java.io.File(root(c), "lsfg");
+        for (int id : new int[] { 255, 256, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302 })
+            if (!new java.io.File(d, id + ".spv").isFile()) return false;
+        return true;
+    }
     static boolean hasTexturePack(Context c) {
         File[] ms = new File(dir(c), "mods").listFiles(); if (ms == null) return false;
         for (File m : ms) {
