@@ -828,3 +828,33 @@ void run_module_inits(void) {
         ((void (*)(void))(m->base + m->init))();
     }
 }
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sys/uio.h>
+// Frame generation's camera guidance (nvn_vk.c fg_cam_*): Legends: Arceus 1.1.1's main camera, read at present time. The camera registry R = *(main+0x42ef5a8);
+//   the game's own lookup (main+0x2a11e64, a libc++ unordered_map: buckets R+0x98, count R+0xa0, node {next, hash, key, ..., int index at +0x30}) finds "Main"
+//   (key 0x6723799257d05608); the camera = *(*(R+0x60) + index x 0x20), live while its byte +0xd0 is set; view (world → view) at +0x50 and projection at +0x90,
+//   4x4 column-major (main+0x29fb138: the scene's constant buffer takes them from there). Each read through process_vm_readv: a pointer that is not (yet) valid
+//   while a scene loads fails the read instead of faulting. 1: vp = projection x view
+static int peek(uint64_t a, void *o, size_t n) { struct iovec l = { o, n }, r = { (void *)(uintptr_t)a, n }; return a && process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n; }
+int dm_cam_viewproj(float vp[16]) {
+    static uint8_t *base; static int tried;
+    if (!tried) { tried = 1; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") && !strncasecmp(g_mod[i].build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) base = g_mod[i].base; }
+    if (!base) return 0;
+    const uint64_t key = 0x6723799257d05608ull; uint64_t R, n, bk, node;
+    if (!peek((uint64_t)(uintptr_t)(base + 0x42ef5a8), &R, 8) || !peek(R + 0xa0, &n, 8) || !n || n > (1u << 20)) return 0;
+    uint64_t idx = __builtin_popcountll(n) <= 1 ? (key & (n - 1)) : key % n;
+    if (!peek(R + 0x98, &bk, 8) || !peek(bk + idx * 8, &node, 8) || !node || !peek(node, &node, 8)) return 0;
+    for (int guard = 0; node && guard < 64; guard++) {
+        uint64_t h[2]; if (!peek(node + 8, h, 16)) return 0;
+        if (h[0] == key && h[1] == key) break;
+        uint64_t hb = __builtin_popcountll(n) <= 1 ? (h[0] & (n - 1)) : h[0] % n; if (hb != idx) return 0;
+        if (!peek(node, &node, 8)) return 0;
+    }
+    int32_t ci; uint64_t vec, cam; uint8_t live; float v[16], pj[16];
+    if (!node || !peek(node + 0x30, &ci, 4) || ci < 0 || !peek(R + 0x60, &vec, 8) || !peek(vec + (uint64_t)ci * 0x20, &cam, 8) || !peek(cam + 0xd0, &live, 1) || !live) return 0;
+    if (!peek(cam + 0x50, v, sizeof v) || !peek(cam + 0x90, pj, sizeof pj)) return 0;
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) { float t = 0; for (int k = 0; k < 4; k++) t += pj[k * 4 + r] * v[c * 4 + k]; vp[c * 4 + r] = t; }
+    for (int i = 0; i < 16; i++) if (vp[i] != vp[i]) return 0;
+    return 1;
+}
+#endif
