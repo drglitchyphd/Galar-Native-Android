@@ -1379,8 +1379,13 @@ static uint64_t g_bar_full_game, g_bar_full_work, g_bar_bits_narrow, g_bar_bits_
 int dm_ab(const char *key) __attribute__((weak));   // (android_main.c: a switch alternated in one run)
 static int barrier_bits_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BARRIER_BITS"); v = !(e && !strcmp(e, "0")); }
     int ab = dm_ab ? dm_ab("barbits") : -1; return ab >= 0 ? ab : v; }
+// Qualcomm's own driver before Vulkan 1.3 (Adreno 6xx / 7xx phones on driver 1.1.128 and the like; not Turnip, which names itself "Turnip Adreno"): skinned and
+//   swaying models explode into spikes there with barriers narrowed between draw passes (Arceus-Native-Android #34 #46 #59 on the Adreno 710, Galar #209 on the
+//   Adreno 650), as on Xclipse until v0.39 made its barriers full (#31 → #48 #78). The vertex-stride fix and the stride canary did not change it; Turnip on the same
+//   phone draws them right. So these drivers get a full barrier before each pass, as Xclipse, PowerVR and Mali (DM_VK_BARRIER=relaxed: narrowed again)
+static int old_qcom_driver(void) { return g_props.vendorID == 0x5143 && VK_API_VERSION_MINOR(g_props.apiVersion) < 3 && !strncmp(g_props.deviceName, "Adreno", 6); }
 static int barrier_relaxed(void) { static int v = -1; if (v < 0) { { const char *e = getenv("DM_VK_BARRIER");   // (relaxed by default for Legends: Arceus, and for every game on Adreno (Qualcomm, vendor 0x5143); Mali and the rest keep full barriers)
-        v = e && (!strcmp(e, "full") || !strcmp(e, "relaxed")) ? !strcmp(e, "relaxed") : arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") || g_props.vendorID == 0x5143; } VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
+        v = e && (!strcmp(e, "full") || !strcmp(e, "relaxed")) ? !strcmp(e, "relaxed") : (arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") || g_props.vendorID == 0x5143) && !old_qcom_driver(); } VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
 static void barrier_all(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
