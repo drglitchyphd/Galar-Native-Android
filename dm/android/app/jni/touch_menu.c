@@ -372,17 +372,6 @@ static uint64_t map_button(float x, float y) {
     if (y <= -488 && x >= 552 && x < 840) return DM_BTN_X;
     return 0;
 }
-// The battle's command buttons (Legends: Arceus): standalone L_btn_* panes, each the picture of one of the controller's buttons, not a list the cursor walks (a tap on
-//   Fight, L_btn_attack_00, was dropped as "its list is not focused", S25+ 2026-11-20). A tap presses that button. Names seen so far: L_btn_attack_* (Fight, A). Any
-//   other L_btn_* is logged with its place, so the next battle names it; until then it falls through to the menu logic as before
-static int battle_button(const pane_t *t) {
-    if (strncmp(t->name, "L_btn_", 6)) return 0;
-    static const struct { const char *pre; uint64_t b; const char *what; } B[] = { { "L_btn_attack", DM_BTN_A, "Fight (A)" } };
-    for (unsigned i = 0; i < sizeof B / sizeof *B; i++) if (!strncmp(t->name, B[i].pre, strlen(B[i].pre))) {
-        press(B[i].b); fprintf(stderr, "[touch-menu] battle button %s: %s\n", t->name, B[i].what); return 1; }
-    fprintf(stderr, "[touch-menu] battle button %s [%.0f %.0f %.0f %.0f]: not mapped yet (tell which button it shows)\n", t->name, t->x0, t->y0, t->x1, t->y1);
-    return 0;
-}
 // steers the cursor into the target with D-pad presses (re-reading where it went after each one), then presses A
 static void drive(float tx, float ty) {
     pane_t t; float cx, cy; uintptr_t lock = 0;
@@ -398,7 +387,6 @@ static void drive(float tx, float ty) {
         if (empty_at(tx, ty) && !atomic_load(&g_map)) { press(DM_BTN_B); fprintf(stderr, "[touch-menu] tap (%.0f, %.0f) outside the menu: B (back)\n", tx, ty); return; }   // (not on the map: its surface is outside every list)
         fprintf(stderr, "[touch-menu] tap (%.0f, %.0f): no menu item there\n", tx, ty); diag(tx, ty); return; }
     fprintf(stderr, "[touch-menu] tap (%.0f, %.0f) on %s [%.0f %.0f %.0f %.0f], cursor at (%.0f, %.0f)\n", tx, ty, t.name, t.x0, t.y0, t.x1, t.y1, cx, cy);
-    if (battle_button(&t)) return;
     if (tab_tap(&t)) return;
     int j = jump(&t);
     if (j < 0) {   // a pop-up has the focus (the Satchel's Use / Discard / Cancel): its layout lives in mappings the last scan did not keep
