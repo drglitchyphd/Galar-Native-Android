@@ -2528,8 +2528,8 @@ static vtex *dummy_make(VkFormat f, VkImageType type, uint32_t layers, int cube,
     x->w = x->h = x->d = 1; x->levels = 1; x->layers = layers; x->samples = samples; x->usage = ci.usage; x->aspect = fmt_aspect(f); x->is3d = type == VK_IMAGE_TYPE_3D; x->cube_ok = cube;
     x->fswz[0] = NVN_SWZ_R; x->fswz[1] = NVN_SWZ_G; x->fswz[2] = NVN_SWZ_B; x->fswz[3] = NVN_SWZ_A;
     VkCommandBuffer cb = once_begin(); {
-        VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = x->img, .subresourceRange = { x->aspect, 0, 1, 0, layers } };
+        VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = x->img, .subresourceRange = { x->aspect, 0, 1, 0, layers } };   // (WRITE too: the clear below; SYNC-HAZARD-WRITE-AFTER-WRITE)
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
         VkImageSubresourceRange r = { x->aspect, 0, 1, 0, layers };
         if (x->aspect & VK_IMAGE_ASPECT_COLOR_BIT) { VkClearColorValue c = {{0}}; vkCmdClearColorImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
@@ -2649,6 +2649,7 @@ typedef struct vshader {
     char key[24]; int stage; VkShaderStageFlagBits vkstage; VkShaderModule mod, glmod; uint32_t shift;
     spv_res res[64]; vres_how how[64]; int nres;
     spv_input in[32]; int nin;
+    spv_input glin[32]; int nglin;              // the GL-depth variant's (glmod) own inputs: the translator may type them differently
     uint8_t drv_read[3]; uint8_t color_mask, color_known;
     VkBuffer c1buf; VkDeviceSize c1off, c1len;
     uint64_t in_mask, out_mask;                 // user varyings by location (spv_io_masks)
@@ -2875,6 +2876,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         if (g_fmz && (c2 = spv_fmz(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         c2 = spv_init_outputs(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_yflip && (c2 = spv_flip_y(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
+        { spv_res gres[64]; int gnr = 0, gst; uint32_t gls[3]; if (spv_reflect(glcode, ngl / 4, gres, 64, &gnr, s->glin, 32, &s->nglin, &gst, gls)) s->nglin = 0; }
         VkShaderModuleCreateInfo gci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ngl, .pCode = glcode };
         VkResult gr = vkCreateShaderModule(g_dev, &gci, NULL, &s->glmod);
         if (gr) { VLOG("[RED] shader %s: GL depth fallback module failed %d", hex, gr); s->glmod = VK_NULL_HANDLE; }
@@ -3786,6 +3788,29 @@ static void *prewarm_main(void *arg) {
     return NULL;
 }
 // Builds the pipeline for key k (no lookup: pso_get and the prewarm do that); ss: the draw state built in, on a driver without extended dynamic state (else NULL)
+// A vertex attribute's format as the shader reads it. Vulkan wants the format's numeric type to match the shader input's (VUID-VkGraphicsPipelineCreateInfo-Input-08733;
+//   the driver is free to do anything otherwise); NVIDIA's hardware, which the game was made for, hands a 32-bit attribute's bits to the shader unchanged whatever its
+//   type. A 32-bit integer format under a float input therefore becomes the float format of the same size, and a 32-bit float format under an integer input the
+//   integer one: the same bits reach the shader, by the spec. Smaller integer formats have no bit-for-bit match (left as they are, logged once)
+// The vertex module a pipeline gets (pso_make) and its inputs: the GL-depth variant on a driver without depth clip control while the game's depth is GL's
+static int vs_gl(const vshader *vs, int depth_zero) { return vs && !g_clipctl && !depth_zero && vs->glmod && vs->nglin; }
+static const spv_input *vs_inputs(const vshader *vs, int depth_zero, int *n) { if (vs_gl(vs, depth_zero)) { *n = vs->nglin; return vs->glin; } *n = vs ? vs->nin : 0; return vs ? vs->in : NULL; }
+static VkFormat attr_fmt_for(const vshader *vs, int depth_zero, uint32_t loc, VkFormat f) {
+    int nin; const spv_input *in = vs_inputs(vs, depth_zero, &nin);
+    int cls = -1; for (int i = 0; i < nin; i++) if (in[i].location == loc) { cls = in[i].sclass; break; }
+    if (cls < 0) return f;
+    int fi = f >= VK_FORMAT_R32_UINT && f <= VK_FORMAT_R32G32B32A32_SFLOAT ? (int)(f - VK_FORMAT_R32_UINT) : -1;   // R32 .. R32G32B32A32, each UINT / SINT / SFLOAT
+    if (fi >= 0) { int base = fi / 3 * 3, kind = fi % 3;   // kind 0 uint, 1 sint, 2 float
+        int want = cls == 0 ? 2 : cls == 1 ? 0 : 1;
+        if (kind != want) { static int said; if (!said++) VLOG("vertex attributes: a 32-bit %s format under a %s shader input is read as %s (the same bits, as the Switch's GPU hands them over)",
+                                                                 kind == 2 ? "float" : "integer", cls == 0 ? "float" : "integer", want == 2 ? "float" : "integer");
+                            return (VkFormat)(VK_FORMAT_R32_UINT + base + want); } }
+    else if (cls == 0) { static int said; int ints = (f >= VK_FORMAT_R8_UINT && f <= VK_FORMAT_R8_SINT) || (f >= VK_FORMAT_R8G8_UINT && f <= VK_FORMAT_R8G8_SINT) ||
+            (f >= VK_FORMAT_R8G8B8A8_UINT && f <= VK_FORMAT_R8G8B8A8_SINT) || (f >= VK_FORMAT_R16_UINT && f <= VK_FORMAT_R16_SINT) || (f >= VK_FORMAT_R16G16_UINT && f <= VK_FORMAT_R16G16_SINT) ||
+            (f >= VK_FORMAT_R16G16B16A16_UINT && f <= VK_FORMAT_R16G16B16A16_SINT);
+        if (ints && !said++) VLOG("[RED] vertex attributes: an 8 / 16-bit integer format %d under a float shader input (location %u): no format gives the same bits; left as it is", (int)f, loc); }
+    return f;
+}
 static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     vshader *vs = pr->sh[0], *fs = pr->sh[1]; VkPipeline p = VK_NULL_HANDLE;
     // a capture drawn as points (a key recorded while that route was on, or now): only with the route on and its shaders made. A recorded one built ahead at a start
@@ -3802,7 +3827,7 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     VkVertexInputBindingDescription vb[17]; VkVertexInputAttributeDescription va[32]; VkVertexInputBindingDivisorDescriptionEXT vd[16]; uint32_t nvb = 0, nva = 0, nvd = 0; uint32_t have = 0;
     for (uint32_t loc = 0; loc < 32; loc++) {
         if (!k.attr[loc].used) continue;
-        va[nva++] = (VkVertexInputAttributeDescription){ loc, k.attr[loc].bind, (VkFormat)k.attr[loc].fmt, k.attr[loc].bind == 16 ? 0 : k.attr[loc].off };
+        va[nva++] = (VkVertexInputAttributeDescription){ loc, k.attr[loc].bind, attr_fmt_for(vs, k.depth_zero, loc, (VkFormat)k.attr[loc].fmt), k.attr[loc].bind == 16 ? 0 : k.attr[loc].off };
         uint32_t b = k.attr[loc].bind; if (have >> b & 1) continue; have |= 1u << b;
         vb[nvb++] = (VkVertexInputBindingDescription){ b, 0, b != 16 && k.attr[loc].inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX };
         if (b != 16 && k.attr[loc].inst && k.attr[loc].div > 1) { if (g_divisor) vd[nvd++] = (VkVertexInputBindingDivisorDescriptionEXT){ b, k.attr[loc].div }; else RED_ONCE(26, "instance divisor %u needs VK_EXT_vertex_attribute_divisor", k.attr[loc].div); }
@@ -3872,13 +3897,14 @@ static VkPipeline pso_get(vprog *pr, VkPrimitiveTopology topo) {
     k.logic_en = S.color.logic_op != NVN_LOGIC_OP_COPY; k.logic_op = (uint8_t)S.color.logic_op; k.depth_zero = (uint8_t)atomic_load(&g_depth_zero); k.yflip = (uint8_t)(g_yflip && !atomic_load(&g_origin_ll)); k.discard = (uint8_t)!!S.rast_discard;
     if (P_tf && g_tf_pts > 0) { k.discard = 0; k.tfpts = (uint8_t)P.ncolor; }   // (a capture drawn as points: tf_points.h)
     k.ds_swap = (uint8_t)g_ds_swap;
-    for (int i = 0; i < vs->nin; i++) {
-        uint32_t loc = vs->in[i].location; if (loc >= 32) continue;
+    int nvin; const spv_input *vin = vs_inputs(vs, k.depth_zero, &nvin);   // (the inputs of the vertex module this pipeline gets)
+    for (int i = 0; i < nvin; i++) {
+        uint32_t loc = vin[i].location; if (loc >= 32) continue;
         k.attr[loc].used = 1;
-        if ((int)loc < S.nattr && S.attr[loc].fmt) { int st = S.attr[loc].stream; VkFormat f = vfmt_for(S.attr[loc].fmt, vs->in[i].sclass);
+        if ((int)loc < S.nattr && S.attr[loc].fmt) { int st = S.attr[loc].stream; VkFormat f = vfmt_for(S.attr[loc].fmt, vin[i].sclass);
             if (f && st < 16) { k.attr[loc].fmt = f; k.attr[loc].off = S.attr[loc].offset; k.attr[loc].bind = (uint8_t)st; k.attr[loc].inst = S.stream[st].divisor != 0; k.attr[loc].div = S.stream[st].divisor; continue; }
             RED_ONCE(25, "vertex attribute format %#x not mapped", S.attr[loc].fmt); }
-        k.attr[loc].fmt = vs->in[i].sclass == 1 ? VK_FORMAT_R32G32B32A32_UINT : vs->in[i].sclass == 2 ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_SFLOAT; k.attr[loc].bind = 16;   // unbound: reads 0
+        k.attr[loc].fmt = vin[i].sclass == 1 ? VK_FORMAT_R32G32B32A32_UINT : vin[i].sclass == 2 ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_SFLOAT; k.attr[loc].bind = 16;   // unbound: reads 0
     }
     if (!g_eds) {   // the state draw_ sets per draw where the driver lets it, as the same values (and the same rules: depth / stencil only with such an attachment)
         sst s; memset(&s, 0, sizeof s);
@@ -4824,7 +4850,7 @@ void *front_metal_layer(void);
 #define SC_MAX 32
 static struct { void *win; VkSurfaceKHR surf; VkSwapchainKHR sc; VkImage img[SC_MAX]; VkImageView view[SC_MAX]; uint32_t n; VkFormat fmt; VkExtent2D ext; int srgb;
                 VkExtent2D lext; int rot;   // lext: the window as the app sees it (landscape); rot: quarter turns the swapchain is pre-rotated by (ext is then the panel's own size)
-                VkSemaphore acq[3], done[3]; VkFence fence[3]; VkCommandPool pool; VkCommandBuffer cb[3]; uint32_t slot; } W;
+                VkSemaphore acq[3], done[3], idone[SC_MAX]; VkFence fence[3]; VkCommandPool pool; VkCommandBuffer cb[3]; uint32_t slot; } W;
 // Making and dropping the window surface runs on a thread of its own: present_window runs on a game thread, whose stack is the game's (outside its pthread stack), and
 // releasing an Android surface calls into Java (BLASTBufferQueue's corner-radii callback), which attaches the calling thread; ART aborts the process when that thread's
 // stack is not its pthread stack (Thread::InitStack: "FindStackTop() > GetStackEnd()"). That was the crash on leaving the app (recents, home) and coming back
@@ -4851,6 +4877,14 @@ static int swap_ensure(void *win, int srgb) {
 #endif
     if (W.sc && W.win == win && W.srgb == srgb) return 1;
     return swap_job_run(1, win, srgb);
+}
+// The semaphore a present of swapchain image i waits on, one per image (made the first time): one per frame slot (3) was signalled again for another image while the
+//   driver could still hold it for an image presented earlier and not acquired again (validation: VUID-vkQueueSubmit-pSignalSemaphores-00067; the swapchain has more
+//   images than slots). The image is acquired again before its semaphore is signalled again, which is what makes it safe
+static VkSemaphore done_img(uint32_t i) {
+    if (i >= SC_MAX) i = SC_MAX - 1;
+    if (!W.idone[i]) { VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO }; vkCreateSemaphore(g_dev, &sci, NULL, &W.idone[i]); }
+    return W.idone[i];
 }
 static void swap_destroy_now(void) {
     if (W.sc) { pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);   // (the queue is externally synchronized: other threads submit to it)
@@ -5305,7 +5339,7 @@ static int fsr_draw(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint32_t th
     ib.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; ib.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
     // RCAS: into the swapchain image's box (the caller has it in COLOR_ATTACHMENT and records nothing else in between)
-    VkImageMemoryBarrier sb = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    VkImageMemoryBarrier sb = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,   /* (READ: the pass after loads it; SYNC-HAZARD-READ-AFTER-WRITE) */
         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = W.img[ii], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &sb);
@@ -5350,7 +5384,7 @@ static int scale_draw_view(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint
     int which = mode == 1 && !color_mode() ? 1 : 0; if (which && !scale_setup(W.fmt, 1)) which = 0;   // (SGSR has no colour: with one chosen, the sharp upscaler)
     if (!scale_setup(W.fmt, which)) return 0;
     if (mode == 2 || sh < 0) sh = 0;   // (turned but smooth: plain bilinear)
-    VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,   /* (READ: the pass after loads it; SYNC-HAZARD-READ-AFTER-WRITE) */
         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = W.img[ii], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
@@ -5715,12 +5749,12 @@ static void present_window_locked(vtex *x, const int crop[4]) {
     if (!gen) npic = 0;
     present_compose(cb, imgs[npic], &real, flip);
     vkEndCommandBuffer(cb);
-    VkPipelineStageFlags ws[LS_MAXGEN + 1]; VkSemaphore wsem[LS_MAXGEN + 1] = { W.acq[sl] }, ssem[LS_MAXGEN + 1] = { W.done[sl] };
+    VkPipelineStageFlags ws[LS_MAXGEN + 1]; VkSemaphore wsem[LS_MAXGEN + 1] = { W.acq[sl] }, ssem[LS_MAXGEN + 1] = { done_img(imgs[0]) };   // (ssem[j]: image imgs[j]'s present)
     for (int k = 0; k <= LS_MAXGEN; k++) ws[k] = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    for (int k = 0; k < npic; k++) { wsem[1 + k] = FGE.acqx[sl][k]; ssem[1 + k] = FGE.donex[sl][k]; }
+    for (int k = 0; k < npic; k++) { wsem[1 + k] = FGE.acqx[sl][k]; ssem[1 + k] = done_img(imgs[1 + k]); }
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = (uint32_t)(1 + npic), .pWaitSemaphores = wsem, .pWaitDstStageMask = ws, .commandBufferCount = 1, .pCommandBuffers = &cb,
                         .signalSemaphoreCount = (uint32_t)(1 + npic), .pSignalSemaphores = ssem };
-    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &W.done[sl], .swapchainCount = 1, .pSwapchains = &W.sc, .pImageIndices = &ii };
+    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &ssem[0], .swapchainCount = 1, .pSwapchains = &W.sc, .pImageIndices = &ii };
     VkPresentTimeGOOGLE pt = { 0 }; VkPresentTimesInfoGOOGLE pti = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &pt };
     g_fg_pace = gen; g_fg_mult = npic + 1; if (pace_time(&pt)) pi.pNext = &pti; g_fg_pace = 0;   // (a time asked for, nothing waited on: the present mode stays as it is)
     pthread_mutex_lock(&g_qmu);
@@ -5731,7 +5765,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         uint64_t now = mono_ns(), sp = period / (uint64_t)(npic + 1), rf = pace_off() ? 0 : g_refresh_ns, want = pt.desiredPresentTime;
         FGE.pending = npic; FGE.phead = 0; FGE.pmult = npic + 1; FGE.arrived = t_arr; FGE.seq++;
         for (int k = 1; k <= npic; k++) {
-            FGE.pii[k - 1] = imgs[k]; FGE.pdone[k - 1] = FGE.donex[sl][k - 1];
+            FGE.pii[k - 1] = imgs[k]; FGE.pdone[k - 1] = done_img(imgs[k]);
             // with a display time asked: each handed over early hundredths of a refresh before the time of the picture ahead of it (it asks its own an interval / n later);
             // without: at its own time
             uint64_t at = want + (uint64_t)(k - 1) * sp, ea = rf * (uint64_t)g_fg_early / 100;
