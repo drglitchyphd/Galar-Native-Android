@@ -990,7 +990,7 @@ static void graphics_auto(void) {
             if ((cpu_bound || for_heat) && to < 2 && lo >= 2) to = 2;   // (the CPU the limit, or hot: handheld mode, the game's lighter settings, not a smaller picture first)
             lv = to; L30_APPLY(); cool = 0; held = 0; slow = 0; since = 0;
             fprintf(stderr, "%s: %.1f fps (GPU %.1f ms, game thread %.1f ms of %.1f)%s: %s, render scale %d %%; a step up after %d s steady\n", for_heat ? "graphics auto: the phone is hot" : "fps guard",
-                    fps, gpu, cpu, budget, cpu_bound ? ", the CPU the limit" : "", mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f), wait * 5);
+                    fps > 0 ? fps : fps_avg, gpu, cpu, budget, cpu_bound ? ", the CPU the limit" : "", mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f), wait * 5);
         } else if ((lv > 0 && cool >= wait) || up_early) {
             lv--; L30_APPLY(); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
             fprintf(stderr, "graphics auto: %s: %s, render scale %d %%\n", up_early ? "the GPU has room" : g_fps_guard ? "steady and cool" : "cooled down", mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f));
