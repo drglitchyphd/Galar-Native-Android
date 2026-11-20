@@ -405,3 +405,5 @@ Resolution	Resolução
 720p: lightest, for phones that cannot hold 30 (from the next start)	720p: o mais leve, para celulares que não mantêm 30 (a partir do próximo início)
 1080p, as the game is made	1080p, como o jogo foi feito
 1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p: mais nítido, mas mais pesado para a GPU (menos fps, celular mais quente; a partir do próximo início)
+Dynamic	Dinâmico
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinâmico: 60 onde o celular consegue, 30 onde não, com a imagem completa; a velocidade do jogo fica certa
