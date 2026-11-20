@@ -59,7 +59,7 @@
 //   neither went a safe-start level up nor offered another driver (#280: Mali-G68 r38p1, "vkWaitSemaphores failed: -4 (device lost?)" 12 s in, every start)
 void dm_crash_note(int in_game) __attribute__((weak));
 #define VDIE(...) do { VLOG("FATAL " __VA_ARGS__); if (dm_crash_note) dm_crash_note(0); abort(); } while (0)
-static int g_red_once[128];
+static int g_red_once[160];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) VLOG("[RED] " __VA_ARGS__); } while (0)
 #define VKCHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) VDIE("%s failed: %d (%s:%d)", #x, r_, __FILE__, __LINE__); } while (0)
 #define NTEX 256
@@ -180,6 +180,12 @@ static int g_clampzero; static _Atomic int g_clampzero_n;   // shaders get spv_c
 static int g_fmz; static _Atomic int g_fmz_n;   // shaders get spv_fmz (every multiply by 0 gives 0, as Maxwell's FMZ: DM_VK_FMZ=1, a test); how many it changed
 static int g_nanmm; static _Atomic int g_nanmm_n;           // shaders get spv_nan_minmax (min / max / saturate drop NaN as on Maxwell: mtl_init decides; 2: spv_nan_select too); how many it changed
 static int g_dualsrc = 1;        // the device blends with a second shader output (dualSrcBlend): Arm's own Mali driver has none (r44p1)
+// Optional Vulkan 1.0 features (any of them may be missing on a phone): what the device has (mtl_init); without one, the state that needs it is left out or replaced
+//   (pso_build, samp_vk, the draw), never passed to the driver. DM_VK_MIN_FEATURES=1 takes every such route on any GPU (a test of the Vulkan 1.0 baseline)
+static int g_drawp = 1;          // draw parameters (VK_KHR_shader_draw_parameters / shaderDrawParameters): without, spv_no_drawparams + dp_push
+static int g_nosbsc;             // Vulkan 1.0 without VK_KHR_storage_buffer_storage_class: spv_sb_to_uniform before spv_to_10
+static int g_f_clamp = 1, g_f_logic = 1, g_f_nonsolid = 1, g_f_indblend = 1, g_f_biasclamp = 1, g_f_aniso = 1, g_minmax = 1;
+static uint32_t g_feat_have = ~0u;   // SPV_NEED_* the device has (spv_feature_needs)
 static int g_tlsem = 1;          // the device has timeline semaphores; 0: each submission signals a fence of its own instead (older Adreno stock drivers, Vulkan 1.1, #99)
 // Markers of a set-up step that crashed the driver (mark_file below), one set per driver kind: a crash on a driver package does not change the phone's own driver
 static const char *drv_mark(const char *base) {
@@ -238,8 +244,12 @@ static void gap_wrap(void) {
 static PFN_vkCreateShaderModule g_csm_real;
 static _Atomic int g_csm10_n, g_csm10_fail;
 static VKAPI_ATTR VkResult VKAPI_CALL vk_shader_module_10(VkDevice d, const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *a, VkShaderModule *m) {
-    size_t nw = 0; uint32_t *c = spv_to_10(ci->pCode, ci->codeSize / 4, &nw);
-    if (!c) { if (ci->codeSize >= 8 && ci->pCode[1] > 0x00010000u && !atomic_fetch_add(&g_csm10_fail, 1)) VLOG("[RED] Vulkan 1.0: a shader needs more than SPIR-V 1.0 (a subgroup instruction): passed as it is"); return g_csm_real(d, ci, a, m); }
+    size_t nw = 0; uint32_t *sb = NULL;
+    if (g_nosbsc && ci->codeSize >= 20) { sb = malloc(ci->codeSize); if (sb) { memcpy(sb, ci->pCode, ci->codeSize); if (spv_sb_to_uniform(sb, ci->codeSize / 4) < 0) RED_ONCE(128, "Vulkan 1.0: a shader's storage buffers could not be declared the 1.0 way"); } }
+    uint32_t *c = spv_to_10(sb ? sb : ci->pCode, ci->codeSize / 4, &nw);
+    if (!c) { if (ci->codeSize >= 8 && ci->pCode[1] > 0x00010000u && !atomic_fetch_add(&g_csm10_fail, 1)) VLOG("[RED] Vulkan 1.0: a shader needs more than SPIR-V 1.0 (a subgroup instruction): passed as it is");
+              VkShaderModuleCreateInfo c1 = *ci; if (sb) c1.pCode = sb; VkResult r1 = g_csm_real(d, &c1, a, m); free(sb); return r1; }
+    free(sb);
     VkShaderModuleCreateInfo c2 = *ci; c2.codeSize = nw * 4; c2.pCode = c;
     VkResult r = g_csm_real(d, &c2, a, m); free(c);
     if (atomic_fetch_add(&g_csm10_n, 1) == 0) VLOG("Vulkan 1.0: shaders made SPIR-V 1.0 as they load (first: %s)", r ? "refused" : "ok");
@@ -303,7 +313,7 @@ void mtl_init(void) {
     if (g_qf == nq) VDIE("no graphics + compute queue");
     uint32_t nde = 0; vkEnumerateDeviceExtensionProperties(g_pd, NULL, &nde, NULL);
     VkExtensionProperties *de = calloc(nde ? nde : 1, sizeof *de); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &nde, de);
-    const char *dext[24]; uint32_t ndext = 0;
+    const char *dext[48]; uint32_t ndext = 0;
     g_api = g_props.apiVersion < g_instance_api ? g_props.apiVersion : g_instance_api;   // (the version the driver hands out functions for: the lower of the two)
     if (getenv("DM_VK_API")) { int a = atoi(getenv("DM_VK_API")); uint32_t f = a == 10 ? VK_API_VERSION_1_0 : a == 11 ? VK_API_VERSION_1_1 : a == 12 ? VK_API_VERSION_1_2 : g_api; if (f < g_api) g_api = f; }
     int old = g_api < VK_API_VERSION_1_3, old11 = g_api < VK_API_VERSION_1_2;
@@ -351,13 +361,16 @@ void mtl_init(void) {
     if ((g_divisor = !as_mali && has_ext(de, nde, "VK_EXT_vertex_attribute_divisor"))) dext[ndext++] = "VK_EXT_vertex_attribute_divisor";
     if ((g_eds2 = has_ext(de, nde, "VK_EXT_extended_dynamic_state2"))) dext[ndext++] = "VK_EXT_extended_dynamic_state2";
     int compctl = has_ext(de, nde, "VK_EXT_image_compression_control"); if (compctl) dext[ndext++] = "VK_EXT_image_compression_control";
+    // min / max sampler filtering (the game's reduction-mode samplers): Vulkan 1.2's samplerFilterMinmax (read with the features below), or this extension before 1.2
+    if (g_api < VK_API_VERSION_1_2 && (g_minmax = has_ext(de, nde, "VK_EXT_sampler_filter_minmax"))) dext[ndext++] = "VK_EXT_sampler_filter_minmax";
     // Vulkan 1.0 drivers: what 1.1 has built in and the engine relies on, as extensions. maintenance1: the flipped viewport (a negative height) that turns NVN's upper-left
     //   origin into Vulkan's; shader_draw_parameters: the base instance 718 of 1,543 Sword / Shield shaders read; storage_buffer_storage_class: a shader that uses it
     //   (the shaders themselves are made SPIR-V 1.0 at module creation: vk_shader_module_10)
     if (g_api < VK_API_VERSION_1_1) {
         static const char *const x10[] = { "VK_KHR_maintenance1", "VK_KHR_shader_draw_parameters", "VK_KHR_storage_buffer_storage_class" };
-        for (unsigned k = 0; k < sizeof x10 / sizeof *x10; k++) { if (has_ext(de, nde, x10[k])) dext[ndext++] = x10[k]; else if (k == 0) g_yflip = 1; else VLOG("[RED] Vulkan 1.0 driver without %s: %s", x10[k],
-            k == 1 ? "shaders that read the base instance will not load" : "shaders with storage buffers of that kind will not load"); }
+        // without shader_draw_parameters: spv_no_drawparams (push constants); without storage_buffer_storage_class: spv_sb_to_uniform (Uniform + BufferBlock)
+        for (unsigned k = 0; k < sizeof x10 / sizeof *x10; k++) { if (has_ext(de, nde, x10[k])) dext[ndext++] = x10[k]; else if (k == 0) g_yflip = 1; else if (k == 1) g_drawp = 0; else g_nosbsc = 1;
+            if (k && !has_ext(de, nde, x10[k])) VLOG("Vulkan 1.0 driver without %s: %s", x10[k], k == 1 ? "draw parameters come from push constants" : "storage buffers declared the Vulkan 1.0 way"); }
         VLOG("Vulkan 1.0 driver: shaders made SPIR-V 1.0 as they load, 1.1 features through their extensions");
     }   // to read whether render targets stay compressed
     if (getenv("DM_VK_YFLIP")) g_yflip = atoi(getenv("DM_VK_YFLIP")) != 0;   // (tries the route on a driver that has maintenance1)
@@ -454,6 +467,9 @@ void mtl_init(void) {
     void *tail = opt;
     if (old && x_eds) { fed.pNext = tail; tail = &fed; }
     if (old11 && g_tlsem) { fts.pNext = tail; tail = &fts; }   // (only with its extension enabled: a structure of one that is not is invalid)
+    // Vulkan 1.1 devices: shaderDrawParameters has its own structure there (the 1.1 block is 1.2+); read for g_drawp, and enabled with the device when present
+    VkPhysicalDeviceShaderDrawParametersFeatures fsdp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES };
+    if (old11 && g_api >= VK_API_VERSION_1_1) { fsdp.pNext = tail; tail = &fsdp; }
     if (old && x_dynren) { fdr.pNext = tail; tail = &fdr; }
     VkPhysicalDeviceVulkan13Features f13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = opt };
     VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = old ? tail : (void *)&f13 };
@@ -593,6 +609,31 @@ void mtl_init(void) {
     g_dualsrc = f2.features.dualSrcBlend || (getenv("DM_VK_DUALSRC") && !strcmp(getenv("DM_VK_DUALSRC"), "keep"));
     if (getenv("DM_VK_DUALSRC") && !strcmp(getenv("DM_VK_DUALSRC"), "emulate")) g_dualsrc = 0;   // (a test: the two-step blend of draw on a driver that has dualSrcBlend)
     if (!f2.features.dualSrcBlend) VLOG("blending: the driver has no dual-source blending (dualSrcBlend): the game's SRC1 blend factors %s", g_dualsrc ? "passed as they are (DM_VK_DUALSRC=keep)" : "become the first output's");
+    // The other optional Vulkan 1.0 features the engine can be asked for: each one missing has its route (Vulkan 1.0 baseline: no phone left out for lacking one)
+    { const char *mf = getenv("DM_VK_MIN_FEATURES"); int minf = mf && atoi(mf);
+      const VkPhysicalDeviceFeatures *F = &f2.features;
+      g_drawp = g_api < VK_API_VERSION_1_1 ? g_drawp : old11 ? fsdp.shaderDrawParameters != 0 : f11.shaderDrawParameters != 0;
+      g_minmax = g_api >= VK_API_VERSION_1_2 && !old11 ? f12.samplerFilterMinmax != 0 : g_minmax;
+      g_f_clamp = F->depthClamp; g_f_logic = F->logicOp; g_f_nonsolid = F->fillModeNonSolid; g_f_indblend = F->independentBlend; g_f_biasclamp = F->depthBiasClamp; g_f_aniso = F->samplerAnisotropy;
+      g_feat_have = (F->geometryShader ? SPV_NEED_GEOM : 0) | (F->tessellationShader ? SPV_NEED_TESS : 0) | (F->shaderFloat64 ? SPV_NEED_F64 : 0) | (F->shaderInt64 ? SPV_NEED_I64 : 0)
+                  | (F->shaderInt16 ? SPV_NEED_I16 : 0) | (F->shaderTessellationAndGeometryPointSize ? SPV_NEED_TGPSIZE : 0) | (F->shaderImageGatherExtended ? SPV_NEED_GATHEREXT : 0)
+                  | (F->shaderStorageImageMultisample ? SPV_NEED_STORMS : 0) | (F->shaderClipDistance ? SPV_NEED_CLIP : 0) | (F->shaderCullDistance ? SPV_NEED_CULL : 0)
+                  | (F->imageCubeArray ? SPV_NEED_CUBEARR : 0) | (F->sampleRateShading ? SPV_NEED_SRS : 0) | (F->shaderResourceResidency ? SPV_NEED_SPARSE : 0)
+                  | (F->shaderResourceMinLod ? SPV_NEED_MINLOD : 0) | (F->shaderStorageImageExtendedFormats ? SPV_NEED_EXTFMT : 0)
+                  | (F->shaderStorageImageReadWithoutFormat ? SPV_NEED_IMGRNF : 0) | (F->shaderStorageImageWriteWithoutFormat ? SPV_NEED_IMGWNF : 0) | (F->multiViewport ? SPV_NEED_MVP : 0)
+                  | (F->fragmentStoresAndAtomics ? SPV_NEED_FRAGSTORE : 0);
+      if (minf) { g_drawp = g_minmax = g_f_clamp = g_f_logic = g_f_nonsolid = g_f_indblend = g_f_biasclamp = g_f_aniso = 0; }
+      if (getenv("DM_VK_NO_DRAWP")) g_drawp = !atoi(getenv("DM_VK_NO_DRAWP"));   // 1: the push-constant route on any GPU; 0: draw parameters passed as before
+      if (!g_drawp) VLOG("draw parameters: the device has none%s: shaders that read them get them from push constants", getenv("DM_VK_NO_DRAWP") ? " (DM_VK_NO_DRAWP)" : "");
+      char miss[256] = ""; size_t ml = 0;
+      #define MISS(c, s) if (!(c) && ml < sizeof miss - 40) ml += (size_t)snprintf(miss + ml, sizeof miss - ml, "%s%s", ml ? ", " : "", s)
+      MISS(g_drawp, "draw parameters (from push constants)"); MISS(g_minmax, "min / max sampler filtering (plain filtering)"); MISS(g_f_clamp, "depth clamp (left off)");
+      MISS(g_f_logic, "logic ops (left off)"); MISS(g_f_nonsolid, "line / point fill (filled)"); MISS(g_f_indblend, "per-target blending (the first target's)");
+      MISS(g_f_biasclamp, "depth bias clamp (unclamped)"); MISS(g_f_aniso, "anisotropic filtering (off)");
+      #undef MISS
+      if (ml) VLOG("optional Vulkan features this device lacks%s: %s", minf ? " (DM_VK_MIN_FEATURES)" : "", miss);
+      if (!(g_feat_have & SPV_NEED_GEOM) || !(g_feat_have & SPV_NEED_TESS))
+          VLOG("shader stages this device lacks: %s%s%s (programs with them are skipped)", g_feat_have & SPV_NEED_GEOM ? "" : "geometry", !(g_feat_have & SPV_NEED_GEOM) && !(g_feat_have & SPV_NEED_TESS) ? ", " : "", g_feat_have & SPV_NEED_TESS ? "" : "tessellation"); }
     // The BC layer's set-up builds and runs its shaders on this GPU: a start that dies there leaves the marker, and later starts on this driver convert on the CPU
     //   (DM_VK_BC_GPU=1 tries again)
     if (!f2.features.textureCompressionBC) {
@@ -2486,12 +2527,13 @@ static VkSampler samp_vk(const samp_par *p) {
     // anisotropic filtering capped (DM_VK_MAX_ANISO, default 8): above 8x the texture units fetch far more for surfaces at a glancing angle for little visible gain
     { static float cap = -1; if (cap < 0) { const char *e = getenv("DM_VK_MAX_ANISO"); cap = e ? (float)atof(e) : 8.0f; if (cap < 1) cap = 1; }
       float want = p->aniso > cap ? cap : p->aniso;
-      if (want > 1) { ci.anisotropyEnable = VK_TRUE; ci.maxAnisotropy = want > g_props.limits.maxSamplerAnisotropy ? g_props.limits.maxSamplerAnisotropy : want; } }
+      if (want > 1 && g_f_aniso) { ci.anisotropyEnable = VK_TRUE; ci.maxAnisotropy = want > g_props.limits.maxSamplerAnisotropy ? g_props.limits.maxSamplerAnisotropy : want; } }
     if (p->cmp_mode) { ci.compareEnable = VK_TRUE; ci.compareOp = (VkCompareOp)(p->cmp_func - 1); }
     VkSamplerReductionModeCreateInfo rd = { .sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO, .reductionMode = p->reduction == 1 ? VK_SAMPLER_REDUCTION_MODE_MIN : VK_SAMPLER_REDUCTION_MODE_MAX };
     VkSamplerCustomBorderColorCreateInfoEXT bc = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT, .format = VK_FORMAT_UNDEFINED };
     const void **tail = &ci.pNext;
-    if (p->reduction == 1 || p->reduction == 2) { *tail = &rd; tail = &rd.pNext; }
+    if ((p->reduction == 1 || p->reduction == 2) && g_minmax) { *tail = &rd; tail = &rd.pNext; }
+    else if (p->reduction == 1 || p->reduction == 2) RED_ONCE(136, "a min / max filtering sampler on a device without it: plain filtering");
     int std = (p->border[0] == 0 && p->border[1] == 0 && p->border[2] == 0 && (p->border[3] == 0 || p->border[3] == 1)) || (p->border[0] == 1 && p->border[1] == 1 && p->border[2] == 1 && p->border[3] == 1);
     if (g_border && !std) { memcpy(bc.customBorderColor.float32, p->border, 16); ci.borderColor = VK_BORDER_COLOR_FLOAT_CUSTOM_EXT; *tail = &bc; }
     else ci.borderColor = p->border[3] > 0.5f ? (p->border[0] > 0.5f ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK) : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
@@ -2657,7 +2699,19 @@ typedef struct vshader {
     uint8_t out_cls[8];                         // fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
     struct { uint64_t drop; uint32_t um, sm; int sw; VkShaderModule mod; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)
     int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod, ptsmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
+    uint8_t dp;                                 // reads draw parameters from push constants (a device without them: spv_no_drawparams; the draw pushes them, dp_push)
+    uint32_t lacks;                             // SPV_NEED_* the shader needs and the device lacks (spv_feature_needs)
 } vshader;
+// A device without draw parameters: the module (any variant of a shader) without them (spv_no_drawparams); c is freed when replaced
+static uint32_t *dp_fix(vshader *s, uint32_t *c, size_t *nw, const char *hex) {
+    if (g_drawp || !c) return c;
+    int mode = 0; size_t n2; uint32_t *d = spv_no_drawparams(c, *nw, &n2, &mode);
+    if (!d) { if (mode == 0) { /* no DrawParameters: nothing to do */ } return c; }
+    free(c); *nw = n2;
+    if (mode == 1) s->dp = 1;
+    if (mode == 2) RED_ONCE(129, "shader %s: a draw parameter in a module with push constants already (a capture variant): read as 0", hex);
+    return d;
+}
 static char g_spv_dir[1024];
 static nvn_hmap g_shmap = {.klen = 8};      // shader key (8 bytes) → stage + 1 (as a pointer)
 static nvn_hmap g_shcache = {.klen = 8};    // shader key → vshader
@@ -2877,6 +2931,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         c2 = spv_init_outputs(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_yflip && (c2 = spv_flip_y(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         { spv_res gres[64]; int gnr = 0, gst; uint32_t gls[3]; if (spv_reflect(glcode, ngl / 4, gres, 64, &gnr, s->glin, 32, &s->nglin, &gst, gls)) s->nglin = 0; }
+        if (!g_drawp) { nw = ngl / 4; glcode = dp_fix(s, glcode, &nw, hex); ngl = nw * 4; }
         VkShaderModuleCreateInfo gci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ngl, .pCode = glcode };
         VkResult gr = vkCreateShaderModule(g_dev, &gci, NULL, &s->glmod);
         if (gr) { VLOG("[RED] shader %s: GL depth fallback module failed %d", hex, gr); s->glmod = VK_NULL_HANDLE; }
@@ -2886,13 +2941,24 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     spv_io_masks(code, ns / 4, &s->in_mask, &s->out_mask);
     if (st == 0 && (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3])) {   // transform feedback: the capture variant (tf_draw)
         size_t tw; uint32_t *tc = spv_tf_variant(code, ns / 4, (const int (*)[2])s->tf, TF_BIND, &tw);
+        tc = dp_fix(s, tc, &tw, hex);
         if (tc) { VkShaderModuleCreateInfo tci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = tw * 4, .pCode = tc }; if (vkCreateShaderModule(g_dev, &tci, NULL, &s->tfmod)) s->tfmod = VK_NULL_HANDLE; free(tc); }
         if (!s->tfmod) VLOG("[RED] shader %s: transform feedback capture variant failed", hex);
         if (g_tf_pts > 0) { size_t pw; uint32_t *pc_ = spv_tf_points_variant(code, ns / 4, (const int (*)[2])s->tf, TFP_W, &pw);   // the point route (tf_points.h)
+            pc_ = dp_fix(s, pc_, &pw, hex);
             if (pc_) { VkShaderModuleCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = pw * 4, .pCode = pc_ }; if (vkCreateShaderModule(g_dev, &pci, NULL, &s->ptsmod)) s->ptsmod = VK_NULL_HANDLE; free(pc_); }
             if (!s->ptsmod) VLOG("[RED] shader %s: transform feedback point variant failed", hex); }
     }
     if (g_yflip && st == 0) { size_t nw; uint32_t *c2 = spv_flip_y(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } else RED_ONCE(127, "vertex shader %s: no position to flip (Vulkan 1.0 without maintenance1)", hex); }
+    if (!g_drawp) { size_t nw = ns / 4; code = dp_fix(s, code, &nw, hex); ns = nw * 4; }
+    // what it needs of the device's optional features: a missing geometry / tessellation stage skips its programs (pso_build); the rest is named once and passed on
+    if ((s->lacks = spv_feature_needs(code, ns / 4) & ~g_feat_have)) {
+        static _Atomic uint32_t said; uint32_t fresh = s->lacks & ~atomic_fetch_or(&said, s->lacks);
+        static const char *nm[] = { "geometry shaders", "tessellation", "64-bit floats", "64-bit integers", "16-bit integers", "tessellation / geometry point size", "gather offsets",
+            "multisampled storage images", "clip distances", "cull distances", "cube map arrays", "sample-rate shading", "sparse resources", "min LOD", "extended storage formats",
+            "storage image reads without a format", "storage image writes without a format", "multiple viewports", "fragment shader stores" };
+        for (int b = 0; b < 19; b++) if (fresh >> b & 1) VLOG("[RED] shader %s needs %s, which this device lacks: %s", hex, nm[b], b <= 1 ? "its programs are skipped" : "passed to the driver as it is");
+    }
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
     if (st == 1) { s->code = code; s->nw = ns / 4; } else free(code);
@@ -2940,13 +3006,15 @@ static VkPipelineLayout prog_layout(vprog *o, int compute) {
     int tf = !compute && o->sh[0] && o->sh[0]->tfmod;   // transform feedback: the capture buffers and { first, base[4] } (tf_draw)
     if (tf) for (int k = 0; k < 4; k++) if (o->sh[0]->tf_stride[k]) b[n++] = (VkDescriptorSetLayoutBinding){ TF_BIND + (uint32_t)k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
     VkPushConstantRange pcr = { VK_SHADER_STAGE_VERTEX_BIT, 0, 20 };
+    int dp = !compute && o->sh[0] && o->sh[0]->dp;   // draw parameters from push constants (dp_push): one range over both
+    if (dp) pcr.size = SPV_DRAWP_PC_OFFSET + 12;
     // more descriptors than one push takes (Pokémon Legends: Arceus' terrain: 29, past the 32 of some Adreno drivers with other programs): this program uses descriptor sets
     uint32_t nd = 0; for (uint32_t i = 0; i < n; i++) nd += b[i].descriptorCount;
     o->np[compute] = (uint8_t)(g_nopush || nd > g_maxpush);
     if (o->np[compute] && !g_nopush) { static int said; if (!said++) VLOG("a program with %u descriptors (push limit %u): descriptor sets for such programs", nd, g_maxpush); }
     VkDescriptorSetLayoutCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = o->np[compute] ? 0 : VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = n, .pBindings = b };
     VKCHECK(vkCreateDescriptorSetLayout(g_dev, &dci, NULL, &o->dsl[compute]));
-    VkPipelineLayoutCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &o->dsl[compute], .pushConstantRangeCount = tf ? 1u : 0u, .pPushConstantRanges = &pcr };
+    VkPipelineLayoutCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &o->dsl[compute], .pushConstantRangeCount = tf || dp ? 1u : 0u, .pPushConstantRanges = &pcr };
     VKCHECK(vkCreatePipelineLayout(g_dev, &pci, NULL, &o->pl[compute]));
     return o->pl[compute];
 }
@@ -3853,7 +3921,20 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
             cb[i].srcColorBlendFactor = bfac_dev(k.blend[i].src_rgb); cb[i].dstColorBlendFactor = bfac_dev(k.blend[i].dst_rgb); cb[i].srcAlphaBlendFactor = bfac_dev(k.blend[i].src_a); cb[i].dstAlphaBlendFactor = bfac_dev(k.blend[i].dst_a);
             cb[i].colorBlendOp = bop(k.blend[i].eq_rgb); cb[i].alphaBlendOp = bop(k.blend[i].eq_a); }
     }
-    VkPipelineColorBlendStateCreateInfo bs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .logicOpEnable = k.tfpts ? 0 : k.logic_en, .logicOp = (VkLogicOp)k.logic_op,
+    // Optional Vulkan 1.0 features the device may lack (mtl_init): the state that needs one is left out, never passed on
+    if (!g_f_indblend && ncb > 1) {   // without independentBlend every target takes the same state: the first written target's (no blending if any target is an integer one)
+        uint32_t t = 0; while (t < ncb && !cb[t].colorWriteMask) t++;
+        if (t < ncb) { int differ = 0, anyint = 0; for (uint32_t i = 0; i < ncb; i++) { if (memcmp(&cb[i], &cb[t], sizeof cb[t])) differ = 1; if (cf[i] && fmt_int_class(cf[i])) anyint = 1; }
+            if (differ) { VkPipelineColorBlendAttachmentState one = cb[t]; if (anyint) one.blendEnable = VK_FALSE; for (uint32_t i = 0; i < ncb; i++) cb[i] = one;
+                RED_ONCE(131, "targets blended differently on a device without independentBlend (vertex %s): every target as the first written one", vs ? vs->key : "-"); } }
+    }
+    if (!g_f_clamp && rs.depthClampEnable) { rs.depthClampEnable = VK_FALSE; RED_ONCE(132, "depth clamp on a device without it: left off (geometry past the far plane is clipped)"); }
+    if (!g_f_nonsolid && rs.polygonMode != VK_POLYGON_MODE_FILL) { rs.polygonMode = VK_POLYGON_MODE_FILL; RED_ONCE(133, "line / point fill on a device without fillModeNonSolid: filled"); }
+    int logic_en = k.tfpts ? 0 : k.logic_en;
+    if (!g_f_logic && logic_en) { logic_en = 0; RED_ONCE(134, "a logic op (%u) on a device without logicOp: plain writes", (unsigned)k.logic_op); }
+    // a geometry / tessellation stage the device does not have: the program is skipped
+    for (int i = 0; i < 5; i++) if (pr->sh[i] && (pr->sh[i]->lacks & (SPV_NEED_GEOM | SPV_NEED_TESS))) { RED_ONCE(135, "a program with a geometry / tessellation stage this device lacks (shader %s): not drawn", pr->sh[i]->key); return VK_NULL_HANDLE; }
+    VkPipelineColorBlendStateCreateInfo bs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .logicOpEnable = logic_en, .logicOp = (VkLogicOp)k.logic_op,
                                            .attachmentCount = ncb, .pAttachments = cb };
     VkDynamicState dyn[24]; uint32_t nd = 0;
     VkDynamicState base[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
@@ -4329,7 +4410,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_BIT, S.st_vmask[0]); vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_BACK_BIT, S.st_vmask[1]);
     vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_BIT, S.st_wmask[0]); vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_BACK_BIT, S.st_wmask[1]);
     vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_BIT, S.st_ref[0]); vkCmdSetStencilReference(cb, VK_STENCIL_FACE_BACK_BIT, S.st_ref[1]);
-    if (S.poly.offset_en & 4) vkCmdSetDepthBias(cb, S.po.units, S.po.clamp, S.po.factor); else vkCmdSetDepthBias(cb, 0, 0, 0);
+    if (S.poly.offset_en & 4) vkCmdSetDepthBias(cb, S.po.units, g_f_biasclamp ? S.po.clamp : 0.0f, S.po.factor); else vkCmdSetDepthBias(cb, 0, 0, 0);   // (no depthBiasClamp: unclamped)
     vkCmdSetBlendConstants(cb, S.blend_color);
     }
     // vertex streams: the pool buffers at their addresses, strides from the stream state; binding 16 = zeros for unbound attributes
@@ -4360,6 +4441,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
           if (chk == 1 && tfb[0] && pr->sh[0]->tf_stride[0]) { chk = 2; uint64_t at = S.tf[0].addr + S.tf_off[0], n = (uint64_t)dw->count * pr->sh[0]->tf_stride[0]; if (n > 64) n = 64;
               n &= ~3ull; if (n) { dm_guest_write_prepare((void *)(uintptr_t)at, n); for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(uintptr_t)(at + i) = 0x7fc0deadu;
                   g_tfchk_at = at; g_tfchk_n = (uint32_t)n; g_tfchk_frame = g_frame_no; } } }
+        if (pr->sh[0]->dp) { uint32_t dv[3] = { (uint32_t)dw->first, (uint32_t)dw->base_instance, 0 }; vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, SPV_DRAWP_PC_OFFSET, sizeof dv, dv); }
         vkCmdDraw(cb, (uint32_t)dw->count, 1, (uint32_t)dw->first, (uint32_t)dw->base_instance);
         vshader *vs = pr->sh[0];
         if (tfp_n) {   // as points: the targets into the capture buffers
@@ -4373,6 +4455,12 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     }
     desc_flush(VK_PIPELINE_BIND_POINT_GRAPHICS, pl, pr->dsl[0]);
     uint32_t inst = (uint32_t)((dw ? dw->instances : di->instances) > 0 ? (dw ? dw->instances : di->instances) : 1);
+    if (pr->sh[0]->dp) {   // a device without draw parameters: the draw's base vertex / base instance, as the shader reads them (spv_no_drawparams); 0 for an indirect draw
+        int ind = (dw && dw->ind) || (di && di->ind);
+        uint32_t dv[3] = { ind ? 0u : dw ? (uint32_t)dw->first : (uint32_t)di->base_vertex, ind ? 0u : (uint32_t)(dw ? dw->base_instance : di->base_instance), 0 };
+        if (ind) RED_ONCE(130, "an indirect draw with vertex shader %s, which reads a draw parameter, on a device without them: read as 0", pr->sh[0]->key);
+        vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, SPV_DRAWP_PC_OFFSET, sizeof dv, dv);
+    }
     if ((dw && dw->ind) || (di && di->ind)) {
         VkBuffer ab; VkDeviceSize ao; uint64_t ind = dw ? dw->ind : di->ind;
         if (prim == 6 || prim == 7) { RED_ONCE(35, "indirect fan / quad draw not supported yet"); return; }
