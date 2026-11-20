@@ -595,7 +595,12 @@ static int arc_res(module_t *m, int64_t p0, int64_t p1) {
     for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w; memcpy(&w, m->base + R[i].off, 4);
         if (R[i].off + 4 > m->text_end || w != R[i].orig || overlaps_rewrite(m, R[i].off, 4, p0, p1)) { LOG("[RED] %s: 1440p not applied (Legends: Arceus 1.1.1's render size code differs at +%#llx)", m->name, (unsigned long long)R[i].off); return 0; } }
     for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w = (R[i].orig & ~(0xffffu << 5)) | R[i].imm << 5; memcpy(m->base + R[i].off, &w, 4); }
-    LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)", m->name);
+    // The GPU memory the config builder (main+0x277d798) gives graphics setup (main+0x29d6a64): the render-target pool, config+0x30, 250 MB → 400 MB, and config+0x08,
+    //   15 MB (0xf00000: exactly the 2560x1440 target that found no free block) → 32 MB. Both MOVZ Wn, #imm, LSL #16, patched in place (the user's analysis, verified)
+    static const struct { uint64_t off; uint32_t orig, now; } G[] = { { 0x277d7f0, 0x52a1f409u, 0x52a32009u }, { 0x277d7f4, 0x52a01e0bu, 0x52a0400bu } };
+    int g = 1; for (unsigned i = 0; i < 2; i++) { uint32_t w; memcpy(&w, m->base + G[i].off, 4); g &= G[i].off + 4 <= m->text_end && w == G[i].orig && !overlaps_rewrite(m, G[i].off, 4, p0, p1); }
+    if (g) for (unsigned i = 0; i < 2; i++) { memcpy(m->base + G[i].off, &G[i].now, 4); mod_page_note(m, G[i].off, 4); }
+    LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)%s", m->name, g ? "; render-target pool 400 MB (was 250), config+0x08 32 MB (was 15)" : "; [RED] the GPU memory sizes differ: left as they are");
     return (int)(sizeof R / sizeof *R);
 }
 // True aspect ratio for Legends: Arceus 1.1.1 (experimental, DM_WIDE_RENDER=1 with Widescreen): the game renders at the screen's own shape instead of 16:9 stretched to
