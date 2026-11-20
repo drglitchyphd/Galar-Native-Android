@@ -1095,12 +1095,16 @@ static void load_report(const thr_snap *a, int na, uint64_t ns, uint64_t bytes, 
 #include <ucontext.h>
 #include <link.h>
 enum { LP_N = 32768 };
-static struct { uint64_t pc, lr; int who; } g_lp[LP_N]; static _Atomic int g_lp_n; static _Atomic int g_lp_on; static int g_lp_tid[2];
+enum { LP_F = 10 };   // frames a sample keeps: pc, lr, then the frame-pointer chain (the engine is built with frame pointers)
+static struct { uint64_t f[LP_F]; int nf, who; } g_lp[LP_N]; static _Atomic int g_lp_n; static _Atomic int g_lp_on; static int g_lp_tid[2];
 static void lp_sig(int sig, siginfo_t *si, void *ucv) {
     (void)sig; (void)si; if (!atomic_load(&g_lp_on)) return;
     ucontext_t *uc = ucv; int t = (int)gettid(), who = t == g_lp_tid[0] ? 0 : t == g_lp_tid[1] ? 1 : -1; if (who < 0) return;
     int i = atomic_fetch_add(&g_lp_n, 1); if (i >= LP_N) return;
-    g_lp[i].pc = uc->uc_mcontext.pc; g_lp[i].lr = uc->uc_mcontext.regs[30]; g_lp[i].who = who;
+    g_lp[i].who = who; g_lp[i].f[0] = uc->uc_mcontext.pc; g_lp[i].f[1] = uc->uc_mcontext.regs[30]; int nf = 2;
+    uint64_t sp = uc->uc_mcontext.sp, fp = uc->uc_mcontext.regs[29];
+    while (nf < LP_F && fp && !(fp & 15) && fp >= sp && fp < sp + (8u << 20)) { uint64_t nx = ((uint64_t *)(uintptr_t)fp)[0], ra = ((uint64_t *)(uintptr_t)fp)[1]; g_lp[i].f[nf++] = ra; if (nx <= fp) break; fp = nx; }   // (inside its own stack only)
+    g_lp[i].nf = nf;
 }
 static timer_t g_lp_timer[2]; static int g_lp_ntimer;
 static void load_prof(int start) {
@@ -1112,7 +1116,8 @@ static void load_prof(int start) {
         g_lp_tid[0] = nvn_rq_tid ? nvn_rq_tid() : 0; g_lp_tid[1] = (int)getpid(); atomic_store(&g_lp_n, 0); g_lp_ntimer = 0;
         for (int k = 0; k < 2; k++) { if (!g_lp_tid[k]) continue;
             struct sigevent ev; memset(&ev, 0, sizeof ev); ev.sigev_notify = SIGEV_THREAD_ID; ev.sigev_signo = SIGPROF; ev._sigev_un._tid = g_lp_tid[k];
-            if (timer_create(CLOCK_MONOTONIC, &ev, &g_lp_timer[g_lp_ntimer])) continue;
+            clockid_t cpu = (clockid_t)((~(unsigned)g_lp_tid[k]) << 3) | 6;   // (the thread's own CPU clock, CPUCLOCK_SCHED | PERTHREAD: a sample per 1 ms it runs, none while it waits)
+            if (timer_create(cpu, &ev, &g_lp_timer[g_lp_ntimer]) && timer_create(CLOCK_MONOTONIC, &ev, &g_lp_timer[g_lp_ntimer])) continue;
             struct itimerspec it = { { 0, 1000000 }, { 0, 1000000 } }; timer_settime(g_lp_timer[g_lp_ntimer], 0, &it, NULL); g_lp_ntimer++; }
         atomic_store(&g_lp_on, 1); return;
     }
@@ -1120,11 +1125,12 @@ static void load_prof(int start) {
     atomic_store(&g_lp_on, 0); for (int k = 0; k < g_lp_ntimer; k++) timer_delete(g_lp_timer[k]); g_lp_ntimer = 0;
     int n = atomic_load(&g_lp_n); if (n > LP_N) n = LP_N;
     static int seq; char p[1200]; snprintf(p, sizeof p, "%s/load_prof_%d.txt", g_files, ++seq); FILE *f = fopen(p, "w"); if (!f) return;
-    fprintf(f, "# samples %d (1 ms each), thread 0 = dm-replay tid %d, 1 = main tid %d\n", n, g_lp_tid[0], g_lp_tid[1]);
-    for (int i = 0; i < n; i++) { Dl_info a, b; const char *ma = "?", *mb = "?"; uint64_t oa = g_lp[i].pc, ob = g_lp[i].lr;
-        if (dladdr((void *)(uintptr_t)g_lp[i].pc, &a) && a.dli_fname) { ma = strrchr(a.dli_fname, '/') ? strrchr(a.dli_fname, '/') + 1 : a.dli_fname; oa -= (uint64_t)(uintptr_t)a.dli_fbase; }
-        if (dladdr((void *)(uintptr_t)g_lp[i].lr, &b) && b.dli_fname) { mb = strrchr(b.dli_fname, '/') ? strrchr(b.dli_fname, '/') + 1 : b.dli_fname; ob -= (uint64_t)(uintptr_t)b.dli_fbase; }
-        fprintf(f, "%d %s %llx %s %llx\n", g_lp[i].who, ma, (unsigned long long)oa, mb, (unsigned long long)ob); }
+    fprintf(f, "# samples %d (1 ms of CPU each), thread 0 = dm-replay tid %d, 1 = main tid %d; per line: thread, then module:offset for pc, lr and the frame chain\n", n, g_lp_tid[0], g_lp_tid[1]);
+    for (int i = 0; i < n; i++) { fprintf(f, "%d", g_lp[i].who);
+        for (int k = 0; k < g_lp[i].nf; k++) { Dl_info a; const char *m = "?"; uint64_t o = g_lp[i].f[k];
+            if (dladdr((void *)(uintptr_t)g_lp[i].f[k], &a) && a.dli_fname) { m = strrchr(a.dli_fname, '/') ? strrchr(a.dli_fname, '/') + 1 : a.dli_fname; o -= (uint64_t)(uintptr_t)a.dli_fbase; }
+            fprintf(f, " %s:%llx", m, (unsigned long long)o); }
+        fputc('\n', f); }
     fclose(f); fprintf(stderr, "[cpu] load profile: %d samples written to %s\n", n, p);
 }
 static void load_boost(int loading, uint64_t t) {
