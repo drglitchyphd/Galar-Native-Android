@@ -532,6 +532,27 @@ static const struct { const char *build, *game; uint64_t cull; } WIDE_SITES[] = 
     { "a16802625e7826bf83b6f9708e475b91", "Shield 1.3.2", 0xd93444 },
     { "a3b75bcd3311385aeed67fbeeb79cbb7", "Sword 1.3.2", 0xd93414 },
 };
+// The HUD kept 16:9 in the middle with Widescreen (DM_WIDE_HUD=0: stretched as before). Every ui2d layout's 2D camera takes its projection from a param block
+//   {u32 type, l, r, b, t, near, far} (SetProjection main+0x6851c0 → matrix main+0x684ef0, type 2 = orthographic, one path for every 2D camera): nine HUD blocks
+//   {2, -960, 960, -540, 540, 0.1, 800} and the default {2, -640, 640, -360, 360, ...} at main+0x203fac8, in read-only data at the same addresses in Sword and Shield
+//   1.3.2. Their left / right times k = the screen's ratio / (16/9): the layout lands 16:9 in the middle of the wider picture, whether the game renders 16:9 (stretched
+//   to the screen) or the screen's own shape (DM_WIDE_RENDER). Each block's 28 bytes are checked first. Not yet seen on a phone: full-screen fades and menu
+//   backgrounds now cover the middle 16:9 only
+static int wide_hud_patch(module_t *m, double ratio, const char *game) {
+    const char *e = getenv("DM_WIDE_HUD"); if (e && !strcmp(e, "0")) return 0;
+    static const uint64_t B[10] = { 0x205f484, 0x2060404, 0x2060420, 0x2060458, 0x20604d4, 0x20620b0, 0x2062724, 0x2068a88, 0x2074650, 0x203fac8 };
+    static const float P1080[7] = { 0, -960.0f, 960.0f, -540.0f, 540.0f, 0.1f, 800.0f }, P720[7] = { 0, -640.0f, 640.0f, -360.0f, 360.0f, 0.1f, 800.0f };
+    float k = (float)(ratio / (16.0 / 9.0)); int n = 0;
+    for (unsigned i = 0; i < 10; i++) {
+        const float *want = i == 9 ? P720 : P1080; uint8_t *p = m->base + B[i]; uint32_t type;
+        if (B[i] + 28 > m->size) continue;
+        memcpy(&type, p, 4); if (type != 2 || memcmp(p + 4, want + 1, 24)) continue;
+        float lr[2] = { want[1] * k, want[2] * k }; memcpy(p + 4, lr, 8); n++;
+    }
+    if (n == 10) LOG("%s: widescreen HUD for %s: kept 16:9 in the middle (the 2D layouts' projection x %.4f)", m->name, game, (double)k);
+    else LOG("[RED] %s: widescreen HUD for %s: %d of 10 layout projections matched (the rest stay stretched)", m->name, game, n);
+    return n;
+}
 static int wide_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     const char *e = getenv("DM_ASPECT"); if (!e || strcmp(e, "wide")) return 0;
     const char *r = getenv("DM_WIDE_RATIO"); double ratio = r ? atof(r) : 0;
@@ -552,6 +573,39 @@ static int wide_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     memcpy(m->base + cave, w, 12); memcpy(m->base + ld, &br, 4); memcpy(m->base + def, dw, 8); memcpy(m->base + cull, &cw, 4);
     LOG("%s: widescreen camera for %s: aspect %.4f (%08x), culling %.4f, at +%#llx / +%#llx / +%#llx", m->name, WIDE_SITES[si].game, ratio, b,
         (double)({ uint32_t c = hc << 16; float g; memcpy(&g, &c, 4); g; }), (unsigned long long)ld, (unsigned long long)def, (unsigned long long)cull);
+    return 4 + wide_hud_patch(m, ratio, WIDE_SITES[si].game);
+}
+// True aspect ratio (experimental, DM_WIDE_RENDER=1 with Widescreen): the game renders at the screen's own shape instead of 16:9 stretched to it, so pixels stay
+//   square. The graphics config's constructor (main+0x5e85e0, and an inlined copy at +0x5e86e0; the same in both games) packs each window size into one register:
+//   MOVZ X9, #1920 then MOVK X9, #1080, LSL #32 (TV mode) and MOVK X9, #1280, LSL #32 after the format word (handheld). The two widths become 1080 x the screen's aspect
+//   and 720 x it (even, at most 21.6:9); the heights stay, so the camera (wide_patch) sees as much more as the picture is wider. Render targets grow by the same factor
+//   (about 25 % at 20:9): the game's GPU memory areas are not resized, so this stays off by default until a phone has played with it (Legends: Arceus's 1440p could not start)
+static int wide_render_patch(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_WIDE_RENDER"), *a = getenv("DM_ASPECT"), *r = getenv("DM_WIDE_RATIO");
+    if (!e || atoi(e) <= 0 || !a || strcmp(a, "wide")) return 0;
+    int si = -1; for (unsigned i = 0; i < sizeof WIDE_SITES / sizeof *WIDE_SITES; i++) if (!strncasecmp(m->build_id, WIDE_SITES[i].build, 32)) si = (int)i;
+    double ratio = r ? atof(r) : 0; if (si < 0 || ratio < 16.0 / 9.0 + 0.01) return 0;
+    if (ratio > 2.4) ratio = 2.4;
+    uint32_t w1080 = (uint32_t)(1080 * ratio / 2 + 0.5) * 2, w720 = (uint32_t)(720 * ratio / 2 + 0.5) * 2;
+    static const struct { uint64_t off; uint32_t orig; int tv; } S[] = { { 0x5e860c, 0xd280f009u, 1 }, { 0x5e861c, 0xf2c0a009u, 0 }, { 0x5e871c, 0xd280f009u, 1 }, { 0x5e8734, 0xf2c0a009u, 0 } };
+    for (unsigned i = 0; i < 4; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4);
+        if (S[i].off + 4 > m->text_end || w != S[i].orig || overlaps_rewrite(m, S[i].off, 4, p0, p1)) { LOG("[RED] %s: true aspect ratio not applied (%s: the graphics config code differs at +%#llx)", m->name, WIDE_SITES[si].game, (unsigned long long)S[i].off); return 0; } }
+    for (unsigned i = 0; i < 4; i++) { uint32_t w = S[i].tv ? 0xd2800000u | w1080 << 5 | 9 : 0xf2c00000u | w720 << 5 | 9; memcpy(m->base + S[i].off, &w, 4); }
+    LOG("%s: true aspect ratio for %s: the game renders %ux1080 in TV mode, %ux720 handheld (screen %.4f), instead of 16:9 stretched", m->name, WIDE_SITES[si].game, w1080, w720, ratio);
+    return 4;
+}
+// Resolution (DM_GALAR_RES, Graphics → Resolution: 720 / 1080 the game's own / 1440) for Pokémon Sword and Shield 1.3.2: the TV-mode window size the graphics
+//   config's constructor packs into one register, MOVZ X9, #1920 then MOVK X9, #1080, LSL #32 (main+0x5e860c / +0x5e8610, and the inlined copy at +0x5e871c / +0x5e8728;
+//   the same words in both games). Handheld mode keeps its own 1280x720. Checked word by word; with it the true aspect ratio (wide_render_patch) is left out (same words).
+//   1440p's render targets are 78 % larger: not yet run on a phone
+static int galar_res_patch(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_GALAR_RES"); int res = e ? atoi(e) : 0; if (res != 720 && res != 1440) return 0;
+    uint32_t W = res == 1440 ? 2560 : 1280, H = res == 1440 ? 1440 : 720;
+    static const struct { uint64_t off; uint32_t orig; int h; } S[] = { { 0x5e860c, 0xd280f009u, 0 }, { 0x5e8610, 0xf2c08709u, 1 }, { 0x5e871c, 0xd280f009u, 0 }, { 0x5e8728, 0xf2c08709u, 1 } };
+    for (unsigned i = 0; i < 4; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4);
+        if (S[i].off + 4 > m->text_end || w != S[i].orig || overlaps_rewrite(m, S[i].off, 4, p0, p1)) { LOG("[RED] %s: resolution %dp not applied (the graphics config code differs at +%#llx)", m->name, res, (unsigned long long)S[i].off); return 0; } }
+    for (unsigned i = 0; i < 4; i++) { uint32_t w = (S[i].orig & ~(0xffffu << 5)) | (S[i].h ? H : W) << 5; memcpy(m->base + S[i].off, &w, 4); }
+    LOG("%s: resolution: the TV-mode window is %ux%u (DM_GALAR_RES; handheld keeps 1280x720)", m->name, W, H);
     return 4;
 }
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
@@ -559,6 +613,8 @@ static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, in
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
     n += wide_patch(m, lim, p0, p1);
+    n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
+    n += wide_render_patch(m, p0, p1);
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),

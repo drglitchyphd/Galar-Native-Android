@@ -123,3 +123,25 @@ int dm_crypto_emu(ucontext_t *uc) {   // crash.c: a SIGILL on one of these instr
     return 1;
 }
 #endif
+
+// LSE swaps on ARMv8.0 CPUs (Cortex-A73 / A53: Snapdragon 680 / 685 and other older phones). The code rewriter turns some of the game's exclusive load / store loops into
+// one LSE swap (patch_nso.py "Exclusive swap loops": newer cores dropped the loop's reservation and Legends: Arceus froze loading a save), and a CPU without LSE stops on it
+// with SIGILL (Arceus-Native-Android #33: swpal xzr, x9, [x8] at main+0x1e916b8 on a Snapdragon 685). Here SWP / SWPA / SWPL / SWPAL of any size (encoding size 111000 A R 1
+// Rs 1 000 00 Rn Rt) are done as one atomic exchange, sequentially consistent, which is at least what any of them asks for; 1 = done, the thread goes on at the next instruction
+int dm_lse_emu(ucontext_t *uc) {
+    uint32_t ins; memcpy(&ins, (void *)(uintptr_t)uc->uc_mcontext.pc, 4);
+    if ((ins & 0x3F20FC00u) != 0x38208000u) return 0;
+    unsigned size = ins >> 30, rs = (ins >> 16) & 31, rn = (ins >> 5) & 31, rt = ins & 31;
+    uint64_t base = rn == 31 ? uc->uc_mcontext.sp : uc->uc_mcontext.regs[rn], v = rs == 31 ? 0 : uc->uc_mcontext.regs[rs], old;
+    void *p = (void *)(uintptr_t)base;
+    switch (size) {
+    case 0: old = __atomic_exchange_n((uint8_t *)p, (uint8_t)v, __ATOMIC_SEQ_CST); break;
+    case 1: old = __atomic_exchange_n((uint16_t *)p, (uint16_t)v, __ATOMIC_SEQ_CST); break;
+    case 2: old = __atomic_exchange_n((uint32_t *)p, (uint32_t)v, __ATOMIC_SEQ_CST); break;
+    default: old = __atomic_exchange_n((uint64_t *)p, v, __ATOMIC_SEQ_CST); break;
+    }
+    if (rt != 31) uc->uc_mcontext.regs[rt] = old;
+    static int told; if (!told++) { char b[160]; int n = snprintf(b, sizeof b, "[cpu] this CPU has no LSE atomics: the rewritten code's swaps are done in software (first at pc %#llx)\n", (unsigned long long)uc->uc_mcontext.pc); if (n > 0) write(2, b, (size_t)n); }
+    uc->uc_mcontext.pc += 4;
+    return 1;
+}

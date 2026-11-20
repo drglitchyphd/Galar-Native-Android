@@ -12,7 +12,7 @@ from xml.sax.saxutils import escape as xml_escape   # (the label: "Pokémon Swor
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE); DM = os.path.dirname(ANDROID)
 LIBS = ['libnxnative.so', 'libnx_extract.so', 'libdmsh_xlate.so', 'libspirv_cross.so', 'libpython3.14.so', 'libpython_exe.so', 'libcapstone.so', 'liblz4.so', 'libssl_python.so', 'libcrypto_python.so']
-OPTIONAL = ['libdmsh_gate.so', 'libdmoodle.so', 'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so']   # libadrenotools: custom Adreno drivers (Turnip); without them the phone's own driver only
+OPTIONAL = ['libdmsh_gate.so', 'libdmoodle.so', 'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so', 'libVkLayer_khronos_validation.so']   # libadrenotools: custom Adreno drivers (Turnip); without them the phone's own driver only
 PY_SKIP = ('test', 'idlelib', 'tkinter', 'turtledemo', 'ensurepip', 'pydoc_data', 'lib2to3', 'venv', 'sqlite3', '__pycache__', 'unittest', 'wsgiref', 'xmlrpc', 'curses', 'dbm')
 DM_PARTS = ['games/game.py', 'tools/patch_nso.py', 'gfx/tools', 'ios/tools/ios_metal.py', 'android/tools']   # and every game profile (setup names the other game when given its dump)
 sys.path.insert(0, os.path.join(DM, 'games')); import game as _game
@@ -130,7 +130,7 @@ def main():
     # Java: the setup screen, the keyboard dialog, the immersive helper
     cls = os.path.join(w, 'classes'); os.makedirs(cls)
     srcs = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(ANDROID, 'app/java')) for f in fs if f.endswith('.java')]
-    run('javac', '-source', '8', '-target', '8', '-nowarn', '-cp', jar, '-d', cls, *srcs)
+    run('javac', '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-nowarn', '-cp', jar, '-d', cls, *srcs)   # (UTF-8 sources: a Windows JDK reads them as cp1252 otherwise, and the menu's ✕ › °C · ✓ come out garbled)
     run(os.path.join(bt, 'd8' + bat), '--release', '--min-api', '33', '--lib', jar, '--output', w, *[os.path.join(d, f) for d, _, fs in os.walk(cls) for f in fs])
     # the payload: native libraries, the Python standard library, the setup scripts
     with zipfile.ZipFile(os.path.join(w, 'base.apk'), 'a') as z:

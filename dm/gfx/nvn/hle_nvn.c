@@ -1083,7 +1083,19 @@ static void rq_wait(const char *who) {
         static int n; if (n++ < 20) LOG("[RED] %s has waited 5 s on the replay thread: it is at %s, queue %llu..%llu, %d presents, caller lr %p", who, g_rq_at, (unsigned long long)g_rq_tail, (unsigned long long)g_rq_head, g_rq_presents, __builtin_return_address(0));
     }
 }
-static void *rq_main(void *a) {
+#ifdef __linux__
+#include <sys/prctl.h>
+#define DM_THREAD_NAME(n) prctl(PR_SET_NAME, (n), 0, 0, 0)
+#else
+#define DM_THREAD_NAME(n) ((void)0)
+#endif
+static _Atomic int g_rq_tid;   // the replay thread's id (android_main.c: its loads profiled)
+int nvn_rq_tid(void) { return atomic_load(&g_rq_tid); }
+static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
+#ifdef __linux__
+    atomic_store(&g_rq_tid, (int)gettid());
+#endif
+
     (void)a;
     for (;;) {
         pthread_mutex_lock(&g_rq_mu);
@@ -1346,6 +1358,13 @@ static void tpush(int k, double v) { g_tw[k][g_tn[k]++ % TWIN] = v; }
 // Thermal attribution (iOS DM_HEAT): per-frame GPU milliseconds are kept in a separate ring, taking the mean / p95 "since the last read" (at most the last HRN frames), without interfering with the timing summary's 300-frame window
 #define HRN 1024
 static double g_hr[HRN]; static uint64_t g_hn, g_hn_read;
+// The GPU's average time per frame over the last n frames measured (ms; -1 when the driver gives no timestamps): android_main.c graphics_auto tells a GPU-bound
+//   slowdown from a CPU-bound one with it (read from the log thread; a sample torn by the present thread only shifts the average a little)
+double dm_gpu_avg_ms(int n) {
+    uint64_t h = g_hn; if (!h || n <= 0) return -1; if ((uint64_t)n > h) n = (int)h; if (n > HRN) n = HRN;
+    double s = 0; for (int i = 1; i <= n; i++) s += g_hr[(h - (uint64_t)i) % HRN];
+    return s / n;
+}
 static int dcmp(const void *a, const void *b);
 void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {
     uint64_t hi = g_hn, lo = g_hn_read > hi ? hi : g_hn_read; if (hi - lo > HRN) lo = hi - HRN; g_hn_read = hi;
@@ -1592,6 +1611,7 @@ static void fstep_tick(const win_t *o) {
 }
 // A frame that keeps its slot is held 1 slot and the game steps 1 slot; when frames run late the hold steps up (60 → 30 → 20 fps at 60) and the game steps as many slots
 static nvn_fstep g_vs;   // present thread only
+_Atomic int dm_fps_dyn;   // frame rate Dynamic: the game step follows the hold (android_main.c sets it at start and when the menu changes the frame rate)
 static void vstep_tick(const win_t *o) {
     static uint64_t prev, held[FSTEP_MAX + 1]; static int nlog;
     const double v = 1e9 / dm_step_hz;
@@ -1611,9 +1631,13 @@ static void vstep_tick(const win_t *o) {
     //   the game's own. The world and its animations move by the same step every frame (a step that followed real time, v0.73, moved them by 1-2-3 slots:
     //   the player's run swung between two poses, #190, and fast objects skipped collisions, #187). A phone that cannot hold the rate plays slower, as with the
     //   mod. Presentation still holds frames 1 or 2 slots (above), so they are shown evenly
-    uint32_t ns = (uint32_t)((1000000000ull * (live_fps() == 30 && dm_step_hz == 60 ? 2 : 1) + (uint64_t)dm_step_hz - 1) / (uint64_t)dm_step_hz);
+    // Frame rate Dynamic (dm_fps_dyn): the step follows the hold, 1 slot at 60, 2 at 30, so the world moves at its real speed whichever the phone holds (a constant
+    //   1 / 60 at a 2-slot hold walked the player at half speed, S25+ 2026-11-20). The hold changes only after 3 late frames or a 30-frame trial, never frame by frame,
+    //   so the step does not swing between frames (the pose swing of the real-time step, #190)
+    int mult = live_fps() == 30 && dm_step_hz == 60 ? 2 : atomic_load(&dm_fps_dyn) && dm_step_hz == 60 && g_vs.k >= 1 && g_vs.k <= 2 ? g_vs.k : 1;
+    uint32_t ns = (uint32_t)((1000000000ull * (uint64_t)mult + (uint64_t)dm_step_hz - 1) / (uint64_t)dm_step_hz);
     { static uint32_t last; if (ns != last) { dm_guest_write_prepare(dm_step_word, 4); __atomic_store_n((uint32_t *)dm_step_word, ns, __ATOMIC_RELAXED); last = ns;
-          LOG("[nvn] game step: %.2f ms a frame, as the 60 FPS mod", ns / 1e6); } }
+          LOG("[nvn] game step: %.2f ms a frame%s", ns / 1e6, atomic_load(&dm_fps_dyn) ? " (Dynamic: the step follows the hold)" : ", as the 60 FPS mod"); } }
     atomic_store(&g_fs_k, g_vs.k); held[g_vs.k]++;
     if (k0 && g_vs.k != k0 && nlog < 40) LOG("[nvn] frame step: hold %d → %d slots of %.2f ms at present %llu (cost %.2f slots, GPU %.2f)%s", k0, g_vs.k, v / 1e6,
                                              (unsigned long long)o->presents, cost, gpu, ++nlog == 40 ? "; further changes not logged" : "");

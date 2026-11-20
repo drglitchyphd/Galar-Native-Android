@@ -132,13 +132,15 @@ static void crash_gate(int sig) {
     if (none == me) _exit(128 + sig);
     for (;;) pause();
 }
-__attribute__((weak)) int dm_crypto_emu(ucontext_t *uc);   // crypto_emu.c (Linux / Android on ARM64)
+__attribute__((weak)) int dm_crypto_emu(ucontext_t *uc);
+__attribute__((weak)) int dm_lse_emu(ucontext_t *uc);   // crypto_emu.c: LSE swaps on ARMv8.0 CPUs (#33)   // crypto_emu.c (Linux / Android on ARM64)
 __attribute__((weak)) void dm_crash_log_copy(void);   // android_main.c: the log copied to Download/ now (its copy there is refreshed every 5 s: a crash's record was missing from it, #57); open / read / write only
 __attribute__((weak)) void dm_crash_note(int in_game);   // android_main.c: "this run crashed" for the next start (boot_state), and whether the pc was in the game's own code; only write() inside
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
-    if (sig == SIGILL && dm_crypto_emu && dm_crypto_emu(uc)) return;   // an ARMv8 crypto instruction the CPU lacks (the emulator's ARM translation): done in software, crypto_emu.c
+    if (sig == SIGILL && dm_crypto_emu && dm_crypto_emu(uc)) return;
+    if (sig == SIGILL && dm_lse_emu && dm_lse_emu(uc)) return;   // an LSE swap the rewriter wrote, on a CPU without LSE: done as an atomic exchange, crypto_emu.c   // an ARMv8 crypto instruction the CPU lacks (the emulator's ARM translation): done in software, crypto_emu.c
     if (sig == SIGSEGV || sig == SIGBUS) {
         int is_write = (int)((DM_UC_ESR(uc) >> 6) & 1);   // The WnR bit of ESR
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
@@ -173,6 +175,15 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         fprintf(stderr, "[dm] *x%d:", i);
         for (int k = 0; k < 6; k++) off("", w[k]);
         fputc('\n', stderr);
+        // one level further: a word that points at an object whose first word is in a module (its vtable). The heap a game loader allocates from sits at
+        //   [loader + 8] (Dynamax crash #211: alloc(size, 16) at main+0x5dd7b8 came back null): its vtable tells which allocator ran dry
+        int said = 0;
+        for (int k = 0; k < 6; k++) { uint64_t v[1]; vm_size_t g2 = 0;
+            if (w[k] < 0x100000000ull || (w[k] & 7) || module_of((void *)w[k])) continue;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)w[k], sizeof v, (vm_address_t)v, &g2) != KERN_SUCCESS || g2 != sizeof v || !module_of((void *)v[0])) continue;
+            if (!said++) fprintf(stderr, "[dm] *x%d's objects:", i);
+            fprintf(stderr, " [%d]", k); off("", v[0]); }
+        if (said) fputc('\n', stderr);
     }
     dm_backtrace(DM_UC_SS(uc).__fp);
     // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)

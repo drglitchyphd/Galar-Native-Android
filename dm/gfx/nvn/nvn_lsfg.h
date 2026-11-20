@@ -8,6 +8,7 @@
 //   ls_load:     reads <dir>/<id>.spv for the 25 shaders and checks each one's bindings against what the chain will give it (refuses anything else)
 //   ls_setup:    pipelines once, then the images and descriptor sets for a frame size
 //   ls_ingest:   the frame copy c[p] → its 7 flow levels (255), features per level (290..293, three frames of history), the scene's change over time (298..302)
+//   ls_hud:      (ours) HUD-free: the caller fed c[p] the scene alone and hud the frame as shown; picture gen with that HUD put back → o (overlay/ls_hud.comp)
 //   ls_generate: motion from the coarsest level to the finest (280, 282..285), detail on the four finest (280, 286..289, 281, 294..297), then the picture m[gen] (256);
 //                count pictures between each two frames (1..3: 2x, 3x, 4x), gen 0..count-1 of them, each at its own time between the two
 // Like nvn_fgen.h: it owns its images and pipelines, every image stays in the GENERAL layout, a memory barrier comes before each pass, and the caller serializes the
@@ -17,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "overlay/ls_hud_spv.h"
 #ifndef FG_MEM   // the caller's allocator (nvn_vk.c: vk_alloc) or, here, one allocation per image (the same hook as nvn_fgen.h)
 #define FG_MEM
 typedef struct { VkDeviceMemory mem; } fg_mem;
@@ -58,6 +60,8 @@ typedef struct {
     struct { ls_img t1[3], t2[2], out; VkDescriptorSet first[3], ds[4]; } ga[LS_MIPS];
     struct { ls_img t1[3], t2[2], out1, out2; VkDescriptorSet first[3], ds[4], sixth[3], ds2[4]; } de[3];
     VkDescriptorSet ds_mip[2], ds_gen[2][LS_MAXGEN];
+    // HUD-free (ls_hud, our own pass): hud the frame as shown, o the picture with its HUD back; hbase: the pipeline is there (else no HUD-free, nothing else lost)
+    ls_img hud, o; VkDescriptorSetLayout hdsl; VkPipelineLayout hpl; VkPipeline hpipe; VkDescriptorPool hdp; VkDescriptorSet hds[2][LS_MAXGEN]; int hbase;
 } lsfg;
 static int ls_fail(lsfg *g, const char *why) { g->failed = 1; g->why = why; return 0; }
 
@@ -199,6 +203,28 @@ static void ls_write(lsfg *g, VkDescriptorSet ds, int id, int ubo, int s0, ls_im
 }
 #define LSV(...) ((ls_img *[]){ __VA_ARGS__ })
 
+// The HUD pass's pipeline and sets (ls_base, once): 0 leaves HUD-free off, the rest runs as before
+static int ls_hud_base(lsfg *g) {
+    VkDevice dev = g->dev; VkDescriptorSetLayoutBinding b[4];
+    for (uint32_t i = 0; i < 4; i++) b[i] = (VkDescriptorSetLayoutBinding){ i, i < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = b };
+    if (vkCreateDescriptorSetLayout(dev, &dli, NULL, &g->hdsl)) return 0;
+    VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g->hdsl };
+    if (vkCreatePipelineLayout(dev, &pli, NULL, &g->hpl)) return 0;
+    VkShaderModuleCreateInfo mi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof ls_hud_comp_spv, .pCode = ls_hud_comp_spv }; VkShaderModule mod;
+    if (vkCreateShaderModule(dev, &mi, NULL, &mod)) return 0;
+    VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = g->hpl,
+        .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = mod, .pName = "main" } };
+    VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &g->hpipe); vkDestroyShaderModule(dev, mod, NULL);
+    if (r) { g->hpipe = VK_NULL_HANDLE; return 0; }
+    VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * LS_MAXGEN * 3 }, { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * LS_MAXGEN } };
+    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2 * LS_MAXGEN, .poolSizeCount = 2, .pPoolSizes = ps };
+    if (vkCreateDescriptorPool(dev, &dpi, NULL, &g->hdp)) return 0;
+    for (int i = 0; i < 2; i++) for (int k = 0; k < LS_MAXGEN; k++) {
+        VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g->hdp, .descriptorSetCount = 1, .pSetLayouts = &g->hdsl };
+        if (vkAllocateDescriptorSets(dev, &ai, &g->hds[i][k])) return 0; }
+    return 1;
+}
 // Samplers, one pipeline per shader, every descriptor set, the constants' buffer: once
 static int ls_base(lsfg *g) {
     VkDevice dev = g->dev;
@@ -242,7 +268,17 @@ static int ls_base(lsfg *g) {
     VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = t }; void *m = NULL;
     if (t == mp.memoryTypeCount || vkAllocateMemory(dev, &mai, NULL, &g->umem) || vkBindBufferMemory(dev, g->ubo, g->umem, 0) || vkMapMemory(dev, g->umem, 0, VK_WHOLE_SIZE, 0, &m))
         return ls_fail(g, "no memory for its constants");
-    g->umap = m; g->base = 1; return 1;
+    g->umap = m; g->base = 1; g->hbase = ls_hud_base(g); return 1;
+}
+// The HUD pass's sets for the images of this size: set [i][k] = picture k, the newest frame's scene (c[i]), the frame as shown → o
+static void ls_hud_write(lsfg *g) {
+    for (int i = 0; i < 2; i++) for (int k = 0; k < LS_MAXGEN; k++) {
+        VkDescriptorImageInfo ii[4] = { { g->samp[LS_S_EDGE], g->m[k].view, VK_IMAGE_LAYOUT_GENERAL }, { g->samp[LS_S_EDGE], g->c[i].view, VK_IMAGE_LAYOUT_GENERAL },
+                                        { g->samp[LS_S_EDGE], g->hud.view, VK_IMAGE_LAYOUT_GENERAL }, { VK_NULL_HANDLE, g->o.view, VK_IMAGE_LAYOUT_GENERAL } };
+        VkWriteDescriptorSet w[4];
+        for (uint32_t j = 0; j < 4; j++) w[j] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g->hds[i][k], .dstBinding = j, .descriptorCount = 1,
+            .descriptorType = j < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii[j] };
+        vkUpdateDescriptorSets(g->dev, 4, w, 0, NULL); }
 }
 // Ready for frames of this format and size, the motion search at `flow` of the frame's size (0.25..1): 1, or 0 with g->why (g->failed: it cannot run at all, stop asking).
 // A new size, format or flow scale destroys the images: the device must be idle
@@ -278,6 +314,7 @@ static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
         for (int k = 0; k < 3; k++) MK(&g->de[i].t1[k], C8, e->w, e->h);
         for (int k = 0; k < 2; k++) MK(&g->de[i].t2[k], C8, e->w, e->h);
         MK(&g->de[i].out1, F16, e->w, e->h); MK(&g->de[i].out2, F16, e->w, e->h); }
+    if (ok && g->hbase) ok = ls_img_make(g, &g->hud, u, w, h, fmt) && ls_img_make(g, &g->o, u, w, h, fmt);
 #undef MK
     if (!ok) { ls_images_free(g); return ls_fail(g, "no memory for its images"); }
     for (int b = 0; b < LS_BLOCKS; b++) {   // block b > 0: generation slot b - 1 (count 1: slot 0; count 2: slots 1, 2; count 3: slots 3..5)
@@ -286,7 +323,9 @@ static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
             memcpy(g->umap + (size_t)(b * 3 + v) * g->ustride, &k, 48); } }
     for (int i = 0; i < 2; i++) {
         ls_write(g, g->ds_mip[i], 255, 0, LS_S_ZERO, LSV(&g->c[i]), LSV(&g->mip[0], &g->mip[1], &g->mip[2], &g->mip[3], &g->mip[4], &g->mip[5], &g->mip[6]));
-        for (int k = 0; k < LS_MAXGEN; k++) ls_write(g, g->ds_gen[i][k], 256, 0, LS_S_ZERO, LSV(&g->c[1 - i], &g->c[i], &g->ga[6].out, &g->de[2].out1, &g->de[2].out2), LSV(&g->m[k])); }
+        for (int k = 0; k < LS_MAXGEN; k++) ls_write(g, g->ds_gen[i][k], 256, 0, LS_S_ZERO, LSV(&g->c[1 - i], &g->c[i], &g->ga[6].out, &g->de[2].out1, &g->de[2].out2), LSV(&g->m[k]));
+ }
+    if (g->hbase) ls_hud_write(g);
     for (int l = 0; l < LS_MIPS; l++) {
         ls_write(g, g->al[l].ds[0], 290, 0, LS_S_ZERO, LSV(&g->mip[l]), LSV(&g->al[l].t1));
         ls_write(g, g->al[l].ds[1], 291, 0, LS_S_ZERO, LSV(&g->al[l].t1), LSV(&g->al[l].t2));
@@ -376,4 +415,16 @@ static void ls_generate(lsfg *g, VkCommandBuffer cb, int count, int gen) {
     ls_run(g, cb, 256, g->ds_gen[g->p][gen], &g->m[gen], 16);
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+// HUD-free: picture gen (ls_generate done) with the HUD of the frame as shown (the caller's copy into hud) put back where the shown frame differs from its scene → o,
+//   readable by a fragment shader or a copy like m. o is shared by the pictures: the caller draws each from it before the next ls_hud (this pass waits for that)
+static int ls_hud_ok(const lsfg *g) { return g->hbase && g->hud.img && g->o.img; }
+static void ls_hud(lsfg *g, VkCommandBuffer cb, int gen) {
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g->hpipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g->hpl, 0, 1, &g->hds[g->p][gen], 0, NULL);
+    vkCmdDispatch(cb, (g->w + 7) / 8, (g->h + 7) / 8, 1);
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }

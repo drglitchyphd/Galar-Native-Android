@@ -382,3 +382,28 @@ Updating the shaders	シェーダーを更新中
 3D render scale	3D描画スケール
 Auto: what the Graphics setting gives, lowered by itself when the phone is hot	自動：グラフィック設定に従い、端末が熱いと自動で下げます
 50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50%：3Dを半分のサイズで描画。最も涼しく速い（文字とメニューは鮮明なまま）
+Quit the game	ゲームを終了
+Closes the game completely	ゲームを完全に閉じます
+Quit the game? Progress you have not saved in the game is lost, as on the console.	ゲームを終了しますか？ゲーム内でセーブしていない進行状況は、本体と同じく失われます。
+Quit	終了
+Power	電力
+Balanced	バランス
+Balanced: the best picture this phone holds at a steady frame rate	バランス：この端末が安定したフレームレートで保てる最高の画質
+Battery saver	バッテリー節約
+Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up	バッテリー節約：端末の発熱を抑え電池を長持ち：自動では30fps、軽めの画質、端末が温まると早めに負荷を下げます
+Record the frame's passes	フレームのパスを記録
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	重い場面向け：3秒以内にこのメニューを閉じ、ゲームが重い場所にとどまってください。3フレーム分の描画パス（端末が対応していればGPU時間付き）がダウンロードに保存されます（framegraph.txt で終わるファイル）。issue に添付してください。
+Recording in 3 seconds: close the menu.	3秒後に記録します：メニューを閉じてください。
+Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	左端：自動（グラフィック設定どおり、端末が熱いと自動で下げます）。下げるほど発熱が減り速くなり、3Dはやわらかくなります。文字やメニューはくっきりのままです。
+Mode	モード
+Auto: as the Graphics setting decides	自動：グラフィック設定に従います
+Quality	画質優先
+Quality: docked: 1080p and the game's full effects	画質優先：TVモード：1080p、ゲーム本来のすべての効果
+Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	パフォーマンス優先：3Dを720pで描画：より涼しく安定（HUDと文字は鮮明なまま）
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	パフォーマンス優先：携帯モード：720p、ゲームの軽い設定：より涼しく安定
+Resolution	解像度
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p：最も軽い、30を保てない端末向け（次回起動から）
+1080p, as the game is made	1080p、ゲーム本来の解像度
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p：より鮮明だがGPU負荷が増加（fps低下・発熱、次回起動から）
+Dynamic	ダイナミック
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます

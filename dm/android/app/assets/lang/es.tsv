@@ -382,3 +382,28 @@ Updating the shaders	Actualizando los shaders
 3D render scale	Escala de renderizado 3D
 Auto: what the Graphics setting gives, lowered by itself when the phone is hot	Auto: lo que da el ajuste de Gráficos, reducido solo cuando el móvil se calienta
 50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50 %: el 3D a la mitad de tamaño, lo más fresco y rápido (el texto y los menús siguen nítidos)
+Quit the game	Salir del juego
+Closes the game completely	Cierra el juego por completo
+Quit the game? Progress you have not saved in the game is lost, as on the console.	¿Salir del juego? Se pierde el progreso que no hayas guardado en el juego, como en la consola.
+Quit	Salir
+Power	Energía
+Balanced	Equilibrado
+Balanced: the best picture this phone holds at a steady frame rate	Equilibrado: la mejor imagen que este teléfono mantiene con una tasa de fotogramas estable
+Battery saver	Ahorro de batería
+Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up	Ahorro de batería: un teléfono más fresco y más batería: 30 fps en Automático, una imagen más ligera, y se modera antes cuando el teléfono se calienta
+Record the frame's passes	Grabar los pases del fotograma
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Para escenas lentas: cierra este menú en menos de 3 segundos y quédate donde el juego va lento. Los pases de render de tres fotogramas, con su tiempo de GPU si el teléfono lo da, se guardan en Descargas (un archivo que termina en framegraph.txt). Adjúntalo a tu issue.
+Recording in 3 seconds: close the menu.	Grabando en 3 segundos: cierra el menú.
+Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	Izquierda: Automático, lo que da el ajuste de Gráficos, bajado por sí solo cuando el teléfono se calienta. Más bajo: más fresco y rápido, el 3D más suave; el texto y los menús siguen nítidos.
+Mode	Modo
+Auto: as the Graphics setting decides	Auto: lo que decida el ajuste de Gráficos
+Quality	Calidad
+Quality: docked: 1080p and the game's full effects	Calidad: en el dock: 1080p y todos los efectos del juego
+Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	Rendimiento: el 3D a 720p: más fresco y estable (el HUD y el texto siguen nítidos)
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Rendimiento: portátil: 720p y los ajustes más ligeros del juego: más fresco y estable
+Resolution	Resolución
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p: lo más ligero, para teléfonos que no mantienen 30 (desde el próximo inicio)
+1080p, as the game is made	1080p, como está hecho el juego
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p: más nítido, pero más carga para la GPU (menos fps, teléfono más caliente; desde el próximo inicio)
+Dynamic	Dinámico
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinámico: 60 donde el teléfono puede, 30 donde no, con la imagen completa; la velocidad del juego se mantiene

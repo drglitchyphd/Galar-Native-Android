@@ -197,8 +197,13 @@ public final class GameMenu {
         c.setOnClickListener(v -> r.run());
     }
     private static void slider(Activity a, String title, String key, int min, int max, int def, java.util.function.IntFunction<String> fmt) {
+        slider(a, title, key, min, max, def, fmt, String::valueOf, s -> { try { return Integer.parseInt(s); } catch (NumberFormatException e) { return def; } });
+    }
+    // a slider whose positions map to the stored values (store) and back (load): the 3D render scale keeps its fractions ("0.80") and Auto ("")
+    private static void slider(Activity a, String title, String key, int min, int max, int def, java.util.function.IntFunction<String> fmt,
+                               java.util.function.IntFunction<String> store, java.util.function.ToIntFunction<String> load) {
         LinearLayout c = card(a); LinearLayout row = titleRow(a, c, title, null);
-        int v; try { v = Integer.parseInt(GameSettings.get(a, key)); } catch (NumberFormatException e) { v = def; }
+        int v = load.applyAsInt(GameSettings.get(a, key));
         v = Math.max(min, Math.min(max, v));
         TextView val = text(a, fmt.apply(v), 14, 0xFFF2F2F5, true); row.addView(val);
         SeekBar sb = new SeekBar(a); sb.setMax(max - min); sb.setProgress(v - min); sb.setPadding(dp(a, 10), dp(a, 14), dp(a, 10), dp(a, 4));
@@ -214,7 +219,7 @@ public final class GameMenu {
         knob.setColor(0xFFFFFFFF); knob.setStroke(dp(a, 3), 0x40FFFFFF); knob.setSize(dp(a, 20), dp(a, 20));
         sb.setThumb(knob); sb.setThumbOffset(dp(a, 10)); sb.setSplitTrack(false); sb.setBackground(null);
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar b, int p, boolean user) { val.setText(fmt.apply(p + min)); if (user) set(a, key, String.valueOf(p + min)); }
+            public void onProgressChanged(SeekBar b, int p, boolean user) { val.setText(fmt.apply(p + min)); if (user) set(a, key, store.apply(p + min)); }
             public void onStartTrackingTouch(SeekBar b) { }
             public void onStopTrackingTouch(SeekBar b) { }
         });
@@ -316,14 +321,32 @@ public final class GameMenu {
             // Lowest: handheld mode with the game's 3D render scale capped (Pokémon Sword / Shield: the engine's hle_resscale.c; Scarlet / Violet have no such scale)
             { "lowest", t(a, "Lowest"), t(a, GameSettings.paldea(a) ? "Lowest: handheld mode, 3D at 960x540, coolest" : "Lowest: 3D at 960x540, coolest") } };
         choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);
+        // Quality (docked) or Performance (handheld), live (android_main.c DM_DISPLAY_MODE); Sword / Shield keep TV mode and draw the 3D at 720p for Performance
+        boolean galarMode = GameSettings.isShield(a) || "0100ABF008968000".equalsIgnoreCase(GameSettings.game(a)[0]);
+        choice(a, "DM_DISPLAY_MODE", t(a, "Mode"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: as the Graphics setting decides") },
+            { "quality", t(a, "Quality"), t(a, "Quality: docked: 1080p and the game's full effects") },
+            { "performance", t(a, "Performance"), galarMode ? t(a, "Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)")
+                                                             : t(a, "Performance: handheld: 720p and the game's lighter settings: cooler and steadier") } });
+        // Sword / Shield: the TV-mode window size (loader.c galar_res_patch), from the next start
+        if (galarMode) choice(a, "DM_GALAR_RES", t(a, "Resolution"), new String[][] {
+            { "720", "720p", t(a, "720p: lightest, for phones that cannot hold 30 (from the next start)") },
+            { "", "1080p", t(a, "1080p, as the game is made") },
+            { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)") } });
         // the game's own 3D render scale, capped (android_main.c DM_RES_CAP, hle_resscale.c): Sword / Shield, at once. The HUD and text stay sharp; only the 3D is drawn smaller
-        if (!GameSettings.paldea(a)) choice(a, "DM_RES_CAP", t(a, "3D render scale"), new String[][] {
-            { "", t(a, "Auto"), t(a, "Auto: what the Graphics setting gives, lowered by itself when the phone is hot") },
-            { "0.90", "90 %", "" }, { "0.80", "80 %", "" }, { "0.75", "75 %", "" }, { "0.66", "66 %", "" },
-            { "0.50", "50 %", t(a, "50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)") } });
+        // Battery saver (android_main.c power_saver, #333): live
+        choice(a, "DM_POWER", t(a, "Power"), new String[][] { { "", t(a, "Balanced"), t(a, "Balanced: the best picture this phone holds at a steady frame rate") },
+            { "saver", t(a, "Battery saver"), t(a, "Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up") } });
+        // a slider (the user, 2026-11-19): positions 9..20 = Auto, then 50 % to 100 % in steps of 5; stored as before ("" Auto, "0.85"), so env.txt and the engine are unchanged
+        if (!GameSettings.paldea(a)) {
+            slider(a, t(a, "3D render scale"), "DM_RES_CAP", 9, 20, 9, v -> v == 9 ? t(a, "Auto") : (v * 5) + " %",
+                   v -> v == 9 ? "" : String.format(java.util.Locale.ROOT, "%.2f", v * 5 / 100.0),
+                   st -> { try { double d = Double.parseDouble(st); return Math.max(10, Math.min(20, (int) Math.round(d * 20))); } catch (RuntimeException e) { return 9; } });
+            note(a, t(a, "Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp."));
+        }
         if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", p[5]) },
             { "30", "30 fps", t(a, "30 fps, as the game is made") }, { "60", "60 fps", GameSettings.paldea(a) ? t(a, "Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)")
-                                                                                               : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") } });
+                                                                                               : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") },
+            { "dyn", t(a, "Dynamic"), t(a, "Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right") } });
         if (GameActivity.sustainedSupported(a)) choice(a, "DM_SUSTAINED", t(a, "Sustained performance"), new String[][] {
             { "", t(a, "Off"), t(a, "Off: the phone's full speed, which drops when it gets hot") }, { "on", t(a, "On"), t(a, "On: a speed the phone can hold for hours, fewer slowdowns when hot") } });
         heading(a, t(a, "Memory"));
@@ -471,10 +494,11 @@ public final class GameMenu {
         button(a, r, t(a, "Save"), true, () -> { try (FileWriter fw = new FileWriter(new File(m, "notes.txt"))) { fw.write(e.getText().toString()); } catch (IOException x) { } go("order"); });
         button(a, r, t(a, "Cancel"), false, () -> go("order"));
     }
-    private static void confirm(Activity a, String q, Runnable yes) {   // asked in a card at the top of the page, not a pop-up
+    private static void confirm(Activity a, String q, Runnable yes) { confirm(a, q, t(a, "Delete"), yes); }
+    private static void confirm(Activity a, String q, String yesLabel, Runnable yes) {   // asked in a card at the top of the page, not a pop-up
         LinearLayout c = new LinearLayout(a); c.setOrientation(LinearLayout.VERTICAL); c.setBackground(round(CARD, dp(a, 16), dp(a, 2), WARN)); c.setPadding(dp(a, 16), dp(a, 12), dp(a, 16), dp(a, 12));
         c.addView(text(a, q, 15, TEXT, true)); LinearLayout r = new LinearLayout(a); c.addView(r);
-        button(a, r, t(a, "Delete"), true, yes); button(a, r, t(a, "Cancel"), false, () -> go(page));
+        button(a, r, yesLabel, true, yes); button(a, r, t(a, "Cancel"), false, () -> go(page));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = dp(a, 10); body.addView(c, 0, lp); scroll.scrollTo(0, 0);
     }
 
@@ -561,6 +585,10 @@ public final class GameMenu {
         heading(a, t(a, "Background"));
         choice(a, "DM_BACKGROUND", t(a, "Leaving the game"), new String[][] { { "", t(a, "Keep playing"), t(a, "Keep playing: the game and its sound go on in the background") },
             { "off", t(a, "Pause"), t(a, "Pause: the game stops while it is not on screen") } });
+        // Quit (#317): the app otherwise stays in memory. Saves are committed atomically (hle_fs.c), so stopping at any moment keeps the last save the game made,
+        //   as turning the console off does; what was not saved in the game is lost, which the card says
+        action(a, t(a, "Quit the game"), t(a, "Closes the game completely"), () -> confirm(a, t(a, "Quit the game? Progress you have not saved in the game is lost, as on the console."),
+            t(a, "Quit"), () -> { a.finishAndRemoveTask(); android.os.Process.killProcess(android.os.Process.myPid()); }));
         // the replay on its own thread (hle_nvn.c DM_NVN_ASYNC): the game's thread hands each frame's graphics work over instead of translating it itself (about a quarter
         //   of a frame on a slow CPU, #99). Off by default until players have run it on many phones
         heading(a, t(a, "Performance"));
@@ -572,6 +600,10 @@ public final class GameMenu {
         action(a, t(a, "Capture a frame"), t(a, "Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue."),
                () -> { try (java.io.FileWriter w = new java.io.FileWriter(new File(GameSettings.dir(a), "capture.req"))) { w.write("90"); } catch (IOException e) { }
                        android.widget.Toast.makeText(a, t(a, "Capturing in 3 seconds: close the menu."), android.widget.Toast.LENGTH_LONG).show(); });
+        // a frame graph for a performance report (nvn/fg_rec.h, the renderer's frame recorder): framegraph.req holds "<frames> <frames to wait>"; the text goes to Download
+        action(a, t(a, "Record the frame's passes"), t(a, "For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue."),
+               () -> { try (java.io.FileWriter w = new java.io.FileWriter(new File(GameSettings.dir(a), "framegraph.req"))) { w.write("3 90"); } catch (IOException e) { }
+                       android.widget.Toast.makeText(a, t(a, "Recording in 3 seconds: close the menu."), android.widget.Toast.LENGTH_LONG).show(); });
         // Mali's white scenes (#47 #53 #64 #68 #69 #72 #75): switches the engine has for narrowing it down, which players could only set by editing env.txt; each one a
         //   tester tries (with a capture) rules a cause in or out. Shown on Mali phones only
         if (DriverPackages.gpu(a).contains("mali")) {
