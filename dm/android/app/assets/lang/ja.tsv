@@ -420,3 +420,6 @@ Tap or swipe	タップかスワイプ
 Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	＋をタップでライドポケモンを呼ぶ、左右にスワイプで切り替え
 Tap only	タップのみ
 + works as on the console	＋は本体と同じ動作
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p：最も軽い、30を保てない端末向け（次回起動から）
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p：より鮮明だがGPU負荷が増加（fps低下・発熱、次回起動から）
+the game's own (100 %)	ゲーム本来（100 %）

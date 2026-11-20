@@ -320,8 +320,11 @@ public final class GameMenu {
             { "quality", t(a, "Quality"), t(a, "Quality: docked: 1080p and the game's full effects") },
             { "performance", t(a, "Performance"), t(a, "Performance: handheld: 720p and the game's lighter settings: cooler and steadier") } });
         // Legends: Arceus's TV-mode render size (loader.c arc_res): 1080p as the game is made, or 1440p (sharper, heavier); from the next start
-        if (false && GameSettings.arceus(a)) choice(a, "DM_ARC_RES", t(a, "Resolution"), new String[][] { { "", "1080p", t(a, "1080p, as the game is made") },
-            { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)") } });
+        // Legends: Arceus: the TV-mode render size (loader.c arc_res; the GPU memory grows with it), from the next start
+        if (GameSettings.arceus(a)) choice(a, "DM_ARC_RES", t(a, "Resolution"), new String[][] {
+            { "720", "720p", t(a, "720p: lightest, for phones that cannot hold 30 (from the next start)") },
+            { "", "1080p", t(a, "1080p, as the game is made") },
+            { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)") } });
         // Legends: Arceus: the POTATO mod's draw distance and shadows (android_main.c lowspec, DM_LOWSPEC 1 / 2), for phones that cannot hold its frame rate
         // Legends: Arceus: flat normal maps on the field's ground and tree bark (setup_game.py flat_normals): on this engine their detail lights shadowed ground purple
         if (GameSettings.arceus(a)) choice(a, "DM_FLAT_NORMALS", t(a, "No reflections"), new String[][] { { "", t(a, "On"), t(a, "On: smooth ground lighting, no purple shadows") },
@@ -330,11 +333,8 @@ public final class GameMenu {
             { "0", t(a, "Off"), t(a, "Off: the world as the game draws it") },
             { "1", t(a, "On"), t(a, "On: shorter draw distance for Pokémon, people and trees, lighter shadows") }, { "2", t(a, "Lowest"), t(a, "Lowest: shorter draw distance and no shadows") } });
         // Legends: Arceus: how far trees, terrain detail and animation reach (android_main.c draw_distance: the player's own config files, changed at start)
-        if (GameSettings.arceus(a)) choice(a, "DM_ARC_DRAW", t(a, "Draw distance"), new String[][] {
-            { "near", t(a, "Near"), t(a, "Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)") },
-            { "", t(a, "Default"), t(a, "Default: as the game draws it") },
-            { "far", t(a, "Far"), t(a, "Far: trees, terrain detail and animation half as far again (from the next start)") },
-            { "veryfar", t(a, "Very far"), t(a, "Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)") } });
+        // Legends: Arceus: how far trees, terrain detail, people and Pokémon reach (android_main.c draw_distance: the player's own config files, changed at start)
+        if (GameSettings.arceus(a)) slider(a, t(a, "Draw distance"), "DM_DRAW_DIST", 50, 200, 100, v -> v == 100 ? t(a, "the game's own (100 %)") : v + " %");
         // Legends: Arceus: the strong / agile style moves' start effects (android_main.c style_fx, the No More Styles 1.2 mod): off by default, they covered the screen with grey boxes
         if (GameSettings.arceus(a)) choice(a, "DM_ARC_STYLE_FX", t(a, "Style move effects"), new String[][] { { "", t(a, "Off"), t(a, "Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before") },
             { "1", t(a, "On"), t(a, "On: the game's own animation (grey boxes on some phones)") } });

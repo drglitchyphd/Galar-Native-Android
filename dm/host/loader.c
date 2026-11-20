@@ -598,21 +598,20 @@ static int arc_gpu_pool(module_t *m, unsigned pool_mb, int64_t p0, int64_t p1) {
 //   2560x1440 at the five places it is set (after Fl4sh's "2560x1440" mod for 1.1.1): sharper, and heavier on the GPU. Handheld mode keeps its own 720p.
 //   Each word is checked first (MOV / MOVK of 0x780 or 0x438 into the register the game uses); a build or code that differs is left alone
 static int arc_res(module_t *m, int64_t p0, int64_t p1) {
-    // Off for now unless forced (DM_ARC_RES_FORCE=1): the game's GPU memory areas stay sized for 1080p, so the first 2560x1440 render target (0xf00000 bytes)
-    //   finds no free block and the game's own pool allocator reads through a null pointer at start (main+0x2a8d750 from the texture builder at main+0x2a97f40;
-    //   v0.40 players who chose 1440p could not start the game). A player's DM_ARC_RES=1440 is ignored, so they can play again with nothing to change
-    const char *e = getenv("DM_ARC_RES"); if (!e || atoi(e) != 1440) return 0;
-    { const char *f = getenv("DM_ARC_RES_FORCE"); if (!(f && atoi(f) > 0)) {
-        LOG("%s: 1440p is off for now (DM_ARC_RES=1440 ignored): the game's render target memory is sized for 1080p and the game crashed at start", m->name); return 0; } }
-    static const struct { uint64_t off; uint32_t orig, imm; } R[] = {
-        { 0x29f0650, 0x5280f008u, 0xa00 }, { 0x29f0654, 0x52808709u, 0x5a0 }, { 0x29f0410, 0x5280f008u, 0xa00 }, { 0x29f0414, 0x52808709u, 0x5a0 },
-        { 0x2b9a5fc, 0x5280f008u, 0xa00 }, { 0x2b9a604, 0x52808708u, 0x5a0 }, { 0x277bd44, 0x5280f009u, 0xa00 }, { 0x277bd50, 0x52808708u, 0x5a0 },
-        { 0x29e99e8, 0xf2c0f008u, 0xa00 }, { 0x29e99f4, 0xf2c08708u, 0x5a0 } };
+    // DM_ARC_RES (Graphics → Resolution): 720 / 1080 (the game's own) / 1440, the TV-mode render size at the five places it is set, width and height
+    //   (MOV / MOVK of 0x780 and 0x438). 1440p grows the render-target pool and the GFX2 heap with it (arc_gpu_pool: the start crash of v0.40 came from a pool sized
+    //   for 1080p; S25+ 2026-11-20: 2560x1440 at a steady 30). 720p needs no more memory. Handheld mode keeps its own 720p; DM_ARC_RES_FORCE no longer needed
+    const char *e = getenv("DM_ARC_RES"); int res = e ? atoi(e) : 0; if (res != 1440 && res != 720) return 0;
+    uint32_t W = res == 1440 ? 0xa00 : 0x500, H = res == 1440 ? 0x5a0 : 0x2d0;
+    static const struct { uint64_t off; uint32_t orig; int h; } R[] = {
+        { 0x29f0650, 0x5280f008u, 0 }, { 0x29f0654, 0x52808709u, 1 }, { 0x29f0410, 0x5280f008u, 0 }, { 0x29f0414, 0x52808709u, 1 },
+        { 0x2b9a5fc, 0x5280f008u, 0 }, { 0x2b9a604, 0x52808708u, 1 }, { 0x277bd44, 0x5280f009u, 0 }, { 0x277bd50, 0x52808708u, 1 },
+        { 0x29e99e8, 0xf2c0f008u, 0 }, { 0x29e99f4, 0xf2c08708u, 1 } };
     for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w; memcpy(&w, m->base + R[i].off, 4);
-        if (R[i].off + 4 > m->text_end || w != R[i].orig || overlaps_rewrite(m, R[i].off, 4, p0, p1)) { LOG("[RED] %s: 1440p not applied (Legends: Arceus 1.1.1's render size code differs at +%#llx)", m->name, (unsigned long long)R[i].off); return 0; } }
-    for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w = (R[i].orig & ~(0xffffu << 5)) | R[i].imm << 5; memcpy(m->base + R[i].off, &w, 4); }
-    int g = arc_gpu_pool(m, 400, p0, p1);
-    LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)%s", m->name, g ? "; render-target pool 400 MB (was 250), GFX2 heap +150 MB" : "; [RED] the GPU memory sizes differ: left as they are");
+        if (R[i].off + 4 > m->text_end || w != R[i].orig || overlaps_rewrite(m, R[i].off, 4, p0, p1)) { LOG("[RED] %s: %dp not applied (Legends: Arceus 1.1.1's render size code differs at +%#llx)", m->name, res, (unsigned long long)R[i].off); return 0; } }
+    for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w = (R[i].orig & ~(0xffffu << 5)) | (R[i].h ? H : W) << 5; memcpy(m->base + R[i].off, &w, 4); }
+    int g = res == 1440 ? arc_gpu_pool(m, 400, p0, p1) : 1;
+    LOG("%s: resolution: the TV-mode render size is %ux%u (DM_ARC_RES)%s", m->name, W, H, res != 1440 ? "" : g ? "; render-target pool 400 MB (was 250), GFX2 heap +150 MB" : "; [RED] the GPU memory sizes differ: left as they are");
     return (int)(sizeof R / sizeof *R);
 }
 // True aspect ratio for Legends: Arceus 1.1.1 (experimental, DM_WIDE_RENDER=1 with Widescreen): the game renders at the screen's own shape instead of 16:9 stretched to

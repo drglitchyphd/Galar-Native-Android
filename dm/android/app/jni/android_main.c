@@ -627,13 +627,17 @@ static int cb_load(const char *path, cfgbuf *b) {
     int ok = b->d && fread(b->d, 1, (size_t)n, f) == (size_t)n; fclose(f); return ok;
 }
 static void draw_distance(void) {
-    const char *e = getenv("DM_ARC_DRAW");
-    if (!e || !*e || !strcmp(e, "auto")) {   // Default: the game's own, unless the fps guard remembered that this phone needs Near to hold 30 (lock30_draw)
+    // DM_DRAW_DIST: percent (50-200, the settings' slider; 100 the game's own); the older DM_ARC_DRAW near / far / veryfar are 75 / 150 / 200
+    char pct[16] = ""; { const char *d = getenv("DM_DRAW_DIST"), *o = getenv("DM_ARC_DRAW");
+        if (d && atoi(d) >= 50 && atoi(d) <= 200 && atoi(d) != 100) snprintf(pct, sizeof pct, "%d", atoi(d));
+        else if (!d && o && *o) snprintf(pct, sizeof pct, "%s", !strcmp(o, "near") ? "75" : !strcmp(o, "far") ? "150" : !strcmp(o, "veryfar") ? "200" : ""); }
+    const char *e = pct[0] ? pct : NULL;
+    if (!e) {   // Default: the game's own, unless the fps guard remembered that this phone needs Near to hold 30 (lock30_draw)
         char p[1100], cur[16] = ""; snprintf(p, sizeof p, "%s/auto_draw.txt", g_files); FILE *f = fopen(p, "r");
         if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); }
-        if (strncmp(cur, "near", 4)) return;
-        e = "near"; fprintf(stderr, "boot: draw distance near, chosen by the fps guard (this phone's CPU could not hold 30 at the game's own distance; Settings -> Draw distance overrides it)\n"); }
-    double k = !strcmp(e, "near") ? 0.75 : !strcmp(e, "far") ? 1.5 : !strcmp(e, "veryfar") ? 2.0 : 1.0; if (k == 1.0) return;
+        if (strncmp(cur, "near", 4) && atoi(cur) < 50) return;
+        e = "75"; fprintf(stderr, "boot: draw distance near, chosen by the fps guard (this phone's CPU could not hold 30 at the game's own distance; Settings -> Draw distance overrides it)\n"); }
+    double k = atoi(e) / 100.0; if (!(k >= 0.5 && k <= 2.0) || k == 1.0) return;
     const char *ls = getenv("DM_LOWSPEC"); if (ls && atoi(ls) > 0) { fprintf(stderr, "boot: draw distance %s left out: Lower specs is on (its own files)\n", e); return; }
     const char *rf = getenv("DM_ROMFS"); char rom[1100]; snprintf(rom, sizeof rom, "%s", rf && *rf ? rf : ""); if (!*rom) snprintf(rom, sizeof rom, "%s/RomFS", g_game);
     char root[1100], in[1300], out[1300]; snprintf(root, sizeof root, "%s/drawdist/romfs", g_files);
@@ -915,9 +919,9 @@ extern _Atomic uint64_t g_nvn_game_work_avg_ns __attribute__((weak));
 static void lock30_draw(int on, double cpu, double budget) {
     char p[1100]; snprintf(p, sizeof p, "%s/auto_draw.txt", g_files);
     FILE *f = fopen(p, "r"); char cur[16] = ""; if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); }
-    int was = !strncmp(cur, "near", 4); if (was == on) return;
-    const char *e = getenv("DM_ARC_DRAW"); if (e && *e && strcmp(e, "auto")) return;   // (chosen by hand)
-    f = fopen(p, "w"); if (!f) return; fputs(on ? "near\n" : "\n", f); fclose(f);
+    int was = !strncmp(cur, "near", 4) || atoi(cur) >= 50; if (was == on) return;
+    { const char *d = getenv("DM_DRAW_DIST"), *o = getenv("DM_ARC_DRAW"); if ((d && atoi(d) != 100) || (!d && o && *o && strcmp(o, "auto"))) return; }   // (chosen by hand)
+    f = fopen(p, "w"); if (!f) return; fputs(on ? "75\n" : "\n", f); fclose(f);
     fprintf(stderr, on ? "fps guard: the CPU cannot hold 30 here even at the lightest settings (game thread %.1f ms of %.1f): draw distance Near from the next start (Settings -> Draw distance)\n"
                        : "fps guard: steady with the CPU to spare (game thread %.1f ms of %.1f): the game's own draw distance again from the next start\n", cpu, budget);
 }
