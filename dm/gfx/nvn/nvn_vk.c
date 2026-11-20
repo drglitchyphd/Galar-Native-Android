@@ -1534,7 +1534,8 @@ static uint64_t g_hold_frames, g_hold_split;   // frames submitted whole at thei
 // Default (the user's choice after the S25+ test, 2026-11-19: mode 2 looked better): mode 2 where the replay has a thread of its own (hle_nvn.c DM_NVN_ASYNC, Auto: Adreno),
 //   whose ~7 ms more a frame then stays off the game's thread; off where the replay runs on the game's thread
 int nvn_async_on(void) __attribute__((weak));
-static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : nvn_async_on && nvn_async_on() ? 2 : 0; if (v < 0 || v > 2) v = 0;
+// Legends: Arceus: off by default for now (DM_VK_FRAME_HOLD=1 / 2 to try): its transform feedback capture passes and report timestamps have not been run held on a phone
+static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : 0; (void)nvn_async_on; if (v < 0 || v > 2) v = 0;
     VLOG("frames: %s", v == 2 ? "held whole until presented, each pass's stores decided from the whole frame (DM_VK_FRAME_HOLD=2): up to a frame later on screen"
                        : v ? "held whole until presented (DM_VK_FRAME_HOLD=1): up to a frame later on screen" : "submitted as recorded"); } return v; }
 static uint64_t g_dec_dc, g_dec_fix, g_dec_passes;   // stores left out (overwritten unread), stores put back (read after all: a guess elsewhere was wrong), passes decided
@@ -5267,7 +5268,7 @@ static int framegen_mode(void) {
     const char *e = getenv("DM_FRAMEGEN"); m = e && (!strcmp(e, "on") || !strcmp(e, "1")) ? 1 : e && !strcmp(e, "debug") ? 2 : e && !strcmp(e, "lsfg") ? 3 : 0;
     dm_framegen_mode = m; return m;
 }
-static struct { fgen g; lsfg ls; int ls_tried; fg_plan plan; int off, up, p, have_prev, resizes, zgen; uint64_t resize_t;
+static struct { fgen g; lsfg ls; int ls_tried; fg_plan plan; int off, up, p, have_prev, resizes, zgen, hf_last; uint64_t resize_t;
                 VkSemaphore acq2[3], done2[3]; VkQueryPool qp; double tsper; int q_live[3]; uint64_t budget;
                 int pending; uint32_t pii; VkSemaphore pdone; uint64_t due, seq, arrived; sem_t wake;   // the real frame waiting for its time (under g_wmu)
                 uint64_t n_gen, n_plain, gpu_sum, gpu_n, gpu_max, cpu_sum, lag_sum, lag_n, last_log; } FGE;
@@ -5385,7 +5386,12 @@ static void present_window_locked(vtex *x, const int crop[4]) {
             if (!FGE.off && fg_plan_cost(&FGE.plan, ns, t_arr, FGE.budget)) { char why[96]; snprintf(why, sizeof why, "the GPU needs over %.1f ms for a picture, %.1f ms the last one", FGE.budget / 1e6, ns / 1e6); fg_off(why); } } }
     int fgm = framegen_mode(), fg = fgm && !FGE.off && fg_ready(x, cx, cy, cw, ch), gen = 0;
     if (!fg) { FGE.have_prev = 0; FGE.ls.n = 0; }   // (the copy of the frame before goes stale the moment a frame is not copied; Lossless Scaling's history starts again)
-    else { FGE.g.debug = fgm == 2; gen = fg_plan_frame(&FGE.plan, t_arr, period) && FGE.have_prev && (fgm != 3 || FGE.ls.n >= 2); }   // (lsfg: three frames of history first)
+    // HUD-free (our own frame generation): the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud). A switch between
+    //   the two kinds: the frame before is of the other kind, no picture from it (decided before the swapchain images are asked for)
+    int hf = fg && fgm != 3 && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt;
+    if (fg && hf != FGE.hf_last) FGE.have_prev = 0;
+    FGE.hf_last = hf;
+    if (fg) { FGE.g.debug = fgm == 2; gen = fg_plan_frame(&FGE.plan, t_arr, period) && FGE.have_prev && (fgm != 3 || FGE.ls.n >= 2); }   // (lsfg: three frames of history first)
     uint32_t ii, i2 = 0; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, UINT64_MAX, W.acq[sl], VK_NULL_HANDLE, &ii);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return; }
     if (r && r != VK_SUBOPTIMAL_KHR) return;
@@ -5402,9 +5408,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         if (FGE.qp && gen) { vkCmdResetQueryPool(cb, FGE.qp, sl * 2, 2); vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2); }
         if (ls) ls_begin(ls, cb); else fg_begin(g, cb);
         VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { cx, cy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { (uint32_t)cw, (uint32_t)ch, 1 } };
-        // HUD-free (our own frame generation): the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud)
-        int hf = !ls && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt;
-        if (!ls) { if (hf != g->hud_on && FGE.have_prev) FGE.have_prev = 0; g->hud_on = hf; }   // (a switch between the two: the frame before is of the other kind, no picture from it)
+        if (!ls) g->hud_on = hf;
         if (hf) { VkImageCopy sc = ic; sc.srcOffset = (VkOffset3D){ 0, 0, 0 };
             vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
             vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, g->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
