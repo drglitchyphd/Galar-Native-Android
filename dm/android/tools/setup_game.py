@@ -269,6 +269,8 @@ def main():
         dst = os.path.join(a.out, 'aoc'); shutil.rmtree(dst, ignore_errors=True)
         if os.path.isdir(aoc): shutil.move(aoc, dst)
         aoc = dst
+        # the game's icon (home screen shortcut, launcher card, recent apps) written now, not only at the very end: a setup that stops or fails later keeps it
+        if os.path.isfile(os.path.join(ex, 'icon.jpg')): shutil.copyfile(os.path.join(ex, 'icon.jpg'), os.path.join(a.out, 'icon.jpg'))
 
         step(2)
         pat = os.path.join(a.out, 'patched'); shutil.rmtree(pat, ignore_errors=True); os.makedirs(pat)
