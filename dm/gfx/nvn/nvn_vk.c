@@ -1690,12 +1690,18 @@ static int g_tsq_ok(void) {
 // Our own frame generation only (DM_FRAMEGEN=on); DM_FRAMEGEN_HUDFREE=0 leaves it out. Everything here runs on the thread that builds the GPU's work
 static int framegen_mode(void);
 enum { HP_N = 512 };
-static struct { vtex *c0; uint32_t draws; uint8_t rr, nr; vtex *r[4]; } g_hp[HP_N]; static int g_hp_n;   // this frame's passes so far
-static struct { vtex *c0; uint32_t draws; uint8_t rr, nr; vtex *r[4]; int open; } g_hpc;                 // the open pass
+// (z: the pass's depth target; zclr / zcd: it clears it, to what: the far plane, which tells which way round the game keeps depth)
+static struct { vtex *c0, *z; uint32_t draws; uint8_t rr, nr, zclr; float zcd; vtex *r[4]; } g_hp[HP_N]; static int g_hp_n;   // this frame's passes so far
+static struct { vtex *c0, *z; uint32_t draws; uint8_t rr, nr, zclr; float zcd; vtex *r[4]; int open; } g_hpc;               // the open pass
 static uint64_t g_hp_seq;                       // presents so far (the frame number HUD-free uses: hle_nvn.c's g_frame_no is set from the game's thread)
 static vtex *g_hp_F; static int g_hp_k;         // learnt: the final image, and which pass drawing into it is the first HUD pass (1-based; 0: none)
 static int g_hp_count; static uint64_t g_hp_scene_seq;   // passes into F begun this frame; the frame the scene copy was made in (+1)
 static VkImage g_hp_simg; static vmalloc_t g_hp_sa; static uint32_t g_hp_sw, g_hp_sh; static VkFormat g_hp_sfmt; static int g_hp_sfresh;
+// Depth guidance (nvn_fgen.h fg_depth_src): the scene's depth, learnt with the split (the depth target of the last pass before the first HUD pass whose shape is the final
+//   image's: not a shadow map), copied with the scene; g_hp_zgen counts its copy images (the presenting side names a new one to frame generation), g_hp_zseq the frame copied
+static vtex *g_hp_Z; static int g_hp_zfar1;
+static VkImage g_hp_zimg; static vmalloc_t g_hp_za; static uint32_t g_hp_zw, g_hp_zh; static VkFormat g_hp_zfmt; static VkImageAspectFlags g_hp_zasp; static int g_hp_zfresh, g_hp_zgen; static uint64_t g_hp_zseq;
+static int fg_depth_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FRAMEGEN_DEPTH"); v = !(e && !strcmp(e, "0")); } return v; }
 static int hudfree_on(void) {
     static int v = -1; if (v < 0) { const char *e = getenv("DM_FRAMEGEN_HUDFREE"); v = !(e && !strcmp(e, "0")); }
     return v && framegen_mode() == 1;
@@ -1708,8 +1714,10 @@ static void hp_read(vtex *x) {   // (sk_read: sampled, copied, loaded, shown)
 static void hp_draw(void) { if (g_hpc.open) g_hpc.draws++; }
 static void hp_pass_end(void) {
     if (!g_hpc.open) return; g_hpc.open = 0;
-    if (g_hp_n < HP_N) { g_hp[g_hp_n].c0 = g_hpc.c0; g_hp[g_hp_n].draws = g_hpc.draws; g_hp[g_hp_n].rr = g_hpc.rr; g_hp[g_hp_n].nr = g_hpc.nr; memcpy(g_hp[g_hp_n].r, g_hpc.r, sizeof g_hpc.r); g_hp_n++; }
+    if (g_hp_n < HP_N) { g_hp[g_hp_n].c0 = g_hpc.c0; g_hp[g_hp_n].draws = g_hpc.draws; g_hp[g_hp_n].rr = g_hpc.rr; g_hp[g_hp_n].nr = g_hpc.nr; memcpy(g_hp[g_hp_n].r, g_hpc.r, sizeof g_hpc.r);
+                         g_hp[g_hp_n].z = g_hpc.z; g_hp[g_hp_n].zclr = g_hpc.zclr; g_hp[g_hp_n].zcd = g_hpc.zcd; g_hp_n++; }
 }
+static void sk_read(vtex *x); static void depth_read(vtex *x);   // (below: a read of an image, for the stores)
 // a game pass begins (after its barrier, before vkCmdBeginRendering): its first colour target noted; the learnt first HUD pass into the final image takes the scene copy first
 static void hp_pass_begin(VkCommandBuffer cb, vtex *c0) {
     if (!hudfree_on()) return;
@@ -1729,6 +1737,28 @@ static void hp_pass_begin(VkCommandBuffer cb, vtex *c0) {
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib); g_hp_sfresh = 0; }
     VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { c0->w, c0->h, 1 } };
     vkCmdCopyImage(cb, c0->img, VK_IMAGE_LAYOUT_GENERAL, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+    vtex *Z = framegen_mode() == 1 && fg_depth_on() ? g_hp_Z : NULL;   // (depth guidance: ours only; Lossless Scaling takes pictures alone)
+    if (Z && Z->img && Z->samples == 1 && !Z->is3d && (Z->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && (Z->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        if (!g_hp_zimg || g_hp_zw != Z->w || g_hp_zh != Z->h || g_hp_zfmt != Z->fmt) {
+            if (g_hp_zimg) { defer_add((dfr){ .kind = DF_IMAGE, .h.img = g_hp_zimg, .a = g_hp_za }); g_hp_zimg = VK_NULL_HANDLE; }
+            VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = Z->fmt, .extent = { Z->w, Z->h, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                                     .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+            VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, Z->fmt, &fp);
+            if ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) && !vkCreateImage(g_dev, &ii, NULL, &g_hp_zimg)) {
+                VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, g_hp_zimg, &rq); g_hp_za = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+                VKCHECK(vkBindImageMemory(g_dev, g_hp_zimg, g_hp_za.b->mem, g_hp_za.off)); g_hp_zw = Z->w; g_hp_zh = Z->h; g_hp_zfmt = Z->fmt;
+                g_hp_zasp = Z->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT); g_hp_zfresh = 1; g_hp_zgen++; }
+            else { g_hp_zimg = VK_NULL_HANDLE; g_hp_zgen++; } }
+        if (g_hp_zimg) {
+            if (g_hp_zfresh) {
+                VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = g_hp_zimg, .subresourceRange = { g_hp_zasp, 0, 1, 0, 1 } };
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib); g_hp_zfresh = 0; }
+            VkImageCopy zc = { { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, { 0, 0, 0 }, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, { 0, 0, 0 }, { Z->w, Z->h, 1 } };
+            vkCmdCopyImage(cb, Z->img, VK_IMAGE_LAYOUT_GENERAL, g_hp_zimg, VK_IMAGE_LAYOUT_GENERAL, 1, &zc);
+            // a read of the game's depth: its store stays (the held frame's verdict, the learnt skips, DM_VK_DEPTH_DISCARD), not one of the HUD pass's own reads
+            int op = g_hpc.open; g_hpc.open = 0; sk_read(Z); depth_read(Z); g_hpc.open = op;
+            g_hp_zseq = g_hp_seq + 1; } }
     barrier_all(cb);   // (the copy reads the scene before the HUD pass draws on it)
     g_hp_scene_seq = g_hp_seq + 1;
 }
@@ -1739,9 +1769,21 @@ static void hp_learn(vtex *shown) {
     vtex *F = shown; int s = -1;
     for (int i = 0; i < g_hp_n; i++) if (g_hp[i].c0 == shown) s = i;
     if (s >= 0 && g_hp[s].nr == 1) F = g_hp[s].r[0];
-    int j = 0, last_scene = 0, k = 0;
+    int j = 0, last_scene = 0, k = 0, ik = -1;
     for (int i = 0; i < g_hp_n; i++) { if (g_hp[i].c0 != F || !g_hp[i].draws) continue; j++;
-        if (g_hp[i].rr) { last_scene = j; k = 0; } else if (!k && j > last_scene) k = j; }
+        if (g_hp[i].rr) { last_scene = j; k = 0; ik = -1; } else if (!k && j > last_scene) { k = j; ik = i; } }
+    {   // the scene's depth: the last depth target before the first HUD pass of the final image's shape and at least a quarter of its size, and which way round its depth is
+        //   (what a pass clears it to is the far plane); unknown either way: none
+        vtex *Z = NULL; int far1 = -1;
+        for (int i = (ik >= 0 ? ik : g_hp_n) - 1; i >= 0 && F && !Z; i--) { vtex *z = g_hp[i].z;
+            if (z && g_hp[i].draws && (uint64_t)z->w * 4 * z->h >= (uint64_t)F->w * F->h && fabs((double)z->w * F->h - (double)z->h * F->w) <= 0.02 * (double)z->w * F->h) Z = z; }
+        for (int i = 0; i < g_hp_n && Z; i++) if (g_hp[i].z == Z && g_hp[i].zclr) far1 = g_hp[i].zcd > 0.5f;
+        if (Z && far1 < 0 && Z == g_hp_Z) far1 = g_hp_zfar1;   // (cleared in an earlier frame only: as learnt then)
+        if (far1 < 0) Z = NULL;
+        if (Z != g_hp_Z || (Z && far1 != g_hp_zfar1)) { static int said; if (said < 8) { said++;
+            if (Z) VLOG("frame generation, depth guidance: the scene's depth %ux%u (format %d), its far plane at %d", Z->w, Z->h, (int)Z->fmt, far1);
+            else VLOG("frame generation, depth guidance: no scene depth found (pictures without it)"); } }
+        g_hp_Z = Z; if (Z) g_hp_zfar1 = far1; }
     if (F != g_hp_F || k != g_hp_k) { static int said; if (said < 12) { said++; VLOG("frame generation, HUD-free: the final image %ux%u, the HUD from its %d%s pass drawing into it%s", F ? F->w : 0, F ? F->h : 0, k,
                                                                                    k == 1 ? "st" : k == 2 ? "nd" : k == 3 ? "rd" : "th", k ? "" : " (none found: the frame as it is)"); } }
     g_hp_F = F; g_hp_k = k; g_hp_n = 0; g_hp_count = 0; g_hp_seq++;
@@ -3170,7 +3212,7 @@ static int pass_begin(void) {
     memset(&P, 0, sizeof P); uint32_t tw = 16384, th = 16384, nlay = 0; int any = 0, ncol = 0;   // nlay: the fewest layers of the attachments (a layered pass over a 3D target)
     uint64_t dkey = 0, skey = 0; int dnone = 0, snone = 0;
     fgr_attin fga[10]; int fgn = 0;   // (the frame recorder, while it records)
-    vtex *hp_c0 = NULL;   // (HUD-free: the pass's first colour target)
+    vtex *hp_c0 = NULL, *hp_z = NULL; int hp_zclr = 0; float hp_zcd = 0;   // (HUD-free: the pass's first colour target; depth guidance: its depth target, cleared to what)
     for (int i = 0; i < 8; i++) { ca[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO }; }
     if (sk_on()) {   // this pass's key for the store learning (sk_attach): its render targets and how many times they were set before in this frame
         static struct { uint64_t sig; uint32_t n; } occ[256]; static uint64_t occ_frame = ~0ull;
@@ -3211,7 +3253,8 @@ static int pass_begin(void) {
             if (x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) { da.imageView = v; da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 da.storeOp = sk_on() && sk_attach(x, dl, dy, 2, 8, R.clear_d) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE; dkey = g_sk_last;
                 if (da.storeOp == VK_ATTACHMENT_STORE_OP_STORE && g_store_none && sk_ro(dkey, R.clear_d)) { da.storeOp = VK_ATTACHMENT_STORE_OP_NONE; dnone = 1; }
-                da.loadOp = R.clear_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; da.clearValue.depthStencil.depth = R.cd; P.hd = 1; P.dfmt = (uint32_t)x->fmt; }
+                da.loadOp = R.clear_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; da.clearValue.depthStencil.depth = R.cd; P.hd = 1; P.dfmt = (uint32_t)x->fmt;
+                hp_z = x; hp_zclr = R.clear_d; hp_zcd = R.cd; }
             if (x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) { sa.imageView = v; sa.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 sa.storeOp = sk_on() && sk_attach(x, dl, dy, 3, 9, R.clear_s) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE; skey = g_sk_last;
                 if (sa.storeOp == VK_ATTACHMENT_STORE_OP_STORE && g_store_none && sk_ro(skey, R.clear_s)) { sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE; snone = 1; }
@@ -3252,7 +3295,7 @@ static int pass_begin(void) {
     uint64_t pt2 = prof ? mono_ns() : 0;
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {tw, th}}, .layerCount = nlay ? nlay : 1, .colorAttachmentCount = (uint32_t)ncol, .pColorAttachments = ca,
                            .pDepthAttachment = P.hd ? &da : NULL, .pStencilAttachment = P.hs ? &sa : NULL };
-    if (!P_tf) hp_pass_begin(CB(), hp_c0);   // (HUD-free frame generation: the scene copy before the first HUD pass)
+    if (!P_tf) { hp_pass_begin(CB(), hp_c0); g_hpc.z = hp_z; g_hpc.zclr = (uint8_t)hp_zclr; g_hpc.zcd = hp_zcd; }   // (HUD-free frame generation: the scene copy before the first HUD pass)
     if (!P_tf) g_seg_fgp = fgr_pass_begin(CB(), tw, th, nlay ? nlay : 1, P.samples, fga, fgn);   // (the held frame decides this pass's stores by it)   // (the transform feedback capture passes are ours, not the game's)
     rend_begin(CB(), &ri, P.cfmt, P.hd ? P.dfmt : P.hs ? P.sfmt : 0, P.samples, 0); g_stat_begins++;
     if (prof) { uint64_t pt3 = mono_ns(); g_pb_ns[0] += pt1 - pt0; g_pb_ns[1] += pt2 - pt1; g_pb_ns[2] += pt3 - pt2; }
@@ -5224,7 +5267,7 @@ static int framegen_mode(void) {
     const char *e = getenv("DM_FRAMEGEN"); m = e && (!strcmp(e, "on") || !strcmp(e, "1")) ? 1 : e && !strcmp(e, "debug") ? 2 : e && !strcmp(e, "lsfg") ? 3 : 0;
     dm_framegen_mode = m; return m;
 }
-static struct { fgen g; lsfg ls; int ls_tried; fg_plan plan; int off, up, p, have_prev, resizes; uint64_t resize_t;
+static struct { fgen g; lsfg ls; int ls_tried; fg_plan plan; int off, up, p, have_prev, resizes, zgen; uint64_t resize_t;
                 VkSemaphore acq2[3], done2[3]; VkQueryPool qp; double tsper; int q_live[3]; uint64_t budget;
                 int pending; uint32_t pii; VkSemaphore pdone; uint64_t due, seq, arrived; sem_t wake;   // the real frame waiting for its time (under g_wmu)
                 uint64_t n_gen, n_plain, gpu_sum, gpu_n, gpu_max, cpu_sum, lag_sum, lag_n, last_log; } FGE;
@@ -5376,6 +5419,13 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
         fg_ingest(g, cb, p);
+        {   // depth guidance: this frame's scene depth (copied with the scene) → its nearness. A new copy image: named to frame generation once nothing in flight uses the old one
+            int zgen = g_hp_zimg ? g_hp_zgen : 0;
+            if (FGE.zgen != zgen) { pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);
+                int ok = fg_depth_src(g, g_hp_zimg, g_hp_zfmt, g_hp_zfar1); FGE.zgen = zgen;
+                if (g_hp_zimg) VLOG("frame generation, depth guidance: %s (%ux%u, format %d)", ok ? "on" : "the driver cannot sample that depth format: off", g_hp_zw, g_hp_zh, (int)g_hp_zfmt); }
+            g->z_on = fg_depth_on(); g->z_far1 = g_hp_zfar1;
+            fg_depth_ingest(g, cb, p, hf && g_hp_zimg && g_hp_zseq == g_hp_scene_seq && g_hp_Z); }
         if (gen) { fg_generate(g, cb, p);
             if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; }
             pres_src mid = { NULL, g->m.img, g->m.view, g->w, g->h, 0, 0, cw, ch };
