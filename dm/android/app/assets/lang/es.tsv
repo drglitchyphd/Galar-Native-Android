@@ -409,3 +409,10 @@ Dynamic	Dinámico
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinámico: 60 donde el teléfono puede, 30 donde no, con la imagen completa; la velocidad del juego se mantiene
 100 % (as on the Switch)	100 % (como en la Switch)
 How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick.	Lo rápido que giran el stick derecho y la cámara táctil. Menos: más lenta y precisa. Más: velocidad máxima con menos stick.
+Normal	Normal
+Draw distance	Distancia de dibujado
+the game's own (100 %)	la del juego (100 %)
+Normal: as the game is made	Normal: como viene el juego
+Low: softer shadows, lighter on the GPU (from the next start)	Bajas: sombras más suaves, menos carga para la GPU (desde el próximo inicio)
+Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	Mínimas: sombras suaves solo cerca, sin sombras lejanas: lo más ligero (desde el próximo inicio)
+How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	Hasta dónde se dibujan la hierba y los detalles del campo (desde el próximo inicio). Menos: más ligero y fresco. Más: más detalle a lo lejos, más carga para la GPU.

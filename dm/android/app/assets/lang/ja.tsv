@@ -409,3 +409,10 @@ Dynamic	ダイナミック
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます
 100 % (as on the Switch)	100 %（Switchと同じ）
 How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick.	右スティックとタッチ操作でカメラが回る速さです。低い：ゆっくり細かく。高い：スティックを少し倒すだけで最高速。
+Normal	標準
+Draw distance	描画距離
+the game's own (100 %)	ゲーム本来（100 %）
+Normal: as the game is made	標準：ゲーム本来の設定
+Low: softer shadows, lighter on the GPU (from the next start)	低：影が柔らかくなり、GPUの負荷が減ります（次回起動から）
+Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	最低：近くの影だけ（柔らかめ）、遠くの影なし：最も軽い（次回起動から）
+How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	草やフィールドの細部を描く距離です（次回起動から）。低い：軽く、発熱が少ない。高い：遠くまで細かく、GPUの負荷が増えます。

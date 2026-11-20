@@ -608,11 +608,65 @@ static int galar_res_patch(module_t *m, int64_t p0, int64_t p1) {
     LOG("%s: resolution: the TV-mode window is %ux%u (DM_GALAR_RES; handheld keeps 1280x720)", m->name, W, H);
     return 4;
 }
+// Galar 1.3.2 (Shield; Sword's sites are 0x30 earlier, the same words): which game this main is, and its address shift from Shield's
+static int galar_shift(module_t *m, int64_t *d) {
+    if (!strncasecmp(m->build_id, "a16802625e7826bf83b6f9708e475b91", 32)) { *d = 0; return 1; }
+    if (!strncasecmp(m->build_id, "a3b75bcd3311385aeed67fbeeb79cbb7", 32)) { *d = -0x30; return 2; }
+    return 0;
+}
+static int words_are(module_t *m, int64_t p0, int64_t p1, const uint64_t *off, const uint32_t *orig, int n) {
+    for (int i = 0; i < n; i++) { uint32_t w; if (off[i] + 4 > m->text_end) return 0; memcpy(&w, m->base + off[i], 4); if (w != orig[i] || overlaps_rewrite(m, off[i], 4, p0, p1)) return 0; }
+    return 1;
+}
+// Shadows (DM_SHADOWS, Graphics → Shadows) for Sword and Shield 1.3.2. The main scene's shadow target is 1024 x 1024 with 2 layers = 2 cascades (built in main+0xf679d0:
+//   MOV W8, #0x400 / MOV X8, #0x400 at +0xf67d38 / +0xf67d40; handheld copies it), and the fallback target a scene builds when it has none (+0xf56108 / +0xf56110).
+//   low: 512 x 512 (a quarter of the memory and fill); lowest: also only the near cascade (the cascade-level setter main+0xf52930 always stores 1: CMP W1, #1 / B.LT
+//   → MOV W1, #1 / NOP; far shadows go). The layer count stays 2 (a level-2 request must pass the setter's bounds check). Read once, when the targets are made
+static int galar_shadow_patch(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_SHADOWS"); int64_t d; const char *g;
+    if (!e || (strcmp(e, "low") && strcmp(e, "lowest"))) return 0;
+    int gi = galar_shift(m, &d); if (!gi) return 0; g = gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2";
+    uint64_t so[4] = { 0xf67d38 + d, 0xf67d40 + d, 0xf56108 + d, 0xf56110 + d }; const uint32_t sw[4] = { 0x321603e8u, 0xd2808008u, 0x321603e8u, 0xd2808008u }, nw[4] = { 0x52804008u, 0xd2804008u, 0x52804008u, 0xd2804008u };
+    uint64_t co[2] = { 0xf52930 + d, 0xf52934 + d }; const uint32_t cw[2] = { 0x7100043fu, 0x5400010bu }, cn[2] = { 0x52800021u, 0xd503201fu };
+    int lowest = !strcmp(e, "lowest");
+    if (!words_are(m, p0, p1, so, sw, 4) || (lowest && !words_are(m, p0, p1, co, cw, 2))) { LOG("[RED] %s: shadows %s not applied (%s's shadow code differs)", m->name, e, g); return 0; }
+    for (int i = 0; i < 4; i++) memcpy(m->base + so[i], &nw[i], 4);
+    if (lowest) for (int i = 0; i < 2; i++) memcpy(m->base + co[i], &cn[i], 4);
+    LOG("%s: shadows %s for %s: shadow maps 512 x 512%s (DM_SHADOWS)", m->name, e, g, lowest ? ", the near cascade only" : "");
+    return lowest ? 6 : 4;
+}
+// Draw distance (DM_DRAW_DIST, percent 50-200, Graphics → Draw distance; from the next start) for Sword and Shield 1.3.2: the terrain detail layers (grass and the other
+//   instanced field objects, terrain_draw_setting's visible distance and fade bands, main+0xccb000) are shown by a squared camera distance computed once per layer in
+//   main+0xccec80 (FADDP V2.2S at +0xcced80, stored and reused by every comparison). That one is scaled by 1 / k^2 in a small cave at the end of the rewriter's code area:
+//   FADDP; LDR S31, =1/k^2; FMUL S2, S2, S31; B back (V31 is unused in that function). Trees, NPCs and Pokémon in the wild are RomFS data, not this
+static int galar_draw_patch(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_DRAW_DIST"); int pct = e ? atoi(e) : 100; int64_t d;
+    if (pct == 100 || pct < 50 || pct > 200) return 0;
+    int gi = galar_shift(m, &d); if (!gi) return 0;
+    uint64_t site = 0xcced80 + d; const uint32_t orig = 0x2e20d402u;
+    if (!words_are(m, p0, p1, &site, &orig, 1)) { LOG("[RED] %s: draw distance not applied (the terrain layer code differs)", m->name); return 0; }
+    // the cave: the zero tail of the rewriter's code area (mapped read + execute with it), 64 bytes checked free
+    int64_t end = m->patch_off < 0 ? p1 : (int64_t)m->size; static const uint8_t z[64];
+    int64_t cave = end - 32;
+    if (end - 64 < p0 || memcmp(m->base + end - 64, z, 64) || llabs(cave - (int64_t)site) >= (1ll << 27)) { LOG("[RED] %s: draw distance not applied (no free code space in reach)", m->name); return 0; }
+    float k = pct / 100.0f, lit = 1.0f / (k * k); uint32_t c[5];
+    c[0] = orig;                                    // FADDP V2.2S, V0.2S, V0.2S
+    c[1] = 0x1c00007fu;                             // LDR S31, [PC, #12]
+    c[2] = 0x1e3f0842u;                             // FMUL S2, S2, S31
+    c[3] = 0x14000000u | (uint32_t)((((int64_t)site + 4) - (cave + 12)) >> 2 & 0x3ffffff);   // B site + 4
+    memcpy(&c[4], &lit, 4);
+    memcpy(m->base + cave, c, sizeof c);
+    uint32_t br = 0x14000000u | (uint32_t)((cave - (int64_t)site) >> 2 & 0x3ffffff); memcpy(m->base + site, &br, 4);
+    __builtin___clear_cache((char *)(m->base + cave), (char *)(m->base + cave + 20));
+    LOG("%s: draw distance %d %% for %s: grass and field detail layers (DM_DRAW_DIST)", m->name, pct, gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2");
+    return 2;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
     n += wide_patch(m, lim, p0, p1);
+    n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1);
     n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
     n += wide_render_patch(m, p0, p1);
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
