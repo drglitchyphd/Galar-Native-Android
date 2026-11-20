@@ -412,3 +412,11 @@ Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from t
 Default: as the game draws it	標準：ゲーム本来の描画
 Far: trees, terrain detail and animation half as far again (from the next start)	遠い：木・地形の細部・アニメーションを1.5倍遠くまで（次回起動から）
 Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	とても遠い：木・地形の細部・アニメーションを2倍遠くまで：GPU負荷が増えます（次回起動から）
+Edge-run	端で走る
+On: push the stick past its ring to dash	オン：スティックを輪の外まで押すとダッシュ
+Off: the stick only walks and runs	オフ：スティックは歩く・走るだけ
+Ride button	ライドボタン
+Tap or swipe	タップかスワイプ
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	＋をタップでライドポケモンを呼ぶ、左右にスワイプで切り替え
+Tap only	タップのみ
++ works as on the console	＋は本体と同じ動作

@@ -422,3 +422,11 @@ Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from t
 Default: as the game draws it	Par défaut : comme le jeu le dessine
 Far: trees, terrain detail and animation half as far again (from the next start)	Loin : arbres, détail du terrain et animation 50 % plus loin (au prochain lancement)
 Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	Très loin : arbres, détail du terrain et animation deux fois plus loin : plus lourd pour le GPU (au prochain lancement)
+Edge-run	Course au bord
+On: push the stick past its ring to dash	Oui : poussez le stick au-delà de son anneau pour courir
+Off: the stick only walks and runs	Non : le stick ne fait que marcher et courir
+Ride button	Bouton de monture
+Tap or swipe	Toucher ou glisser
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	Touchez + pour appeler un Pokémon monture ; glissez à gauche / droite pour en changer
+Tap only	Toucher seulement
++ works as on the console	+ fonctionne comme sur la console

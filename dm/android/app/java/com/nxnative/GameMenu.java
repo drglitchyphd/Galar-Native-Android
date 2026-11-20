@@ -388,6 +388,13 @@ public final class GameMenu {
         if (GameSettings.arceus(a)) choice(a, "DM_TOUCH_GESTURES", t(a, "Touch gestures"), new String[][] {
             { "", t(a, "On"), t(a, "On: tap = A, swipe up = throw, left / right = L / R, down = X, taps on the item bubbles") },
             { "off", t(a, "Off"), t(a, "Off: the screen only turns the camera; use the buttons (menus still take taps)") } });   // (touch_ui.c size_k: every control, the moved ones too)
+        // Legends: Arceus's own moves on the controls (touch_ui.c edge_run / ride_swipe): the buttons from the game's own help text and HUD guide table
+        if (GameSettings.arceus(a)) choice(a, "DM_TOUCH_EDGE_RUN", t(a, "Edge-run"), new String[][] {
+            { "", t(a, "On"), t(a, "On: push the stick past its ring to dash") },
+            { "off", t(a, "Off"), t(a, "Off: the stick only walks and runs") } });
+        if (GameSettings.arceus(a)) choice(a, "DM_TOUCH_RIDE_SWIPE", t(a, "Ride button"), new String[][] {
+            { "", t(a, "Tap or swipe"), t(a, "Tap + to call a ride Pokémon, swipe it left / right to change Pokémon") },
+            { "off", t(a, "Tap only"), t(a, "+ works as on the console") } });
         slider(a, t(a, "Fade after"), "DM_TOUCH_FADE", 0, 10, 3, v -> v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));
         action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + and − together to reset)."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); } catch (UnsatisfiedLinkError e) { } });
