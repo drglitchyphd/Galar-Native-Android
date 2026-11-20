@@ -627,7 +627,12 @@ static int cb_load(const char *path, cfgbuf *b) {
     int ok = b->d && fread(b->d, 1, (size_t)n, f) == (size_t)n; fclose(f); return ok;
 }
 static void draw_distance(void) {
-    const char *e = getenv("DM_ARC_DRAW"); if (!e || !*e) return;
+    const char *e = getenv("DM_ARC_DRAW");
+    if (!e || !*e || !strcmp(e, "auto")) {   // Default: the game's own, unless the fps guard remembered that this phone needs Near to hold 30 (lock30_draw)
+        char p[1100], cur[16] = ""; snprintf(p, sizeof p, "%s/auto_draw.txt", g_files); FILE *f = fopen(p, "r");
+        if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); }
+        if (strncmp(cur, "near", 4)) return;
+        e = "near"; fprintf(stderr, "boot: draw distance near, chosen by the fps guard (this phone's CPU could not hold 30 at the game's own distance; Settings -> Draw distance overrides it)\n"); }
     double k = !strcmp(e, "near") ? 0.75 : !strcmp(e, "far") ? 1.5 : !strcmp(e, "veryfar") ? 2.0 : 1.0; if (k == 1.0) return;
     const char *ls = getenv("DM_LOWSPEC"); if (ls && atoi(ls) > 0) { fprintf(stderr, "boot: draw distance %s left out: Lower specs is on (its own files)\n", e); return; }
     const char *rf = getenv("DM_ROMFS"); char rom[1100]; snprintf(rom, sizeof rom, "%s", rf && *rf ? rf : ""); if (!*rom) snprintf(rom, sizeof rom, "%s/RomFS", g_game);
@@ -901,6 +906,21 @@ static void heat_guard(void) {   // (Legends: Arceus: the 3D render scale throug
         fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(h * 100 + 0.5f)); }
     else if (on && calm_n >= 12) { on = 0; dm_arc_scale_set(cap); fprintf(stderr, "heat guard: cooled down: 3D render scale %d %% again\n", (int)(cap * 100 + 0.5f)); }
 }
+// Locked 30, the last lever (Legends: Arceus): when even the lightest step of graphics_auto falls short with the CPU the limit, the draw distance is the one setting
+//   left that lowers the CPU's work (fewer people and Pokémon loaded, trees and terrain detail closer). It is only read at start, so it is remembered in
+//   <files>/auto_draw.txt and applied from the next start, when the player has Draw distance on Default (a distance chosen by hand is never changed);
+//   ten calm minutes with the game thread under half the budget take it back for the start after. on: 1 near, 0 back to the game's own
+extern double dm_gpu_avg_ms(int frames) __attribute__((weak));
+extern _Atomic uint64_t g_nvn_game_work_avg_ns __attribute__((weak));
+static void lock30_draw(int on, double cpu, double budget) {
+    char p[1100]; snprintf(p, sizeof p, "%s/auto_draw.txt", g_files);
+    FILE *f = fopen(p, "r"); char cur[16] = ""; if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); }
+    int was = !strncmp(cur, "near", 4); if (was == on) return;
+    const char *e = getenv("DM_ARC_DRAW"); if (e && *e && strcmp(e, "auto")) return;   // (chosen by hand)
+    f = fopen(p, "w"); if (!f) return; fputs(on ? "near\n" : "\n", f); fclose(f);
+    fprintf(stderr, on ? "fps guard: the CPU cannot hold 30 here even at the lightest settings (game thread %.1f ms of %.1f): draw distance Near from the next start (Settings -> Draw distance)\n"
+                       : "fps guard: steady with the CPU to spare (game thread %.1f ms of %.1f): the game's own draw distance again from the next start\n", cpu, budget);
+}
 static void graphics_auto(void) {
     static int mode = 1, cool, slow, held, wait = 12, primed, lv, since; static uint64_t last_fr;
     const char *g = getenv("DM_GRAPHICS");
@@ -921,51 +941,61 @@ static void graphics_auto(void) {
     int short_ = fps > 1 && fps_avg < 30 * 0.93, full = fps >= 30 * 0.97;   // (no frames at all: a load or a pause, not a slow scene)
     slow = short_ ? slow + 1 : 0;
     cool = calm && (!g_fps_guard || full) ? cool + 1 : 0;
-    if (dm_res_scale_ready()) {   // the render scale (a cap set by hand, DM_RES_CAP or Lowest, is left alone)
-        static int probe, probe_hot, nogain, noheat; static double fps_was;
-        if (getenv("DM_RES_CAP")) return;
+    // Locked 30 for every phone (Legends: Arceus): one ladder of lighter settings, the lightest last, each the game's own: TV mode at 100 % / 85 % of the render scale,
+    //   then handheld mode (the game's 720p and its lighter settings, which also ease the CPU) at 100 / 85 / 70 %. The scale multiplies the player's own (Graphics →
+    //   Render scale). Down a step after two checks short of 30 (one when the GPU is over 85 % of the frame's budget), or while hot; a scale step is skipped when the CPU
+    //   is the limit (GPU under 70 % of the budget, the game thread over 85 %: a smaller picture would only look worse), straight to handheld mode instead. Every step is
+    //   judged 15 s later and taken back if it gained under 1.5 fps (6 %), that reason then steps nothing for 5 minutes. Up a step after a calm, steady spell (a minute,
+    //   twice as long after each fall back, up to 16), or at once when the GPU's time at the bigger step would still fit in 75 % of the budget. Graphics → Mode chosen
+    //   by hand keeps its mode (the scale steps only). Still short at the lightest step with the CPU the limit: draw distance Near from the next start (lock30_draw)
+    {
+        static const float LS[] = { 1.0f, 0.85f, 1.0f, 0.85f, 0.70f }; static const int LM[] = { 1, 1, 0, 0, 0 };   // scale, mode (1 TV, 0 handheld)
+        enum { NL = 5 };
+        static int probe, probe_hot, nogain, noheat, cpu_short, said_cpu; static double fps_was;
+        extern void dm_arc_scale_set(float) __attribute__((weak));
+        int dm = display_mode(), lo = NL - 1;
+        if (dm == 1) lo = 1;   // (Quality: TV mode kept, only its scale steps)
+        float cap = 1.0f; { const char *c = getenv("DM_RES_CAP"); if (c) { cap = (float)atof(c); if (!(cap >= 0.5f && cap <= 1.0f)) cap = 1.0f; } }
+        #define L30_APPLY() do { float sc = cap * LS[lv]; if (sc < 0.5f) sc = 0.5f; if (dm_arc_scale_set) dm_arc_scale_set(sc); \
+                                 int m = dm == 2 ? 0 : dm == 1 ? 1 : LM[lv]; if (m != mode) { mode = m; dm_set_opmode(m); } } while (0)
+        { static int started; if (!started) { started = 1; if (dm == 2) mode = 0; } }   // (Performance: handheld already, set at start)
         since++;
         if (nogain > 0) nogain--;
         if (noheat > 0) noheat--;
-        // a step is tried for 15 s, then kept only if the average gained clearly (1.5 fps, or 6 %): a lower resolution only helps a GPU that is behind, not a CPU
+        double budget = 1000.0 / (g_fps_guard > 0 ? g_fps_guard : 30), gpu = dm_gpu_avg_ms ? dm_gpu_avg_ms(60) : -1, cpu = &g_nvn_game_work_avg_ns ? atomic_load(&g_nvn_game_work_avg_ns) / 1e6 : -1;
+        int gpu_bound = gpu > 0 && gpu > 0.85 * budget, cpu_bound = gpu > 0 && gpu < 0.70 * budget && cpu > 0.85 * budget;
         double gain_need = fps_was * 0.06 > 1.5 ? fps_was * 0.06 : 1.5;
         if (probe && !--probe && fps_avg > 1 && fps_was > 1 && lv > 0 && (probe_hot ? fps_avg < fps_was - 1.0 : fps_avg < fps_was + gain_need)) {   // the step did not help
-            lv--; dm_res_factor_set(k_res_steps[lv]); slow = 0; since = 0;
+            lv--; L30_APPLY(); slow = 0; since = 0;
             if (probe_hot) noheat = 60; else nogain = 60;
-            fprintf(stderr, "%s: the lighter picture %s (%.1f → %.1f fps on average): back to 3D render scale %d %%; %s for 5 minutes\n", probe_hot ? "graphics auto" : "fps guard",
-                    probe_hot ? "cost frames" : "did not help", fps_was, fps_avg, (int)(k_res_steps[lv] * 100 + 0.5f),
-                    probe_hot ? "heat lowers it no further" : "the slowdown is not the GPU's, so a short frame rate lowers it no further");
+            fprintf(stderr, "%s: the lighter step %s (%.1f -> %.1f fps on average): back to %s, render scale %d %%; %s for 5 minutes\n", probe_hot ? "graphics auto" : "fps guard",
+                    probe_hot ? "cost frames" : "did not help", fps_was, fps_avg, mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f),
+                    probe_hot ? "heat lowers it no further" : "a short frame rate lowers it no further");
             return;
         }
         if (full) held++;
         if (held >= 24) wait = 12;   // two minutes held at this step: the next step down waits a minute again
-        int for_heat = hot && since >= 6 && !noheat && !probe, for_rate = slow >= 3 && !nogain && !probe;   // (one step at a time: the last one judged first)
-        if ((for_heat || for_rate) && lv < NRES - 1) {
+        cpu_short = short_ && cpu_bound ? cpu_short + 1 : 0;
+        if (cpu_short == 2 && !(said_cpu++ % 6)) fprintf(stderr, "fps guard: %.1f fps, short of %d, and the CPU is the limit (game thread %.1f ms, GPU %.1f ms of %.1f)\n", fps, g_fps_guard, cpu, gpu, budget);
+        if (cpu_short >= 6 && (lv >= lo || nogain)) lock30_draw(1, cpu, budget);   // (the lightest step and still short, with the CPU the limit: fewer things to draw from the next start)
+        if (full && cpu > 0 && cpu < 0.5 * budget && cool >= 120) lock30_draw(0, cpu, budget);   // (ten calm minutes with the CPU half idle: the normal distance may come back)
+        int for_heat = hot && since >= 6 && !noheat && !probe,
+            for_rate = slow >= (gpu_bound ? 1 : 2) && !nogain && !probe;
+        double r_up = lv > 0 && LM[lv - 1] == LM[lv] ? LS[lv - 1] / LS[lv] : 9;   // (up to TV mode: no early guess, the mode's cost is not the pixels')
+        int up_early = lv > 0 && !probe && gpu > 0 && cool >= 2 && full && !hot && gpu * r_up * r_up < 0.75 * budget;
+        if ((for_heat || for_rate) && lv < lo) {
             if (!for_heat && held < 24 && wait < 192) wait *= 2;   // short again soon after a step up: wait twice as long next time
             probe = 3; probe_hot = for_heat; fps_was = fps_avg > 1 ? fps_avg : fps;
-            lv++; if (for_heat && lv < RES_HOT) lv = RES_HOT;   // hot: straight to about 720p (70 % of 1080p), not one step every 30 s while the phone keeps heating up
-            dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0;
-            if (for_heat) fprintf(stderr, "graphics auto: the phone is hot: 3D render scale %d %% (about %dp)\n", (int)(k_res_steps[lv] * 100 + 0.5f), (int)(1080 * k_res_steps[lv] + 0.5f));
-            else fprintf(stderr, "fps guard: %.1f fps, short of %d: 3D render scale %d %%; a step up after %d s steady\n", fps, g_fps_guard, (int)(k_res_steps[lv] * 100 + 0.5f), wait * 5);
-        } else if (lv > 0 && cool >= wait) {
-            lv--; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
-            fprintf(stderr, "graphics auto: %s: 3D render scale %d %%\n", g_fps_guard ? "steady and cool" : "cooled down", (int)(k_res_steps[lv] * 100 + 0.5f));
+            int to = lv + 1;
+            if ((cpu_bound || for_heat) && to < 2 && lo >= 2) to = 2;   // (the CPU the limit, or hot: handheld mode, the game's lighter settings, not a smaller picture first)
+            lv = to; L30_APPLY(); cool = 0; held = 0; slow = 0; since = 0;
+            fprintf(stderr, "%s: %.1f fps (GPU %.1f ms, game thread %.1f ms of %.1f)%s: %s, render scale %d %%; a step up after %d s steady\n", for_heat ? "graphics auto: the phone is hot" : "fps guard",
+                    fps, gpu, cpu, budget, cpu_bound ? ", the CPU the limit" : "", mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f), wait * 5);
+        } else if ((lv > 0 && cool >= wait) || up_early) {
+            lv--; L30_APPLY(); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
+            fprintf(stderr, "graphics auto: %s: %s, render scale %d %%\n", up_early ? "the GPU has room" : g_fps_guard ? "steady and cool" : "cooled down", mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f));
         }
-        return;
-    }
-    if (display_mode()) return;   // (Graphics → Mode chosen: the mode stays as the player set it; heat_guard and the scale do the rest)
-    if (mode == 1) {
-        if (full) held++;
-        if (held >= 24) wait = 12;   // two minutes held in TV mode: the next fall back waits a minute again
-        if (hot || slow >= 2) {
-            if (!hot && held < 24 && wait < 192) wait *= 2;   // fell back soon after trying TV mode again: wait twice as long next time
-            mode = 0; dm_set_opmode(0); cool = 0; held = 0;
-            if (hot) fprintf(stderr, "graphics auto: the phone is hot: handheld mode (720p)\n");
-            else fprintf(stderr, "fps guard: %.1f fps, short of %d: handheld mode (720p); TV mode again after %d s steady\n", fps, g_fps_guard, wait * 5);
-        }
-    } else if (cool >= wait) {
-        mode = 1; dm_set_opmode(1); slow = 0; held = 0;
-        fprintf(stderr, "graphics auto: %s: TV mode (1080p)\n", g_fps_guard ? "steady and cool" : "cooled down");
+        #undef L30_APPLY
     }
 }
 static void pin_update(void);
