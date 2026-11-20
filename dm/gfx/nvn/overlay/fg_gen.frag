@@ -8,7 +8,8 @@ layout(set = 0, binding = 0) uniform sampler2D a;    // the previous frame
 layout(set = 0, binding = 1) uniform sampler2D b;    // the current frame
 layout(set = 0, binding = 2) uniform sampler2D fl;   // the finest level's vectors
 layout(set = 0, binding = 3) uniform sampler2D st;   // fg_stat.frag's texel
-layout(push_constant) uniform P { vec4 a; } p;       // 1 / width, 1 / height of the vectors' level; z: 1 = show the vectors (DM_FRAMEGEN=debug)
+layout(set = 0, binding = 4) uniform sampler2D hud;  // HUD-free (p.a.w = 1): the current frame as shown, its HUD on; a, b are the frames before the HUD was drawn
+layout(push_constant) uniform P { vec4 a; } p;       // 1 / width, 1 / height of the vectors' level; z: 1 = show the vectors (DM_FRAMEGEN=debug); w: 1 = HUD-free
 float max3(vec3 v) { return max(v.x, max(v.y, v.z)); }
 void main() {
     vec4 f = textureLod(fl, uv, 0.0);
@@ -18,6 +19,8 @@ void main() {
     vec3 m = ina && inb ? mix(0.5 * (aw + bw), 0.5 * (a0 + b0), smoothstep(0.10, 0.30, max3(abs(aw - bw)))) : inb ? bw : ina ? aw : 0.5 * (a0 + b0);   // (off the edge on one side: the other frame alone)
     m = mix(m, b0, 1.0 - smoothstep(0.004, 0.016, max3(abs(a0 - b0))));
     m = mix(m, a0, smoothstep(0.70, 0.95, textureLod(st, vec2(0.5), 0.0).r));
+    // HUD-free: the motion came from frames without the HUD; the HUD goes back on top where the shown frame differs from its own HUD-less copy (soft at its edges)
+    if (p.a.w > 0.5) { vec3 hv = textureLod(hud, uv, 0.0).rgb; m = mix(m, hv, smoothstep(0.004, 0.02, max3(abs(hv - b0)))); }
     if (p.a.z > 0.5) m = mix(m, vec3(0.5) + vec3(f.xy * 0.1, -f.x * 0.1), 0.6);
     o = vec4(m, 1.0);
 }

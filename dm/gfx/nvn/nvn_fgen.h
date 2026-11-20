@@ -31,6 +31,7 @@ typedef struct {
     VkSampler samp; VkRenderPass rp[3]; VkFormat rpfmt;   // [0] R8 (brightness), [1] RGBA16F (vectors), [2] the frame's format
     VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkDescriptorPool dp; VkPipeline pipe[4];   // luma, flow, stat, gen
     fg_img c[2], m, y[2][FG_LEVELS], f[FG_LEVELS], st;   // frame copies (previous / current, swapping), the in-between picture, brightness levels, vectors, the one texel
+    fg_img hud; int hud_on;   // HUD-free (the caller fills c[] with frames before the HUD was drawn and hud with the frame as shown): fg_gen.frag puts the HUD back
     VkDescriptorSet ds_luma[2][FG_LEVELS], ds_flow[2][FG_LEVELS], ds_stat, ds_gen[2];
 } fgen;
 static int fg_fail(fgen *g, const char *why) { g->failed = 1; g->why = why; return 0; }
@@ -86,14 +87,15 @@ static int fg_img_make(fgen *g, fg_img *i, VkFormat fmt, uint32_t w, uint32_t h,
 static void fg_images_free(fgen *g) {
     for (int p = 0; p < 2; p++) { fg_img_free(g, &g->c[p]); for (int l = 0; l < FG_LEVELS; l++) fg_img_free(g, &g->y[p][l]); }
     for (int l = 0; l < FG_LEVELS; l++) fg_img_free(g, &g->f[l]);
-    fg_img_free(g, &g->m); fg_img_free(g, &g->st); g->w = g->h = 0;
+    fg_img_free(g, &g->m); fg_img_free(g, &g->st); fg_img_free(g, &g->hud); g->w = g->h = 0;
 }
 static void fg_ds_write(fgen *g, VkDescriptorSet ds, VkImageView v0, VkImageView v1, VkImageView v2, VkImageView v3) {   // (every binding gets a view: a shader that reads fewer leaves the rest alone)
-    VkDescriptorImageInfo ii[4] = { { g->samp, v0, VK_IMAGE_LAYOUT_GENERAL }, { g->samp, v1, VK_IMAGE_LAYOUT_GENERAL }, { g->samp, v2, VK_IMAGE_LAYOUT_GENERAL }, { g->samp, v3, VK_IMAGE_LAYOUT_GENERAL } };
-    VkWriteDescriptorSet w[4];
-    for (int i = 0; i < 4; i++) w[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i, .descriptorCount = 1,
+    VkDescriptorImageInfo ii[5] = { { g->samp, v0, VK_IMAGE_LAYOUT_GENERAL }, { g->samp, v1, VK_IMAGE_LAYOUT_GENERAL }, { g->samp, v2, VK_IMAGE_LAYOUT_GENERAL }, { g->samp, v3, VK_IMAGE_LAYOUT_GENERAL },
+                                    { g->samp, g->hud.view ? g->hud.view : v1, VK_IMAGE_LAYOUT_GENERAL } };   // (binding 4: the frame as shown, HUD-free; read by fg_gen.frag only)
+    VkWriteDescriptorSet w[5];
+    for (int i = 0; i < 5; i++) w[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i, .descriptorCount = 1,
                                                                 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[i] };
-    vkUpdateDescriptorSets(g->dev, 4, w, 0, NULL);
+    vkUpdateDescriptorSets(g->dev, 5, w, 0, NULL);
 }
 static int fg_fmt_ok(fgen *g, VkFormat f, VkFormatFeatureFlags need) { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g->pd, f, &fp); return (fp.optimalTilingFeatures & need) == need; }
 // Ready for frames of this format and size (the game frame's crop): 1, or 0 with g->why once it cannot run at all (g->failed: the caller stops asking).
@@ -107,14 +109,14 @@ static int fg_setup(fgen *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
         if (!fg_fmt_ok(g, VK_FORMAT_R8_UNORM, tgt) || !fg_fmt_ok(g, VK_FORMAT_R16G16B16A16_SFLOAT, tgt)) return fg_fail(g, "the driver cannot render to and filter R8 / RGBA16F");
         VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = 0.25f };
-        VkDescriptorSetLayoutBinding b[4]; for (int i = 0; i < 4; i++) b[i] = (VkDescriptorSetLayoutBinding){ (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = b };
+        VkDescriptorSetLayoutBinding b[5]; for (int i = 0; i < 5; i++) b[i] = (VkDescriptorSetLayoutBinding){ (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 5, .pBindings = b };
         if (vkCreateSampler(dev, &sci, NULL, &g->samp) || vkCreateDescriptorSetLayout(dev, &dli, NULL, &g->dsl)) return fg_fail(g, "no sampler / descriptor layout");
         VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 };
         VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g->dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
         if (vkCreatePipelineLayout(dev, &pli, NULL, &g->pl)) return fg_fail(g, "no pipeline layout");
         enum { NSET = 4 * FG_LEVELS + 3 };
-        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NSET * 4 };
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NSET * 5 };
         VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = NSET, .poolSizeCount = 1, .pPoolSizes = &ps };
         if (vkCreateDescriptorPool(dev, &dpi, NULL, &g->dp)) return fg_fail(g, "no descriptor pool");
         VkDescriptorSet all[NSET]; VkDescriptorSetLayout ls[NSET]; for (int i = 0; i < NSET; i++) ls[i] = g->dsl;
@@ -146,6 +148,7 @@ static int fg_setup(fgen *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
     for (int p = 0; p < 2 && ok; p++) { ok = fg_img_make(g, &g->c[p], fmt, w, h, smp | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_NULL_HANDLE);
         for (int l = 0; l < FG_LEVELS && ok; l++) ok = fg_img_make(g, &g->y[p][l], VK_FORMAT_R8_UNORM, g->lw[l], g->lh[l], att, g->rp[0]); }
     for (int l = 0; l < FG_LEVELS && ok; l++) ok = fg_img_make(g, &g->f[l], VK_FORMAT_R16G16B16A16_SFLOAT, g->lw[l], g->lh[l], att, g->rp[1]);
+    if (ok) ok = fg_img_make(g, &g->hud, fmt, w, h, smp | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_NULL_HANDLE);   // (HUD-free: the frame as shown)
     if (!ok) { fg_images_free(g); return fg_fail(g, "no memory for its images"); }
     for (int p = 0; p < 2; p++) {
         for (int l = 0; l < FG_LEVELS; l++) {
@@ -161,8 +164,8 @@ static int fg_setup(fgen *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
 // First use of new images: UNDEFINED → GENERAL, once
 static void fg_begin(fgen *g, VkCommandBuffer cb) {
     if (!g->fresh) return;
-    VkImageMemoryBarrier ib[2 + 2 * FG_LEVELS + FG_LEVELS + 2]; int n = 0; VkImage im[2 + 2 * FG_LEVELS + FG_LEVELS + 2];
-    im[n++] = g->m.img; im[n++] = g->st.img;
+    VkImageMemoryBarrier ib[3 + 2 * FG_LEVELS + FG_LEVELS + 2]; int n = 0; VkImage im[3 + 2 * FG_LEVELS + FG_LEVELS + 2];
+    im[n++] = g->m.img; im[n++] = g->st.img; if (g->hud.img) im[n++] = g->hud.img;   // (HUD-free's copy of the frame as shown too)
     for (int p = 0; p < 2; p++) { im[n++] = g->c[p].img; for (int l = 0; l < FG_LEVELS; l++) im[n++] = g->y[p][l].img; }
     for (int l = 0; l < FG_LEVELS; l++) im[n++] = g->f[l].img;
     for (int i = 0; i < n; i++) ib[i] = (VkImageMemoryBarrier){ .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -195,7 +198,7 @@ static void fg_generate(fgen *g, VkCommandBuffer cb, int p) {
     for (int l = FG_LEVELS - 1; l >= 0; l--)   // the coarsest level looks 4 texels each way (128 pixels of a 1080p frame), the others refine by one
         fg_pass(g, cb, 1, &g->f[l], g->lw[l], g->lh[l], 1, g->ds_flow[p][l], 1.0f / g->lw[l], 1.0f / g->lh[l], l == FG_LEVELS - 1 ? 4 : 1, l == FG_LEVELS - 1 ? 0 : 1);
     fg_pass(g, cb, 1, &g->st, 1, 1, 2, g->ds_stat, 0, 0, 0, 0);
-    fg_pass(g, cb, 2, &g->m, g->w, g->h, 3, g->ds_gen[p], 1.0f / g->lw[0], 1.0f / g->lh[0], g->debug ? 1 : 0, 0);
+    fg_pass(g, cb, 2, &g->m, g->w, g->h, 3, g->ds_gen[p], 1.0f / g->lw[0], 1.0f / g->lh[0], g->debug ? 1 : 0, g->hud_on ? 1 : 0);
 }
 #endif
 // ---------- When to generate, and when the real frame goes out (pure: tests/t_fgen.c) ----------
