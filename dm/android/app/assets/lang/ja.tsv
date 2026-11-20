@@ -384,3 +384,44 @@ NaN fix + textures: the same, and broken values read from textures become 0 too.
 This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	このバージョンではゲームのシェーダーの変換方法が変わりました：今すぐ更新します。ファイルは不要で、セーブデータはそのままです。この画面を開いたままにしてください。セットアップのシェーダー手順と同じくらい時間がかかります。
 Setting up	セットアップ
 Keep the phone cooler: half the workers (setup takes longer)	端末を熱くしにくくする：ワーカーを半分にします（セットアップに時間がかかります）
+3D render scale	3D描画スケール
+Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	左端：自動（ゲーム本来の解像度）。下げるほど発熱が減り速くなり、3Dはやわらかくなります。文字やメニューはくっきりのままです。
+Record the frame's passes	フレームのパスを記録
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	重い場面向け：3秒以内にこのメニューを閉じ、ゲームが重い場所にとどまってください。3フレーム分の描画パス（端末が対応していればGPU時間付き）がダウンロードに保存されます（framegraph.txt で終わるファイル）。issue に添付してください。
+Recording in 3 seconds: close the menu.	3秒後に記録します：メニューを閉じてください。
+Lossless Scaling pictures	Lossless Scalingの生成枚数
+2x: one picture between each two of the game's frames (30 fps moves like 60)	2x：ゲームの2つのフレームの間に1枚（30 fpsが60のように動きます）
+3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x：2つのフレームの間に2枚（90 fps相当。均一になるのは90 Hzの画面のみ）
+4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x：2つのフレームの間に3枚（120 fps相当。120 Hzの画面と高速なGPUが必要）
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	オフ：最も軽い設定でも、ここではゲーム自身のフレームを奪っていました（%s fpsまで低下）。オフにしてからオンにすると再試行します。
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	オフ：このGPUは1枚の画像に%s msかかり、ゲームが割ける時間を超えています。オフにしてからオンにすると再試行します。
+Off until the next start (see the log for why).	次回の起動までオフ（理由はログにあります）。
+Auto: 2x, light (the game's frame rate shown doubled)	自動：2x、軽め（ゲームのフレームレートを2倍で表示）
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	一時停止中：ここではゲームが %s fps で、設定したフレームレートを下回っています。ゲームが再びそのレートを保つと自動で再開します。
+Mode	モード
+Auto: as the Graphics setting decides	自動：グラフィック設定に従います
+Quality	画質優先
+Quality: docked: 1080p and the game's full effects	画質優先：TVモード：1080p、ゲーム本来のすべての効果
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	パフォーマンス優先：携帯モード：720p、ゲームの軽い設定：より涼しく安定
+Draw distance	描画距離
+Near	近い
+Default	標準
+Far	遠い
+Very far	とても遠い
+Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)	近い：木や細部を近くまで、読み込む人やポケモンを減らして軽く（次回起動から）
+Default: as the game draws it	標準：ゲーム本来の描画
+Far: trees, terrain detail and animation half as far again (from the next start)	遠い：木・地形の細部・アニメーションを1.5倍遠くまで（次回起動から）
+Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	とても遠い：木・地形の細部・アニメーションを2倍遠くまで：GPU負荷が増えます（次回起動から）
+Edge-run	端で走る
+On: push the stick past its ring to dash	オン：スティックを輪の外まで押すとダッシュ
+Off: the stick only walks and runs	オフ：スティックは歩く・走るだけ
+Ride button	ライドボタン
+Tap or swipe	タップかスワイプ
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	＋をタップでライドポケモンを呼ぶ、左右にスワイプで切り替え
+Tap only	タップのみ
++ works as on the console	＋は本体と同じ動作
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p：最も軽い、30を保てない端末向け（次回起動から）
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p：より鮮明だがGPU負荷が増加（fps低下・発熱、次回起動から）
+the game's own (100 %)	ゲーム本来（100 %）
+Dynamic	ダイナミック
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます

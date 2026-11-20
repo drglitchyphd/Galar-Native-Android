@@ -216,26 +216,49 @@ static int g_bg_off = -1;   // DM_BACKGROUND=off: pause in the background (defau
 static int bg_play(void) { if (g_bg_off < 0) { const char *e = getenv("DM_BACKGROUND"); g_bg_off = e && !strcmp(e, "off"); } return !g_bg_off; }
 extern int dm_fps_live __attribute__((weak));   // loader.c: the live frame-rate target (30 / 60), 0 when the start has none (another game, a fixed 90 / 120, DM_FPS_LIVE=0)
 static void window_rate(ANativeWindow *w);
+// GameMenu.java: why frame generation is not making pictures right now (nvn_vk.c nvn_vk_framegen_note: "", "paused:<fps>", "slow:<ms>", "cost:<fps>", "off"), for the line under its choice
+extern void nvn_vk_framegen_note(char *buf, size_t n) __attribute__((weak));
+JNIEXPORT jstring JNICALL Java_com_nxnative_GameMenu_nativeFramegenNote(JNIEnv *env, jclass c) {
+    (void)c; char b[48] = ""; if (nvn_vk_framegen_note) nvn_vk_framegen_note(b, sizeof b); return (*env)->NewStringUTF(env, b);
+}
+// Graphics → Mode (DM_DISPLAY_MODE, live): Auto (the Graphics level decides), Quality (docked: TV mode, 1080p, the game's full effects), Performance (handheld mode:
+//   720p and the game's lighter settings). The game takes a change as a real dock / undock (hle_oe.c dm_set_opmode → notifications 30 / 31: Legends: Arceus redrew
+//   at 1280x720 and back at once, clean, at 60 fps; Galaxy S25+ 2026-11-20). With Quality or Performance chosen, Graphics Auto switches the mode no more
+void dm_set_opmode(int m);   // (host/hle_oe.c)
+static int display_mode(void) { const char *m = getenv("DM_DISPLAY_MODE"); return m && !strcmp(m, "quality") ? 1 : m && !strcmp(m, "performance") ? 2 : 0; }   // 0 Auto
+static int g_fps_guard;   // (the fps guard's target: defined below with fps_guard_init; changed here when the frame rate is)
 JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env, jclass c, jstring jk, jstring jv) {
     (void)c; const char *k = (*env)->GetStringUTFChars(env, jk, NULL), *v0 = (*env)->GetStringUTFChars(env, jv, NULL); const char *v = *v0 ? v0 : NULL; int now = 1;
     if (!strcmp(k, "DM_BACKGROUND")) g_bg_off = v && !strcmp(v, "off");
     else if (!strcmp(k, "DM_FPS_TARGET")) {   // 30 / 60 at once with the live frame rate (the hold limit, the window's rate, the display pacing); otherwise the next start
-        int t = v ? atoi(v) : 0; if (!v) { const char *a = getenv("DM_AUTO_FPS"); t = a && atoi(a) >= 60 ? 60 : 30; }   // (Auto: the phone profile's)
+        int dyn = v && !strcmp(v, "dyn");
+        int t = dyn ? 60 : v ? atoi(v) : 0; if (!v) { const char *a = getenv("DM_AUTO_FPS"); t = a && atoi(a) >= 60 ? 60 : 30; }   // (Auto: the phone profile's)
+        if (g_fps_guard > 0 && (t == 30 || t == 60)) { g_fps_guard = dyn || t == 30 ? 30 : 60; fprintf(stderr, "fps guard: now defends %d fps%s\n", g_fps_guard, dyn ? " (Dynamic: 60 where the phone can, the picture kept)" : ""); }
         if (&dm_fps_live && __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED) && (t == 30 || t == 60)) {
             __atomic_store_n(&dm_fps_live, t, __ATOMIC_RELAXED); window_rate(atomic_load(&g_window));
             fprintf(stderr, "frame rate: %d fps, switched while playing\n", t);
         } else now = 0;
     }
     else if (!strcmp(k, "DM_GYRO")) { extern _Atomic int dm_gyro_mode; atomic_store(&dm_gyro_mode, v && !strcmp(v, "on") ? 2 : v && !strcmp(v, "aim") ? 1 : 0); }
-    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_SIZE") || !strcmp(k, "DM_TOUCH_GESTURES") || !strcmp(k, "DM_TOUCH_CAM_SENS") || !strcmp(k, "DM_TOUCH_CAMERA") || !strcmp(k, "DM_TOUCH_RSTICK") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3")) touch_ui_setting(k, v);
+    else if (!strcmp(k, "DM_TOUCH_OPACITY") || !strcmp(k, "DM_TOUCH_SIZE") || !strcmp(k, "DM_TOUCH_GESTURES") || !strcmp(k, "DM_TOUCH_CAM_SENS") || !strcmp(k, "DM_TOUCH_CAMERA") || !strcmp(k, "DM_TOUCH_RSTICK") || !strcmp(k, "DM_TOUCH_FADE") || !strcmp(k, "DM_TOUCH_HAPTIC") || !strcmp(k, "DM_TOUCH_L3R3") || !strcmp(k, "DM_TOUCH_EDGE_RUN") || !strcmp(k, "DM_TOUCH_RIDE_SWIPE")) touch_ui_setting(k, v);
     else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }
     else if (!strcmp(k, "DM_LSTICK_SENS")) { extern _Atomic int dm_lstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 50 || p > 300) p = 100; if (&dm_lstick_pct) atomic_store(&dm_lstick_pct, p); else now = 0; }   // (hle_hid.c lsens)
     else if (!strcmp(k, "DM_RSTICK_SENS")) { extern _Atomic int dm_rstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 25 || p > 400) p = 100; if (&dm_rstick_pct) atomic_store(&dm_rstick_pct, p); else now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
+    else if (!strcmp(k, "DM_DISPLAY_MODE")) {
+        if (v && *v) setenv("DM_DISPLAY_MODE", v, 1); else unsetenv("DM_DISPLAY_MODE");
+        int m = display_mode(); const char *g = getenv("DM_GRAPHICS");
+        int tv = m == 1 ? 1 : m == 2 ? 0 : !(g && (!strcmp(g, "low") || !strcmp(g, "lowest")));   // (Auto: what the Graphics level gives)
+        dm_set_opmode(tv); fprintf(stderr, "mode: %s: %s, set while playing\n", m == 2 ? "performance" : m == 1 ? "quality" : "auto", tv ? "TV mode (docked)" : "handheld mode"); }
+    else if (!strcmp(k, "DM_RES_CAP")) {   // Legends: Arceus's 3D render scale (loader.c arc_scale): live; Auto = the game's own (1.0)
+        extern void dm_arc_scale_set(float) __attribute__((weak)); float c = v ? (float)atof(v) : 1.0f; if (!(c >= 0.5f && c <= 1.0f)) c = 1.0f;
+        if (v) setenv("DM_RES_CAP", v, 1); else unsetenv("DM_RES_CAP");
+        if (dm_arc_scale_set) dm_arc_scale_set(c); else now = 0; }
     else if (!strcmp(k, "DM_ASPECT")) __atomic_store_n(&dm_aspect_mode, !v ? DM_ASPECT_FIT : !strcmp(v, "20:9") ? DM_ASPECT_20_9 : !strcmp(v, "fill") || !strcmp(v, "wide") ? DM_ASPECT_FILL : DM_ASPECT_FIT, __ATOMIC_RELAXED);
     else if (!strcmp(k, "DM_COLOR")) { extern volatile int dm_color_mode; dm_color_mode = v && !strcmp(v, "vibrant") ? 1 : v && !strcmp(v, "cinematic") ? 2 : 0; }   // (nvn_vk.c color_mode: live)
     else if (!strcmp(k, "DM_SCALER")) { extern volatile int dm_scaler_mode; if (!v || !*v) v = getenv("DM_AUTO_SCALER"); dm_scaler_mode = v && !strcmp(v, "sgsr") ? 1 : v && !strcmp(v, "fsr") ? 3 : v && !strcmp(v, "smooth") ? 2 : 0; }   // (Auto: the app's pick)
     else if (!strcmp(k, "DM_FRAMEGEN")) { extern volatile int dm_framegen_mode; dm_framegen_mode = v && (!strcmp(v, "on") || !strcmp(v, "1")) ? 1 : v && !strcmp(v, "debug") ? 2 : v && !strcmp(v, "lsfg") ? 3 : 0; window_rate(atomic_load(&g_window));   // nvn_vk.c present_window_locked
         window_rate(atomic_load(&g_window)); }   // (Android is told the doubled rate, or the game's own again)
+    else if (!strcmp(k, "DM_LSFG_MULT")) { extern volatile int dm_lsfg_mult; int m = v ? atoi(v) : 0; dm_lsfg_mult = m >= 2 && m <= 4 ? m : 0; }   // nvn_vk.c lsfg_mult: 0 auto
     else if (!strcmp(k, "DM_SCALER_SHARPNESS")) { extern volatile float dm_scaler_sharpness; dm_scaler_sharpness = !v || !strcmp(v, "sharp") ? 0.7f : !strcmp(v, "smooth") ? -1.0f : (float)atof(v); }   // nvn_vk.c scale_draw
     else if (!strcmp(k, "DM_PAD_LAYOUT") || !strcmp(k, "DM_PAD_MAPPING")) {
         pthread_mutex_lock(&g_padset_mu);
@@ -545,47 +568,174 @@ static void device_profile(void) {
             *maker ? maker : "?", *model ? model : "unknown", force ? ", DM_PROFILE" : "", gb, g ? g : "default", an ? an : "default", tq ? tq : "full");
 }
 #if DM_GAME_PROGRAM_ID == 0x01001F5010DFA000ull   // (Legends: Arceus only: its RomFS files)
-// "Lower specs" (the settings' DM_LOWSPEC: 1 lower, 2 lowest), for phones that cannot hold the game's frame rate: the POTATO mod's RomFS files, kept in this library
-//   (lowspec_files.h) and written to <files>/lowspec on start, are laid over the game's RomFS (hle_fs.c DM_ROMFS_OVERLAY, first root wins): a shorter draw distance for
-//   Pokémon, people and trees (bin/misc/app_config/field_common_config.bin) and lighter shadows, at 1 fewer (Low Shadows), at 2 none (No Shadows: field_shadow_config.bin)
-#include "lowspec_files.h"
+// "Draw distance" (the settings' DM_ARC_DRAW: near / far / veryfar; Default: none): the player's OWN config files, read from their RomFS, with the distance values
+//   rewritten, laid over the RomFS like Lower specs (nothing of the game's comes with the app). The files are FlatBuffers of named settings, each {name, type, ?, min,
+//   max, values: a vector of strings}: a value is changed by appending its new string at the end of the buffer and pointing the vector's slot at it (offsets point
+//   forward, so the rest stays valid). Changed: bin/misc/app_config/field_common_config.bin kTreeVisibleDistance [0, 200], kTreeFadeDistanceFar [180, 200],
+//   kDistanceOfCameraToTerrainLodPoint 7 (and for Near the people / Pokémon load radii 60 / 40), field_anime_framerate_config.bin distanceBaseValue 60 (where animation
+//   slows down); each times the setting's factor, never over the setting's own max. Read at start: a change applies at the next start
 static int write_all(const char *path, const unsigned char *b, size_t n) {
     char d[1200]; snprintf(d, sizeof d, "%s", path);
     for (char *s = d + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(d, 0770); *s = '/'; }
     FILE *f = fopen(path, "wb"); if (!f) return 0;
     int ok = fwrite(b, 1, n, f) == n; return fclose(f) == 0 && ok;
 }
-static void lowspec(void) {
-    const char *e = getenv("DM_LOWSPEC"); int lv = e ? atoi(e) : 0; if (lv < 1 || lv > 2) return;
-    char root[1100], f[1300]; snprintf(root, sizeof root, "%s/lowspec/romfs", g_files);
-    snprintf(f, sizeof f, "%s/bin/misc/app_config/field_common_config.bin", root);
-    int ok = write_all(f, LS_draw_distance, sizeof LS_draw_distance);
-    snprintf(f, sizeof f, "%s/bin/misc/app_config/field_shadow_config.bin", root);
-    ok &= lv == 2 ? write_all(f, LS_no_shadows, sizeof LS_no_shadows) : write_all(f, LS_low_shadows, sizeof LS_low_shadows);
-    if (!ok) { fprintf(stderr, "boot: [RED] lower specs: could not write %s\n", root); return; }
+typedef struct { unsigned char *d; size_t n, cap; } cfgbuf;
+static uint32_t cb_u32(const cfgbuf *b, size_t o) { uint32_t v; memcpy(&v, b->d + o, 4); return v; }
+static int32_t cb_s32(const cfgbuf *b, size_t o) { int32_t v; memcpy(&v, b->d + o, 4); return v; }
+static uint16_t cb_u16(const cfgbuf *b, size_t o) { uint16_t v; memcpy(&v, b->d + o, 2); return v; }
+static int cb_str(const cfgbuf *b, size_t o, char *out, size_t n) {   // the FlatBuffer string at o, 0 if none
+    if (o + 4 > b->n) return 0; uint32_t L = cb_u32(b, o); if (L == 0 || L >= n || o + 4 + L >= b->n || b->d[o + 4 + L]) return 0;
+    memcpy(out, b->d + o + 4, L); out[L] = 0; return 1;
+}
+// the entry table named `name`: its values vector (*vec) and its max (*mx); 0 if not found
+static int cb_entry(const cfgbuf *b, const char *name, size_t *vec, double *mx) {
+    size_t L = strlen(name);
+    for (size_t so = 0; so + 4 + L < b->n; so += 4) {
+        if (cb_u32(b, so) != L || memcmp(b->d + so + 4, name, L) || b->d[so + 4 + L]) continue;
+        for (size_t p = 0; p + 4 <= so; p += 4) {
+            if (p + cb_u32(b, p) != so) continue;   // the slot pointing at the name
+            for (size_t t = p >= 64 ? p - 64 : 0; t <= p; t += 4) {   // the table whose field 0 is that slot
+                int64_t vt = (int64_t)t - cb_s32(b, t); if (vt < 0 || (size_t)vt + 16 > b->n) continue;
+                uint16_t vsz = cb_u16(b, (size_t)vt); if (vsz < 16 || (size_t)vt + vsz > b->n) continue;
+                if (t + cb_u16(b, (size_t)vt + 4) != p) continue;
+                uint16_t fmx = cb_u16(b, (size_t)vt + 4 + 8), fv = cb_u16(b, (size_t)vt + 4 + 10); if (!fv) return 0;
+                char m[32]; *mx = fmx && cb_str(b, t + fmx + cb_u32(b, t + fmx), m, sizeof m) ? atof(m) : 1e9;
+                size_t va = t + fv; *vec = va + cb_u32(b, va); return *vec + 4 <= b->n; } } }
+    return 0;
+}
+static int cb_append(cfgbuf *b, const char *s) {   // a new string at the end (4-aligned); its offset, or -1
+    size_t L = strlen(s), need = 4 + L + 1, at = (b->n + 3) & ~(size_t)3, end = (at + need + 3) & ~(size_t)3;
+    if (end > b->cap) { size_t c = end + 256; unsigned char *d = realloc(b->d, c); if (!d) return -1; b->d = d; b->cap = c; }
+    memset(b->d + b->n, 0, end - b->n); uint32_t l32 = (uint32_t)L; memcpy(b->d + at, &l32, 4); memcpy(b->d + at + 4, s, L); b->n = end; return (int)at;
+}
+// every value of the entry times k, as an integer if `whole`, never over its max; the count changed
+static int cb_scale(cfgbuf *b, const char *name, double k, int whole) {
+    size_t vec; double mx; if (!cb_entry(b, name, &vec, &mx)) return 0;
+    uint32_t cnt = cb_u32(b, vec); int n = 0;
+    for (uint32_t i = 0; i < cnt && i < 8; i++) {
+        size_t es = vec + 4 + 4 * i; char v[32]; if (!cb_str(b, es + cb_u32(b, es), v, sizeof v)) continue;
+        double x = atof(v) * k; if (x > mx) x = mx;
+        char o[32]; if (whole) snprintf(o, sizeof o, "%d", (int)(x + (x >= 0 ? 0.5 : -0.5))); else snprintf(o, sizeof o, "%g", x);
+        int at = cb_append(b, o); if (at < 0) return n;
+        uint32_t rel = (uint32_t)((size_t)at - es); memcpy(b->d + es, &rel, 4); n++;
+    }
+    return n;
+}
+static int cb_load(const char *path, cfgbuf *b) {
+    FILE *f = fopen(path, "rb"); if (!f) return 0;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 16 || n > (1 << 20)) { fclose(f); return 0; }
+    b->d = malloc((size_t)n + 512); b->cap = (size_t)n + 512; b->n = (size_t)n;
+    int ok = b->d && fread(b->d, 1, (size_t)n, f) == (size_t)n; fclose(f); return ok;
+}
+static void draw_distance(void) {
+    // DM_DRAW_DIST: percent (50-200, the settings' slider; 100 the game's own); the older DM_ARC_DRAW near / far / veryfar are 75 / 150 / 200
+    char pct[16] = ""; { const char *d = getenv("DM_DRAW_DIST"), *o = getenv("DM_ARC_DRAW");
+        if (d && atoi(d) >= 50 && atoi(d) <= 200 && atoi(d) != 100) snprintf(pct, sizeof pct, "%d", atoi(d));
+        else if (!d && o && *o) snprintf(pct, sizeof pct, "%s", !strcmp(o, "near") ? "75" : !strcmp(o, "far") ? "150" : !strcmp(o, "veryfar") ? "200" : ""); }
+    const char *e = pct[0] ? pct : NULL;
+    if (!e) {   // Default: the game's own, unless the fps guard remembered that this phone needs Near to hold 30 (lock30_draw)
+        char p[1100], cur[16] = ""; snprintf(p, sizeof p, "%s/auto_draw.txt", g_files); FILE *f = fopen(p, "r");
+        if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); }
+        if (strncmp(cur, "near", 4) && atoi(cur) < 50) return;
+        e = "75"; fprintf(stderr, "boot: draw distance near, chosen by the fps guard (this phone's CPU could not hold 30 at the game's own distance; Settings -> Draw distance overrides it)\n"); }
+    double k = atoi(e) / 100.0; if (!(k >= 0.5 && k <= 2.0) || k == 1.0) return;
+    const char *ls = getenv("DM_LOWSPEC"); if (ls && atoi(ls) > 0) { fprintf(stderr, "boot: draw distance %s left out: Lower specs is on (its own files)\n", e); return; }
+    const char *rf = getenv("DM_ROMFS"); char rom[1100]; snprintf(rom, sizeof rom, "%s", rf && *rf ? rf : ""); if (!*rom) snprintf(rom, sizeof rom, "%s/RomFS", g_game);
+    char root[1100], in[1300], out[1300]; snprintf(root, sizeof root, "%s/drawdist/romfs", g_files);
+    int nc = 0, na = 0; cfgbuf b = { 0 };
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_common_config.bin", rom);
+    if (cb_load(in, &b)) {
+        nc += cb_scale(&b, "kTreeVisibleDistance", k, 0); nc += cb_scale(&b, "kTreeFadeDistanceFar", k, 0); nc += cb_scale(&b, "kDistanceOfCameraToTerrainLodPoint", k, 0);
+        if (k < 1) { nc += cb_scale(&b, "kArea00NpcLoadRadius", k, 1); nc += cb_scale(&b, "kArea00NpcPokeLoadRadius", k, 1); }   // (Near: fewer people and Pokémon loaded too)
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_common_config.bin", root); if (nc && !write_all(out, b.d, b.n)) nc = -1; free(b.d); }
+    memset(&b, 0, sizeof b);
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_anime_framerate_config.bin", rom);
+    if (cb_load(in, &b)) { na = cb_scale(&b, "distanceBaseValue", k, 0);
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_anime_framerate_config.bin", root); if (na && !write_all(out, b.d, b.n)) na = -1; free(b.d); }
+    if (nc <= 0 && na <= 0) { fprintf(stderr, "boot: [RED] draw distance %s: the player's config files could not be read or changed (%s)\n", e, rom); return; }
+    const char *o = getenv("DM_ROMFS_OVERLAY"); char all[4096];
+    snprintf(all, sizeof all, "%s%s%s", root, o && *o ? ":" : "", o && *o ? o : "");   // (ahead of the other overlays)
+    setenv("DM_ROMFS_OVERLAY", all, 1);
+    fprintf(stderr, "boot: draw distance %s (x%.2f): %d value(s) in field_common_config, %d in field_anime_framerate_config, from the player's own files (RomFS overlay %s)\n", e, k, nc, na, root);
+}
+// "Lower specs" (the settings' DM_LOWSPEC: 1 lower, 2 lowest), for phones that cannot hold the game's frame rate, from the player's OWN config files (as Draw distance;
+//   nothing of the game's or of a mod comes with the app): the people / Pokémon load radii and the trees' visible distance halved (field_common_config.bin
+//   kArea00NpcLoadRadius 60 → 30, kArea00NpcPokeLoadRadius 40 → 20, kTreeVisibleDistance 200 → 100), and the shadow cascades' splits (field_shadow_config.bin
+//   cascadeShadowSplit1..4) set as the POTATO mod set them: lower "-1." / "-1." / "-1." / "-1..", lowest the same with split 1 "1..." (the same strings, so the
+//   game reads them exactly as it read the mod's)
+static int cb_set(cfgbuf *b, const char *name, const char *val) {   // the entry's first value replaced by val; 1 done
+    size_t vec; double mx; if (!cb_entry(b, name, &vec, &mx) || cb_u32(b, vec) < 1) return 0;
+    size_t es = vec + 4; int at = cb_append(b, val); if (at < 0) return 0;
+    uint32_t rel = (uint32_t)((size_t)at - es); memcpy(b->d + es, &rel, 4); return 1;
+}
+static const char *own_romfs(char *buf, size_t n) { const char *rf = getenv("DM_ROMFS"); if (rf && *rf) snprintf(buf, n, "%s", rf); else snprintf(buf, n, "%s/RomFS", g_game); return buf; }
+static void overlay_first(const char *root) {
     const char *o = getenv("DM_ROMFS_OVERLAY"); char all[4096];
     snprintf(all, sizeof all, "%s%s%s", root, o && *o ? ":" : "", o && *o ? o : "");   // (ahead of any other overlay)
     setenv("DM_ROMFS_OVERLAY", all, 1);
-    fprintf(stderr, "boot: lower specs %d: shorter draw distance, %s (RomFS overlay %s)\n", lv, lv == 2 ? "no shadows" : "lighter shadows", root);
 }
-// "Style move effects" (the settings' DM_ARC_STYLE_FX: off unless 1): the strong / agile style moves' start effects replaced by the No More Styles 1.2 mod's nearly
-//   empty ones (nostyles_files.h), laid over the game's RomFS like Lower specs. With the game's own effects, grey boxes covered the screen on Adreno and Xclipse
-//   (Arceus-Native-Android #14 #15 #20); the moves and their power are unchanged, only the full-screen animation as they start goes
-#include "nostyles_files.h"
+static void lowspec(void) {
+    const char *e = getenv("DM_LOWSPEC"); int lv = e ? atoi(e) : 0; if (lv < 1 || lv > 2) return;
+    char rom[1100], root[1100], in[1300], out[1300]; own_romfs(rom, sizeof rom); snprintf(root, sizeof root, "%s/lowspec/romfs", g_files);
+    int nc = 0, ns = 0; cfgbuf b = { 0 };
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_common_config.bin", rom);
+    if (cb_load(in, &b)) {
+        nc += cb_scale(&b, "kArea00NpcLoadRadius", 0.5, 1); nc += cb_scale(&b, "kArea00NpcPokeLoadRadius", 0.5, 1); nc += cb_scale(&b, "kTreeVisibleDistance", 0.5, 0);
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_common_config.bin", root); if (nc && !write_all(out, b.d, b.n)) nc = -1; free(b.d); }
+    memset(&b, 0, sizeof b);
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_shadow_config.bin", rom);
+    if (cb_load(in, &b)) {
+        ns += cb_set(&b, "cascadeShadowSplit4", "-1."); ns += cb_set(&b, "cascadeShadowSplit3", "-1."); ns += cb_set(&b, "cascadeShadowSplit2", "-1.");
+        ns += cb_set(&b, "cascadeShadowSplit1", lv == 2 ? "1..." : "-1..");
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_shadow_config.bin", root); if (ns && !write_all(out, b.d, b.n)) ns = -1; free(b.d); }
+    if (nc <= 0 || ns <= 0) { fprintf(stderr, "boot: [RED] lower specs: the player's config files could not be read or changed (%s): left out\n", rom); return; }
+    overlay_first(root);
+    fprintf(stderr, "boot: lower specs %d: shorter draw distance (%d values), %s (%d values), from the player's own files (RomFS overlay %s)\n", lv, nc, lv == 2 ? "no shadows" : "lighter shadows", ns, root);
+}
+// "Style move effects" (the settings' DM_ARC_STYLE_FX: off unless 1): the strong / agile style moves' start sequences (bin/effect/battle/sequence/cmn_battle_waza_
+//   {pow,teq}_start.wbin) cut down to what the No More Styles 1.2 mod left, from the PLAYER'S OWN files: of the sequence's 39 steps, its first empty one and the one
+//   holding a single command 0x21 (the end of the sequence), that command's two arguments set as the mod set them (0, 32; the game's own are 9, 41). With the game's own effects grey boxes covered the screen on Adreno
+//   and Xclipse (Arceus-Native-Android #14 #15 #20); the moves and their power are unchanged, only the full-screen animation as they start goes. A FlatBuffer cut in
+//   place: the steps vector's count and its two slots rewritten (the kept steps lie after it, offsets point forward)
+static size_t fb_field(const cfgbuf *b, size_t t, int i) {   // a table field's address, 0 if absent
+    int64_t vt = (int64_t)t - cb_s32(b, t); if (vt < 0 || (size_t)vt + 4 > b->n) return 0;
+    uint16_t vsz = cb_u16(b, (size_t)vt); if ((size_t)(4 + 2 * i + 2) > vsz) return 0;
+    uint16_t fo = cb_u16(b, (size_t)vt + 4 + 2 * (size_t)i); return fo ? t + fo : 0;
+}
+static size_t fb_ref(const cfgbuf *b, size_t a) { return a && a + 4 <= b->n ? a + cb_u32(b, a) : 0; }   // where a uoffset field points
+static int seq_strip(cfgbuf *b) {
+    size_t root = cb_u32(b, 0), vf = fb_field(b, root, 0), v = fb_ref(b, vf); if (!v || v + 4 > b->n) return 0;
+    uint32_t n = cb_u32(b, v); size_t empty = 0, end = 0;
+    for (uint32_t k = 0; k < n && v + 8 + 4 * k <= b->n; k++) {
+        size_t st = fb_ref(b, v + 4 + 4 * k), cf = st ? fb_field(b, st, 2) : 0, cv = fb_ref(b, cf); if (!st) continue;
+        uint32_t cn = cv && cv + 4 <= b->n ? cb_u32(b, cv) : 0;
+        if (!empty && cf && cn == 0) empty = st;
+        if (!end && cn == 1) { size_t cmd = fb_ref(b, cv + 4), op = cmd ? fb_field(b, cmd, 0) : 0;
+            if (op && b->d[op] == 0x21) { end = st; size_t args = fb_ref(b, fb_field(b, cmd, 1));
+                for (int i = 0; args && i < 2; i++) { size_t a = fb_field(b, args, i); uint32_t x = i ? 32u : 0u; if (a && a + 4 <= b->n) memcpy(b->d + a, &x, 4); } } }   // (as the mod: 0, 32; the game's own 9, 41)
+    }
+    if (!empty || !end || empty < v + 12 || end < v + 12) return 0;
+    uint32_t two = 2, r0 = (uint32_t)(empty - (v + 4)), r1 = (uint32_t)(end - (v + 8));
+    memcpy(b->d + v, &two, 4); memcpy(b->d + v + 4, &r0, 4); memcpy(b->d + v + 8, &r1, 4); return 1;
+}
 static void style_fx(void) {
     const char *e = getenv("DM_ARC_STYLE_FX"); if (e && !strcmp(e, "1")) { fprintf(stderr, "boot: style move effects: the game's own (DM_ARC_STYLE_FX=1)\n"); return; }
-    char root[1100], f[1300]; snprintf(root, sizeof root, "%s/nostyles/romfs", g_files);
-    snprintf(f, sizeof f, "%s/bin/effect/battle/sequence/cmn_battle_waza_pow_start.wbin", root); int ok = write_all(f, NS_pow_start, sizeof NS_pow_start);
-    snprintf(f, sizeof f, "%s/bin/effect/battle/sequence/cmn_battle_waza_teq_start.wbin", root); ok &= write_all(f, NS_teq_start, sizeof NS_teq_start);
-    if (!ok) { fprintf(stderr, "boot: [RED] style move effects: could not write %s\n", root); return; }
-    const char *o = getenv("DM_ROMFS_OVERLAY"); char all[4096];
-    snprintf(all, sizeof all, "%s%s%s", root, o && *o ? ":" : "", o && *o ? o : "");
-    setenv("DM_ROMFS_OVERLAY", all, 1);
-    fprintf(stderr, "boot: style move effects off: the strong / agile start effects of No More Styles 1.2 (RomFS overlay %s)\n", root);
+    static const char *const F[2] = { "cmn_battle_waza_pow_start.wbin", "cmn_battle_waza_teq_start.wbin" };
+    char rom[1100], root[1100], in[1300], out[1300]; own_romfs(rom, sizeof rom); snprintf(root, sizeof root, "%s/nostyles/romfs", g_files);
+    int ok = 1;
+    for (int i = 0; i < 2 && ok; i++) { cfgbuf b = { 0 };
+        snprintf(in, sizeof in, "%s/bin/effect/battle/sequence/%s", rom, F[i]); snprintf(out, sizeof out, "%s/bin/effect/battle/sequence/%s", root, F[i]);
+        ok = cb_load(in, &b) && seq_strip(&b) && write_all(out, b.d, b.n); free(b.d); }
+    if (!ok) { fprintf(stderr, "boot: [RED] style move effects: the player's sequence files could not be read or cut (%s): the game's own\n", rom); return; }
+    overlay_first(root);
+    fprintf(stderr, "boot: style move effects off: the strong / agile style moves start without their full-screen animation, from the player's own files (RomFS overlay %s)\n", root);
 }
 #else
 static void lowspec(void) { }
 static void style_fx(void) { }
+static void draw_distance(void) { }
 #endif
 // "No reflections" (profile key flat_normals, the menu's DM_FLAT_NORMALS, on unless 0): the game's terrain packs with their ground and bark normal maps made flat, made by
 //   the setup from the player's own files (dm/android/tools/flat_normals.py) into <game>/flat_normals, laid over the RomFS after every mod (hle_fs.c DM_ROMFS_OVERLAY, first
@@ -733,17 +883,61 @@ static void fps_guard_init(void) {
     const char *t = getenv("DM_FPS_TARGET"), *off = getenv("DM_FPS_GUARD"), *g = getenv("DM_GRAPHICS");
     if (!t || !*t) t = getenv("DM_AUTO_FPS");   // (Frame rate on Auto: what the app chose for this phone)
     int fps = t ? atoi(t) : 0; if (fps <= 0) fps = 30;   // (no target set: the game's own 30)
+    if (getenv("DM_FPS_DYN")) fps = 30;   // (Dynamic: the guard defends 30; the rest is the hold's)
     if (fps < 30 || (off && !strcmp(off, "0")) || (g && (!strcmp(g, "high") || !strcmp(g, "low") || !strcmp(g, "lowest")))) return;   // (read before the phone's profile fills DM_GRAPHICS in)
     g_fps_guard = fps; fprintf(stderr, "fps guard: %d fps target: a lighter picture whenever it falls short of 30 or the phone runs hot\n", fps);
+}
+// The heat guard, for every Graphics level the guard above does not run on (High, Low, Lowest, a scale set by hand): only heat, never the frame rate. Hot (thermal
+//   status moderate or worse, or the throttling forecast at 0.9): the 3D render scale goes to the 720p step through the game's own setter; back to the game's size
+//   after a calm minute. A Galaxy S25+ on High at 1080p ran its GPU down to 160 MHz (51 °C), the game at 20 fps, 2026-11-20. DM_HEAT_GUARD=0 leaves it out
+// Adreno's own GPU limit (kgsl): the thermal engine caps the clock directly, and Android's thermal status can stay "none" or "light" meanwhile (a Galaxy S25+ held at
+//   160 MHz of 1200, power level 14 of 15, status not raised, 2026-11-20). Returns the cap as a share of the top clock (1: no cap), -1 where it cannot be read
+static float gpu_cap_share(void) {
+    static int ok = 1; if (!ok) return -1;
+    long cap = 0, top = 0; FILE *f = fopen("/sys/class/kgsl/kgsl-3d0/max_gpuclk", "r");
+    if (f) { if (fscanf(f, "%ld", &cap) != 1) cap = 0; fclose(f); }
+    f = fopen("/sys/class/kgsl/kgsl-3d0/gpu_available_frequencies", "r");
+    if (f) { if (fscanf(f, "%ld", &top) != 1) top = 0; fclose(f); }   // (the first, the highest)
+    if (cap <= 0 || top <= 0) { ok = 0; fprintf(stderr, "heat: the GPU's clock limit cannot be read here (not Adreno, or not allowed): Android's thermal status alone\n"); return -1; }
+    return (float)cap / (float)top;
+}
+static void heat_guard(void) {   // (Legends: Arceus: the 3D render scale through loader.c arc_scale, under the slider's own value)
+    static int off = -1, on, calm_n; if (off < 0) { const char *e = getenv("DM_HEAT_GUARD"); off = e && !strcmp(e, "0"); }
+    extern void dm_arc_scale_set(float) __attribute__((weak));
+    if (off || !g_th_mgr || !g_th_st || !dm_arc_scale_set) return;
+    int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
+    int hot = st >= 2 || hr >= 0.9f, calm = st <= 1 && (hr < 0 || hr < 0.75f);
+    float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
+    calm_n = calm ? calm_n + 1 : 0;
+    const char *ce = getenv("DM_RES_CAP"); float cap = ce ? (float)atof(ce) : 1.0f; if (!(cap >= 0.5f && cap <= 1.0f)) cap = 1.0f;   // (the slider's value: the guard only ever goes under it)
+    if (hot && !on) { on = 1; calm_n = 0; float h = cap < 0.67f ? cap : 0.67f; dm_arc_scale_set(h);
+        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(h * 100 + 0.5f)); }
+    else if (on && calm_n >= 12) { on = 0; dm_arc_scale_set(cap); fprintf(stderr, "heat guard: cooled down: 3D render scale %d %% again\n", (int)(cap * 100 + 0.5f)); }
+}
+// Locked 30, the last lever (Legends: Arceus): when even the lightest step of graphics_auto falls short with the CPU the limit, the draw distance is the one setting
+//   left that lowers the CPU's work (fewer people and Pokémon loaded, trees and terrain detail closer). It is only read at start, so it is remembered in
+//   <files>/auto_draw.txt and applied from the next start, when the player has Draw distance on Default (a distance chosen by hand is never changed);
+//   ten calm minutes with the game thread under half the budget take it back for the start after. on: 1 near, 0 back to the game's own
+extern double dm_gpu_avg_ms(int frames) __attribute__((weak));
+extern _Atomic uint64_t g_nvn_game_work_avg_ns __attribute__((weak));
+static void lock30_draw(int on, double cpu, double budget) {
+    char p[1100]; snprintf(p, sizeof p, "%s/auto_draw.txt", g_files);
+    FILE *f = fopen(p, "r"); char cur[16] = ""; if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); }
+    int was = !strncmp(cur, "near", 4) || atoi(cur) >= 50; if (was == on) return;
+    { const char *d = getenv("DM_DRAW_DIST"), *o = getenv("DM_ARC_DRAW"); if ((d && atoi(d) != 100) || (!d && o && *o && strcmp(o, "auto"))) return; }   // (chosen by hand)
+    f = fopen(p, "w"); if (!f) return; fputs(on ? "75\n" : "\n", f); fclose(f);
+    fprintf(stderr, on ? "fps guard: the CPU cannot hold 30 here even at the lightest settings (game thread %.1f ms of %.1f): draw distance Near from the next start (Settings -> Draw distance)\n"
+                       : "fps guard: steady with the CPU to spare (game thread %.1f ms of %.1f): the game's own draw distance again from the next start\n", cpu, budget);
 }
 static void graphics_auto(void) {
     static int mode = 1, cool, slow, held, wait = 12, primed, lv, since; static uint64_t last_fr;
     const char *g = getenv("DM_GRAPHICS");
-    if (!(g && !strcmp(g, "auto") && g_th_mgr && g_th_st) && !g_fps_guard) return;
+    if (!(g && !strcmp(g, "auto") && g_th_mgr && g_th_st) && !g_fps_guard) { heat_guard(); return; }
     int hot = 0, calm = 1;
     if (g_th_mgr && g_th_st) { int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
         // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate
-        hot = st >= 2 || hr >= 0.9f; calm = st <= 1 && (hr < 0 || hr < 0.75f); }
+        hot = st >= 2 || hr >= 0.9f; calm = st <= 1 && (hr < 0 || hr < 0.75f);
+        float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; } }   // (Adreno's own GPU limit: heat_guard)
     double fps = -1;
     // (the first minute of frames does not count: a save loading in runs slow while the game reads the world, Legends: Arceus at 22.6 fps for its first 20 s; that
     //   dropped TV mode for two minutes on a phone that then held 30 in it, Galaxy S25+ 2026-11-09)
@@ -755,50 +949,61 @@ static void graphics_auto(void) {
     int short_ = fps > 1 && fps_avg < 30 * 0.93, full = fps >= 30 * 0.97;   // (no frames at all: a load or a pause, not a slow scene)
     slow = short_ ? slow + 1 : 0;
     cool = calm && (!g_fps_guard || full) ? cool + 1 : 0;
-    if (dm_res_scale_ready()) {   // the render scale (a cap set by hand, DM_RES_CAP or Lowest, is left alone)
-        static int probe, probe_hot, nogain, noheat; static double fps_was;
-        if (getenv("DM_RES_CAP")) return;
+    // Locked 30 for every phone (Legends: Arceus): one ladder of lighter settings, the lightest last, each the game's own: TV mode at 100 % / 85 % of the render scale,
+    //   then handheld mode (the game's 720p and its lighter settings, which also ease the CPU) at 100 / 85 / 70 %. The scale multiplies the player's own (Graphics →
+    //   Render scale). Down a step after two checks short of 30 (one when the GPU is over 85 % of the frame's budget), or while hot; a scale step is skipped when the CPU
+    //   is the limit (GPU under 70 % of the budget, the game thread over 85 %: a smaller picture would only look worse), straight to handheld mode instead. Every step is
+    //   judged 15 s later and taken back if it gained under 1.5 fps (6 %), that reason then steps nothing for 5 minutes. Up a step after a calm, steady spell (a minute,
+    //   twice as long after each fall back, up to 16), or at once when the GPU's time at the bigger step would still fit in 75 % of the budget. Graphics → Mode chosen
+    //   by hand keeps its mode (the scale steps only). Still short at the lightest step with the CPU the limit: draw distance Near from the next start (lock30_draw)
+    {
+        static const float LS[] = { 1.0f, 0.85f, 1.0f, 0.85f, 0.70f }; static const int LM[] = { 1, 1, 0, 0, 0 };   // scale, mode (1 TV, 0 handheld)
+        enum { NL = 5 };
+        static int probe, probe_hot, nogain, noheat, cpu_short, said_cpu; static double fps_was;
+        extern void dm_arc_scale_set(float) __attribute__((weak));
+        int dm = display_mode(), lo = NL - 1;
+        if (dm == 1) lo = 1;   // (Quality: TV mode kept, only its scale steps)
+        float cap = 1.0f; { const char *c = getenv("DM_RES_CAP"); if (c) { cap = (float)atof(c); if (!(cap >= 0.5f && cap <= 1.0f)) cap = 1.0f; } }
+        #define L30_APPLY() do { float sc = cap * LS[lv]; if (sc < 0.5f) sc = 0.5f; if (dm_arc_scale_set) dm_arc_scale_set(sc); \
+                                 int m = dm == 2 ? 0 : dm == 1 ? 1 : LM[lv]; if (m != mode) { mode = m; dm_set_opmode(m); } } while (0)
+        { static int started; if (!started) { started = 1; if (dm == 2) mode = 0; } }   // (Performance: handheld already, set at start)
         since++;
         if (nogain > 0) nogain--;
         if (noheat > 0) noheat--;
-        // a step is tried for 15 s, then kept only if the average gained clearly (1.5 fps, or 6 %): a lower resolution only helps a GPU that is behind, not a CPU
+        double budget = 1000.0 / (g_fps_guard > 0 ? g_fps_guard : 30), gpu = dm_gpu_avg_ms ? dm_gpu_avg_ms(60) : -1, cpu = &g_nvn_game_work_avg_ns ? atomic_load(&g_nvn_game_work_avg_ns) / 1e6 : -1;
+        int gpu_bound = gpu > 0 && gpu > 0.85 * budget, cpu_bound = gpu > 0 && gpu < 0.70 * budget && cpu > 0.85 * budget;
         double gain_need = fps_was * 0.06 > 1.5 ? fps_was * 0.06 : 1.5;
         if (probe && !--probe && fps_avg > 1 && fps_was > 1 && lv > 0 && (probe_hot ? fps_avg < fps_was - 1.0 : fps_avg < fps_was + gain_need)) {   // the step did not help
-            lv--; dm_res_factor_set(k_res_steps[lv]); slow = 0; since = 0;
+            lv--; L30_APPLY(); slow = 0; since = 0;
             if (probe_hot) noheat = 60; else nogain = 60;
-            fprintf(stderr, "%s: the lighter picture %s (%.1f → %.1f fps on average): back to 3D render scale %d %%; %s for 5 minutes\n", probe_hot ? "graphics auto" : "fps guard",
-                    probe_hot ? "cost frames" : "did not help", fps_was, fps_avg, (int)(k_res_steps[lv] * 100 + 0.5f),
-                    probe_hot ? "heat lowers it no further" : "the slowdown is not the GPU's, so a short frame rate lowers it no further");
+            fprintf(stderr, "%s: the lighter step %s (%.1f -> %.1f fps on average): back to %s, render scale %d %%; %s for 5 minutes\n", probe_hot ? "graphics auto" : "fps guard",
+                    probe_hot ? "cost frames" : "did not help", fps_was, fps_avg, mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f),
+                    probe_hot ? "heat lowers it no further" : "a short frame rate lowers it no further");
             return;
         }
         if (full) held++;
         if (held >= 24) wait = 12;   // two minutes held at this step: the next step down waits a minute again
-        int for_heat = hot && since >= 6 && !noheat && !probe, for_rate = slow >= 3 && !nogain && !probe;   // (one step at a time: the last one judged first)
-        if ((for_heat || for_rate) && lv < NRES - 1) {
+        cpu_short = short_ && cpu_bound ? cpu_short + 1 : 0;
+        if (cpu_short == 2 && !(said_cpu++ % 6)) fprintf(stderr, "fps guard: %.1f fps, short of %d, and the CPU is the limit (game thread %.1f ms, GPU %.1f ms of %.1f)\n", fps, g_fps_guard, cpu, gpu, budget);
+        if (cpu_short >= 6 && (lv >= lo || nogain)) lock30_draw(1, cpu, budget);   // (the lightest step and still short, with the CPU the limit: fewer things to draw from the next start)
+        if (full && cpu > 0 && cpu < 0.5 * budget && cool >= 120) lock30_draw(0, cpu, budget);   // (ten calm minutes with the CPU half idle: the normal distance may come back)
+        int for_heat = hot && since >= 6 && !noheat && !probe,
+            for_rate = slow >= (gpu_bound ? 1 : 2) && !nogain && !probe;
+        double r_up = lv > 0 && LM[lv - 1] == LM[lv] ? LS[lv - 1] / LS[lv] : 9;   // (up to TV mode: no early guess, the mode's cost is not the pixels')
+        int up_early = lv > 0 && !probe && gpu > 0 && cool >= 2 && full && !hot && gpu * r_up * r_up < 0.75 * budget;
+        if ((for_heat || for_rate) && lv < lo) {
             if (!for_heat && held < 24 && wait < 192) wait *= 2;   // short again soon after a step up: wait twice as long next time
             probe = 3; probe_hot = for_heat; fps_was = fps_avg > 1 ? fps_avg : fps;
-            lv++; if (for_heat && lv < RES_HOT) lv = RES_HOT;   // hot: straight to about 720p (70 % of 1080p), not one step every 30 s while the phone keeps heating up
-            dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0;
-            if (for_heat) fprintf(stderr, "graphics auto: the phone is hot: 3D render scale %d %% (about %dp)\n", (int)(k_res_steps[lv] * 100 + 0.5f), (int)(1080 * k_res_steps[lv] + 0.5f));
-            else fprintf(stderr, "fps guard: %.1f fps, short of %d: 3D render scale %d %%; a step up after %d s steady\n", fps, g_fps_guard, (int)(k_res_steps[lv] * 100 + 0.5f), wait * 5);
-        } else if (lv > 0 && cool >= wait) {
-            lv--; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
-            fprintf(stderr, "graphics auto: %s: 3D render scale %d %%\n", g_fps_guard ? "steady and cool" : "cooled down", (int)(k_res_steps[lv] * 100 + 0.5f));
+            int to = lv + 1;
+            if ((cpu_bound || for_heat) && to < 2 && lo >= 2) to = 2;   // (the CPU the limit, or hot: handheld mode, the game's lighter settings, not a smaller picture first)
+            lv = to; L30_APPLY(); cool = 0; held = 0; slow = 0; since = 0;
+            fprintf(stderr, "%s: %.1f fps (GPU %.1f ms, game thread %.1f ms of %.1f)%s: %s, render scale %d %%; a step up after %d s steady\n", for_heat ? "graphics auto: the phone is hot" : "fps guard",
+                    fps > 0 ? fps : fps_avg, gpu, cpu, budget, cpu_bound ? ", the CPU the limit" : "", mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f), wait * 5);
+        } else if ((lv > 0 && cool >= wait) || up_early) {
+            lv--; L30_APPLY(); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
+            fprintf(stderr, "graphics auto: %s: %s, render scale %d %%\n", up_early ? "the GPU has room" : g_fps_guard ? "steady and cool" : "cooled down", mode ? "TV mode" : "handheld mode", (int)(cap * LS[lv] * 100 + 0.5f));
         }
-        return;
-    }
-    if (mode == 1) {
-        if (full) held++;
-        if (held >= 24) wait = 12;   // two minutes held in TV mode: the next fall back waits a minute again
-        if (hot || slow >= 2) {
-            if (!hot && held < 24 && wait < 192) wait *= 2;   // fell back soon after trying TV mode again: wait twice as long next time
-            mode = 0; dm_set_opmode(0); cool = 0; held = 0;
-            if (hot) fprintf(stderr, "graphics auto: the phone is hot: handheld mode (720p)\n");
-            else fprintf(stderr, "fps guard: %.1f fps, short of %d: handheld mode (720p); TV mode again after %d s steady\n", fps, g_fps_guard, wait * 5);
-        }
-    } else if (cool >= wait) {
-        mode = 1; dm_set_opmode(1); slow = 0; held = 0;
-        fprintf(stderr, "graphics auto: %s: TV mode (1080p)\n", g_fps_guard ? "steady and cool" : "cooled down");
+        #undef L30_APPLY
     }
 }
 static void pin_update(void);
@@ -919,6 +1124,9 @@ static void host_start(void) {
     // why Android ended the previous run (GameActivity, ApplicationExitInfo): reason 2 a signal, 3 low memory, 4 / 5 a crash, 6 not responding, 10 / 11 the player /
     //   the app, 13 other (Samsung's game manager, heat), 14 frozen
     { const char *le = getenv("DM_LAST_EXIT"); if (le && *le) fprintf(stderr, "boot: Android says the previous run ended: %s\n", le); }
+    // Frame rate Dynamic (DM_FPS_TARGET=dyn): 60 wherever the phone holds it and 30 where it does not, frame by frame (the host's hold, hle_nvn.c vstep_tick), at the
+    //   full picture: the fps guard defends 30 only (60 lowers the resolution to hold 60). Everything that reads the target sees 60; DM_FPS_DYN tells the guard
+    { const char *ft = getenv("DM_FPS_TARGET"); if (ft && !strcmp(ft, "dyn")) { setenv("DM_FPS_TARGET", "60", 1); setenv("DM_FPS_DYN", "1", 1); } }
     fps_guard_init();   // (before the phone profile: Graphics chosen by hand only)
     device_profile();   // the chip tier's defaults, under env.txt
     // Game files: inside the installed APKs (the all-in-one .apks bundle, read through apkfs.c as /nxapk/...), else copied into the files folder
@@ -937,6 +1145,7 @@ static void host_start(void) {
     // graphics (the app's settings screen): high = the console's TV mode (1080p, full effects), low = handheld mode (720p, the game's own lighter settings),
     // auto = TV mode, made lighter while the phone is hot or slow (graphics_auto below), lowest = handheld mode with the game's 3D render scale capped at 75 % (960x540 in
     // Pokémon Sword / Shield, hle_resscale.c; other games: as low). DM_OPMODE and DM_RES_CAP in env.txt still win
+    { int m = display_mode(); if (m) setenv("DM_OPMODE", m == 1 ? "1" : "0", 1); }   // (Graphics → Mode: Quality / Performance, before the level's defaults)
     { const char *g = getenv("DM_GRAPHICS"); if (g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) setenv("DM_OPMODE", "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0);
       if (g && !strcmp(g, "lowest")) setenv("DM_RES_CAP", "0.75", 0); }
 #if defined(DM_GAME_ANDROID_OPMODE) && DM_GAME_ANDROID_OPMODE >= 0
@@ -957,6 +1166,7 @@ static void host_start(void) {
     mods_romfs(p);
     lowspec();   // Legends: Arceus's "Lower specs" (DM_LOWSPEC): its RomFS files first in the overlay (after the mods: mods_romfs takes a set DM_ROMFS_OVERLAY for env.txt's choice)
     style_fx();   // Legends: Arceus's "Style move effects" (off unless DM_ARC_STYLE_FX=1): the No More Styles start effects first in the overlay
+    draw_distance();   // Legends: Arceus's "Draw distance" (DM_ARC_DRAW): the player's own config files with the distances changed, first in the overlay
     flat_normals();   // Legends: Arceus's "No reflections": its flat normal maps last in the overlay, under any mod
     SETP("DM_VK_PSO_RECORD", "vk_pipelines.bin"); SETP("DM_VK_PCACHE", "vk_pipeline_cache.bin"); SETG("DM_VK_PSO_SEED", "vk_pipelines_seed.bin");
     snprintf(q, sizeof q, "%s/shaders.pak", g_game); if (!stat(q, &st)) setenv("DM_SPV_PAK", q, 0);   // the packed shader set, else vk/b-<chain>/

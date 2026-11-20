@@ -243,16 +243,29 @@ uint32_t *spv_init_outputs(const uint32_t *code, size_t words, size_t *out_words
 }
 
 // ---- Clean-up for strict drivers (Adreno): the translator declares capabilities every shader of a stage gets, whether it uses them or not ----
+// Also (Vulkan 1.0 baseline, every device): the subgroup capabilities (Vote / Ballot / Shuffle: every translated shader declares them, none of 77,002 Sword / Shield
+//   shaders uses one; a Vulkan 1.1 driver need only support them in the stages its subgroupSupportedStages lists, Adreno 6xx not the vertex stage) and ImageGatherExtended
+//   (declared by every shader; needs shaderImageGatherExtended, optional in Vulkan 1.0) where nothing uses a non-constant offset
+static int spv_img_operand_at(uint32_t op) {   // the image-operands word of an image instruction (0: none / not an image instruction)
+    switch (op) { case 87: case 88: case 91: case 92: case 95: case 98: return 5; case 89: case 90: case 93: case 94: case 96: case 97: return 6; case 99: return 4; default: return 0; }
+}
 size_t spv_strip_unused(uint32_t *code, size_t words) {
     if (words < 5 || code[0] != 0x07230203u) return words;
-    int f64 = 0, ilk = 0;
-    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return words;
+    int f64 = 0, ilk = 0, sg = 0, gext = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return words; const uint32_t *x = code + i;
         if (op == OpTypeFloat && n >= 3 && code[i + 2] == 64) f64 = 1;
         if (op == 5364 || op == 5365) ilk = 1;   // OpBegin / OpEndInvocationInterlockEXT
+        if ((op >= 333 && op <= 366) || op == 4421 || op == 4422 || (op >= 4428 && op <= 4430) || op == 4432) sg = 1;   // OpGroupNonUniform*, the KHR ballot / vote instructions
+        if (op == OpDecorate && n >= 4 && x[2] == DecBuiltIn && ((x[3] >= 36 && x[3] <= 41) || (x[3] >= 4416 && x[3] <= 4420))) sg = 1;   // subgroup built-ins
+        { int at = spv_img_operand_at(op); if (at && n > (uint32_t)at && (x[at] & 0x30)) gext = 1; }   // Offset / ConstOffsets
+        if (op >= 305 && op <= 320) gext = 1;   // sparse image instructions: left as declared
         i += n; }
     size_t w = 5;
     for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i; int drop = 0;
         if (op == 17 /* OpCapability */ && n == 2 && ((x[1] == 10 && !f64) || ((x[1] == 5378 || x[1] == 5363 || x[1] == 5372) && !ilk))) drop = 1;
+        if (op == 17 && n == 2 && !sg && ((x[1] >= 61 && x[1] <= 66) || x[1] == 4423 || x[1] == 4431)) drop = 1;
+        if (op == 17 && n == 2 && !gext && x[1] == 25) drop = 1;
+        if (op == 10 && !sg && n >= 2 && (!strncmp((const char *)(x + 1), "SPV_KHR_shader_ballot", 4 * (n - 1)) || !strncmp((const char *)(x + 1), "SPV_KHR_subgroup_vote", 4 * (n - 1)))) drop = 1;
         if (op == 10 /* OpExtension */ && !ilk && n >= 2 && !strncmp((const char *)(x + 1), "SPV_EXT_fragment_shader_interlock", 4 * (n - 1))) drop = 1;
         if (op == OpExecutionMode && n >= 3 && x[2] >= 5366 && x[2] <= 5371 && !ilk) drop = 1;   // the interlock execution modes
         if (!drop) { memmove(code + w, x, 4 * n); w += n; }
@@ -890,4 +903,231 @@ uint32_t *spv_clamp_zero(const uint32_t *code, size_t words, size_t *out_words) 
   none:
     free(k); free(fw); free(pp); free(h);
     return NULL;
+}
+
+// ---- SPIR-V 1.0, for Vulkan 1.0 drivers ----
+// The translator writes SPIR-V 1.3 and declares capabilities every shader of a stage gets: the subgroup ones (GroupNonUniform, Vote, Ballot, Shuffle), which only Vulkan 1.1
+//   has. Of 1,543 Sword / Shield shaders every one declared them and none used a subgroup instruction; nothing else in them is newer than SPIR-V 1.0 but draw parameters
+//   (an extension on Vulkan 1.0). A copy here: version 1.0, the unused subgroup capabilities dropped, OpExtension "SPV_KHR_shader_draw_parameters" added where DrawParameters is
+//   declared and "SPV_KHR_storage_buffer_storage_class" where that storage class is used. NULL when the module really uses something 1.0 cannot have (a subgroup instruction or
+//   built-in, an instruction from a later version), or is already 1.0
+static size_t spv_str_words(const char *s) { return (strlen(s) + 4) / 4; }
+uint32_t *spv_to_10(const uint32_t *code, size_t words, size_t *out_words) {
+    if (words < 5 || code[0] != 0x07230203u || code[1] <= 0x00010000u) return NULL;
+    int drawp = 0, sbsc = 0, has_dp_ext = 0, has_sb_ext = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return NULL; const uint32_t *x = code + i;
+        if (op >= 333 && op <= 366) return NULL;                                   // OpGroupNonUniform*: really used
+        if (op == 330 || op == 331 || op == 332 || (op >= 400 && op <= 403) || op == 4421 || op == 4428) return NULL;   // instructions from SPIR-V 1.1+ / subgroup extensions
+        if (op == OpDecorate && n >= 4 && x[2] == 11 /* BuiltIn */ && ((x[3] >= 36 && x[3] <= 41) || (x[3] >= 4416 && x[3] <= 4420))) return NULL;   // subgroup built-ins
+        if (op == 17 && n == 2 && x[1] == 4427) drawp = 1;                          // DrawParameters
+        if (op == OpVariable && n >= 4 && x[3] == 12) sbsc = 1;                      // StorageBuffer storage class
+        if (op == OpTypePointer && n >= 4 && x[2] == 12) sbsc = 1;
+        if (op == 10 && n >= 2) { const char *s = (const char *)(x + 1);
+            if (!strncmp(s, "SPV_KHR_shader_draw_parameters", 4 * (n - 1))) has_dp_ext = 1;
+            if (!strncmp(s, "SPV_KHR_storage_buffer_storage_class", 4 * (n - 1))) has_sb_ext = 1; }
+        i += n; }
+    const char *add[2]; int nadd = 0;
+    if (drawp && !has_dp_ext) add[nadd++] = "SPV_KHR_shader_draw_parameters";
+    if (sbsc && !has_sb_ext) add[nadd++] = "SPV_KHR_storage_buffer_storage_class";
+    size_t extra = 0; for (int k = 0; k < nadd; k++) extra += 1 + spv_str_words(add[k]);
+    uint32_t *o = malloc(4 * (words + extra)); if (!o) return NULL;
+    memcpy(o, code, 20); o[1] = 0x00010000u;
+    size_t w = 5; int added = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (!added && op != 17) {   // the new extensions right after the last OpCapability (OpExtension comes next in the layout)
+            for (int k = 0; k < nadd; k++) { size_t sw = spv_str_words(add[k]); o[w] = (uint32_t)(1 + sw) << 16 | 10; memset(o + w + 1, 0, 4 * sw); memcpy(o + w + 1, add[k], strlen(add[k])); w += 1 + sw; }
+            added = 1; }
+        int drop = op == 17 && n == 2 && ((x[1] >= 61 && x[1] <= 66) || x[1] == 4423 || x[1] == 4431);   // the subgroup capabilities, unused (checked above)
+        if (!drop) { memcpy(o + w, x, 4 * n); w += n; }
+        i += n; }
+    *out_words = w; return o;
+}
+
+// ---- Devices without draw parameters (Vulkan 1.0 without VK_KHR_shader_draw_parameters; Vulkan 1.1+ with shaderDrawParameters off: Arm's Mali drivers among them) ----
+// The DrawParameters capability and its extension are dropped. A shader that reads BaseVertex / BaseInstance / DrawIndex (144 of 36,600 Sword / Shield vertex shaders read
+//   BaseInstance) reads them instead from push constants at SPV_DRAWP_PC_OFFSET (three 32-bit words: base vertex, base instance, draw index; the draw pushes them, nvn_vk.c
+//   dp_push). A module that already has push constants (a transform feedback variant) reads 0. *mode: 0 the capability dropped only, 1 push constants, 2 zero. NULL: nothing
+//   to do (no DrawParameters) or not possible (the built-ins of different types, or used other than loaded)
+uint32_t *spv_no_drawparams(const uint32_t *code, size_t words, size_t *out_words, int *mode) {
+    enum { OpCapability = 17, OpExtension = 10, OpMemberDecorate = 72, OpLoad = 61, OpFunction = 54, OpCopyObject = 83, SC_PushConstant = 9, DecOffset = 35 };
+    *mode = 0;
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint8_t *kind = calloc(bound, 1); if (!kind) return NULL;   // a draw-parameter variable: 1 + (0 BaseVertex / 1 BaseInstance / 2 DrawIndex)
+    int cap = 0, has_pc = 0, ndp = 0, bad = 0; size_t first_fn = 0; uint32_t tm = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) { free(kind); return NULL; } const uint32_t *x = code + i;
+        if (op == OpCapability && n == 2 && x[1] == 4427) cap = 1;
+        else if (op == OpDecorate && n >= 4 && x[1] < bound && x[2] == DecBuiltIn && x[3] >= 4424 && x[3] <= 4426) { kind[x[1]] = (uint8_t)(1 + x[3] - 4424); ndp++; }
+        else if (op == OpVariable && n >= 4 && x[3] == SC_PushConstant) has_pc = 1;
+        else if (op == OpFunction && !first_fn) first_fn = i;
+        i += n; }
+    if (!cap || !first_fn) { free(kind); return NULL; }
+    if (ndp) for (size_t i = 5; i < first_fn;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;   // each one's type: a 32-bit integer, the same for all
+        if (op == OpVariable && n >= 4 && x[2] < bound && kind[x[2]]) { const uint32_t *p = def_of(code, words, x[1]); const uint32_t *t = p ? def_of(code, words, p[3]) : NULL;
+            if (!t || (t[0] & 0xffff) != OpTypeInt || t[2] != 32 || (tm && tm != p[3])) bad = 1; else tm = p[3]; }
+        i += n; }
+    if (ndp && !tm) bad = 1;
+    // used only by OpLoad (any other instruction naming one of them: not possible)
+    if (ndp && !bad) for (size_t i = first_fn; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        for (uint32_t k = 1; k < n && !bad; k++) if (x[k] < bound && kind[x[k]] && !(op == OpLoad && k == 3)) bad = 1;
+        i += n; }
+    if (bad) { free(kind); return NULL; }
+    int m = !ndp ? 0 : has_pc ? 2 : 1; *mode = m;
+    uint32_t nb = bound, t_s = 0, t_ps = 0, t_pt = 0, v_p = 0, c[3] = {0}, cz = 0;
+    if (m == 1) { t_s = nb++; t_ps = nb++; t_pt = nb++; v_p = nb++; for (int k = 0; k < 3; k++) c[k] = nb++; }
+    if (m == 2) cz = nb++;
+    size_t nload = 0; for (size_t i = first_fn; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (op == OpLoad && n >= 4 && code[i + 3] < bound && kind[code[i + 3]]) nload++; i += n; }
+    uint32_t *o = malloc(4 * (words + 64 + nload * 5)); if (!o) { free(kind); return NULL; }
+    memcpy(o, code, 20); size_t w = 5; int dec = 0, decl = 0, in_fn = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpFunction) in_fn = 1;
+        if (m == 1 && !dec && !in_fn && ((op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == OpVariable)) {   // the block's decorations, after the other annotations
+            o[w++] = 3u << 16 | OpDecorate; o[w++] = t_s; o[w++] = DecBlock;
+            for (uint32_t k = 0; k < 3; k++) { o[w++] = 5u << 16 | OpMemberDecorate; o[w++] = t_s; o[w++] = k; o[w++] = DecOffset; o[w++] = SPV_DRAWP_PC_OFFSET + 4 * k; }
+            dec = 1; }
+        if (!decl && op == OpFunction) {   // the new types, constants and the variable, before the first function
+            if (m == 1) { o[w++] = 5u << 16 | OpTypeStruct; o[w++] = t_s; o[w++] = tm; o[w++] = tm; o[w++] = tm;
+                          o[w++] = 4u << 16 | OpTypePointer; o[w++] = t_ps; o[w++] = SC_PushConstant; o[w++] = t_s;
+                          o[w++] = 4u << 16 | OpTypePointer; o[w++] = t_pt; o[w++] = SC_PushConstant; o[w++] = tm;
+                          for (uint32_t k = 0; k < 3; k++) { o[w++] = 4u << 16 | OpConstant; o[w++] = tm; o[w++] = c[k]; o[w++] = k; }
+                          o[w++] = 4u << 16 | OpVariable; o[w++] = t_ps; o[w++] = v_p; o[w++] = SC_PushConstant; }
+            if (m == 2) { o[w++] = 4u << 16 | OpConstant; o[w++] = tm; o[w++] = cz; o[w++] = 0; }
+            decl = 1; }
+        if (op == OpCapability && n == 2 && x[1] == 4427) { i += n; continue; }
+        if (op == OpExtension && n >= 2 && !strncmp((const char *)(x + 1), "SPV_KHR_shader_draw_parameters", 4 * (n - 1))) { i += n; continue; }
+        if ((op == OpName || op == OpDecorate) && n >= 2 && x[1] < bound && kind[x[1]]) { i += n; continue; }
+        if (op == OpVariable && !in_fn && n >= 4 && x[2] < bound && kind[x[2]]) { i += n; continue; }
+        if (op == OpEntryPoint && n >= 4) {   // the interface without them (a push constant variable is listed there only from SPIR-V 1.4 on)
+            size_t sw = (strnlen((const char *)(x + 3), 4 * (n - 3)) + 4) / 4, hw = w; o[w++] = 0;
+            for (uint32_t k = 1; k < 3 + sw && k < n; k++) o[w++] = x[k];
+            for (uint32_t k = (uint32_t)(3 + sw); k < n; k++) if (!(x[k] < bound && kind[x[k]])) o[w++] = x[k];
+            if (m == 1 && code[1] >= 0x00010400u) o[w++] = v_p;
+            o[hw] = (uint32_t)(w - hw) << 16 | OpEntryPoint; i += n; continue; }
+        if (op == OpLoad && n >= 4 && x[3] < bound && kind[x[3]]) {
+            if (m == 1) { uint32_t t = nb++; o[w++] = 5u << 16 | OpAccessChain; o[w++] = t_pt; o[w++] = t; o[w++] = v_p; o[w++] = c[kind[x[3]] - 1];
+                          o[w++] = 4u << 16 | OpLoad; o[w++] = x[1]; o[w++] = x[2]; o[w++] = t; }
+            else { o[w++] = 4u << 16 | OpCopyObject; o[w++] = x[1]; o[w++] = x[2]; o[w++] = cz; }
+            i += n; continue; }
+        memcpy(o + w, x, 4 * n); w += n; i += n;
+    }
+    free(kind);
+    if ((m == 1 && (!dec || !decl)) || (m == 2 && !decl)) { free(o); *mode = 0; return NULL; }
+    o[3] = nb; *out_words = w; return o;
+}
+
+// Vulkan 1.0 without VK_KHR_storage_buffer_storage_class: storage buffers in the StorageBuffer storage class (the transform feedback capture variants of SPIR-V 1.3
+//   shaders) become Uniform + BufferBlock, the form every Vulkan 1.0 driver takes. In place. 1 changed, 0 nothing to do, -1 not possible (a struct used both ways)
+int spv_sb_to_uniform(uint32_t *code, size_t words) {
+    if (words < 5 || code[0] != 0x07230203u) return 0;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return 0;
+    uint8_t *st = calloc(bound, 1); if (!st) return -1;   // struct ids: 1 behind a StorageBuffer pointer, 2 behind any other pointer
+    int any = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) { free(st); return -1; } const uint32_t *x = code + i;
+        if (op == OpTypePointer && n >= 4 && x[3] < bound) { if (x[2] == SC_StorageBuffer) { st[x[3]] |= 1; any = 1; } else st[x[3]] |= 2; }
+        i += n; }
+    if (!any) { free(st); return 0; }
+    for (uint32_t k = 0; k < bound; k++) if (st[k] == 3) { free(st); return -1; }
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; uint32_t *x = code + i;
+        if (op == OpTypePointer && n >= 4 && x[2] == SC_StorageBuffer) x[2] = SC_Uniform;
+        else if (op == OpVariable && n >= 4 && x[3] == SC_StorageBuffer) x[3] = SC_Uniform;
+        else if (op == OpDecorate && n >= 3 && x[1] < bound && st[x[1]] == 1 && x[2] == DecBlock) x[2] = DecBufferBlock;
+        i += n; }
+    free(st); return 1;
+}
+
+// What a shader needs of the device's optional features (Vulkan 1.0 core features a driver may lack): SPV_NEED_* bits
+uint32_t spv_feature_needs(const uint32_t *code, size_t words) {
+    if (words < 5 || code[0] != 0x07230203u) return 0;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return 0;
+    uint32_t need = 0; int frag = 0, fstore = 0;
+    uint8_t *sc = calloc(bound, 1); uint32_t *ty = calloc(bound, 4);   // sc: a pointer type's storage class + 1; ty: a pointer id's type
+    if (!sc || !ty) { free(sc); free(ty); return 0; }
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) break; const uint32_t *x = code + i;
+        if (op == 17 && n == 2) switch (x[1]) {
+            case 2: need |= SPV_NEED_GEOM; break; case 3: need |= SPV_NEED_TESS; break; case 10: need |= SPV_NEED_F64; break; case 11: need |= SPV_NEED_I64; break;
+            case 22: need |= SPV_NEED_I16; break; case 23: case 24: need |= SPV_NEED_TGPSIZE; break; case 25: need |= SPV_NEED_GATHEREXT; break;
+            case 27: need |= SPV_NEED_STORMS; break; case 32: need |= SPV_NEED_CLIP; break; case 33: need |= SPV_NEED_CULL; break;
+            case 34: case 45: need |= SPV_NEED_CUBEARR; break; case 35: need |= SPV_NEED_SRS; break; case 41: need |= SPV_NEED_SPARSE; break;
+            case 42: need |= SPV_NEED_MINLOD; break; case 49: need |= SPV_NEED_EXTFMT; break; case 55: need |= SPV_NEED_IMGRNF; break; case 56: need |= SPV_NEED_IMGWNF; break;
+            case 57: need |= SPV_NEED_MVP; break; default: break; }
+        else if (op == OpEntryPoint && n >= 2 && x[1] == 4) frag = 1;
+        else if (op == OpTypePointer && n >= 4 && x[1] < bound) sc[x[1]] = (uint8_t)(x[2] + 1);
+        else if ((op == OpVariable || op == 65 || op == 66 || op == 67) && n >= 3 && x[2] < bound) ty[x[2]] = x[1];   // (and the access chains)
+        else if (op == 62 /* OpStore */ && n >= 3 && x[1] < bound && ty[x[1]] < bound) { uint8_t s = sc[ty[x[1]]]; if (s == 1 + SC_Uniform || s == 1 + SC_StorageBuffer) fstore = 1; }
+        else if (op == 99 /* OpImageWrite */ || (op >= 227 && op <= 242)) fstore = 1;   // (and the atomics)
+        i += n; }
+    free(sc); free(ty);
+    if (frag && fstore) need |= SPV_NEED_FRAGSTORE;
+    return need;
+}
+
+// ---- Vulkan 1.0 without VK_KHR_maintenance1: no negative viewport height, so NVN's upper-left origin is made in the vertex shader instead ----
+// Before every return of the vertex entry point: gl_Position.y *= s, s a float specialization constant (SPV_FLIP_Y_SPEC_ID, default 1.0) that the pipeline sets to -1 while the
+// game's window origin is upper left. y_ndc -> -y_ndc under a positive viewport puts every pixel where the flipped viewport did (same rows, same winding, same gl_FragCoord)
+uint32_t *spv_flip_y(const uint32_t *code, size_t words, size_t *out_words) {
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint32_t entry = 0, posvar = 0, blk = 0, mem = 0, f32 = 0, v4 = 0, i32 = 0, pv4 = 0, cmem = 0;
+    int nret = 0, vertex = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return NULL; const uint32_t *x = code + i;
+        if (op == OpEntryPoint && n >= 3 && !entry) { entry = x[2]; vertex = x[1] == 0; }
+        else if (op == OpDecorate && n >= 4 && x[2] == DecBuiltIn && x[3] == 0 /* Position */) posvar = x[1];
+        else if (op == 72 /* OpMemberDecorate */ && n >= 5 && x[3] == DecBuiltIn && x[4] == 0) { blk = x[1]; mem = x[2]; }
+        i += n; }
+    if (!vertex || !entry || (!posvar && !blk)) return NULL;
+    if (blk) {   // the gl_PerVertex block: its Output variable, and the member's type
+        const uint32_t *s = def_of(code, words, blk); if (!s || (s[0] & 0xffff) != OpTypeStruct || 2 + mem >= (s[0] >> 16)) return NULL;
+        v4 = s[2 + mem];
+        for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+            if (op == OpVariable && n >= 4 && x[3] == SC_Output) { const uint32_t *p = def_of(code, words, x[1]); if (p && p[3] == blk) posvar = x[2]; }
+            i += n; }
+        if (!posvar) return NULL;
+    } else {
+        for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+            if (op == OpVariable && n >= 4 && x[2] == posvar) { const uint32_t *p = def_of(code, words, x[1]); if (p) v4 = p[3]; }
+            i += n; }
+    }
+    const uint32_t *v = def_of(code, words, v4); if (!v || (v[0] & 0xffff) != OpTypeVector || v[3] != 4) return NULL;
+    f32 = v[2];
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpTypePointer && n >= 4 && x[2] == SC_Output && x[3] == v4 && !pv4) pv4 = x[1];
+        if (op == OpTypeInt && n >= 4 && x[2] == 32 && !i32) i32 = x[1];
+        i += n; }
+    if (blk && i32) for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpConstant && n == 4 && x[1] == i32 && x[3] == mem) { cmem = x[2]; break; }
+        i += n; }
+    for (size_t i = 5, in = 0; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff;
+        if (op == 54 /* OpFunction */) in = code[i + 2] == entry; else if (op == 253 /* OpReturn */ && in) nret++;
+        i += n; }
+    if (!nret) return NULL;
+    uint32_t nb = bound, spec = nb++;
+    int add_i32 = blk && !i32, add_c = blk && !cmem, add_p = blk && !pv4;
+    if (add_i32) i32 = nb++;
+    if (add_c) cmem = nb++;
+    if (add_p) pv4 = nb++;
+    size_t cap = words + 4 + 16 + (size_t)nret * 28; uint32_t *o = malloc(4 * cap); if (!o) return NULL;   // per return: access chain 5, load 4, extract 5, multiply 5, insert 6, store 3
+    memcpy(o, code, 20); size_t w = 5; int dec = 0, decl = 0, in = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (!dec && ((op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == OpVariable)) {   // the SpecId decoration, after the other annotations
+            o[w++] = 4u << 16 | OpDecorate; o[w++] = spec; o[w++] = 1 /* SpecId */; o[w++] = SPV_FLIP_Y_SPEC_ID; dec = 1; }
+        if (!decl && op == 54) {   // the new types / constants, before the first function
+            if (add_i32) { o[w++] = 4u << 16 | OpTypeInt; o[w++] = i32; o[w++] = 32; o[w++] = 1; }
+            if (add_c) { o[w++] = 4u << 16 | OpConstant; o[w++] = i32; o[w++] = cmem; o[w++] = mem; }
+            if (add_p) { o[w++] = 4u << 16 | OpTypePointer; o[w++] = pv4; o[w++] = SC_Output; o[w++] = v4; }
+            o[w++] = 4u << 16 | 50 /* OpSpecConstant */; o[w++] = f32; o[w++] = spec; o[w++] = 0x3f800000u; decl = 1; }
+        if (op == 54) in = x[2] == entry;
+        if (op == 253 && in) {
+            uint32_t ptr = posvar;
+            if (blk) { ptr = nb++; o[w++] = 5u << 16 | OpAccessChain; o[w++] = pv4; o[w++] = ptr; o[w++] = posvar; o[w++] = cmem; }
+            uint32_t ld = nb++, y = nb++, ny = nb++, nv = nb++;
+            o[w++] = 4u << 16 | 61 /* OpLoad */; o[w++] = v4; o[w++] = ld; o[w++] = ptr;
+            o[w++] = 5u << 16 | 81 /* OpCompositeExtract */; o[w++] = f32; o[w++] = y; o[w++] = ld; o[w++] = 1;
+            o[w++] = 5u << 16 | 133 /* OpFMul */; o[w++] = f32; o[w++] = ny; o[w++] = y; o[w++] = spec;
+            o[w++] = 6u << 16 | 82 /* OpCompositeInsert */; o[w++] = v4; o[w++] = nv; o[w++] = ny; o[w++] = ld; o[w++] = 1;
+            o[w++] = 3u << 16 | 62 /* OpStore */; o[w++] = ptr; o[w++] = nv;
+        }
+        memcpy(o + w, x, 4 * n); w += n; i += n;
+    }
+    if (!dec || !decl) { free(o); return NULL; }
+    o[3] = nb; *out_words = w; return o;
 }

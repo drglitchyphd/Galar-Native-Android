@@ -130,7 +130,7 @@ def main():
     # Java: the setup screen, the keyboard dialog, the immersive helper
     cls = os.path.join(w, 'classes'); os.makedirs(cls)
     srcs = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(ANDROID, 'app/java')) for f in fs if f.endswith('.java')]
-    run('javac', '-source', '8', '-target', '8', '-nowarn', '-cp', jar, '-d', cls, *srcs)
+    run('javac', '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-nowarn', '-cp', jar, '-d', cls, *srcs)   # (UTF-8 sources: a Windows JDK reads them as cp1252 otherwise, and the menu's ✕ › °C · ✓ come out garbled)
     run(os.path.join(bt, 'd8' + bat), '--release', '--min-api', '33', '--lib', jar, '--output', w, *[os.path.join(d, f) for d, _, fs in os.walk(cls) for f in fs])
     # the payload: native libraries, the Python standard library, the setup scripts
     with zipfile.ZipFile(os.path.join(w, 'base.apk'), 'a') as z:

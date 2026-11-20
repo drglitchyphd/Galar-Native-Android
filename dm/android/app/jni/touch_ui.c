@@ -93,6 +93,13 @@ static float g_size = -1;
 static float size_k(void) { if (g_size < 0) { const char *e = getenv("DM_TOUCH_SIZE"); float v = e ? (float)atof(e) : 100.0f; g_size = (v < 80 || v > 130 ? 100.0f : v) / 100.0f; } return g_size; }
 static void sel_to_win(float lx, float ly, float *x, float *y);
 // L3 / R3 on screen: an option (DM_TOUCH_L3R3=on, Controls → Touch controls), off by default: Sword and Shield hardly use them. -1: not read yet
+// Legends: Arceus's own moves on the existing controls (touch-first games only, GESTURES_ON; the buttons are the game's, from its own help text and HUD guide table):
+//   edge-run (DM_TOUCH_EDGE_RUN, on by default): the thumb pushed past the stick's ring (1.25 x its radius) presses the left stick once (Dash, the guide table's
+//   DASH prompt), again only after it has come back inside (0.6 x); ride swipe (DM_TOUCH_RIDE_SWIPE, on by default): + acts on release, a sideways swipe on it is
+//   D-pad Left / Right (Change Pokémon while riding: the guide table's CHANGE_RIDE), a tap is + (call a ride Pokémon). Off: as before. -1: not read yet
+static int g_edge_run = -1, g_ride_swipe = -1;
+static int edge_run(void) { if (g_edge_run < 0) { const char *e = getenv("DM_TOUCH_EDGE_RUN"); g_edge_run = GESTURES_ON && !(e && !strcmp(e, "off")); } return g_edge_run; }
+static int ride_swipe(void) { if (g_ride_swipe < 0) { const char *e = getenv("DM_TOUCH_RIDE_SWIPE"); g_ride_swipe = GESTURES_ON && !(e && !strcmp(e, "off")); } return g_ride_swipe; }
 static int g_l3r3 = -1;
 static int l3r3_on(void) { if (g_l3r3 < 0) { const char *e = getenv("DM_TOUCH_L3R3"); g_l3r3 = e && !strcmp(e, "on"); } return g_l3r3; }
 static void layout(float w, float h) {
@@ -333,6 +340,9 @@ static void recompute_locked(void) {
         if (g_ptr[i].id < 0 || g_ptr[i].pm) continue;
         int c = g_ptr[i].target;
         if (c == C_STICK) { float r = g_c[C_STICK].r, dx = g_ptr[i].x - g_stick_x, dy = g_ptr[i].y - g_stick_y, d = sqrtf(dx * dx + dy * dy);
+            if (edge_run() && !menu) { static int edge;   // past the ring: one press of the left stick (Dash); re-armed once the thumb is back inside
+                if (d > 1.25f * r) { if (!edge) { edge = 1; dm_input_press_frames(DM_BTN_LS, 90000000ull, 2); click_locked(); static int n; if (n++ < 10) fprintf(stderr, "[touch] edge-run: dash\n"); } }
+                else if (d < 0.6f * r) edge = 0; }
             if (d > r) { dx *= r / d; dy *= r / d; }
             float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < 0.12f * 0.12f) nx = ny = 0;   // dead zone
             lx = nx; ly = ny; stick = 1; g_knob_x = g_stick_x + dx; g_knob_y = g_stick_y + dy; }
@@ -341,6 +351,7 @@ static void recompute_locked(void) {
             float nx = dx / r, ny = -dy / r; if (nx * nx + ny * ny < 0.12f * 0.12f) nx = ny = 0;
             rx = nx; ry = ny; rstick = 1; g_rknob_x = k->cx + dx; g_rknob_y = k->cy + dy; }
         else if (c == C_THROW) { if (t - g_ptr[i].t0 >= QUICK_S) b |= DM_BTN_ZR | (aim_lock() ? DM_BTN_ZL : 0); }   // held: aiming (a tap is the quick throw, on release)
+        else if (c == C_PLUS && ride_swipe()) {}   // (+ acts on release: touch_ui_event)
         else if (c >= C_A) b |= g_c[c].btn;
     }
     for (int c = C_A; c < NCTL; c++) if (c != C_THROW && t < g_held_until[c]) b |= g_c[c].btn;
@@ -490,7 +501,7 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
         if (t >= 0) for (int i = 0; i < 10; i++) if (g_ptr[i].id < 0) {
             if (t == C_STICK || t == C_CAM) for (int j = 0; j < 10; j++) if (g_ptr[j].id >= 0 && (g_ptr[j].target == C_STICK || g_ptr[j].target == C_CAM) && now_s() - g_ptr[j].t0 < 0.25) g_two_t = now_s();
             g_ptr[i].thr = g_ptr[i].lp = g_ptr[i].pm = g_ptr[i].held_log = 0; g_ptr[i].aim = g_aim && (t == C_RSTICK || t == C_CAM); g_ptr[i].id = AMotionEvent_getPointerId(e, k); g_ptr[i].target = t; g_ptr[i].x0 = g_ptr[i].x = g_ptr[i].lx = x; g_ptr[i].y0 = g_ptr[i].y = g_ptr[i].ly = y; g_ptr[i].lt = g_ptr[i].t0 = now_s();
-            if (t >= C_A && t != C_THROW && t != C_LOCK) g_held_until[t] = now_s() + 0.08;
+            if (t >= C_A && t != C_THROW && t != C_LOCK && !(t == C_PLUS && ride_swipe())) g_held_until[t] = now_s() + 0.08;
             if (t == C_LOCK) { g_lockon = !g_lockon; fprintf(stderr, "[touch] lock-on %s\n", g_lockon ? "on" : "off"); }
             if (t == C_RSTICK || (t >= C_UP && t <= C_RIGHT)) g_inner_t = now_s();
             if (t == C_STICK) { float r = g_c[C_STICK].r; g_stick_on = 1;   // the base comes to the thumb, kept on screen
@@ -503,6 +514,11 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
             int aimed = now_s() - g_ptr[i].t0 > 0.12 || fabsf(g_ptr[i].x - g_ptr[i].x0) > g_h * 0.02f || fabsf(g_ptr[i].y - g_ptr[i].y0) > g_h * 0.02f;
             if (aimed) { g_aim = 0; g_lock_until = now_s() + 0.25; g_cam_vx = g_cam_vy = 0; g_ptr[i].id = -1; fprintf(stderr, "[touch] throw\n"); }
             else g_ptr[i].aim = 0; }   // a brush: still aiming
+        for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_PLUS && ride_swipe()) {   // + on release: a sideways swipe changes the ride Pokémon
+            float dx = g_ptr[i].x - g_ptr[i].x0, dy = g_ptr[i].y - g_ptr[i].y0; int sw = fabsf(dx) > g_h * 0.05f && fabsf(dx) > fabsf(dy);
+            uint64_t pb = sw ? (dx > 0 ? DM_BTN_RIGHT : DM_BTN_LEFT) : DM_BTN_PLUS;
+            dm_input_press_frames(pb, 90000000ull, 2); click_locked();
+            fprintf(stderr, "[touch] %s\n", !sw ? "+ (ride)" : dx > 0 ? "ride: next Pokemon (Right)" : "ride: previous Pokemon (Left)"); }
         for (int i = 0; i < 10; i++) if (g_ptr[i].id == id && g_ptr[i].target == C_THROW) {
             if (now_s() - g_ptr[i].t0 < QUICK_S) { g_qt0 = now_s(); fprintf(stderr, "[touch] quick throw\n"); }   // a tap: thrown at once (recompute_locked)
             else { g_lock_until = now_s() + 0.25; fprintf(stderr, "[touch] aimed throw\n"); } }   // held: ZR let go now is the throw; the lock stays a moment
@@ -541,8 +557,11 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
                 sb = part == SEL_LEFT ? DM_BTN_L : part == SEL_RIGHT ? DM_BTN_R : part == SEL_SWAP ? DM_BTN_X : DM_BTN_ZR; }
             if (sb) { dm_input_press_frames(sb, 150000000ull, 4); click_locked(); static int nl; if (nl++ < 20) fprintf(stderr, "[touch] selector %s\n", sb == DM_BTN_L ? "L" : sb == DM_BTN_R ? "R" : sb == DM_BTN_X ? "X" : "ZR"); }
         }
-        // quick swipes on the camera side (under 0.35 s, a tenth of the screen height or more): left / right = L / R (the item or Pokémon), down = X (items / Pokémon)
-        for (int i = 0; i < 10; i++) if (GESTURES && field_gest() && g_ptr[i].id == id && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !g_ptr[i].lp && now_s() - g_ptr[i].t0 < 0.35 && !touch_menu_active()) {
+        // quick swipes on the camera side (under 0.35 s, a tenth of the screen height or more): left / right = L / R (the item or Pokémon), down = X (items / Pokémon).
+        //   Off unless DM_TOUCH_CAM_SWIPES=1: a quick turn of the camera is the same swipe, and it switched the Pokémon as the camera turned (Galaxy S25+, 2026-11-20).
+        //   The selector's own swipes and taps (above) and the L / R buttons switch them
+        static int cam_sw = -1; if (cam_sw < 0) { const char *e = getenv("DM_TOUCH_CAM_SWIPES"); cam_sw = e && !strcmp(e, "1"); }
+        for (int i = 0; i < 10; i++) if (cam_sw && GESTURES && field_gest() && g_ptr[i].id == id && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !g_ptr[i].lp && now_s() - g_ptr[i].t0 < 0.35 && !touch_menu_active()) {
             float sx = g_ptr[i].x - g_ptr[i].x0, sy = g_ptr[i].y - g_ptr[i].y0; uint64_t sb = 0;
             if (fabsf(sx) > g_h * 0.10f && fabsf(sy) < fabsf(sx) * 0.6f) sb = sx > 0 ? DM_BTN_R : DM_BTN_L;
             else if (sy > g_h * 0.10f && fabsf(sx) < sy * 0.6f) sb = DM_BTN_X;
@@ -690,6 +709,8 @@ void touch_ui_setting(const char *key, const char *value) {
     if (!strcmp(key, "DM_TOUCH_OPACITY")) g_opacity = value ? clampf((float)atof(value) / 100.0f, 0.2f, 1.0f) : 1.0f;
     else if (!strcmp(key, "DM_TOUCH_FADE")) g_fade = value ? fmaxf(0.0f, (float)atof(value)) : 3.0f;
     else if (!strcmp(key, "DM_TOUCH_GESTURES")) g_field_gest = !(value && !strcmp(value, "off"));
+    else if (!strcmp(key, "DM_TOUCH_EDGE_RUN")) g_edge_run = GESTURES_ON && !(value && !strcmp(value, "off"));
+    else if (!strcmp(key, "DM_TOUCH_RIDE_SWIPE")) g_ride_swipe = GESTURES_ON && !(value && !strcmp(value, "off"));
     else if (!strcmp(key, "DM_TOUCH_SIZE")) { float v = value ? (float)atof(value) : 100.0f; g_size = (v < 80 || v > 130 ? 100.0f : v) / 100.0f; g_w = g_h = 0; }   // (laid out again at the next frame)
     else if (!strcmp(key, "DM_TOUCH_L3R3")) { g_l3r3 = value && !strcmp(value, "on"); g_w = g_h = 0; }   // (laid out again on the next frame)
     else if (!strcmp(key, "DM_TOUCH_CAM_SENS")) { int v = value ? atoi(value) : 100; g_cam_pct = v < 25 || v > 300 ? 100 : v; }

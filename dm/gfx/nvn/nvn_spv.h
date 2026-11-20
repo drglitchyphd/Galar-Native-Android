@@ -31,6 +31,24 @@ uint32_t *spv_init_outputs(const uint32_t *code, size_t words, size_t *out_words
 uint32_t *spv_swap_out01(const uint32_t *code, size_t words, size_t *out_words);   // fragment outputs at locations 0 and 1 swapped (dual-source blending emulated)
 // Drops capabilities / extensions / execution modes a shader declares but never uses (Float64, fragment shader interlock), in place; returns the new length in words
 size_t spv_strip_unused(uint32_t *code, size_t words);
+// A SPIR-V 1.0 copy for Vulkan 1.0 drivers (unused subgroup capabilities dropped, extensions declared); NULL if it needs more than 1.0 or is 1.0 already
+uint32_t *spv_to_10(const uint32_t *code, size_t words, size_t *out_words);
+// Devices without draw parameters: DrawParameters dropped; BaseVertex / BaseInstance / DrawIndex read from push constants at SPV_DRAWP_PC_OFFSET (*mode 1) or as 0 in a
+//   module that has push constants already (*mode 2); *mode 0: only the capability dropped. NULL: no DrawParameters, or not possible
+#define SPV_DRAWP_PC_OFFSET 64u
+uint32_t *spv_no_drawparams(const uint32_t *code, size_t words, size_t *out_words, int *mode);
+// Optional Vulkan 1.0 features a shader needs (from its capabilities; FRAGSTORE: a fragment shader that writes buffers / images or uses atomics)
+enum { SPV_NEED_GEOM = 1u << 0, SPV_NEED_TESS = 1u << 1, SPV_NEED_F64 = 1u << 2, SPV_NEED_I64 = 1u << 3, SPV_NEED_I16 = 1u << 4, SPV_NEED_TGPSIZE = 1u << 5,
+       SPV_NEED_GATHEREXT = 1u << 6, SPV_NEED_STORMS = 1u << 7, SPV_NEED_CLIP = 1u << 8, SPV_NEED_CULL = 1u << 9, SPV_NEED_CUBEARR = 1u << 10, SPV_NEED_SRS = 1u << 11,
+       SPV_NEED_SPARSE = 1u << 12, SPV_NEED_MINLOD = 1u << 13, SPV_NEED_EXTFMT = 1u << 14, SPV_NEED_IMGRNF = 1u << 15, SPV_NEED_IMGWNF = 1u << 16, SPV_NEED_MVP = 1u << 17,
+       SPV_NEED_FRAGSTORE = 1u << 18 };
+uint32_t spv_feature_needs(const uint32_t *code, size_t words);
+// Vulkan 1.0 without VK_KHR_storage_buffer_storage_class: StorageBuffer storage made Uniform + BufferBlock, in place (1 changed, 0 nothing to do, -1 not possible)
+int spv_sb_to_uniform(uint32_t *code, size_t words);
+// Vulkan 1.0 without VK_KHR_maintenance1 (no negative viewport height): a vertex shader copy whose gl_Position.y is multiplied by the float specialization constant
+//   SPV_FLIP_Y_SPEC_ID (default 1; the pipeline gives -1 for NVN's upper-left origin). NULL if not a vertex shader or it has no position
+#define SPV_FLIP_Y_SPEC_ID 0x5946u
+uint32_t *spv_flip_y(const uint32_t *code, size_t words, size_t *out_words);
 // Fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
 void spv_frag_outputs(const uint32_t *code, size_t words, uint8_t cls[8]);
 // A copy whose float outputs at the locations in umask / smask hold the same bits as uint / int outputs (integer colour targets). NULL if nothing to do or not possible

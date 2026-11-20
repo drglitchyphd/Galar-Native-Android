@@ -578,31 +578,130 @@ static int arc_wide(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     LOG("%s: widescreen for Legends: Arceus 1.1.1: camera aspect %.4f (%08x), HUD kept to 16:9 in the middle (x %.3f of the width)", m->name, ratio, bits, (double)k);
     return 8;
 }
+// The render-target pool of Legends: Arceus 1.1.1, grown for a bigger render size (1440p, the screen's shape). The config builder (main+0x277d798) sets three NVN pools that
+//   graphics setup (main+0x29d6a64 → 0x2aa24c4 → the pool ctor main+0x2a8cf9c) creates: config+0x28 300 MB general, config+0x30 250 MB render targets (CPU no access,
+//   GPU cached, compressible), config+0x38 40 MB commands. Their storage comes from the GFX2 heap (main+0x2626d50, 800 MB), which holds them plus the NVN driver's
+//   63 MB (config+0x08 / +0x10: driver memory, NOT a render-target block: the old 15 → 32 MB change there is gone) and ~147 MB of other users, with no NULL check on
+//   the storage: so GFX2 grows by exactly what the pool grows. Both MOVZ Wn, #imm, LSL #16, each word checked first. 1 applied
+static int arc_gpu_pool(module_t *m, unsigned pool_mb, int64_t p0, int64_t p1) {
+    if (pool_mb <= 250) return 1;
+    if (pool_mb > 600) pool_mb = 600;
+    static const struct { uint64_t off; uint32_t orig; unsigned mb; } G[] = { { 0x277d7f0, 0x52a1f409u, 250 }, { 0x2626d50, 0x52a64001u, 800 } };
+    for (unsigned i = 0; i < 2; i++) { uint32_t w; memcpy(&w, m->base + G[i].off, 4);
+        if (G[i].off + 4 > m->text_end || w != G[i].orig || overlaps_rewrite(m, G[i].off, 4, p0, p1)) return 0; }
+    for (unsigned i = 0; i < 2; i++) { unsigned mb = G[i].mb + (pool_mb - 250); uint32_t w = (G[i].orig & ~(0xffffu << 5)) | (mb * 16u) << 5;
+        memcpy(m->base + G[i].off, &w, 4); mod_page_note(m, G[i].off, 4); }
+    LOG("%s: GPU memory for the bigger render size: render-target pool %u MB (was 250), GFX2 heap %u MB (was 800)", m->name, pool_mb, 800 + pool_mb - 250);
+    return 1;
+}
 // 1440p for Legends: Arceus 1.1.1 (DM_ARC_RES=1440, the menu's Graphics → Resolution; off by default): the game's TV-mode render size, 1920x1080, becomes
 //   2560x1440 at the five places it is set (after Fl4sh's "2560x1440" mod for 1.1.1): sharper, and heavier on the GPU. Handheld mode keeps its own 720p.
 //   Each word is checked first (MOV / MOVK of 0x780 or 0x438 into the register the game uses); a build or code that differs is left alone
 static int arc_res(module_t *m, int64_t p0, int64_t p1) {
-    // Off for now unless forced (DM_ARC_RES_FORCE=1): the game's GPU memory areas stay sized for 1080p, so the first 2560x1440 render target (0xf00000 bytes)
-    //   finds no free block and the game's own pool allocator reads through a null pointer at start (main+0x2a8d750 from the texture builder at main+0x2a97f40;
-    //   v0.40 players who chose 1440p could not start the game). A player's DM_ARC_RES=1440 is ignored, so they can play again with nothing to change
-    const char *e = getenv("DM_ARC_RES"); if (!e || atoi(e) != 1440) return 0;
-    { const char *f = getenv("DM_ARC_RES_FORCE"); if (!(f && atoi(f) > 0)) {
-        LOG("%s: 1440p is off for now (DM_ARC_RES=1440 ignored): the game's render target memory is sized for 1080p and the game crashed at start", m->name); return 0; } }
-    static const struct { uint64_t off; uint32_t orig, imm; } R[] = {
-        { 0x29f0650, 0x5280f008u, 0xa00 }, { 0x29f0654, 0x52808709u, 0x5a0 }, { 0x29f0410, 0x5280f008u, 0xa00 }, { 0x29f0414, 0x52808709u, 0x5a0 },
-        { 0x2b9a5fc, 0x5280f008u, 0xa00 }, { 0x2b9a604, 0x52808708u, 0x5a0 }, { 0x277bd44, 0x5280f009u, 0xa00 }, { 0x277bd50, 0x52808708u, 0x5a0 },
-        { 0x29e99e8, 0xf2c0f008u, 0xa00 }, { 0x29e99f4, 0xf2c08708u, 0x5a0 } };
+    // DM_ARC_RES (Graphics → Resolution): 720 / 1080 (the game's own) / 1440, the TV-mode render size at the five places it is set, width and height
+    //   (MOV / MOVK of 0x780 and 0x438). 1440p grows the render-target pool and the GFX2 heap with it (arc_gpu_pool: the start crash of v0.40 came from a pool sized
+    //   for 1080p; S25+ 2026-11-20: 2560x1440 at a steady 30). 720p needs no more memory. Handheld mode keeps its own 720p; DM_ARC_RES_FORCE no longer needed
+    const char *e = getenv("DM_ARC_RES"); int res = e ? atoi(e) : 0; if (res != 1440 && res != 720) return 0;
+    uint32_t W = res == 1440 ? 0xa00 : 0x500, H = res == 1440 ? 0x5a0 : 0x2d0;
+    static const struct { uint64_t off; uint32_t orig; int h; } R[] = {
+        { 0x29f0650, 0x5280f008u, 0 }, { 0x29f0654, 0x52808709u, 1 }, { 0x29f0410, 0x5280f008u, 0 }, { 0x29f0414, 0x52808709u, 1 },
+        { 0x2b9a5fc, 0x5280f008u, 0 }, { 0x2b9a604, 0x52808708u, 1 }, { 0x277bd44, 0x5280f009u, 0 }, { 0x277bd50, 0x52808708u, 1 },
+        { 0x29e99e8, 0xf2c0f008u, 0 }, { 0x29e99f4, 0xf2c08708u, 1 } };
     for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w; memcpy(&w, m->base + R[i].off, 4);
-        if (R[i].off + 4 > m->text_end || w != R[i].orig || overlaps_rewrite(m, R[i].off, 4, p0, p1)) { LOG("[RED] %s: 1440p not applied (Legends: Arceus 1.1.1's render size code differs at +%#llx)", m->name, (unsigned long long)R[i].off); return 0; } }
-    for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w = (R[i].orig & ~(0xffffu << 5)) | R[i].imm << 5; memcpy(m->base + R[i].off, &w, 4); }
-    LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)", m->name);
+        if (R[i].off + 4 > m->text_end || w != R[i].orig || overlaps_rewrite(m, R[i].off, 4, p0, p1)) { LOG("[RED] %s: %dp not applied (Legends: Arceus 1.1.1's render size code differs at +%#llx)", m->name, res, (unsigned long long)R[i].off); return 0; } }
+    for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w = (R[i].orig & ~(0xffffu << 5)) | (R[i].h ? H : W) << 5; memcpy(m->base + R[i].off, &w, 4); }
+    int g = res == 1440 ? arc_gpu_pool(m, 400, p0, p1) : 1;
+    LOG("%s: resolution: the TV-mode render size is %ux%u (DM_ARC_RES)%s", m->name, W, H, res != 1440 ? "" : g ? "; render-target pool 400 MB (was 250), GFX2 heap +150 MB" : "; [RED] the GPU memory sizes differ: left as they are");
     return (int)(sizeof R / sizeof *R);
+}
+// True aspect ratio for Legends: Arceus 1.1.1 (experimental, DM_WIDE_RENDER=1 with Widescreen): the game renders at the screen's own shape instead of 16:9 stretched to
+//   it. The render widths arc_res moves for 1440p: the five TV-mode 1920s (MOV W8 / W9, #0x780, and the MOVK X8, #0x780, LSL #32 of the pair at +0x29e99e4) become
+//   1080 x the screen's aspect, and that pair's handheld 1280 (MOVZ X8, #0x500) 720 x it (even, at most 21.6:9); the heights stay. With Widescreen's cameras (arc_wide)
+//   the picture keeps square pixels; the HUD is narrowed to 16:9 there already. Off by default: render targets grow ~25 % at 20:9 and the game's GPU memory areas are
+//   sized for 1080p (1440p, +78 %, could not start; crash #3's retry may or may not cover the smaller growth). A build or code that differs (1440p applied too) is left alone
+static int arc_wide_render(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_WIDE_RENDER"), *a = getenv("DM_ASPECT"), *r = getenv("DM_WIDE_RATIO");
+    if (!e || atoi(e) <= 0 || !a || strcmp(a, "wide")) return 0;
+    double ratio = r ? atof(r) : 0; if (ratio < 16.0 / 9.0 + 0.01) return 0;
+    if (ratio > 2.4) ratio = 2.4;
+    uint32_t w1080 = (uint32_t)(1080 * ratio / 2 + 0.5) * 2, w720 = (uint32_t)(720 * ratio / 2 + 0.5) * 2;
+    static const struct { uint64_t off; uint32_t orig; int tv; } S[] = {
+        { 0x29f0650, 0x5280f008u, 1 }, { 0x29f0410, 0x5280f008u, 1 }, { 0x2b9a5fc, 0x5280f008u, 1 }, { 0x277bd44, 0x5280f009u, 1 }, { 0x29e99e8, 0xf2c0f008u, 1 }, { 0x29e99e4, 0xd280a008u, 0 } };
+    for (unsigned i = 0; i < sizeof S / sizeof *S; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4);
+        if (S[i].off + 4 > m->text_end || w != S[i].orig || overlaps_rewrite(m, S[i].off, 4, p0, p1)) { LOG("[RED] %s: true aspect ratio not applied (the render size code differs at +%#llx, or 1440p is on)", m->name, (unsigned long long)S[i].off); return 0; } }
+    for (unsigned i = 0; i < sizeof S / sizeof *S; i++) { uint32_t w = (S[i].orig & ~(0xffffu << 5)) | (S[i].tv ? w1080 : w720) << 5; memcpy(m->base + S[i].off, &w, 4); }
+    arc_gpu_pool(m, (unsigned)(250.0 * w1080 / 1920.0 + 0.999), p0, p1);   // (the render targets grow with the width)
+    LOG("%s: true aspect ratio for Legends: Arceus 1.1.1: the game renders %ux1080 in TV mode, %ux720 handheld (screen %.4f), instead of 16:9 stretched", m->name, w1080, w720, ratio);
+    return (int)(sizeof S / sizeof *S);
+}
+// Crash #3 (Legends: Arceus 1.1.1, on by default; DM_ARC_POOL_RETRY=0 leaves it out): the CPU-mapped buffer allocator's function at main+0x2a8d6ec (vtable main+0x4185e58
+//   slot +0x28) looks a block up on its list (bl find main+0x2a919bc at +0x2a8d714, x0 = list, x1 / x2 its arguments). When that fails it flushes the list (main+0x2a92624)
+//   but never looks again, then reads [x21 + 0x30] with x21 = 0 at +0x2a8d750: the crash. The call at +0x2a8d714 now goes to added code in the zero gap at +0x38c8600
+//   (the same data-area gap as Widescreen's, far past its 36 bytes; that page is kept executable, mod_page_note): it keeps x0 / x1 / x2, looks up, and when that finds
+//   nothing flushes and looks again with the same arguments, up to 4 times. Found: the game goes on as after any lookup that worked; still nothing: the old path, as before.
+//   (find / flush keep x23, the list, as the calling convention asks.) Every word is checked first
+static int arc_pool_retry(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_ARC_POOL_RETRY"); if (e && !strcmp(e, "0")) return 0;
+    const uint64_t site = 0x2a8d714, cave = 0x38c8600; const uint32_t orig = 0x940010aau, call = 0x9438ebbbu;   // bl find → bl cave
+    static const uint32_t code[32] = {
+        0xa9bd7bfdu, 0x910003fdu, 0xa90107e0u, 0xf90013e2u,   // stp x29, x30, [sp, #-48]! / mov x29, sp / stp x0, x1, [sp, #16] / str x2, [sp, #32]
+        0x97c724ebu, 0xb5000320u,                             // bl find / cbnz x0, done
+        0xaa1703e0u, 0x97c72802u, 0xa94107e0u, 0xf94013e2u, 0x97c724e5u, 0xb5000260u,   // 4x: mov x0, x23 / bl flush / ldp x0, x1, [sp, #16] / ldr x2, [sp, #32] / bl find / cbnz x0, done
+        0xaa1703e0u, 0x97c727fcu, 0xa94107e0u, 0xf94013e2u, 0x97c724dfu, 0xb50001a0u,
+        0xaa1703e0u, 0x97c727f6u, 0xa94107e0u, 0xf94013e2u, 0x97c724d9u, 0xb50000e0u,
+        0xaa1703e0u, 0x97c727f0u, 0xa94107e0u, 0xf94013e2u, 0x97c724d3u, 0xb5000020u,
+        0xa8c37bfdu, 0xd65f03c0u };                           // done: ldp x29, x30, [sp], #48 / ret
+    uint32_t w; int ok = cave + sizeof code <= lim && site + 4 <= m->text_end;
+    if (ok) { memcpy(&w, m->base + site, 4); ok = w == orig && !overlaps_rewrite(m, site, 4, p0, p1); }
+    for (unsigned i = 0; ok && i < 32; i++) { memcpy(&w, m->base + cave + 4 * i, 4); ok = !w; }
+    if (!ok) { LOG("[RED] %s: pool lookup retry (crash #3) not applied: the allocator's code or the gap differs, or was rewritten", m->name); return 0; }
+    memcpy(m->base + cave, code, sizeof code); mod_page_note(m, cave, sizeof code);
+    memcpy(m->base + site, &call, 4); mod_page_note(m, site, 4);
+    LOG("%s: pool lookup retry (crash #3): a failed lookup at +%#llx flushes and looks again, up to 4 times (code at +%#llx)", m->name, (unsigned long long)site, (unsigned long long)cave);
+    return 2;
+}
+// 3D render scale for Legends: Arceus 1.1.1 (DM_RES_CAP 0.5 - 1, the menu's slider; live). The game keeps its 3D buffer's scale in two registry properties,
+//   3DBufferWidthScale / 3DBufferHeightScale (keys 0x4aa9ba3dccea94ea / 0x66e7a756352d0d9f), which its own resolution controller sets (levels 1.0 x 1.0, 0.9 x 0.85,
+//   0.85 x 0.8, 0.8 x 0.7; main+0xcc3600) along with reset and restore paths. Four places read them back (vtable +0x38 of the registry, 8 reads): the one that resizes
+//   when they change (main+0x29b2468, compared with its copies at +0x520 / +0x524), the 3D buffer's size (+0x29fb28c), the upscale factors (+0x29bc3b0) and a second
+//   size (+0x2b9f894). Every read's result is multiplied by the slider's value, so all of them agree whatever path set the property and whatever the game's own level:
+//   the instruction after each read (a load of the read's handle, sp / x29 relative) becomes BL to a stub in the zero gap (+0x38c8680, after crash #3's code) that
+//   points x16 at the read's result slot, does the replaced load, and goes to one shared routine: s0 = [x16] x the value (a word after it), d0 / d1 kept. x16 holds
+//   nothing right after a call (the calling convention's scratch). Live: the value's word is rewritten (dm_arc_scale_set); the first reader sees the change and resizes.
+//   Every word is checked first (the eight loads, the gap's zeros)
+static volatile uint32_t *g_arc_scale_lit;   // the scale's word in the gap (NULL: not applied)
+void dm_arc_scale_set(float c) {
+    if (!g_arc_scale_lit || !(c >= 0.5f && c <= 1.0f)) return;
+    uint32_t b; memcpy(&b, &c, 4); __atomic_store_n(g_arc_scale_lit, b, __ATOMIC_RELEASE);
+    LOG("Legends: Arceus 3D render scale %.2f, set while playing", (double)c);
+}
+static int arc_scale(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
+    static const struct { uint64_t off; uint32_t orig, call; } S[8] = {
+        { 0x29b24b0, 0xf9401be0u, 0x943c5874u }, { 0x29b2504, 0xf9401be0u, 0x943c5862u }, { 0x29fb2d0, 0xf94033e0u, 0x943b34f2u }, { 0x29fb324, 0xf94033e0u, 0x943b34e0u },
+        { 0x29bc3dc, 0xf85b83a0u, 0x943c30b5u }, { 0x29bc4b4, 0xf85b83a0u, 0x943c3082u }, { 0x2b9f8cc, 0xf94033e0u, 0x9434a37fu }, { 0x2b9f92c, 0xf94033e0u, 0x9434a36au } };
+    static const uint32_t code[31] = {
+        0x910053f0u, 0xf9401be0u, 0x14000016u,   0x910043f0u, 0xf9401be0u, 0x14000013u,   // add x16, sp, #0x14 / ldr x0, [sp, #0x30] / b shared ...   (one stub a read)
+        0x910023f0u, 0xf94033e0u, 0x14000010u,   0x910243f0u, 0xf94033e0u, 0x1400000du,
+        0xd10243b0u, 0xf85b83a0u, 0x1400000au,   0xd10243b0u, 0xf85b83a0u, 0x14000007u,   // sub x16, x29, #0x90 / ldur x0, [x29, #-0x48] / b shared ...
+        0xd100d3b0u, 0xf94033e0u, 0x14000004u,   0x910113f0u, 0xf94033e0u, 0x14000001u,
+        0x6dbf07e0u, 0xbd400200u, 0x1c0000a1u, 0x1e210800u, 0xbd000200u, 0x6cc107e0u, 0xd65f03c0u };   // shared: stp d0, d1 / ldr s0, [x16] / ldr s1, value / fmul / str / ldp / ret
+    const uint64_t cave = 0x38c8680, lit = cave + sizeof code;   // (the value's word: +0x38c86fc)
+    int ok = lit + 4 <= lim;
+    for (unsigned i = 0; ok && i < 8; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4); ok = S[i].off + 4 <= m->text_end && w == S[i].orig && !overlaps_rewrite(m, S[i].off, 4, p0, p1); }
+    for (unsigned i = 0; ok && i < 32; i++) { uint32_t w; memcpy(&w, m->base + cave + 4 * i, 4); ok = !w; }
+    if (!ok) { LOG("[RED] %s: 3D render scale not applied: the property reads or the gap differ, or were rewritten", m->name); return 0; }
+    const char *e = getenv("DM_RES_CAP"); float c = e ? (float)atof(e) : 1.0f; if (!(c >= 0.5f && c <= 1.0f)) c = 1.0f;
+    memcpy(m->base + cave, code, sizeof code); memcpy(m->base + lit, &c, 4); mod_page_note(m, cave, sizeof code + 4);
+    for (unsigned i = 0; i < 8; i++) { memcpy(m->base + S[i].off, &S[i].call, 4); mod_page_note(m, S[i].off, 4); }
+    g_arc_scale_lit = (volatile uint32_t *)(void *)(m->base + lit);
+    LOG("%s: 3D render scale for Legends: Arceus 1.1.1: %.2f on the game's own (8 reads of 3DBufferWidthScale / HeightScale; the slider changes it live)", m->name, (double)c);
+    return 9;
 }
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
-    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
+    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_wide_render(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),
@@ -728,3 +827,33 @@ void run_module_inits(void) {
         ((void (*)(void))(m->base + m->init))();
     }
 }
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sys/uio.h>
+// Frame generation's camera guidance (nvn_vk.c fg_cam_*): Legends: Arceus 1.1.1's main camera, read at present time. The camera registry R = *(main+0x42ef5a8);
+//   the game's own lookup (main+0x2a11e64, a libc++ unordered_map: buckets R+0x98, count R+0xa0, node {next, hash, key, ..., int index at +0x30}) finds "Main"
+//   (key 0x6723799257d05608); the camera = *(*(R+0x60) + index x 0x20), live while its byte +0xd0 is set; view (world → view) at +0x50 and projection at +0x90,
+//   4x4 column-major (main+0x29fb138: the scene's constant buffer takes them from there). Each read through process_vm_readv: a pointer that is not (yet) valid
+//   while a scene loads fails the read instead of faulting. 1: vp = projection x view
+static int peek(uint64_t a, void *o, size_t n) { struct iovec l = { o, n }, r = { (void *)(uintptr_t)a, n }; return a && process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n; }
+int dm_cam_viewproj(float vp[16]) {
+    static uint8_t *base; static int tried;
+    if (!tried) { tried = 1; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") && !strncasecmp(g_mod[i].build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) base = g_mod[i].base; }
+    if (!base) return 0;
+    const uint64_t key = 0x6723799257d05608ull; uint64_t R, n, bk, node;
+    if (!peek((uint64_t)(uintptr_t)(base + 0x42ef5a8), &R, 8) || !peek(R + 0xa0, &n, 8) || !n || n > (1u << 20)) return 0;
+    uint64_t idx = __builtin_popcountll(n) <= 1 ? (key & (n - 1)) : key % n;
+    if (!peek(R + 0x98, &bk, 8) || !peek(bk + idx * 8, &node, 8) || !node || !peek(node, &node, 8)) return 0;
+    for (int guard = 0; node && guard < 64; guard++) {
+        uint64_t h[2]; if (!peek(node + 8, h, 16)) return 0;
+        if (h[0] == key && h[1] == key) break;
+        uint64_t hb = __builtin_popcountll(n) <= 1 ? (h[0] & (n - 1)) : h[0] % n; if (hb != idx) return 0;
+        if (!peek(node, &node, 8)) return 0;
+    }
+    int32_t ci; uint64_t vec, cam; uint8_t live; float v[16], pj[16];
+    if (!node || !peek(node + 0x30, &ci, 4) || ci < 0 || !peek(R + 0x60, &vec, 8) || !peek(vec + (uint64_t)ci * 0x20, &cam, 8) || !peek(cam + 0xd0, &live, 1) || !live) return 0;
+    if (!peek(cam + 0x50, v, sizeof v) || !peek(cam + 0x90, pj, sizeof pj)) return 0;
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) { float t = 0; for (int k = 0; k < 4; k++) t += pj[k * 4 + r] * v[c * 4 + k]; vp[c * 4 + r] = t; }
+    for (int i = 0; i < 16; i++) if (vp[i] != vp[i]) return 0;
+    return 1;
+}
+#endif

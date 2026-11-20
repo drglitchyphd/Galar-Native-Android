@@ -85,6 +85,15 @@ int main(void) {
     CHECK(g_one_step == ROUNDS, "new way: every give-back went in one mremap");
     int same = 1; for (int k = 0; k < POOL / PG; k++) if (*(uint32_t *)(g_pool + k * PG) != 0xC0DE0000u + (uint32_t)k) same = 0;
     CHECK(same, "the pool's content is unchanged after all the moves");
+    {   // #281: a page the driver took back (unmapped) or left without access: the copy skips it (zeros) instead of crashing, and counts it
+        uint8_t *q = mmap(NULL, 4 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        for (int k = 0; k < 4; k++) memset(q + k * PG, 0x11 * (k + 1), PG);
+        munmap(q + PG, PG); mprotect(q + 2 * PG, PG, PROT_NONE);
+        uint64_t lost0 = atomic_load(&pages_lost); uint8_t *c = pages_copy((uintptr_t)q, 4 * PG);
+        CHECK(c != MAP_FAILED && c[0] == 0x11 && c[3 * PG] == 0x44 && c[PG] == 0 && c[2 * PG + PG - 1] == 0,
+              "pages_copy over an unmapped and an unreadable page: the readable pages copied, the others zero, no fault");
+        CHECK(atomic_load(&pages_lost) - lost0 == 2 * PG, "pages_copy counts the two pages it could not read");
+    }
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

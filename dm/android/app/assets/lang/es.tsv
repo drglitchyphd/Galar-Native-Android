@@ -384,3 +384,44 @@ NaN fix + textures: the same, and broken values read from textures become 0 too.
 This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	Esta versión traduce los shaders del juego de otra forma: se están actualizando. No hacen falta tus archivos y tu partida se conserva. Deja esta pantalla abierta; tarda lo mismo que el paso de shaders de la instalación.
 Setting up	Configuración
 Keep the phone cooler: half the workers (setup takes longer)	Mantener el móvil más fresco: la mitad de procesos (la configuración tarda más)
+3D render scale	Escala de render 3D
+Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	Izquierda: Automático, la resolución del propio juego. Más bajo: más fresco y rápido, el 3D más suave; el texto y los menús siguen nítidos.
+Record the frame's passes	Grabar los pases del fotograma
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Para escenas lentas: cierra este menú en menos de 3 segundos y quédate donde el juego va lento. Los pases de render de tres fotogramas, con su tiempo de GPU si el teléfono lo da, se guardan en Descargas (un archivo que termina en framegraph.txt). Adjúntalo a tu issue.
+Recording in 3 seconds: close the menu.	Grabando en 3 segundos: cierra el menú.
+Lossless Scaling pictures	Imágenes de Lossless Scaling
+2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: una imagen entre cada dos fotogramas del juego (30 fps se mueven como 60)
+3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: dos imágenes entre cada dos fotogramas (como 90 fps; uniforme solo en una pantalla de 90 Hz)
+4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: tres imágenes entre cada dos fotogramas (como 120 fps; requiere una pantalla de 120 Hz y una GPU rápida)
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Desactivada: incluso en su modo más ligero le quitaba al juego sus propios fotogramas aquí (hasta %s fps). Desactívala y actívala para volver a intentarlo.
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	Desactivada: esta GPU necesita %s ms por imagen, más de lo que el juego puede ceder. Desactívala y actívala para volver a intentarlo.
+Off until the next start (see the log for why).	Desactivada hasta el próximo inicio (el motivo está en el registro).
+Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, ligero (la tasa de fotogramas del juego, mostrada al doble)
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	En pausa: aquí el juego va a %s fps, por debajo de su ajuste de tasa de fotogramas. Vuelve a activarse sola cuando el juego la mantiene de nuevo.
+Mode	Modo
+Auto: as the Graphics setting decides	Auto: lo que decida el ajuste de Gráficos
+Quality	Calidad
+Quality: docked: 1080p and the game's full effects	Calidad: en el dock: 1080p y todos los efectos del juego
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Rendimiento: portátil: 720p y los ajustes más ligeros del juego: más fresco y estable
+Draw distance	Distancia de dibujado
+Near	Cerca
+Default	Normal
+Far	Lejos
+Very far	Muy lejos
+Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)	Cerca: árboles y detalles más cerca, menos personas y Pokémon cargados: más ligero (desde el próximo inicio)
+Default: as the game draws it	Normal: como lo dibuja el juego
+Far: trees, terrain detail and animation half as far again (from the next start)	Lejos: árboles, detalle del terreno y animación un 50 % más lejos (desde el próximo inicio)
+Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	Muy lejos: árboles, detalle del terreno y animación el doble de lejos: más carga para la GPU (desde el próximo inicio)
+Edge-run	Correr al borde
+On: push the stick past its ring to dash	Sí: empuja el stick más allá de su anillo para correr
+Off: the stick only walks and runs	No: el stick solo camina y trota
+Ride button	Botón de montura
+Tap or swipe	Tocar o deslizar
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	Toca + para llamar a un Pokémon montura; desliza a izquierda / derecha para cambiarlo
+Tap only	Solo tocar
++ works as on the console	+ funciona como en la consola
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p: lo más ligero, para teléfonos que no mantienen 30 (desde el próximo inicio)
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p: más nítido, pero más carga para la GPU (menos fps, teléfono más caliente; desde el próximo inicio)
+the game's own (100 %)	el del juego (100 %)
+Dynamic	Dinámico
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinámico: 60 donde el teléfono puede, 30 donde no, con la imagen completa; la velocidad del juego se mantiene
