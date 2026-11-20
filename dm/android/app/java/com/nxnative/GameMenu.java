@@ -363,8 +363,11 @@ public final class GameMenu {
         choice(a, "DM_RUMBLE", t(a, "Rumble"), new String[][] { { "", t(a, "On"), t(a, "On: the controller's motor, else the phone's") }, { "pad", t(a, "Controllers only"), "" },
                                                                  { "off", t(a, "Off"), "" } });
         // the right stick / camera, touch and controller alike (hle_hid.c rsens)
-        choice(a, "DM_RSTICK_SENS", t(a, "Camera sensitivity"), new String[][] { { "50", "50 %", t(a, "Slower camera: the right stick and the touch camera turn less") }, { "75", "75 %", "" },
-            { "", "100 %", t(a, "As on the Switch") }, { "125", "125 %", "" }, { "150", "150 %", t(a, "Faster camera: full speed with less of the stick") }, { "200", "200 %", "" } });
+        // a slider (the user, 2026-11-20: every % setting is a slider): positions 10..40 = 50 % to 200 % in steps of 5; stored as before ("" = 100 %, else the percent)
+        slider(a, t(a, "Camera sensitivity"), "DM_RSTICK_SENS", 10, 40, 20, v -> v == 20 ? t(a, "100 % (as on the Switch)") : (v * 5) + " %",
+               v -> v == 20 ? "" : String.valueOf(v * 5),
+               st -> { try { return Math.max(10, Math.min(40, Math.round(Integer.parseInt(st.trim()) / 5f))); } catch (RuntimeException e) { return 20; } });
+        note(a, t(a, "How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick."));
         heading(a, t(a, "Touch controls"));
         // the sticks (touch_ui.c float_on): fixed where the layout puts them, or floating (the left one comes to the thumb; the right half drags the camera)
         choice(a, "DM_TOUCH_STICKS", t(a, "Sticks"), new String[][] { { "", t(a, "Fixed"), t(a, "Fixed: the sticks stay where they are drawn, as on Joy-Cons") },
