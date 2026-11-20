@@ -3349,7 +3349,7 @@ static int pass_begin(void) {
                            .pDepthAttachment = P.hd ? &da : NULL, .pStencilAttachment = P.hs ? &sa : NULL };
     if (xf_x && xf_on()) {   // (stage 3: its frame-end store pending from an earlier frame resolves: cleared whole, or loaded)
         pthread_mutex_lock(&g_fgrmu);
-        if (xf_attach(&xf_x->xf, xf_clr && tw >= xf_x->w && th >= xf_x->h && (nlay ? nlay : 1) == 1)) { g_xf_bad++; RED_ONCE(61, "a depth store left out at a frame's end was loaded by a later pass (%ux%u, format %d): stored again for good", xf_x->w, xf_x->h, (int)xf_x->fmt); }
+        if (xf_attach(&xf_x->xf, xf_clr && tw >= xf_x->w && th >= xf_x->h && (nlay ? nlay : 1) == 1)) { g_xf_bad++; RED_ONCE(63, "a depth store left out at a frame's end was loaded by a later pass (%ux%u, format %d): stored again for good", xf_x->w, xf_x->h, (int)xf_x->fmt); }
         pthread_mutex_unlock(&g_fgrmu); }
     if (!P_tf) { hp_pass_begin(CB(), hp_c0); g_hpc.z = hp_z; g_hpc.zclr = (uint8_t)hp_zclr; g_hpc.zcd = hp_zcd; }   // (HUD-free frame generation: the scene copy before the first HUD pass)
     if (!P_tf) g_seg_fgp = fgr_pass_begin(CB(), tw, th, nlay ? nlay : 1, P.samples, fga, fgn);   // (the held frame decides this pass's stores by it)   // (the transform feedback capture passes are ours, not the game's)
