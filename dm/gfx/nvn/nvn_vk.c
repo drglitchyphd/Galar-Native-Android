@@ -1423,6 +1423,34 @@ static void barrier_host(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
+// Frame generation's camera guidance: the game's view-projection (column-major, its clip space) from a game-specific reader (loader.c), and the matrix from the
+//   current frame's clip space to the frame before's, prev x inverse(cur), in double. DM_FG_CAMERA=0: off
+int dm_cam_viewproj(float vp[16]) __attribute__((weak));
+static int fg_cam_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FG_CAMERA"); v = !(e && !strcmp(e, "0")); } return v; }
+static int fg_cam_m(const float *prev, const float *cur, float *out) {
+    double a[16], inv[16]; for (int i = 0; i < 16; i++) a[i] = cur[i];
+    inv[0] = a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15] + a[9]*a[7]*a[14] + a[13]*a[6]*a[11] - a[13]*a[7]*a[10];
+    inv[4] = -a[4]*a[10]*a[15] + a[4]*a[11]*a[14] + a[8]*a[6]*a[15] - a[8]*a[7]*a[14] - a[12]*a[6]*a[11] + a[12]*a[7]*a[10];
+    inv[8] = a[4]*a[9]*a[15] - a[4]*a[11]*a[13] - a[8]*a[5]*a[15] + a[8]*a[7]*a[13] + a[12]*a[5]*a[11] - a[12]*a[7]*a[9];
+    inv[12] = -a[4]*a[9]*a[14] + a[4]*a[10]*a[13] + a[8]*a[5]*a[14] - a[8]*a[6]*a[13] - a[12]*a[5]*a[10] + a[12]*a[6]*a[9];
+    inv[1] = -a[1]*a[10]*a[15] + a[1]*a[11]*a[14] + a[9]*a[2]*a[15] - a[9]*a[3]*a[14] - a[13]*a[2]*a[11] + a[13]*a[3]*a[10];
+    inv[5] = a[0]*a[10]*a[15] - a[0]*a[11]*a[14] - a[8]*a[2]*a[15] + a[8]*a[3]*a[14] + a[12]*a[2]*a[11] - a[12]*a[3]*a[10];
+    inv[9] = -a[0]*a[9]*a[15] + a[0]*a[11]*a[13] + a[8]*a[1]*a[15] - a[8]*a[3]*a[13] - a[12]*a[1]*a[11] + a[12]*a[3]*a[9];
+    inv[13] = a[0]*a[9]*a[14] - a[0]*a[10]*a[13] - a[8]*a[1]*a[14] + a[8]*a[2]*a[13] + a[12]*a[1]*a[10] - a[12]*a[2]*a[9];
+    inv[2] = a[1]*a[6]*a[15] - a[1]*a[7]*a[14] - a[5]*a[2]*a[15] + a[5]*a[3]*a[14] + a[13]*a[2]*a[7] - a[13]*a[3]*a[6];
+    inv[6] = -a[0]*a[6]*a[15] + a[0]*a[7]*a[14] + a[4]*a[2]*a[15] - a[4]*a[3]*a[14] - a[12]*a[2]*a[7] + a[12]*a[3]*a[6];
+    inv[10] = a[0]*a[5]*a[15] - a[0]*a[7]*a[13] - a[4]*a[1]*a[15] + a[4]*a[3]*a[13] + a[12]*a[1]*a[7] - a[12]*a[3]*a[5];
+    inv[14] = -a[0]*a[5]*a[14] + a[0]*a[6]*a[13] + a[4]*a[1]*a[14] - a[4]*a[2]*a[13] - a[12]*a[1]*a[6] + a[12]*a[2]*a[5];
+    inv[3] = -a[1]*a[6]*a[11] + a[1]*a[7]*a[10] + a[5]*a[2]*a[11] - a[5]*a[3]*a[10] - a[9]*a[2]*a[7] + a[9]*a[3]*a[6];
+    inv[7] = a[0]*a[6]*a[11] - a[0]*a[7]*a[10] - a[4]*a[2]*a[11] + a[4]*a[3]*a[10] + a[8]*a[2]*a[7] - a[8]*a[3]*a[6];
+    inv[11] = -a[0]*a[5]*a[11] + a[0]*a[7]*a[9] + a[4]*a[1]*a[11] - a[4]*a[3]*a[9] - a[8]*a[1]*a[7] + a[8]*a[3]*a[5];
+    inv[15] = a[0]*a[5]*a[10] - a[0]*a[6]*a[9] - a[4]*a[1]*a[10] + a[4]*a[2]*a[9] + a[8]*a[1]*a[6] - a[8]*a[2]*a[5];
+    double det = a[0]*inv[0] + a[1]*inv[4] + a[2]*inv[8] + a[3]*inv[12];
+    if (!(fabs(det) > 1e-20) || det != det) return 0;
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) {   // out = prev x inv (column-major: element (r, c) at c * 4 + r)
+        double v = 0; for (int k = 0; k < 4; k++) v += (double)prev[k * 4 + r] * (inv[c * 4 + k] / det); out[c * 4 + r] = (float)v; if (v != v) return 0; }
+    return 1;
+}
 // Barriers in the submission's command buffer (from the Arceus engine; on Adreno each full one waits for the GPU to go idle and flushes its caches):
 //   g_bar_clean: the last thing recorded was a full barrier, so a barrier before the next pass orders nothing more (it is left out)
 //   g_after_pass: the last thing recorded was the end of a draw pass; g_game_bar: the game called nvnCommandBufferBarrier since the last draw pass began.
@@ -5956,6 +5984,16 @@ static void present_window_locked(vtex *x, const int crop[4]) {
                 if (g_hp_zimg) VLOG("frame generation, depth guidance: %s (%ux%u, format %d)", ok ? "on" : "the driver cannot sample that depth format: off", g_hp_zw, g_hp_zh, (int)g_hp_zfmt); }
             g->z_on = fg_depth_on(); g->z_far1 = g_hp_zfar1;
             fg_depth_ingest(g, cb, p, hf && g_hp_zimg && g_hp_zseq == g_hp_scene_seq && g_hp_Z); }
+        {   // camera guidance: the game's own view-projection for this frame and the one before (dm_cam_viewproj, where the game's camera is known)
+            static float vp[2][16]; static int vok[2], said;
+            vok[p] = fg_cam_on() && dm_cam_viewproj && dm_cam_viewproj(vp[p]);
+            float m[16]; int ok = gen && vok[p] && vok[p ^ 1] && fg_cam_m(vp[p ^ 1], vp[p], m);
+            fg_camera(g, p, ok ? m : NULL, atomic_load(&g_depth_zero));
+            if (ok && g->camb[0] > 0.5f && !said) { said = 1; VLOG("frame generation, camera guidance: on (the game's camera and depth start the motion search; DM_FG_CAMERA=0 off)"); }
+            static unsigned n, nread, nz; n++; nread += vok[p] != 0; nz += g->z_on && g->z_ok[p];   // (why not, once a while: the camera read or the depth)
+            if (n == 300 && !said) VLOG("frame generation, camera guidance: not on yet: camera read %u of %u frames%s, depth %u of %u", nread, n,
+                                        !dm_cam_viewproj ? " (no reader for this game)" : "", nz, n);
+            if (n >= 300) n = nread = nz = 0; }
         if (gen) { fg_generate(g, cb, p);
             if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = 1; }
             pres_src mid = { NULL, g->m.img, g->m.view, g->w, g->h, 0, 0, cw, ch };

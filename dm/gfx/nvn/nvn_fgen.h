@@ -36,6 +36,8 @@ typedef struct {
     fg_img hud; int hud_on;   // HUD-free (the caller fills c[] with frames before the HUD was drawn and hud with the frame as shown): fg_gen.frag puts the HUD back
     // depth guidance: the nearness of each frame (full size, R16F), the caller's depth copy (a view of it, sampled nearest), whether z[p] holds frame p's, the caller's switch
     fg_img z[2]; VkImageView zsrc; VkSampler zsamp; int z_ok[2], z_on, z_far1, z_can; float pb[4];
+    // camera guidance (fg_camera): the flow pass's second vec4 (on, depth 0..1, nearness = 1 - depth) and the matrix from the current frame's clip space to the one before
+    float camb[4], camm[16];
     VkDescriptorSet ds_luma[2][FG_LEVELS], ds_flow[2][FG_LEVELS], ds_stat, ds_gen[2], ds_z;
 } fgen;
 static int fg_fail(fgen *g, const char *why) { g->failed = 1; g->why = why; return 0; }
@@ -117,7 +119,7 @@ static int fg_setup(fgen *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
         VkDescriptorSetLayoutBinding b[7]; for (int i = 0; i < 7; i++) b[i] = (VkDescriptorSetLayoutBinding){ (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
         VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 7, .pBindings = b };
         if (vkCreateSampler(dev, &sci, NULL, &g->samp) || vkCreateDescriptorSetLayout(dev, &dli, NULL, &g->dsl)) return fg_fail(g, "no sampler / descriptor layout");
-        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };   // (two vec4: fg_gen.frag reads the second)
+        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96 };   // (two vec4: fg_gen.frag reads the second; fg_flow.frag a matrix after them)
         VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g->dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
         if (vkCreatePipelineLayout(dev, &pli, NULL, &g->pl)) return fg_fail(g, "no pipeline layout");
         enum { NSET = 4 * FG_LEVELS + 4 };
@@ -165,7 +167,7 @@ static int fg_setup(fgen *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
             VkImageView src = l ? g->y[p][l - 1].view : g->c[p].view;
             fg_ds_write(g, g->ds_luma[p][l], src, src, src, src);
             VkImageView a = g->y[p ^ 1][l].view, b = g->y[p][l].view, c = l + 1 < FG_LEVELS ? g->f[l + 1].view : b;
-            fg_ds_write(g, g->ds_flow[p][l], a, b, c, b); }
+            fg_ds_write(g, g->ds_flow[p][l], a, b, c, g->z[p].view ? g->z[p].view : b); }   // (binding 3: frame p's nearness, for camera guidance)
         fg_ds_write(g, g->ds_gen[p], g->c[p ^ 1].view, g->c[p].view, g->f[0].view, g->st.view);
         if (g->z_can) {   // (5: the frame before's nearness, 6: this one's)
             VkDescriptorImageInfo zi[2] = { { g->samp, g->z[p ^ 1].view, VK_IMAGE_LAYOUT_GENERAL }, { g->samp, g->z[p].view, VK_IMAGE_LAYOUT_GENERAL } }; VkWriteDescriptorSet zw[2];
@@ -197,7 +199,9 @@ static void fg_pass(fgen *g, VkCommandBuffer cb, int rp, fg_img *dst, uint32_t w
     vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g->pipe[pipe]);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g->pl, 0, 1, &ds, 0, NULL);
-    float pc[8] = { a, b, c, d, g->pb[0], g->pb[1], g->pb[2], g->pb[3] }; vkCmdPushConstants(cb, g->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
+    float pc[24] = { a, b, c, d, g->pb[0], g->pb[1], g->pb[2], g->pb[3] };
+    if (pipe == 1) { memcpy(pc + 4, g->camb, sizeof g->camb); memcpy(pc + 8, g->camm, sizeof g->camm); }   // (the flow pass: camera guidance)
+    vkCmdPushConstants(cb, g->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, pipe == 1 ? sizeof pc : 8 * sizeof(float), pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRenderPass(cb);
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT };
@@ -238,6 +242,14 @@ static void fg_depth_ingest(fgen *g, VkCommandBuffer cb, int p, int have) {
     fg_pass(g, cb, 3, &g->z[p], g->w, g->h, 4, g->ds_z, g->z_far1 ? 1.0f : 0.0f, 0, 0, 0); g->z_ok[p] = 1;
 }
 #endif
+// Camera guidance for the next fg_generate(g, cb, p): m = the game's view-projection of frame p ^ 1 times the inverse of frame p's (column-major, the game's clip
+//   space), depth01: the game's depth runs 0..1 (else GL's -1..1). Used only with frame p's nearness (depth guidance); m NULL: off. The flow search then also
+//   starts from the camera's motion where that matches the pictures better, so a fast turn is found beyond the search's own reach
+static void fg_camera(fgen *g, int p, const float *m, int depth01) {
+    int on = m && g->z_on && g->z_ok[p] && g->z[p].view;
+    g->camb[0] = on ? 1.0f : 0.0f; g->camb[1] = depth01 ? 1.0f : 0.0f; g->camb[2] = g->z_far1 ? 1.0f : 0.0f; g->camb[3] = 0;
+    if (on) memcpy(g->camm, m, sizeof g->camm); else memset(g->camm, 0, sizeof g->camm);
+}
 // ---------- When to generate, and when the real frame goes out (pure: tests/t_fgen.c) ----------
 typedef struct { uint64_t last, cost_sum, cost_n, cost_max, win; int over; } fg_plan;
 // A real frame arrived at now (ns); period: the game's frame time. 1: make an in-between picture (the frame before came about one period ago: after a pause, a
