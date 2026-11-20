@@ -624,11 +624,48 @@ static int arc_pool_retry(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     LOG("%s: pool lookup retry (crash #3): a failed lookup at +%#llx flushes and looks again, up to 4 times (code at +%#llx)", m->name, (unsigned long long)site, (unsigned long long)cave);
     return 2;
 }
+// 3D render scale for Legends: Arceus 1.1.1 (DM_RES_CAP 0.5 - 1, the menu's slider; live). The game keeps its 3D buffer's scale in two registry properties,
+//   3DBufferWidthScale / 3DBufferHeightScale (keys 0x4aa9ba3dccea94ea / 0x66e7a756352d0d9f), which its own resolution controller sets (levels 1.0 x 1.0, 0.9 x 0.85,
+//   0.85 x 0.8, 0.8 x 0.7; main+0xcc3600) along with reset and restore paths. Four places read them back (vtable +0x38 of the registry, 8 reads): the one that resizes
+//   when they change (main+0x29b2468, compared with its copies at +0x520 / +0x524), the 3D buffer's size (+0x29fb28c), the upscale factors (+0x29bc3b0) and a second
+//   size (+0x2b9f894). Every read's result is multiplied by the slider's value, so all of them agree whatever path set the property and whatever the game's own level:
+//   the instruction after each read (a load of the read's handle, sp / x29 relative) becomes BL to a stub in the zero gap (+0x38c8680, after crash #3's code) that
+//   points x16 at the read's result slot, does the replaced load, and goes to one shared routine: s0 = [x16] x the value (a word after it), d0 / d1 kept. x16 holds
+//   nothing right after a call (the calling convention's scratch). Live: the value's word is rewritten (dm_arc_scale_set); the first reader sees the change and resizes.
+//   Every word is checked first (the eight loads, the gap's zeros)
+static volatile uint32_t *g_arc_scale_lit;   // the scale's word in the gap (NULL: not applied)
+void dm_arc_scale_set(float c) {
+    if (!g_arc_scale_lit || !(c >= 0.5f && c <= 1.0f)) return;
+    uint32_t b; memcpy(&b, &c, 4); __atomic_store_n(g_arc_scale_lit, b, __ATOMIC_RELEASE);
+    LOG("Legends: Arceus 3D render scale %.2f, set while playing", (double)c);
+}
+static int arc_scale(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
+    static const struct { uint64_t off; uint32_t orig, call; } S[8] = {
+        { 0x29b24b0, 0xf9401be0u, 0x943c5874u }, { 0x29b2504, 0xf9401be0u, 0x943c5862u }, { 0x29fb2d0, 0xf94033e0u, 0x943b34f2u }, { 0x29fb324, 0xf94033e0u, 0x943b34e0u },
+        { 0x29bc3dc, 0xf85b83a0u, 0x943c30b5u }, { 0x29bc4b4, 0xf85b83a0u, 0x943c3082u }, { 0x2b9f8cc, 0xf94033e0u, 0x9434a37fu }, { 0x2b9f92c, 0xf94033e0u, 0x9434a36au } };
+    static const uint32_t code[31] = {
+        0x910053f0u, 0xf9401be0u, 0x14000016u,   0x910043f0u, 0xf9401be0u, 0x14000013u,   // add x16, sp, #0x14 / ldr x0, [sp, #0x30] / b shared ...   (one stub a read)
+        0x910023f0u, 0xf94033e0u, 0x14000010u,   0x910243f0u, 0xf94033e0u, 0x1400000du,
+        0xd10243b0u, 0xf85b83a0u, 0x1400000au,   0xd10243b0u, 0xf85b83a0u, 0x14000007u,   // sub x16, x29, #0x90 / ldur x0, [x29, #-0x48] / b shared ...
+        0xd100d3b0u, 0xf94033e0u, 0x14000004u,   0x910113f0u, 0xf94033e0u, 0x14000001u,
+        0x6dbf07e0u, 0xbd400200u, 0x1c0000a1u, 0x1e210800u, 0xbd000200u, 0x6cc107e0u, 0xd65f03c0u };   // shared: stp d0, d1 / ldr s0, [x16] / ldr s1, value / fmul / str / ldp / ret
+    const uint64_t cave = 0x38c8680, lit = cave + sizeof code;   // (the value's word: +0x38c86fc)
+    int ok = lit + 4 <= lim;
+    for (unsigned i = 0; ok && i < 8; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4); ok = S[i].off + 4 <= m->text_end && w == S[i].orig && !overlaps_rewrite(m, S[i].off, 4, p0, p1); }
+    for (unsigned i = 0; ok && i < 32; i++) { uint32_t w; memcpy(&w, m->base + cave + 4 * i, 4); ok = !w; }
+    if (!ok) { LOG("[RED] %s: 3D render scale not applied: the property reads or the gap differ, or were rewritten", m->name); return 0; }
+    const char *e = getenv("DM_RES_CAP"); float c = e ? (float)atof(e) : 1.0f; if (!(c >= 0.5f && c <= 1.0f)) c = 1.0f;
+    memcpy(m->base + cave, code, sizeof code); memcpy(m->base + lit, &c, 4); mod_page_note(m, cave, sizeof code + 4);
+    for (unsigned i = 0; i < 8; i++) { memcpy(m->base + S[i].off, &S[i].call, 4); mod_page_note(m, S[i].off, 4); }
+    g_arc_scale_lit = (volatile uint32_t *)(void *)(m->base + lit);
+    LOG("%s: 3D render scale for Legends: Arceus 1.1.1: %.2f on the game's own (8 reads of 3DBufferWidthScale / HeightScale; the slider changes it live)", m->name, (double)c);
+    return 9;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
-    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_pool_retry(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
+    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),

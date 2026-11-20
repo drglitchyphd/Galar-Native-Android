@@ -186,8 +186,13 @@ public final class GameMenu {
         c.setOnClickListener(v -> r.run());
     }
     private static void slider(Activity a, String title, String key, int min, int max, int def, java.util.function.IntFunction<String> fmt) {
+        slider(a, title, key, min, max, def, fmt, String::valueOf, s -> { try { return Integer.parseInt(s); } catch (NumberFormatException e) { return def; } });
+    }
+    // a slider whose positions map to the stored values (store) and back (load): the 3D render scale keeps its fractions ("0.80") and Auto ("")
+    private static void slider(Activity a, String title, String key, int min, int max, int def, java.util.function.IntFunction<String> fmt,
+                               java.util.function.IntFunction<String> store, java.util.function.ToIntFunction<String> load) {
         LinearLayout c = card(a); LinearLayout row = titleRow(a, c, title, null);
-        int v; try { v = Integer.parseInt(GameSettings.get(a, key)); } catch (NumberFormatException e) { v = def; }
+        int v = load.applyAsInt(GameSettings.get(a, key));
         v = Math.max(min, Math.min(max, v));
         TextView val = text(a, fmt.apply(v), 14, 0xFFF2F2F5, true); row.addView(val);
         SeekBar sb = new SeekBar(a); sb.setMax(max - min); sb.setProgress(v - min); sb.setPadding(dp(a, 10), dp(a, 14), dp(a, 10), dp(a, 4));
@@ -203,7 +208,7 @@ public final class GameMenu {
         knob.setColor(0xFFFFFFFF); knob.setStroke(dp(a, 3), 0x40FFFFFF); knob.setSize(dp(a, 20), dp(a, 20));
         sb.setThumb(knob); sb.setThumbOffset(dp(a, 10)); sb.setSplitTrack(false); sb.setBackground(null);
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar b, int p, boolean user) { val.setText(fmt.apply(p + min)); if (user) set(a, key, String.valueOf(p + min)); }
+            public void onProgressChanged(SeekBar b, int p, boolean user) { val.setText(fmt.apply(p + min)); if (user) set(a, key, store.apply(p + min)); }
             public void onStartTrackingTouch(SeekBar b) { }
             public void onStopTrackingTouch(SeekBar b) { }
         });
@@ -306,6 +311,13 @@ public final class GameMenu {
         // Legends: Arceus: the strong / agile style moves' start effects (android_main.c style_fx, the No More Styles 1.2 mod): off by default, they covered the screen with grey boxes
         if (GameSettings.arceus(a)) choice(a, "DM_ARC_STYLE_FX", t(a, "Style move effects"), new String[][] { { "", t(a, "Off"), t(a, "Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before") },
             { "1", t(a, "On"), t(a, "On: the game's own animation (grey boxes on some phones)") } });
+        // Legends: Arceus's 3D render scale (loader.c arc_scale, DM_RES_CAP, live): a slider as in Galar Native, Auto (the game's own) then 50 % to 100 % in steps of 5
+        if (GameSettings.arceus(a)) {
+            slider(a, t(a, "3D render scale"), "DM_RES_CAP", 9, 20, 9, v -> v == 9 ? t(a, "Auto") : (v * 5) + " %",
+                   v -> v == 9 ? "" : String.format(java.util.Locale.ROOT, "%.2f", v * 5 / 100.0),
+                   st -> { try { double d = Double.parseDouble(st); return Math.max(10, Math.min(20, (int) Math.round(d * 20))); } catch (RuntimeException e) { return 9; } });
+            note(a, t(a, "Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp."));
+        }
         if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", GameSettings.arceus(a) ? "30" : p[5]) },
             { "30", "30 fps", t(a, "30 fps, as the game is made") }, { "60", "60 fps", GameSettings.paldea(a) ? t(a, "Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)")
                                                                                                : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") } });
