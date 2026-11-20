@@ -1693,7 +1693,7 @@ static int g_hp_count; static uint64_t g_hp_scene_seq;   // passes into F begun 
 static VkImage g_hp_simg; static vmalloc_t g_hp_sa; static uint32_t g_hp_sw, g_hp_sh; static VkFormat g_hp_sfmt; static int g_hp_sfresh;
 static int hudfree_on(void) {
     static int v = -1; if (v < 0) { const char *e = getenv("DM_FRAMEGEN_HUDFREE"); v = !(e && !strcmp(e, "0")); }
-    return v && framegen_mode() == 1;
+    int m = framegen_mode(); return v && (m == 1 || m == 3);   // (ours, and Lossless Scaling's: nvn_lsfg.h ls_hud)
 }
 static void hp_read(vtex *x) {   // (sk_read: sampled, copied, loaded, shown)
     if (!g_hpc.open || !x || x == g_hpc.c0 || x->hp_stamp != g_hp_seq + 1) return;
@@ -5340,7 +5340,7 @@ static int framegen_mode(void) {
     const char *e = getenv("DM_FRAMEGEN"); m = e && (!strcmp(e, "on") || !strcmp(e, "1")) ? 1 : e && !strcmp(e, "debug") ? 2 : e && !strcmp(e, "lsfg") ? 3 : 0;
     dm_framegen_mode = m; return m;
 }
-static struct { fgen g; lsfg ls; int ls_tried, mult_cap; uint64_t ivl, ivl_last; fg_plan plan; int off, up, p, have_prev, resizes; uint64_t resize_t;
+static struct { fgen g; lsfg ls; int ls_tried, mult_cap; uint64_t ivl, ivl_last; fg_plan plan; int off, up, p, have_prev, resizes, hf_last; uint64_t resize_t;
                 VkSemaphore acqx[3][LS_MAXGEN], donex[3][LS_MAXGEN]; VkQueryPool qp; double tsper; int q_live[3], q_pics[3]; uint64_t budget;
                 // the pictures after the first one waiting for their time, the real frame last (under g_wmu): pending of them from phead on, presented g_fg_mult = pmult a game frame
                 int pending, phead, pmult; uint32_t pii[LS_MAXGEN]; VkSemaphore pdone[LS_MAXGEN]; uint64_t pdue[LS_MAXGEN], seq, arrived; sem_t wake;
@@ -5566,7 +5566,12 @@ static void present_window_locked(vtex *x, const int crop[4]) {
             if (!FGE.off) { if (FGE.held) snprintf(FGE.note, sizeof FGE.note, "paused:%.0f", fps); else FGE.note[0] = 0; } } } }
     int fg = fgm && !FGE.off && !FGE.held && FGE.base_fps > 0 && fg_ready(x, cx, cy, cw, ch), gen = 0;   // (the first 3 s: the game's own rate measured, fg_adapt)
     if (!fg) { FGE.have_prev = 0; FGE.ls.n = 0; }   // (the copy of the frame before goes stale the moment a frame is not copied; Lossless Scaling's history starts again)
-    else { FGE.g.debug = fgm == 2; gen = fg_plan_frame(&FGE.plan, t_arr, period) && FGE.have_prev && (fgm != 3 || FGE.ls.n >= 2); }   // (lsfg: three frames of history first)
+    // HUD-free: the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud, nvn_lsfg.h ls_hud). A switch between the two
+    //   kinds: the frames before are of the other kind, no picture from them (decided before the swapchain images are asked for)
+    int hf = fg && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt && (fgm != 3 || ls_hud_ok(&FGE.ls));
+    if (fg && hf != FGE.hf_last) { FGE.have_prev = 0; FGE.ls.n = 0; }
+    FGE.hf_last = hf;
+    if (fg) { FGE.g.debug = fgm == 2; gen = fg_plan_frame(&FGE.plan, t_arr, period) && FGE.have_prev && (fgm != 3 || FGE.ls.n >= 2); }   // (lsfg: three frames of history first)
     uint32_t ii, imgs[LS_MAXGEN + 1]; int npic = 0; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, UINT64_MAX, W.acq[sl], VK_NULL_HANDLE, &ii);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return; }
     if (r && r != VK_SUBOPTIMAL_KHR) return;
@@ -5588,18 +5593,18 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         if (FGE.qp && gen) { vkCmdResetQueryPool(cb, FGE.qp, sl * 2, 2); vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2); }
         if (ls) ls_begin(ls, cb); else fg_begin(g, cb);
         VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { cx, cy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { (uint32_t)cw, (uint32_t)ch, 1 } };
-        // HUD-free (our own frame generation): the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud)
-        int hf = !ls && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt;
-        if (!ls) { if (hf != g->hud_on && FGE.have_prev) FGE.have_prev = 0; g->hud_on = hf; }   // (a switch between the two: the frame before is of the other kind, no picture from it)
+        if (!ls) g->hud_on = hf;
         if (hf) { VkImageCopy sc = ic; sc.srcOffset = (VkOffset3D){ 0, 0, 0 };
-            vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
-            vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, g->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
+            vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
+            vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->hud.img : g->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
         else vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
         if (ls) {   // (its own barriers: the copy is made visible to its compute passes)
             ls_ingest(ls, cb, p);
             if (gen) { for (int k = 0; k < npic; k++) ls_generate(ls, cb, npic, k);
                 if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = npic; }
-                for (int k = 0; k < npic; k++) { pres_src mid = { NULL, ls->m[k].img, ls->m[k].pview, ls->w, ls->h, 0, 0, cw, ch }; present_compose(cb, imgs[k], &mid, flip); } }
+                for (int k = 0; k < npic; k++) { ls_img *e = &ls->m[k];
+                    if (hf) { ls_hud(ls, cb, k); e = &ls->o; }   // (its HUD back on top; o is drawn here before the next picture's pass writes it)
+                    pres_src mid = { NULL, e->img, e->pview, ls->w, ls->h, 0, 0, cw, ch }; present_compose(cb, imgs[k], &mid, flip); } }
         } else {
         VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
