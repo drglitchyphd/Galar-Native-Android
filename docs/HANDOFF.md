@@ -116,7 +116,7 @@ Next steps:
 
 That checkout already had the owner's uncommitted work (touch menu, gestures, `game.tsv` entries and more). Tonight's changes there are **not committed**, so as not to sweep that work in:
 - `nvn_vk.c`: the layered 3D render targets and the shared image for a render target read through a second texture object, both from Galar / Paldea ([handoff/arceus-layered-3d-only.patch](handoff/arceus-layered-3d-only.patch) is exactly these).
-- **Lower specs** (the POTATO mod, for low-end phones; off by default): a choice in `Settings.java` (Off / On / Lowest, `DM_LOWSPEC=1|2`) and `lowspec()` in `android_main.c`, which writes the three files from `lowspec_files.h` to `<files>/lowspec/romfs` and puts that first in `DM_ROMFS_OVERLAY`. Files: [handoff/arceus-lowspec-android_main.c](handoff/arceus-lowspec-android_main.c), [handoff/arceus-lowspec_files.h](handoff/arceus-lowspec_files.h), the source `.bin` files in [handoff/arceus-lowspec-bins](handoff/arceus-lowspec-bins). Not checked against the game's own files (no Arceus RomFS on the PC); the overlay itself was confirmed working on the phone.
+- **Lower specs** (the POTATO mod, for low-end phones; off by default): a choice in `Settings.java` (Off / On / Lowest, `DM_LOWSPEC=1|2`) and `lowspec()` in `android_main.c`. Since 2026-11-20 no mod files ship: `lowspec()` reads the player's own `field_common_config.bin` / `field_shadow_config.bin`, changes the same values the POTATO mod changed (checked equal to the mod on the phone's files), writes them to `<files>/lowspec/romfs` and puts that first in `DM_ROMFS_OVERLAY`. Style move effects (`style_fx()`) are cut from the player's own `cmn_battle_waza_{pow,teq}_start.wbin` the same way.
 - Ask the owner before committing in that repo.
 
 ### 5. Requested, not started
@@ -146,7 +146,7 @@ Taken from `androidswithy` `84fb5df` (the rest of that commit was older copies o
 - touch controls: the game's Back prompt, the item selector's gestures, lock-on, the throw ring, menu swipes and drag scrolling (`touch_ui.c`, `touch_menu.c`), mapped through
   `dm_picture_box`; Galar's ☰ menu and layout editor replace the Arceus settings button
 - `DM_VK_TEXOVR` and the profile key `tex_unwritten_one` (`nvn_vk.c`): the purple-shadow test of problem 3 runs on this engine
-- Lower specs (`DM_LOWSPEC`, the POTATO mod's files in `lowspec_files.h`), in the in-game menu for Arceus only, built into the Arceus engine only
+- Lower specs (`DM_LOWSPEC`, generated from the player's own config files), in the in-game menu for Arceus only, built into the Arceus engine only
 - presses held for a number of game frames (`dm_input_press_frames`), a mouse as touch, WASD as the left stick, the emulator's fault kind without ESR (`crash.c`),
   LSE-free NVN thunks (`elf_asm.py`)
 - split submissions stay on for Arceus (as Scarlet / Violet); no 60 fps choice (the game counts frames); no Lowest graphics (that is Sword / Shield's render scale)

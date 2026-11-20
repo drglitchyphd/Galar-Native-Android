@@ -565,35 +565,18 @@ static void device_profile(void) {
             *maker ? maker : "?", *model ? model : "unknown", force ? ", DM_PROFILE" : "", gb, g ? g : "default", an ? an : "default", tq ? tq : "full");
 }
 #if DM_GAME_PROGRAM_ID == 0x01001F5010DFA000ull   // (Legends: Arceus only: its RomFS files)
-// "Lower specs" (the settings' DM_LOWSPEC: 1 lower, 2 lowest), for phones that cannot hold the game's frame rate: the POTATO mod's RomFS files, kept in this library
-//   (lowspec_files.h) and written to <files>/lowspec on start, are laid over the game's RomFS (hle_fs.c DM_ROMFS_OVERLAY, first root wins): a shorter draw distance for
-//   Pokémon, people and trees (bin/misc/app_config/field_common_config.bin) and lighter shadows, at 1 fewer (Low Shadows), at 2 none (No Shadows: field_shadow_config.bin)
-#include "lowspec_files.h"
-static int write_all(const char *path, const unsigned char *b, size_t n) {
-    char d[1200]; snprintf(d, sizeof d, "%s", path);
-    for (char *s = d + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(d, 0770); *s = '/'; }
-    FILE *f = fopen(path, "wb"); if (!f) return 0;
-    int ok = fwrite(b, 1, n, f) == n; return fclose(f) == 0 && ok;
-}
-static void lowspec(void) {
-    const char *e = getenv("DM_LOWSPEC"); int lv = e ? atoi(e) : 0; if (lv < 1 || lv > 2) return;
-    char root[1100], f[1300]; snprintf(root, sizeof root, "%s/lowspec/romfs", g_files);
-    snprintf(f, sizeof f, "%s/bin/misc/app_config/field_common_config.bin", root);
-    int ok = write_all(f, LS_draw_distance, sizeof LS_draw_distance);
-    snprintf(f, sizeof f, "%s/bin/misc/app_config/field_shadow_config.bin", root);
-    ok &= lv == 2 ? write_all(f, LS_no_shadows, sizeof LS_no_shadows) : write_all(f, LS_low_shadows, sizeof LS_low_shadows);
-    if (!ok) { fprintf(stderr, "boot: [RED] lower specs: could not write %s\n", root); return; }
-    const char *o = getenv("DM_ROMFS_OVERLAY"); char all[4096];
-    snprintf(all, sizeof all, "%s%s%s", root, o && *o ? ":" : "", o && *o ? o : "");   // (ahead of any other overlay)
-    setenv("DM_ROMFS_OVERLAY", all, 1);
-    fprintf(stderr, "boot: lower specs %d: shorter draw distance, %s (RomFS overlay %s)\n", lv, lv == 2 ? "no shadows" : "lighter shadows", root);
-}
 // "Draw distance" (the settings' DM_ARC_DRAW: near / far / veryfar; Default: none): the player's OWN config files, read from their RomFS, with the distance values
 //   rewritten, laid over the RomFS like Lower specs (nothing of the game's comes with the app). The files are FlatBuffers of named settings, each {name, type, ?, min,
 //   max, values: a vector of strings}: a value is changed by appending its new string at the end of the buffer and pointing the vector's slot at it (offsets point
 //   forward, so the rest stays valid). Changed: bin/misc/app_config/field_common_config.bin kTreeVisibleDistance [0, 200], kTreeFadeDistanceFar [180, 200],
 //   kDistanceOfCameraToTerrainLodPoint 7 (and for Near the people / Pokémon load radii 60 / 40), field_anime_framerate_config.bin distanceBaseValue 60 (where animation
 //   slows down); each times the setting's factor, never over the setting's own max. Read at start: a change applies at the next start
+static int write_all(const char *path, const unsigned char *b, size_t n) {
+    char d[1200]; snprintf(d, sizeof d, "%s", path);
+    for (char *s = d + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(d, 0770); *s = '/'; }
+    FILE *f = fopen(path, "wb"); if (!f) return 0;
+    int ok = fwrite(b, 1, n, f) == n; return fclose(f) == 0 && ok;
+}
 typedef struct { unsigned char *d; size_t n, cap; } cfgbuf;
 static uint32_t cb_u32(const cfgbuf *b, size_t o) { uint32_t v; memcpy(&v, b->d + o, 4); return v; }
 static int32_t cb_s32(const cfgbuf *b, size_t o) { int32_t v; memcpy(&v, b->d + o, 4); return v; }
@@ -665,20 +648,77 @@ static void draw_distance(void) {
     setenv("DM_ROMFS_OVERLAY", all, 1);
     fprintf(stderr, "boot: draw distance %s (x%.2f): %d value(s) in field_common_config, %d in field_anime_framerate_config, from the player's own files (RomFS overlay %s)\n", e, k, nc, na, root);
 }
-// "Style move effects" (the settings' DM_ARC_STYLE_FX: off unless 1): the strong / agile style moves' start effects replaced by the No More Styles 1.2 mod's nearly
-//   empty ones (nostyles_files.h), laid over the game's RomFS like Lower specs. With the game's own effects, grey boxes covered the screen on Adreno and Xclipse
-//   (Arceus-Native-Android #14 #15 #20); the moves and their power are unchanged, only the full-screen animation as they start goes
-#include "nostyles_files.h"
+// "Lower specs" (the settings' DM_LOWSPEC: 1 lower, 2 lowest), for phones that cannot hold the game's frame rate, from the player's OWN config files (as Draw distance;
+//   nothing of the game's or of a mod comes with the app): the people / Pokémon load radii and the trees' visible distance halved (field_common_config.bin
+//   kArea00NpcLoadRadius 60 → 30, kArea00NpcPokeLoadRadius 40 → 20, kTreeVisibleDistance 200 → 100), and the shadow cascades' splits (field_shadow_config.bin
+//   cascadeShadowSplit1..4) set as the POTATO mod set them: lower "-1." / "-1." / "-1." / "-1..", lowest the same with split 1 "1..." (the same strings, so the
+//   game reads them exactly as it read the mod's)
+static int cb_set(cfgbuf *b, const char *name, const char *val) {   // the entry's first value replaced by val; 1 done
+    size_t vec; double mx; if (!cb_entry(b, name, &vec, &mx) || cb_u32(b, vec) < 1) return 0;
+    size_t es = vec + 4; int at = cb_append(b, val); if (at < 0) return 0;
+    uint32_t rel = (uint32_t)((size_t)at - es); memcpy(b->d + es, &rel, 4); return 1;
+}
+static const char *own_romfs(char *buf, size_t n) { const char *rf = getenv("DM_ROMFS"); if (rf && *rf) snprintf(buf, n, "%s", rf); else snprintf(buf, n, "%s/RomFS", g_game); return buf; }
+static void overlay_first(const char *root) {
+    const char *o = getenv("DM_ROMFS_OVERLAY"); char all[4096];
+    snprintf(all, sizeof all, "%s%s%s", root, o && *o ? ":" : "", o && *o ? o : "");   // (ahead of any other overlay)
+    setenv("DM_ROMFS_OVERLAY", all, 1);
+}
+static void lowspec(void) {
+    const char *e = getenv("DM_LOWSPEC"); int lv = e ? atoi(e) : 0; if (lv < 1 || lv > 2) return;
+    char rom[1100], root[1100], in[1300], out[1300]; own_romfs(rom, sizeof rom); snprintf(root, sizeof root, "%s/lowspec/romfs", g_files);
+    int nc = 0, ns = 0; cfgbuf b = { 0 };
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_common_config.bin", rom);
+    if (cb_load(in, &b)) {
+        nc += cb_scale(&b, "kArea00NpcLoadRadius", 0.5, 1); nc += cb_scale(&b, "kArea00NpcPokeLoadRadius", 0.5, 1); nc += cb_scale(&b, "kTreeVisibleDistance", 0.5, 0);
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_common_config.bin", root); if (nc && !write_all(out, b.d, b.n)) nc = -1; free(b.d); }
+    memset(&b, 0, sizeof b);
+    snprintf(in, sizeof in, "%s/bin/misc/app_config/field_shadow_config.bin", rom);
+    if (cb_load(in, &b)) {
+        ns += cb_set(&b, "cascadeShadowSplit4", "-1."); ns += cb_set(&b, "cascadeShadowSplit3", "-1."); ns += cb_set(&b, "cascadeShadowSplit2", "-1.");
+        ns += cb_set(&b, "cascadeShadowSplit1", lv == 2 ? "1..." : "-1..");
+        snprintf(out, sizeof out, "%s/bin/misc/app_config/field_shadow_config.bin", root); if (ns && !write_all(out, b.d, b.n)) ns = -1; free(b.d); }
+    if (nc <= 0 || ns <= 0) { fprintf(stderr, "boot: [RED] lower specs: the player's config files could not be read or changed (%s): left out\n", rom); return; }
+    overlay_first(root);
+    fprintf(stderr, "boot: lower specs %d: shorter draw distance (%d values), %s (%d values), from the player's own files (RomFS overlay %s)\n", lv, nc, lv == 2 ? "no shadows" : "lighter shadows", ns, root);
+}
+// "Style move effects" (the settings' DM_ARC_STYLE_FX: off unless 1): the strong / agile style moves' start sequences (bin/effect/battle/sequence/cmn_battle_waza_
+//   {pow,teq}_start.wbin) cut down to what the No More Styles 1.2 mod left, from the PLAYER'S OWN files: of the sequence's 39 steps, its first empty one and the one
+//   holding a single command 0x21 (the end of the sequence), that command's two arguments set as the mod set them (0, 32; the game's own are 9, 41). With the game's own effects grey boxes covered the screen on Adreno
+//   and Xclipse (Arceus-Native-Android #14 #15 #20); the moves and their power are unchanged, only the full-screen animation as they start goes. A FlatBuffer cut in
+//   place: the steps vector's count and its two slots rewritten (the kept steps lie after it, offsets point forward)
+static size_t fb_field(const cfgbuf *b, size_t t, int i) {   // a table field's address, 0 if absent
+    int64_t vt = (int64_t)t - cb_s32(b, t); if (vt < 0 || (size_t)vt + 4 > b->n) return 0;
+    uint16_t vsz = cb_u16(b, (size_t)vt); if ((size_t)(4 + 2 * i + 2) > vsz) return 0;
+    uint16_t fo = cb_u16(b, (size_t)vt + 4 + 2 * (size_t)i); return fo ? t + fo : 0;
+}
+static size_t fb_ref(const cfgbuf *b, size_t a) { return a && a + 4 <= b->n ? a + cb_u32(b, a) : 0; }   // where a uoffset field points
+static int seq_strip(cfgbuf *b) {
+    size_t root = cb_u32(b, 0), vf = fb_field(b, root, 0), v = fb_ref(b, vf); if (!v || v + 4 > b->n) return 0;
+    uint32_t n = cb_u32(b, v); size_t empty = 0, end = 0;
+    for (uint32_t k = 0; k < n && v + 8 + 4 * k <= b->n; k++) {
+        size_t st = fb_ref(b, v + 4 + 4 * k), cf = st ? fb_field(b, st, 2) : 0, cv = fb_ref(b, cf); if (!st) continue;
+        uint32_t cn = cv && cv + 4 <= b->n ? cb_u32(b, cv) : 0;
+        if (!empty && cf && cn == 0) empty = st;
+        if (!end && cn == 1) { size_t cmd = fb_ref(b, cv + 4), op = cmd ? fb_field(b, cmd, 0) : 0;
+            if (op && b->d[op] == 0x21) { end = st; size_t args = fb_ref(b, fb_field(b, cmd, 1));
+                for (int i = 0; args && i < 2; i++) { size_t a = fb_field(b, args, i); uint32_t x = i ? 32u : 0u; if (a && a + 4 <= b->n) memcpy(b->d + a, &x, 4); } } }   // (as the mod: 0, 32; the game's own 9, 41)
+    }
+    if (!empty || !end || empty < v + 12 || end < v + 12) return 0;
+    uint32_t two = 2, r0 = (uint32_t)(empty - (v + 4)), r1 = (uint32_t)(end - (v + 8));
+    memcpy(b->d + v, &two, 4); memcpy(b->d + v + 4, &r0, 4); memcpy(b->d + v + 8, &r1, 4); return 1;
+}
 static void style_fx(void) {
     const char *e = getenv("DM_ARC_STYLE_FX"); if (e && !strcmp(e, "1")) { fprintf(stderr, "boot: style move effects: the game's own (DM_ARC_STYLE_FX=1)\n"); return; }
-    char root[1100], f[1300]; snprintf(root, sizeof root, "%s/nostyles/romfs", g_files);
-    snprintf(f, sizeof f, "%s/bin/effect/battle/sequence/cmn_battle_waza_pow_start.wbin", root); int ok = write_all(f, NS_pow_start, sizeof NS_pow_start);
-    snprintf(f, sizeof f, "%s/bin/effect/battle/sequence/cmn_battle_waza_teq_start.wbin", root); ok &= write_all(f, NS_teq_start, sizeof NS_teq_start);
-    if (!ok) { fprintf(stderr, "boot: [RED] style move effects: could not write %s\n", root); return; }
-    const char *o = getenv("DM_ROMFS_OVERLAY"); char all[4096];
-    snprintf(all, sizeof all, "%s%s%s", root, o && *o ? ":" : "", o && *o ? o : "");
-    setenv("DM_ROMFS_OVERLAY", all, 1);
-    fprintf(stderr, "boot: style move effects off: the strong / agile start effects of No More Styles 1.2 (RomFS overlay %s)\n", root);
+    static const char *const F[2] = { "cmn_battle_waza_pow_start.wbin", "cmn_battle_waza_teq_start.wbin" };
+    char rom[1100], root[1100], in[1300], out[1300]; own_romfs(rom, sizeof rom); snprintf(root, sizeof root, "%s/nostyles/romfs", g_files);
+    int ok = 1;
+    for (int i = 0; i < 2 && ok; i++) { cfgbuf b = { 0 };
+        snprintf(in, sizeof in, "%s/bin/effect/battle/sequence/%s", rom, F[i]); snprintf(out, sizeof out, "%s/bin/effect/battle/sequence/%s", root, F[i]);
+        ok = cb_load(in, &b) && seq_strip(&b) && write_all(out, b.d, b.n); free(b.d); }
+    if (!ok) { fprintf(stderr, "boot: [RED] style move effects: the player's sequence files could not be read or cut (%s): the game's own\n", rom); return; }
+    overlay_first(root);
+    fprintf(stderr, "boot: style move effects off: the strong / agile style moves start without their full-screen animation, from the player's own files (RomFS overlay %s)\n", root);
 }
 #else
 static void lowspec(void) { }
