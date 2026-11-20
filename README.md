@@ -22,8 +22,8 @@
 
 ## Requirements
 
-- Android 12+, arm64, Vulkan 1.1+.
-- About 15 GB free per game. 8 GB of RAM or more is best.
+- Android 12+, arm64, Vulkan 1.0 or later.
+- About 15 GB free per game. 8 GB of RAM or more is best; on 6 GB phones the app picks lighter settings for you.
 
 ## Compatibility
 
@@ -38,12 +38,16 @@
 
 ## What's new
 
-- **Mali crash fix (v0.69).** Arm's driver makes more screen buffers than the game asks for (14 for 8 on a Mali-G57). The game had room for 8, so on some Mali phones the driver closed it a few frames in (#158, #163). It now has room for 32 and uses the count the driver reports.
-- **Screen setup fallbacks (v0.72).** If a driver refuses the screen setup, the game tries again with the plainest settings every driver must accept. Before, that left a black screen.
-- **Two Mali tests (v0.72),** in ☰ → White screen tests (Mali), both off by default:
-  - *Multiply by zero as on the Switch.* On the Switch's GPU, 0 × infinity is 0. On phones it's NaN, which can show as white or glowing surfaces. This rewrites each shader's SPIR-V as it loads so that every multiply follows the Switch's rule, so you don't need to run setup again. A little slower.
-  - *Keep unused depth in tile memory.* Depth that nothing reads afterwards isn't written back to memory, which is faster on Mali. Tell us if anything flickers.
-- **Engine built with link-time optimization (v0.72).** The compiler now optimizes the whole engine at once instead of file by file. It should take less CPU time per frame; not yet measured on a phone.
+**v0.95**
+
+- **A steady 30 fps.** When the phone can't keep up, the game lowers its 3D resolution step by step until it can, and raises it again once things calm down. The HUD and text stay sharp.
+- **Heat guard.** When the phone gets hot, the 3D resolution drops before the phone throttles itself, on every Graphics setting.
+- **Frame rate: Auto, 30, 60 or Dynamic**, changed while you play. *Dynamic* runs at 60 where the phone can and 30 where it can't, at the full picture.
+- **Resolution: 720p, 1080p or 1440p** (from the next start), and a **3D render scale** slider.
+- **Widescreen:** the HUD now stays 16:9 in the middle instead of stretching.
+- **Frame generation** draws the in-between pictures without the HUD (no more doubled text) and uses depth to keep characters clean.
+- **Older and less common phones:** Vulkan 1.0 drivers are supported, older Snapdragon drivers no longer show exploding polygons, PowerVR textures use a safer format, and older ARMv8.0 CPUs no longer crash on certain instructions.
+- **Smoother and lighter:** faster texture loading, fixes found by Vulkan's own validation checks, and a memory report in the log.
 
 ## Playing
 
@@ -56,11 +60,16 @@
 
 | Setting | Choices |
 | --- | --- |
-| Picture | 16:9, fill screen, 20:9 (for widescreen mods) |
+| Picture | 16:9, fill screen, widescreen (the HUD stays 16:9) |
+| Resolution | 720p, 1080p, 1440p (from the next start) |
+| 3D render scale | Auto, or 50–100 % |
 | Upscaling | Auto, Sharp, SGSR, Smooth |
-| Graphics | Auto, High (1080p), Low (720p), Adaptive |
-| Textures | Auto, Full, Half; texture format (compact on Mali / Xclipse / PowerVR) |
-| Frame rate | Auto, 30, 60 (experimental), Sword & Shield |
+| Graphics | Auto, High, Low, Adaptive |
+| Mode | Auto, Quality, Performance |
+| Power | Balanced, Battery saver |
+| Textures | Auto, Full, Half |
+| Frame rate | Auto, 30, 60, Dynamic (changes while you play) |
+| Frame generation | Off, On, Lossless Scaling (your own `Lossless.dll`) |
 | Graphics driver | Phone's own, Turnip, PanVK, or any driver package (with their options) |
 | Controls | Button layout, remapping, touch look and layout, rumble |
 | Performance overlay | fps, temperature, GPU, free memory, battery |
@@ -68,7 +77,7 @@
 | Mods, saves | Import, switch, order and annotate mods; export / import saves |
 | Language | English, Español, Português, Français, 日本語 (Auto: the phone's) |
 
-**Auto** rates the phone's CPU, GPU and RAM (top, mid or low) and picks graphics, textures and filtering from that. The menu shows what it picked.
+**Auto** rates the phone's CPU, GPU and RAM and picks graphics, textures and filtering from that; while you play it keeps the frame rate steady and the phone cool. The menu shows what it picked.
 
 ## Local play
 

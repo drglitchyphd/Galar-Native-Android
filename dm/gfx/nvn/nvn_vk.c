@@ -2716,6 +2716,7 @@ static uint32_t *dp_fix(vshader *s, uint32_t *c, size_t *nw, const char *hex) {
 static char g_spv_dir[1024];
 static nvn_hmap g_shmap = {.klen = 8};      // shader key (8 bytes) → stage + 1 (as a pointer)
 static nvn_hmap g_shcache = {.klen = 8};    // shader key → vshader
+static _Atomic uint64_t g_spv_mod_bytes, g_spv_kept_bytes;   // ([mem]) SPIR-V handed to the driver as main modules, and kept by us (fragment shaders, for variants)
 static int stage_index(const char *s) { return !strcmp(s, "vertex") ? 0 : !strcmp(s, "pixel") ? 1 : !strcmp(s, "compute") ? 5 : !strcmp(s, "hull") ? 3 : !strcmp(s, "domain") ? 4 : !strcmp(s, "geometry") ? 2 : -1; }
 static int hexkey(const char *s, uint8_t k[8]) { for (int i = 0; i < 8; i++) { unsigned v; if (sscanf(s + 2 * i, "%2x", &v) != 1) return -1; k[i] = (uint8_t)v; } return 0; }
 static void shmap_read(void);
@@ -2961,6 +2962,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     }
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
+    atomic_fetch_add(&g_spv_mod_bytes, (uint64_t)ns); if (st == 1) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns);
     if (st == 1) { s->code = code; s->nw = ns / 4; } else free(code);
     if (r) { VLOG("[RED] shader %s: vkCreateShaderModule failed %d", hex, r); if (s->glmod) vkDestroyShaderModule(g_dev, s->glmod, NULL); free(s); return NULL; }
     return s;
@@ -3862,6 +3864,14 @@ static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm");
     if (!n) return NULL;
     static nvn_hmap progs = {.klen = 40}; static nvn_hmap seen = {.klen = sizeof(pso_rec)};
     int built = 0, had = 0, failed = 0, noshader = 0;
+    // Phones with little memory (6.5 GB or less, or DM_VK_PREWARM=cache): every pipeline is built once into the driver's pipeline cache (saved below) and destroyed
+    //   at once, instead of kept. Kept, the 1157 of Sword / Shield's list held about 400 MB of the driver's own memory for the whole run (Galaxy S25+ [mem-by]:
+    //   scudo:primary 398 MB of the app's 551, 2026-11-20), which a 4 GB phone does not have; from the cache a pipeline the game asks for later is made in a few ms
+    //   instead of compiled (and on Adreno in the background, DM_VK_ASYNC_PSO). DM_VK_PREWARM=keep keeps them on any phone
+    int cache_only; { const char *e = getenv("DM_VK_PREWARM");
+        FILE *mf = fopen("/proc/meminfo", "r"); long tot = 0; char ln[128]; while (mf && fgets(ln, sizeof ln, mf)) if (!strncmp(ln, "MemTotal:", 9)) { tot = atol(ln + 9) / 1024; break; } if (mf) fclose(mf);
+        cache_only = e && !strcmp(e, "cache");   // (opt-in: on the S25+ it saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
+        if (cache_only) VLOG("prewarm: into the pipeline cache only, not kept (%s): this phone has %ld MB", e ? "DM_VK_PREWARM=cache" : "6.5 GB or less", tot); }
     for (int i = 0; i < n; i++) {
         if (nvn_hm_get(&seen, &rs[i])) continue; nvn_hm_put(&seen, &rs[i], (void *)1);
         vprog *pr = nvn_hm_get(&progs, rs[i].key);
@@ -3875,10 +3885,11 @@ static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm");
         prog_layout(pr, 0);
         pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
         if (have) { had++; continue; }
-        if (pso_lookup(pr, &k, 0)) built++; else failed++;
+        if (cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); built++; } else failed++; }   // (into the driver's cache, not kept)
+        else if (pso_lookup(pr, &k, 0)) built++; else failed++;
         prewarm_pace(built + failed, &waits);
     }
-    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built, %d already there, %d failed, %d with a shader missing, %.1f s (paused %d times for low memory)", n, ns, nr, built, had, failed, noshader, (mono_ns() - t0) / 1e9, waits);
+    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %.1f s (paused %d times for low memory)", n, ns, nr, built, cache_only ? " (cache only)" : "", had, failed, noshader, (mono_ns() - t0) / 1e9, waits);
     free(rs);
     pcache_save();
     return NULL;
@@ -6003,9 +6014,9 @@ static void mem_report(void) {
     if (g_drop_n) VLOG("[mem] texture quality half: %llu textures uploaded without their largest level so far, about %.0f MB of game texture data left out",
                        (unsigned long long)g_drop_n, g_drop_saved / 1048576.0);
     VLOG("[mem] device blocks %d: %.0f MB (%.0f MB in use); textures %ld live, %.0f MB; pools %d, %.0f MB; arenas %.0f MB; descriptor pools %d; deferred %d; "
-         "shaders %u, pipelines %u, textures by serial %u, aliases %u, ghosts %u; host heap %.0f MB",
+         "shaders %u, pipelines %u, textures by serial %u, aliases %u, ghosts %u; host heap %.0f MB; SPIR-V %.0f MB in the driver's modules, %.0f MB kept by us",
          nb, dev / 1048576, devused / 1048576, atomic_load(&g_live_tex), atomic_load(&g_live_tex_bytes) / 1048576.0, npool, pool / 1048576, arena / 1048576, ndp, ndf,
-         g_shcache.n, g_pso.n, g_by_serial.n, g_alias.n, g_ghost.n, heap / 1048576.0);
+         g_shcache.n, g_pso.n, g_by_serial.n, g_alias.n, g_ghost.n, heap / 1048576.0, atomic_load(&g_spv_mod_bytes) / 1048576.0, atomic_load(&g_spv_kept_bytes) / 1048576.0);
 }
 // The front end's frame report (Android: performance hints, android_main.c): the presenting thread's work since its last present against the frame's period
 __attribute__((weak)) void front_frame_work(uint64_t busy_ns, uint64_t target_ns) { (void)busy_ns; (void)target_ns; }   // (no front end report: nothing)
