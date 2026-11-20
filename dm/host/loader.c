@@ -598,6 +598,25 @@ static int arc_res(module_t *m, int64_t p0, int64_t p1) {
     LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)", m->name);
     return (int)(sizeof R / sizeof *R);
 }
+// True aspect ratio for Legends: Arceus 1.1.1 (experimental, DM_WIDE_RENDER=1 with Widescreen): the game renders at the screen's own shape instead of 16:9 stretched to
+//   it. The render widths arc_res moves for 1440p: the five TV-mode 1920s (MOV W8 / W9, #0x780, and the MOVK X8, #0x780, LSL #32 of the pair at +0x29e99e4) become
+//   1080 x the screen's aspect, and that pair's handheld 1280 (MOVZ X8, #0x500) 720 x it (even, at most 21.6:9); the heights stay. With Widescreen's cameras (arc_wide)
+//   the picture keeps square pixels; the HUD is narrowed to 16:9 there already. Off by default: render targets grow ~25 % at 20:9 and the game's GPU memory areas are
+//   sized for 1080p (1440p, +78 %, could not start; crash #3's retry may or may not cover the smaller growth). A build or code that differs (1440p applied too) is left alone
+static int arc_wide_render(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_WIDE_RENDER"), *a = getenv("DM_ASPECT"), *r = getenv("DM_WIDE_RATIO");
+    if (!e || atoi(e) <= 0 || !a || strcmp(a, "wide")) return 0;
+    double ratio = r ? atof(r) : 0; if (ratio < 16.0 / 9.0 + 0.01) return 0;
+    if (ratio > 2.4) ratio = 2.4;
+    uint32_t w1080 = (uint32_t)(1080 * ratio / 2 + 0.5) * 2, w720 = (uint32_t)(720 * ratio / 2 + 0.5) * 2;
+    static const struct { uint64_t off; uint32_t orig; int tv; } S[] = {
+        { 0x29f0650, 0x5280f008u, 1 }, { 0x29f0410, 0x5280f008u, 1 }, { 0x2b9a5fc, 0x5280f008u, 1 }, { 0x277bd44, 0x5280f009u, 1 }, { 0x29e99e8, 0xf2c0f008u, 1 }, { 0x29e99e4, 0xd280a008u, 0 } };
+    for (unsigned i = 0; i < sizeof S / sizeof *S; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4);
+        if (S[i].off + 4 > m->text_end || w != S[i].orig || overlaps_rewrite(m, S[i].off, 4, p0, p1)) { LOG("[RED] %s: true aspect ratio not applied (the render size code differs at +%#llx, or 1440p is on)", m->name, (unsigned long long)S[i].off); return 0; } }
+    for (unsigned i = 0; i < sizeof S / sizeof *S; i++) { uint32_t w = (S[i].orig & ~(0xffffu << 5)) | (S[i].tv ? w1080 : w720) << 5; memcpy(m->base + S[i].off, &w, 4); }
+    LOG("%s: true aspect ratio for Legends: Arceus 1.1.1: the game renders %ux1080 in TV mode, %ux720 handheld (screen %.4f), instead of 16:9 stretched", m->name, w1080, w720, ratio);
+    return (int)(sizeof S / sizeof *S);
+}
 // Crash #3 (Legends: Arceus 1.1.1, on by default; DM_ARC_POOL_RETRY=0 leaves it out): the CPU-mapped buffer allocator's function at main+0x2a8d6ec (vtable main+0x4185e58
 //   slot +0x28) looks a block up on its list (bl find main+0x2a919bc at +0x2a8d714, x0 = list, x1 / x2 its arguments). When that fails it flushes the list (main+0x2a92624)
 //   but never looks again, then reads [x21 + 0x30] with x21 = 0 at +0x2a8d750: the crash. The call at +0x2a8d714 now goes to added code in the zero gap at +0x38c8600
@@ -665,7 +684,7 @@ static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, in
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
-    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
+    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_wide_render(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),
