@@ -598,11 +598,37 @@ static int arc_res(module_t *m, int64_t p0, int64_t p1) {
     LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)", m->name);
     return (int)(sizeof R / sizeof *R);
 }
+// Crash #3 (Legends: Arceus 1.1.1, on by default; DM_ARC_POOL_RETRY=0 leaves it out): the CPU-mapped buffer allocator's function at main+0x2a8d6ec (vtable main+0x4185e58
+//   slot +0x28) looks a block up on its list (bl find main+0x2a919bc at +0x2a8d714, x0 = list, x1 / x2 its arguments). When that fails it flushes the list (main+0x2a92624)
+//   but never looks again, then reads [x21 + 0x30] with x21 = 0 at +0x2a8d750: the crash. The call at +0x2a8d714 now goes to added code in the zero gap at +0x38c8600
+//   (the same data-area gap as Widescreen's, far past its 36 bytes; that page is kept executable, mod_page_note): it keeps x0 / x1 / x2, looks up, and when that finds
+//   nothing flushes and looks again with the same arguments, up to 4 times. Found: the game goes on as after any lookup that worked; still nothing: the old path, as before.
+//   (find / flush keep x23, the list, as the calling convention asks.) Every word is checked first
+static int arc_pool_retry(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_ARC_POOL_RETRY"); if (e && !strcmp(e, "0")) return 0;
+    const uint64_t site = 0x2a8d714, cave = 0x38c8600; const uint32_t orig = 0x940010aau, call = 0x9438ebbbu;   // bl find → bl cave
+    static const uint32_t code[32] = {
+        0xa9bd7bfdu, 0x910003fdu, 0xa90107e0u, 0xf90013e2u,   // stp x29, x30, [sp, #-48]! / mov x29, sp / stp x0, x1, [sp, #16] / str x2, [sp, #32]
+        0x97c724ebu, 0xb5000320u,                             // bl find / cbnz x0, done
+        0xaa1703e0u, 0x97c72802u, 0xa94107e0u, 0xf94013e2u, 0x97c724e5u, 0xb5000260u,   // 4x: mov x0, x23 / bl flush / ldp x0, x1, [sp, #16] / ldr x2, [sp, #32] / bl find / cbnz x0, done
+        0xaa1703e0u, 0x97c727fcu, 0xa94107e0u, 0xf94013e2u, 0x97c724dfu, 0xb50001a0u,
+        0xaa1703e0u, 0x97c727f6u, 0xa94107e0u, 0xf94013e2u, 0x97c724d9u, 0xb50000e0u,
+        0xaa1703e0u, 0x97c727f0u, 0xa94107e0u, 0xf94013e2u, 0x97c724d3u, 0xb5000020u,
+        0xa8c37bfdu, 0xd65f03c0u };                           // done: ldp x29, x30, [sp], #48 / ret
+    uint32_t w; int ok = cave + sizeof code <= lim && site + 4 <= m->text_end;
+    if (ok) { memcpy(&w, m->base + site, 4); ok = w == orig && !overlaps_rewrite(m, site, 4, p0, p1); }
+    for (unsigned i = 0; ok && i < 32; i++) { memcpy(&w, m->base + cave + 4 * i, 4); ok = !w; }
+    if (!ok) { LOG("[RED] %s: pool lookup retry (crash #3) not applied: the allocator's code or the gap differs, or was rewritten", m->name); return 0; }
+    memcpy(m->base + cave, code, sizeof code); mod_page_note(m, cave, sizeof code);
+    memcpy(m->base + site, &call, 4); mod_page_note(m, site, 4);
+    LOG("%s: pool lookup retry (crash #3): a failed lookup at +%#llx flushes and looks again, up to 4 times (code at +%#llx)", m->name, (unsigned long long)site, (unsigned long long)cave);
+    return 2;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
-    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
+    if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_pool_retry(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),
