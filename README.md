@@ -48,6 +48,8 @@
 - **Frame generation** draws the in-between pictures without the HUD (no more doubled text) and uses depth to keep characters clean.
 - **Older and less common phones:** Vulkan 1.0 drivers are supported, older Snapdragon drivers no longer show exploding polygons, PowerVR textures use a safer format, and older ARMv8.0 CPUs no longer crash on certain instructions.
 - **Smoother and lighter:** faster texture loading, fixes found by Vulkan's own validation checks, and a memory report in the log.
+- **Camera sensitivity is a slider** (50–200 %), like every other setting given in percent.
+- **Setup** keeps the game's icon (home screen shortcut, recent apps) even when it stops partway.
 
 ## Playing
 
@@ -71,7 +73,7 @@
 | Frame rate | Auto, 30, 60, Dynamic (changes while you play) |
 | Frame generation | Off, On, Lossless Scaling (your own `Lossless.dll`) |
 | Graphics driver | Phone's own, Turnip, PanVK, or any driver package (with their options) |
-| Controls | Button layout, remapping, touch look and layout, rumble |
+| Controls | Button layout, remapping, camera sensitivity (50–200 %), touch look and layout, rumble |
 | Performance overlay | fps, temperature, GPU, free memory, battery |
 | Online room | Server and room code for local play over the internet |
 | Mods, saves | Import, switch, order and annotate mods; export / import saves |
