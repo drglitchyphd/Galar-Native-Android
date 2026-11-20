@@ -175,6 +175,15 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         fprintf(stderr, "[dm] *x%d:", i);
         for (int k = 0; k < 6; k++) off("", w[k]);
         fputc('\n', stderr);
+        // one level further: a word that points at an object whose first word is in a module (its vtable). The heap a game loader allocates from sits at
+        //   [loader + 8] (Dynamax crash #211: alloc(size, 16) at main+0x5dd7b8 came back null): its vtable tells which allocator ran dry
+        int said = 0;
+        for (int k = 0; k < 6; k++) { uint64_t v[1]; vm_size_t g2 = 0;
+            if (w[k] < 0x100000000ull || (w[k] & 7) || module_of((void *)w[k])) continue;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)w[k], sizeof v, (vm_address_t)v, &g2) != KERN_SUCCESS || g2 != sizeof v || !module_of((void *)v[0])) continue;
+            if (!said++) fprintf(stderr, "[dm] *x%d's objects:", i);
+            fprintf(stderr, " [%d]", k); off("", v[0]); }
+        if (said) fputc('\n', stderr);
     }
     dm_backtrace(DM_UC_SS(uc).__fp);
     // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)
