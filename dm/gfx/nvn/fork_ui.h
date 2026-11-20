@@ -99,8 +99,9 @@ static void fk_screen_frame(int comp) {
     //   "all buttons" override for when it is wrong
     int dlg = 0; for (int i = 0; i < g_fk_cn; i++) if (!strncmp(g_fk_ck[i], "56af7f00", 8)) dlg = 1;
     { static int age; age = bat ? 0 : age < 100000 ? age + 1 : age; atomic_store(&dm_fork_battle_age, age); }
-    { static int gone = 1000; if (g_fk_area && gone > 90) atomic_fetch_add(&dm_fork_area_popups, 1); gone = g_fk_area ? 0 : gone + 1; }   // FORK v55: a popup after 3 s without one: a new area   // FORK v53: frames since the battle HUD was last drawn (the encounter panel's 1 s close)
+    static int gone = 1000; { if (g_fk_area && gone > 90) atomic_fetch_add(&dm_fork_area_popups, 1); gone = g_fk_area ? 0 : gone + 1; }   // FORK v55: a popup after 3 s without one: a new area   // FORK v53: frames since the battle HUD was last drawn (the encounter panel's 1 s close)
     int k = !comp && g_fk_cn ? 1 : comp && bat ? 2 : comp && dlg ? 3 : 0; static int cand = -1, held;
+    if (gone < 30 && !bat) k = 0;   // FORK v63 (Steven, Nov 20): the area name popup (and 1 s after it) is the overworld: it had switched the controls to the menu / dialogue layout
     if (k != cand) { cand = k; held = 0; return; }
     // (out of a battle only after 3 s without its HUD, to the world or dialogue: its text phases hide the HUD for a moment. To a full-screen menu (the Bag in a
     //   battle) at the usual 10 frames: v47 waited 3 s there too, and the menu's layout came late, Steven Nov 13)
