@@ -395,3 +395,9 @@ Record the frame's passes	Enregistrer les passes de l’image
 For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Pour les scènes lentes : fermez ce menu dans les 3 secondes et restez là où le jeu ralentit. Les passes de rendu de trois images, avec leur temps GPU si le téléphone le donne, sont enregistrées dans Téléchargements (un fichier finissant par framegraph.txt). Joignez-le à votre issue.
 Recording in 3 seconds: close the menu.	Enregistrement dans 3 secondes : fermez le menu.
 Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	À gauche : Auto, ce que donne le réglage Graphismes, abaissé tout seul quand le téléphone chauffe. Plus bas : plus frais et plus rapide, la 3D plus douce ; le texte et les menus restent nets.
+Mode	Mode
+Auto: as the Graphics setting decides	Auto : ce que décide le réglage Graphismes
+Quality	Qualité
+Quality: docked: 1080p and the game's full effects	Qualité : sur le dock : 1080p et tous les effets du jeu
+Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	Performances : la 3D en 720p : plus frais et plus stable (le HUD et le texte restent nets)
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Performances : portable : 720p et les réglages plus légers du jeu : plus frais et plus stable

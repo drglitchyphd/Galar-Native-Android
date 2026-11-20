@@ -321,6 +321,12 @@ public final class GameMenu {
             // Lowest: handheld mode with the game's 3D render scale capped (Pokémon Sword / Shield: the engine's hle_resscale.c; Scarlet / Violet have no such scale)
             { "lowest", t(a, "Lowest"), t(a, GameSettings.paldea(a) ? "Lowest: handheld mode, 3D at 960x540, coolest" : "Lowest: 3D at 960x540, coolest") } };
         choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);
+        // Quality (docked) or Performance (handheld), live (android_main.c DM_DISPLAY_MODE); Sword / Shield keep TV mode and draw the 3D at 720p for Performance
+        boolean galarMode = GameSettings.isShield(a) || "0100ABF008968000".equalsIgnoreCase(GameSettings.game(a)[0]);
+        choice(a, "DM_DISPLAY_MODE", t(a, "Mode"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: as the Graphics setting decides") },
+            { "quality", t(a, "Quality"), t(a, "Quality: docked: 1080p and the game's full effects") },
+            { "performance", t(a, "Performance"), galarMode ? t(a, "Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)")
+                                                             : t(a, "Performance: handheld: 720p and the game's lighter settings: cooler and steadier") } });
         // the game's own 3D render scale, capped (android_main.c DM_RES_CAP, hle_resscale.c): Sword / Shield, at once. The HUD and text stay sharp; only the 3D is drawn smaller
         // Battery saver (android_main.c power_saver, #333): live
         choice(a, "DM_POWER", t(a, "Power"), new String[][] { { "", t(a, "Balanced"), t(a, "Balanced: the best picture this phone holds at a steady frame rate") },

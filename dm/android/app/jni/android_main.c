@@ -221,6 +221,16 @@ JNIEXPORT jstring JNICALL Java_com_nxnative_GameMenu_nativeFramegenNote(JNIEnv *
 //   and the performance hint asks for the whole frame (the governor runs the cores slower). 1 on, 0 off, -1 not read yet
 static _Atomic int g_power_saver = -1;
 static int power_saver(void) { int v = atomic_load(&g_power_saver); if (v < 0) { const char *e = getenv("DM_POWER"); v = e && !strcmp(e, "saver"); atomic_store(&g_power_saver, v); } return v; }
+// Graphics → Mode (DM_DISPLAY_MODE, live): Auto (the Graphics level decides), Quality (docked: TV mode, 1080p, the game's full effects), Performance (handheld:
+//   720p and the game's lighter settings). The game takes a change as a real dock / undock (hle_oe.c dm_set_opmode → notifications 30 / 31: Sword / Shield and
+//   Legends: Arceus redraw at 1280x720 and back at once, Galaxy S25+ 2026-11-20). Pokémon Sword / Shield stay in TV mode for Performance: their handheld mode crashed
+//   when a Pokémon Dynamaxes (#211 #115); the same 720p comes from the 3D render scale instead (the game's own scale, capped at the 720p step, never above the
+//   player's slider). With Quality or Performance chosen, Graphics Auto switches the mode no more (graphics_auto); heat lowers only the 3D render scale
+void dm_set_opmode(int m);   // (host/hle_oe.c)
+static int display_galar(void) { return !strcmp(DM_GAME_ID, "01008DB008C2C000") || !strcmp(DM_GAME_ID, "0100ABF008968000"); }
+static int display_mode(void) { const char *m = getenv("DM_DISPLAY_MODE"); return m && !strcmp(m, "quality") ? 1 : m && !strcmp(m, "performance") ? 2 : 0; }   // 0 Auto
+static float g_user_cap = -1;   // the player's 3D render scale (the slider or the Graphics level's; -1 none), which Performance only ever goes under (Sword / Shield)
+static float display_cap(float c) { return display_mode() == 2 && display_galar() && c > 0.667f ? 0.667f : c; }
 JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env, jclass c, jstring jk, jstring jv) {
     (void)c; const char *k = (*env)->GetStringUTFChars(env, jk, NULL), *v0 = (*env)->GetStringUTFChars(env, jv, NULL); const char *v = *v0 ? v0 : NULL; int now = 1;
     if (!strcmp(k, "DM_BACKGROUND")) g_bg_off = v && !strcmp(v, "off");
@@ -240,9 +250,25 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
     else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }
     // the 3D render scale (☰ → Graphics → 3D render scale; hle_resscale.c's cap on the game's own scale, Sword / Shield): live. Auto = what the Graphics level gives
     //   (Lowest 0.50, Low 0.55, else none) and the heat guard steps it; a percentage is held, and the guard leaves it alone (graphics_auto: DM_RES_CAP set)
+    else if (!strcmp(k, "DM_DISPLAY_MODE")) {
+        if (v && *v) setenv("DM_DISPLAY_MODE", v, 1); else unsetenv("DM_DISPLAY_MODE");
+        int m = display_mode(); const char *g = getenv("DM_GRAPHICS");
+        if (display_galar()) {   // (TV mode always; Performance: the 3D render scale at the 720p step, under the player's own)
+            extern void dm_res_cap_set(float) __attribute__((weak)); extern int dm_res_scale_ready(void);
+            float u = g_user_cap > 0 ? g_user_cap : 1.0f, c = display_cap(u);
+            if (m == 2) { char b[16]; snprintf(b, sizeof b, "%.3f", c); setenv("DM_RES_CAP", b, 1); }
+            else if (g_user_cap > 0 && g_user_cap < 1.0f) { char b[16]; snprintf(b, sizeof b, "%.2f", g_user_cap); setenv("DM_RES_CAP", b, 1); } else unsetenv("DM_RES_CAP");
+            if (&dm_res_cap_set && dm_res_scale_ready()) dm_res_cap_set(c); else now = 0;
+            fprintf(stderr, "mode: %s: 3D render scale %.0f %% (TV mode kept), set while playing\n", m == 2 ? "performance" : m == 1 ? "quality" : "auto", c * 100);
+        } else {
+            int tv = m == 1 ? 1 : m == 2 ? 0 : !(g && (!strcmp(g, "low") || !strcmp(g, "lowest")));   // (Auto: what the Graphics level gives)
+            dm_set_opmode(tv); fprintf(stderr, "mode: %s: %s, set while playing\n", m == 2 ? "performance" : m == 1 ? "quality" : "auto", tv ? "TV mode (docked)" : "handheld mode");
+        } }
     else if (!strcmp(k, "DM_RES_CAP")) { extern void dm_res_cap_set(float) __attribute__((weak)); extern int dm_res_scale_ready(void);
         float c = v ? (float)atof(v) : 0; const char *g = getenv("DM_GRAPHICS");
         if (c >= 0.5f && c <= 1.0f) setenv("DM_RES_CAP", v, 1); else { unsetenv("DM_RES_CAP"); c = g && !strcmp(g, "lowest") ? 0.50f : g && !strcmp(g, "low") ? 0.55f : 1.0f; }
+        g_user_cap = c; c = display_cap(c);   // (Mode: Performance keeps it at the 720p step at most)
+        if (display_cap(1.0f) < 1.0f) { char b[16]; snprintf(b, sizeof b, "%.3f", c); setenv("DM_RES_CAP", b, 1); }   // (held: Auto's guard leaves it alone)
         if (&dm_res_cap_set && dm_res_scale_ready()) { dm_res_cap_set(c); fprintf(stderr, "3D render scale: %.0f %% (%s), set while playing\n", c * 100, v ? "chosen" : "Auto"); } else now = 0; }
     else if (!strcmp(k, "DM_RSTICK_SENS")) { extern _Atomic int dm_rstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 25 || p > 400) p = 100; if (&dm_rstick_pct) atomic_store(&dm_rstick_pct, p); else now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
     else if (!strcmp(k, "DM_ASPECT")) __atomic_store_n(&dm_aspect_mode, !v ? DM_ASPECT_FIT : !strcmp(v, "20:9") ? DM_ASPECT_20_9 : !strcmp(v, "fill") || !strcmp(v, "wide") ? DM_ASPECT_FILL : DM_ASPECT_FIT, __ATOMIC_RELAXED);
@@ -799,6 +825,7 @@ static void graphics_auto(void) {
         }
         return;
     }
+    if (display_mode()) return;   // (Graphics → Mode chosen: the mode stays as the player set it; heat_guard / the scale do the rest)
     if (mode == 1) {
         if (full) held++;
         if (held >= 24) wait = 12;   // two minutes held in TV mode: the next fall back waits a minute again
@@ -945,10 +972,14 @@ static void host_start(void) {
     //   0.50 = 960x540 (as lowest drew before). In handheld mode a Dynamax (the Poké Ball growing) crashed: the game's file loader got a null buffer from one of its
     //   own sub-heaps and unpacked an LZ4 entry into it (main+0x5dd7b8 alloc, no null check → main+0x1865410; #211 Adreno 613 on lowest, #115 Xclipse 530 on low,
     //   both "handheld set, TV flag 0"; no crash reported in TV mode). DM_OPMODE=0 in env.txt still gives handheld
+    { int m = display_mode();   // (Graphics → Mode: Quality / Performance, before the level's defaults below)
+      if (m == 1 || (m == 2 && display_galar())) setenv("DM_OPMODE", "1", 1); else if (m == 2) setenv("DM_OPMODE", "0", 1); }
     { const char *g = getenv("DM_GRAPHICS"); int galar = !strcmp(DM_GAME_ID, "01008DB008C2C000");
       if (g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) setenv("DM_OPMODE", galar ? "1" : "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0);
       if (g && !strcmp(g, "lowest")) setenv("DM_RES_CAP", galar ? "0.50" : "0.75", 0);
-      else if (g && !strcmp(g, "low") && galar) setenv("DM_RES_CAP", "0.55", 0); }
+      else if (g && !strcmp(g, "low") && galar) setenv("DM_RES_CAP", "0.55", 0);
+      { const char *rc = getenv("DM_RES_CAP"); float u = rc ? (float)atof(rc) : 1.0f; if (!(u >= 0.5f && u <= 1.0f)) u = 1.0f; g_user_cap = u;   // (Performance on Sword / Shield: the 720p step at most)
+        if (display_cap(u) < u) { char b[16]; snprintf(b, sizeof b, "%.3f", display_cap(u)); setenv("DM_RES_CAP", b, 1); fprintf(stderr, "mode: performance: 3D render scale %.0f %% (TV mode kept)\n", display_cap(u) * 100); } } }
 #if defined(DM_GAME_ANDROID_OPMODE) && DM_GAME_ANDROID_OPMODE >= 0
     { char m[4]; snprintf(m, sizeof m, "%d", DM_GAME_ANDROID_OPMODE); setenv("DM_OPMODE", m, 0); }   // the profile's android_op_mode (env.txt DM_OPMODE wins)
 #endif   // real sound output (AAudio, compat/aaudio_unit.c); env.txt can set 0
