@@ -4854,7 +4854,16 @@ static struct { uint64_t next, last_log, n, uneven, pauses, sum, nsum, prev_actu
 // Every 10 s the display's record of the frames goes to the log: intervals between shown frames, uneven = more than half a refresh off the target (a stutter you can
 //   see), pauses = longer than 4 intervals (loading, a pipeline built in play: left out of the mean). The compositor shows every frame a fixed refresh or two after its
 //   time, so lateness against the asked time says nothing; the intervals do
-static int g_fg_pace;   // frame generation is presenting, two presents a game frame half an interval apart: 1 the in-between picture (present_window_locked), 2 the real frame (fg_flush_locked)
+#ifdef __linux__
+#include <sys/prctl.h>
+#define DM_THREAD_NAME(n) prctl(PR_SET_NAME, (n), 0, 0, 0)
+#else
+#define DM_THREAD_NAME(n) ((void)0)
+#endif
+static int g_fg_pace;   // frame generation is presenting, g_fg_mult presents a game frame an interval / g_fg_mult apart: 1 the first in-between picture (present_window_locked),
+                        // 2 the ones after it, the real frame last (fg_flush_one_locked)
+static int g_fg_mult = 2;
+static uint64_t g_fg_period;   // the game's frame time as frame generation sees it (fg_period: measured, whole refreshes); 0: the target's
 static int g_fg_lead = 300, g_fg_early = 150;   // in hundredths of a refresh: how far ahead the in-between picture's time is asked, how long before that time the real frame is handed over (DM_FRAMEGEN_TUNE=lead,early)
 extern int dm_fps_live __attribute__((weak));   // (loader.c: the live target the in-game menu switches, 30 or 60; 0 = the start's own)
 static int game_fps(void) { int lf = &dm_fps_live ? __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED) : 0; const char *e = getenv("DM_FPS_TARGET"); return lf ? lf : e && atoi(e) >= 30 ? atoi(e) : 30; }
@@ -4867,9 +4876,12 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
             VLOG("display refresh now %.3f ms (%.2f Hz), was %.3f ms", rc.refreshDuration / 1e6, 1e9 / (double)rc.refreshDuration, g_refresh_ns / 1e6); g_refresh_ns = rc.refreshDuration; g_pace.next = 0; } } }
     if (!g_refresh_ns) return 0;
     uint64_t r = g_refresh_ns, now = mono_ns(); int fps = game_fps();
-    if (g_fg_pace) fps *= 2;
-    uint64_t frame = 1000000000ull / (uint64_t)fps, k = (frame + r / 2) / r; if (!k) k = 1;
-    uint64_t iv = k * r; int pace = !pace_off() && k >= 2;
+    if (g_fg_pace) fps *= g_fg_mult;   // (g_fg_period, when known, replaces it below)
+    uint64_t frame = 1000000000ull / (uint64_t)fps; if (g_fg_pace && g_fg_period) frame = g_fg_period / (uint64_t)g_fg_mult;
+    uint64_t k = (frame + r / 2) / r; if (!k) k = 1;
+    // (frame generation asks times even one refresh apart: handed over unasked, two pictures that reach the compositor within one refresh show as one, the older
+    //   dropped; on the S25+ at 4x 908 of the 1200 pictures in 10 s were seen)
+    uint64_t iv = k * r; int pace = !pace_off() && (k >= 2 || g_fg_pace);
     if (p_past) {
         uint32_t n = 0;
         if (!p_past(g_dev, W.sc, &n, NULL) && n) {
@@ -5323,41 +5335,115 @@ static int framegen_mode(void) {
     const char *e = getenv("DM_FRAMEGEN"); m = e && (!strcmp(e, "on") || !strcmp(e, "1")) ? 1 : e && !strcmp(e, "debug") ? 2 : e && !strcmp(e, "lsfg") ? 3 : 0;
     dm_framegen_mode = m; return m;
 }
-static struct { fgen g; lsfg ls; int ls_tried; fg_plan plan; int off, up, p, have_prev, resizes, zgen, hf_last; uint64_t resize_t;
-                VkSemaphore acq2[3], done2[3]; VkQueryPool qp; double tsper; int q_live[3]; uint64_t budget;
-                int pending; uint32_t pii; VkSemaphore pdone; uint64_t due, seq, arrived; sem_t wake;   // the real frame waiting for its time (under g_wmu)
-                uint64_t n_gen, n_plain, gpu_sum, gpu_n, gpu_max, cpu_sum, lag_sum, lag_n, last_log; } FGE;
+static struct { fgen g; lsfg ls; int ls_tried, mult_cap; uint64_t ivl, ivl_last; fg_plan plan; int off, up, p, have_prev, resizes, hf_last, zgen; uint64_t resize_t;
+                VkSemaphore acqx[3][LS_MAXGEN], donex[3][LS_MAXGEN]; VkQueryPool qp; double tsper; int q_live[3], q_pics[3]; uint64_t budget;
+                // the pictures after the first one waiting for their time, the real frame last (under g_wmu): pending of them from phead on, presented g_fg_mult = pmult a game frame
+                int pending, phead, pmult; uint32_t pii[LS_MAXGEN]; VkSemaphore pdone[LS_MAXGEN]; uint64_t pdue[LS_MAXGEN], seq, arrived; sem_t wake;
+                uint64_t n_gen, n_plain, gpu_sum, gpu_n, gpu_max, cpu_sum, lag_sum, lag_n, last_log;
+                // slow: off by the GPU-time cut-off (tried again when the menu switches frame generation on or to the other kind); mode_seen: the mode the last frame had;
+                // held: paused while the game itself runs under DM_FRAMEGEN_MIN_FPS (rate_ivl: its frame interval, a slow running mean of rate_n intervals); note: for the menu
+                int slow, mode_seen, held, min_fps; uint64_t rate_ivl, rate_last, rate_n; char note[48];
+                // fg_adapt: 3 s windows of the game's own frames (aw_*), its rate without pictures (base_fps), the lighter settings taken (flow_cut: the motion search a
+                // quarter smaller each; mult_cap above), windows in a row that kept the game's rate (ok_win), windows since the last step up (since_up), the wait before one
+                uint64_t aw_t, aw_max, aw_prev, last_gen_t; int aw_n, aw_gen, aw_skip, flow_cut, ok_win, since_up, up_wait; double base_fps; } FGE;
 // The real frame that waits behind its in-between picture goes to the display: at its time (fg_thread), or at once when the next frame, a new swapchain or the
 // window's end comes first. Called with the window lock held
-static void fg_flush_locked(void) {
+static void fg_flush_one_locked(void) {   // the oldest waiting picture
     if (!FGE.pending) return;
-    FGE.pending = 0;
-    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &FGE.pdone, .swapchainCount = 1, .pSwapchains = &W.sc, .pImageIndices = &FGE.pii };
+    int h = FGE.phead++; FGE.pending--;
+    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &FGE.pdone[h], .swapchainCount = 1, .pSwapchains = &W.sc, .pImageIndices = &FGE.pii[h] };
     VkPresentTimeGOOGLE pt; VkPresentTimesInfoGOOGLE pti = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &pt };
-    g_fg_pace = 2; if (pace_time(&pt)) pi.pNext = &pti; g_fg_pace = 0;
+    g_fg_pace = 2; g_fg_mult = FGE.pmult; if (pace_time(&pt)) pi.pNext = &pti; g_fg_pace = 0;
     pthread_mutex_lock(&g_qmu); VkResult r = vkQueuePresentKHR(g_q, &pi); pthread_mutex_unlock(&g_qmu);
-    FGE.lag_sum += mono_ns() - FGE.arrived; FGE.lag_n++;
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) swap_destroy();
+    if (!FGE.pending) { FGE.lag_sum += mono_ns() - FGE.arrived; FGE.lag_n++; }   // (the real frame, last of them)
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { FGE.pending = 0; swap_destroy(); }
 }
-static void *fg_thread(void *a) {
+static void fg_flush_locked(void) { while (FGE.pending) fg_flush_one_locked(); }
+static void *fg_thread(void *a) { DM_THREAD_NAME("dm-framegen");
     (void)a;
     for (;;) {
         sem_wait(&FGE.wake);
-        pthread_mutex_lock(&g_wmu); uint64_t due = FGE.due, seq = FGE.seq; int pend = FGE.pending; pthread_mutex_unlock(&g_wmu);
-        if (!pend) continue;
-        struct timespec ts = { (time_t)(due / 1000000000ull), (long)(due % 1000000000ull) }; clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
-        pthread_mutex_lock(&g_wmu); if (FGE.pending && FGE.seq == seq) fg_flush_locked(); pthread_mutex_unlock(&g_wmu);
+        for (;;) {   // each waiting picture at its time, while they are still this frame's (a new frame or a new swapchain flushes them itself)
+            pthread_mutex_lock(&g_wmu); uint64_t seq = FGE.seq; int pend = FGE.pending, h = FGE.phead; uint64_t due = pend ? FGE.pdue[h] : 0; pthread_mutex_unlock(&g_wmu);
+            if (!pend) break;
+            struct timespec ts = { (time_t)(due / 1000000000ull), (long)(due % 1000000000ull) }; clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+            pthread_mutex_lock(&g_wmu); int same = FGE.pending && FGE.seq == seq && FGE.phead == h; if (same) fg_flush_one_locked(); pthread_mutex_unlock(&g_wmu);
+            if (!same) break; }
     }
     return NULL;
 }
-static void fg_off(const char *why) { FGE.off = 1; FGE.have_prev = 0; VLOG("[RED] frame generation off until the next start (%s): normal presentation", why); }
+// Lossless Scaling: pictures a game frame, the real one included (2x .. 4x). DM_LSFG_MULT=2 / 3 / 4, or auto: the most of 4 and 3 whose rate the display's refresh
+// divides evenly (the game at 30 fps on 120 Hz: 4x; at 90 Hz: 3x; measured, fg_period), else 2x (3x at 120 Hz would show the pictures 1 and 2 refreshes apart in turn). Never above mult_cap, which a
+// GPU too slow for it lowers
+__attribute__((weak)) volatile int dm_lsfg_mult = -1;   // 0 auto, 2..4; -1 not read yet; the in-game menu sets it
+// (Auto, n refreshes a game frame: 4 or 8: 4x; 3 or 6: 3x; 2: 2x; 5, 7: 4x, the steps one refresh uneven)
+// The game's frame time for frame generation: what it measures (a running mean of the frame intervals, pauses left out), never below the target's, in whole
+// refreshes when the display's are known. A game meant for 60 that runs at 30 is treated as 30: pictures go between its frames as they come, 4x at 120 Hz
+static uint64_t fg_period(uint64_t t_arr) {
+    uint64_t target = game_period_ns(), d = FGE.ivl_last ? t_arr - FGE.ivl_last : 0; FGE.ivl_last = t_arr;
+    if (d && d < 4 * target && d < 250000000ull) FGE.ivl = FGE.ivl ? (FGE.ivl * 7 + d) / 8 : d;
+    uint64_t p = FGE.ivl > target ? FGE.ivl : target, r = g_refresh_ns;
+    if (r) { uint64_t n = (p + r / 2) / r; p = (n ? n : 1) * r; }
+    return p;
+}
+static int lsfg_mult(void) {
+    int m = dm_lsfg_mult;
+    if (m < 0) { const char *e = getenv("DM_LSFG_MULT"); m = e ? atoi(e) : 0; if (m < 2 || m > 4) m = 0; dm_lsfg_mult = m; }
+    if (!m) m = 2;   // auto: 2x, light (the game at a locked 60 shown at 120; frame generation runs only then, see the floor in present_window_locked)
+    if (m > FGE.mult_cap) m = FGE.mult_cap;
+    return m < 2 ? 2 : m;
+}
+static void fg_off(const char *why) {
+    FGE.off = 1; FGE.have_prev = 0; snprintf(FGE.note, sizeof FGE.note, "off");
+    FGE.n_gen = FGE.n_plain = FGE.gpu_sum = FGE.gpu_n = FGE.gpu_max = FGE.cpu_sum = FGE.lag_sum = FGE.lag_n = 0; FGE.last_log = 0;
+    VLOG("[RED] frame generation off until the next start (%s): normal presentation", why);
+}
+// One step lighter: Lossless Scaling's pictures a frame one fewer (4x, 3x, 2x), then its motion search a quarter smaller (75 %, 50 %, 25 % of the frame), then off
+// (tried again when the menu switches it on). The window after a step is left to settle; a step down soon after a step up doubles the wait before the next one up
+static void fg_step_down(const char *why, const char *note) {
+    int m = framegen_mode(), cur = m == 3 ? lsfg_mult() : 2;
+    if (m == 3 && cur > 2) { FGE.mult_cap = cur - 1; VLOG("[RED] frame generation lighter (%s): %dx from now on", why, cur - 1); }
+    else if (m == 3 && FGE.flow_cut < 2) { FGE.flow_cut++; VLOG("[RED] frame generation lighter (%s): the motion search a quarter smaller (%d %% less)", why, 25 * FGE.flow_cut); }
+    else { char w[192]; snprintf(w, sizeof w, "%s, at its lightest; switching it on again in the menu tries again", why); fg_off(w); FGE.slow = 1; snprintf(FGE.note, sizeof FGE.note, "%s", note); }
+    memset(&FGE.plan, 0, sizeof FGE.plan); FGE.aw_skip = 1; FGE.ok_win = 0;
+    if (FGE.since_up < 10 && FGE.up_wait < 160) FGE.up_wait *= 2;   // (a step up that did not hold: wait longer before the next, 1 min .. 8 min)
+}
+// Frame generation that knows what it costs this phone: every 3 s of the game's own frames, the rate they came at. Windows without pictures (paused, or the first
+// 3 s) give the game's own rate; windows with pictures throughout must keep it (92 %, or of the game's target when it runs at its cap), else one step lighter. After
+// up_wait windows (20 = 1 min) that kept it, a step back up (the motion search first, then a picture more). Windows with a pause over 0.5 s (a load) are left out
+static void fg_adapt(uint64_t now, int gen) {
+    if (!FGE.up_wait) FGE.up_wait = 20;
+    if (gen) FGE.last_gen_t = now;
+    uint64_t d = FGE.aw_prev ? now - FGE.aw_prev : 0; FGE.aw_prev = now;
+    if (!FGE.aw_t) { FGE.aw_t = now; FGE.aw_n = FGE.aw_gen = 0; FGE.aw_max = 0; return; }
+    if (d > FGE.aw_max) FGE.aw_max = d;
+    FGE.aw_n++; FGE.aw_gen += gen != 0;
+    if (now - FGE.aw_t < 3000000000ull) return;
+    double fps = FGE.aw_n * 1e9 / (double)(now - FGE.aw_t); int all = FGE.aw_gen * 10 >= FGE.aw_n * 9, none = !FGE.aw_gen; uint64_t mx = FGE.aw_max;
+    FGE.aw_t = now; FGE.aw_n = FGE.aw_gen = 0; FGE.aw_max = 0;
+    if (mx > 500000000ull || FGE.off) return;
+    if (FGE.aw_skip) { FGE.aw_skip--; return; }
+    if (none) { FGE.base_fps = fps; return; }
+    if (!all || FGE.base_fps <= 0) return;
+    double tgt = game_fps(), ref = FGE.base_fps < tgt * 0.97 ? FGE.base_fps : tgt; FGE.since_up++;
+    if (fps < ref * 0.92) { char w[96], n[24]; snprintf(w, sizeof w, "the game's own frames %.1f fps with it, %.1f without", fps, FGE.base_fps); snprintf(n, sizeof n, "cost:%.0f", fps);
+        fg_step_down(w, n); return; }
+    if (++FGE.ok_win >= FGE.up_wait && (FGE.flow_cut || FGE.mult_cap < 4)) {
+        FGE.ok_win = 0; FGE.since_up = 0; FGE.aw_skip = 1; memset(&FGE.plan, 0, sizeof FGE.plan);
+        if (FGE.flow_cut) { FGE.flow_cut--; VLOG("frame generation heavier again: the motion search back to %d %% less (the game kept %.1f fps for %d s)", 25 * FGE.flow_cut, fps, FGE.up_wait * 3); }
+        else { FGE.mult_cap++; VLOG("frame generation heavier again: up to %dx (the game kept %.1f fps for %d s)", FGE.mult_cap, fps, FGE.up_wait * 3); } }
+}
+// The menu's line under Frame generation (GameMenu.nativeFramegenNote): "" running or off, "paused:<fps>" under the minimum frame rate, "cost:<fps>" lightest setting still cost the game its frames, "slow:<ms>" cut off for the GPU's
+// time (until switched on again), "off" off for another reason until the next start
+void nvn_vk_framegen_note(char *buf, size_t n) { if (!n) return; pthread_mutex_lock(&g_wmu); snprintf(buf, n, "%s", framegen_mode() ? FGE.note : ""); pthread_mutex_unlock(&g_wmu); }
 // Frame generation can take this frame (the crop cx cy cw ch of x): its semaphores, thread and GPU timer once, its images for this size and format
 static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
     if (x->is3d || !(x->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || (uint32_t)(cx + cw) > x->w || (uint32_t)(cy + ch) > x->h) {
         RED_ONCE(120, "frame generation: the game's frame cannot be copied (usage %#x, %ux%u, crop %d,%d %dx%d): normal presentation", (unsigned)x->usage, x->w, x->h, cx, cy, cw, ch); return 0; }
     if (!FGE.up) {
         VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO }; int bad = 0;
-        for (int i = 0; i < 3; i++) bad |= vkCreateSemaphore(g_dev, &sci, NULL, &FGE.acq2[i]) || vkCreateSemaphore(g_dev, &sci, NULL, &FGE.done2[i]);
+        for (int i = 0; i < 3; i++) for (int k = 0; k < LS_MAXGEN; k++) bad |= vkCreateSemaphore(g_dev, &sci, NULL, &FGE.acqx[i][k]) || vkCreateSemaphore(g_dev, &sci, NULL, &FGE.donex[i][k]);
+        FGE.mult_cap = 4;
         pthread_t t; if (bad || sem_init(&FGE.wake, 0, 0) || pthread_create(&t, NULL, fg_thread, NULL)) { fg_off("no semaphores / thread for it"); return 0; }
         pthread_detach(t);
         uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
@@ -5374,8 +5460,8 @@ static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
         if (!FGE.ls_tried) { FGE.ls_tried = 1; const char *d = getenv("DM_LSFG_DIR");
             if (g_api < VK_API_VERSION_1_3) { fg_off("Lossless Scaling frame generation needs a Vulkan 1.3 driver"); return 0; }
             if (!d || !*d || !ls_load(ls, d)) { fg_off(d && *d ? ls->why : "the Lossless Scaling shaders are not imported"); return 0; } }
-        { const char *e = getenv("DM_LSFG_FLOW"); int pc = e && atoi(e) > 0 ? atoi(e) : ch >= 1000 ? 50 : 75;
-          flow = (pc < 25 ? 25 : pc > 100 ? 100 : pc) / 100.0f; }   // (S25+, 1080p: 100% took 6 ms a picture, 50% 2.9-4.4 ms)
+        { const char *e = getenv("DM_LSFG_FLOW"); int pc = e && atoi(e) > 0 ? atoi(e) : 50;   // (light: half the frame's size, any height)
+          pc -= 25 * FGE.flow_cut; flow = (pc < 25 ? 25 : pc > 100 ? 100 : pc) / 100.0f; }   // (S25+, 1080p: 100% took 6 ms a picture, 50% 2.9-4.4 ms)
         if (ls->w == (uint32_t)cw && ls->h == (uint32_t)ch && ls->fmt == x->fmt && ls->flow == flow) return 1; }
     else if (g->w == (uint32_t)cw && g->h == (uint32_t)ch && g->fmt == x->fmt) return 1;
     uint64_t now = mono_ns();   // a game that changes its frame size all the time (dynamic resolution) would rebuild the images each time: not for it
@@ -5387,8 +5473,10 @@ static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
         if (!ls_setup(ls, g_dev, g_pd, x->fmt, (uint32_t)cw, (uint32_t)ch, flow)) {
             if (ls->failed) fg_off(ls->why ? ls->why : "setup failed"); else RED_ONCE(122, "Lossless Scaling frame generation: %s (%dx%d): normal presentation", ls->why ? ls->why : "not for this frame", cw, ch);
             return 0; }
-        VLOG("Lossless Scaling frame generation ready: %dx%d frames (format %d), motion on %ux%u (%.0f%%), %d images; the GPU's time for it %s; off above %.1f ms a picture", cw, ch, (int)x->fmt,
-             ls->fw, ls->fh, flow * 100, ls->nall, FGE.qp ? "measured" : "cannot be measured on this driver (no timestamps)", FGE.budget / 1e6);
+        VLOG("Lossless Scaling frame generation ready: %dx%d frames (format %d), motion on %ux%u (%.0f%%), %d images, %dx now (display %.1f Hz, game %d fps%s)%s; the GPU's time for it %s; "
+             "off above %.1f ms a picture, half that more for each picture after the first", cw, ch, (int)x->fmt, ls->fw, ls->fh, flow * 100, ls->nall, lsfg_mult(),
+             g_refresh_ns ? 1e9 / (double)g_refresh_ns : 0.0, game_fps(), dm_lsfg_mult > 0 ? ", DM_LSFG_MULT" : ", auto", ls->stripped ? "; without the shaders' float controls (the driver has none)" : "",
+             FGE.qp ? "measured" : "cannot be measured on this driver (no timestamps)", FGE.budget / 1e6);
         return 1; }
     if (!fg_setup(g, g_dev, g_pd, x->fmt, (uint32_t)cw, (uint32_t)ch)) {
         if (g->failed) fg_off(g->why ? g->why : "setup failed"); else RED_ONCE(121, "frame generation: %s (%dx%d): normal presentation", g->why ? g->why : "not for this frame", cw, ch);
@@ -5431,6 +5519,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
     int srgb = x->fmt == VK_FORMAT_R8G8B8A8_SRGB || x->fmt == VK_FORMAT_B8G8R8A8_SRGB;
     if (!swap_ensure(win, srgb)) return;
     uint64_t t_arr = mono_ns(), period = game_period_ns();
+    if (framegen_mode()) g_fg_period = period = fg_period(t_arr);   // (frame generation: the game's frame time as measured, so a game short of its target still gets pictures)
     int32_t cx = crop ? crop[0] : 0, cy = crop ? crop[1] : 0, cw = crop && crop[2] ? crop[2] : (int32_t)x->w, ch = crop && crop[3] ? crop[3] : (int32_t)x->h;
     uint32_t sl = W.slot++ % 3;
     vk_wait(NULL, W.fence[sl], UINT64_MAX);
@@ -5438,20 +5527,58 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         uint64_t t[2]; FGE.q_live[sl] = 0;
         if (vkGetQueryPoolResults(g_dev, FGE.qp, sl * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] >= t[0]) {
             uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * FGE.tsper); FGE.gpu_sum += ns; FGE.gpu_n++; if (ns > FGE.gpu_max) FGE.gpu_max = ns;
-            if (!FGE.off && fg_plan_cost(&FGE.plan, ns, t_arr, FGE.budget)) { char why[96]; snprintf(why, sizeof why, "the GPU needs over %.1f ms for a picture, %.1f ms the last one", FGE.budget / 1e6, ns / 1e6); fg_off(why); } } }
-    int fgm = framegen_mode(), fg = fgm && !FGE.off && fg_ready(x, cx, cy, cw, ch), gen = 0;
+            int np = FGE.q_pics[sl] > 0 ? FGE.q_pics[sl] : 1; uint64_t lim = FGE.budget + (uint64_t)(np - 1) * FGE.budget / 2;   // (each picture after the first: half the budget more)
+            if (!FGE.off && fg_plan_cost(&FGE.plan, ns, t_arr, lim)) {
+                char why[96], n[24]; snprintf(why, sizeof why, "the GPU needs over %.1f ms for %d picture%s, %.1f ms the last frame", lim / 1e6, np, np > 1 ? "s" : "", ns / 1e6);
+                snprintf(n, sizeof n, "slow:%.1f", ns / 1e6); fg_step_down(why, n); } } }
+    int fgm = framegen_mode();
+    if (fgm != FGE.mode_seen) {   // switched in the menu (off and on again, or the other kind): a GPU-time cut-off gets a fresh try, measured and cut off again the same way
+        if (fgm && FGE.off && FGE.slow) { FGE.off = FGE.slow = 0; FGE.note[0] = 0; memset(FGE.q_live, 0, sizeof FGE.q_live);
+            VLOG("frame generation switched on again in the menu: tried again from its full setting, made lighter again step by step if it costs too much"); }
+        if (fgm && FGE.up) FGE.mult_cap = 4;
+        FGE.flow_cut = 0; FGE.ok_win = 0; FGE.since_up = 99; FGE.up_wait = 20; FGE.base_fps = 0; FGE.aw_t = 0; FGE.aw_skip = 0; memset(&FGE.plan, 0, sizeof FGE.plan);
+        FGE.mode_seen = fgm; FGE.held = 1; FGE.rate_n = 0; FGE.rate_ivl = 0; FGE.rate_last = 0; }
+    if (fgm) {   // Frame generation runs only on a game at a locked 60 (the frame rate setting at 60 and the game holding it), and lightly: 2x, the motion search at half
+        //   size. The game's own frame rate (pauses over a second left out) must stay at DM_FRAMEGEN_MIN_FPS (default 58) or more: paused under 57, back from 59.
+        //   Under 60 the in-between pictures cost the game frames it could not spare (#189, Adreno 613: the game at 14-22 fps, 4x of it moved worse). Decided after
+        //   16 frames; until then held. At the 30 fps setting it stays off (the note says why)
+        //   Legends: Arceus: at its own rate, 30 or 60 (players use it to show the 30 fps setting at 60): the floor is that rate less 2 (28 / 58), and the 30 fps setting is not off
+        { static int env = -1; if (env < 0) { const char *e = getenv("DM_FRAMEGEN_MIN_FPS"); int f = e ? atoi(e) : 0; env = f >= 1 && f <= 120 ? f : 0; }
+          FGE.min_fps = env ? env : game_fps() - 2; }
+        if (game_fps() < 30) { if (strcmp(FGE.note, "need60")) VLOG("frame generation off at the %d fps setting: it needs the game at a locked 60", game_fps());
+            FGE.held = 1; FGE.rate_n = 0; FGE.rate_ivl = 0; FGE.rate_last = 0; FGE.base_fps = 0; FGE.aw_t = 0;   // (the game's own rate is measured again at 60)
+            if (!FGE.off) snprintf(FGE.note, sizeof FGE.note, "need60"); }
+        else {
+        uint64_t d = FGE.rate_last ? t_arr - FGE.rate_last : 0; FGE.rate_last = t_arr;
+        if (d && d < 1000000000ull) { FGE.rate_ivl = FGE.rate_ivl ? (FGE.rate_ivl * 15 + d) / 16 : d; FGE.rate_n++; }
+        if (FGE.rate_n >= 16) {
+            uint64_t lo = 1000000000ull / (uint64_t)(FGE.min_fps - 1), hi = 1000000000ull / (uint64_t)(FGE.min_fps + 1);   // (under 57 fps: paused; 59 or more: on)
+            int was = FGE.held, now = FGE.rate_ivl > lo ? 1 : FGE.rate_ivl < hi ? 0 : was; double fps = 1e9 / (double)FGE.rate_ivl;
+            if (now != was) {
+                FGE.held = now;
+                if (now && !FGE.off && FGE.last_gen_t && t_arr - FGE.last_gen_t < 1000000000ull) {   // (it was making pictures: its cost took the game under the floor)
+                    char w[96], n[24]; snprintf(w, sizeof w, "the game fell to %.1f fps with it", fps); snprintf(n, sizeof n, "cost:%.0f", fps); fg_step_down(w, n); }
+                if (now) VLOG("[RED] frame generation paused: the game itself runs at %.1f fps, under the %d fps it needs (DM_FRAMEGEN_MIN_FPS): normal presentation until it holds %d", fps, FGE.min_fps - 1, FGE.min_fps + 1);
+                else if (FGE.n_gen + FGE.n_plain || FGE.last_log) VLOG("frame generation back on: the game runs at %.1f fps", fps); }
+            if (!FGE.off) { if (FGE.held) snprintf(FGE.note, sizeof FGE.note, "paused:%.0f", fps); else FGE.note[0] = 0; } } } }
+    int fg = fgm && !FGE.off && !FGE.held && FGE.base_fps > 0 && fg_ready(x, cx, cy, cw, ch), gen = 0;   // (the first 3 s: the game's own rate measured, fg_adapt)
     if (!fg) { FGE.have_prev = 0; FGE.ls.n = 0; }   // (the copy of the frame before goes stale the moment a frame is not copied; Lossless Scaling's history starts again)
-    // HUD-free (our own frame generation): the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud). A switch between
-    //   the two kinds: the frame before is of the other kind, no picture from it (decided before the swapchain images are asked for)
-    int hf = fg && fgm != 3 && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt;
-    if (fg && hf != FGE.hf_last) FGE.have_prev = 0;
+    // HUD-free: the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud, nvn_lsfg.h ls_hud). A switch between the two
+    //   kinds: the frames before are of the other kind, no picture from them (decided before the swapchain images are asked for)
+    int hf = fg && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt && (fgm != 3 || ls_hud_ok(&FGE.ls));
+    if (fg && hf != FGE.hf_last) { FGE.have_prev = 0; FGE.ls.n = 0; }
     FGE.hf_last = hf;
     if (fg) { FGE.g.debug = fgm == 2; gen = fg_plan_frame(&FGE.plan, t_arr, period) && FGE.have_prev && (fgm != 3 || FGE.ls.n >= 2); }   // (lsfg: three frames of history first)
-    uint32_t ii, i2 = 0; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, UINT64_MAX, W.acq[sl], VK_NULL_HANDLE, &ii);
+    uint32_t ii, imgs[LS_MAXGEN + 1]; int npic = 0; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, UINT64_MAX, W.acq[sl], VK_NULL_HANDLE, &ii);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return; }
     if (r && r != VK_SUBOPTIMAL_KHR) return;
-    if (gen) { VkResult r2 = vkAcquireNextImageKHR(g_dev, W.sc, 4000000ull, FGE.acq2[sl], VK_NULL_HANDLE, &i2);   // a second image, for the real frame; none free within 4 ms: this frame goes out alone
-               gen = r2 == VK_SUCCESS || r2 == VK_SUBOPTIMAL_KHR; }
+    imgs[0] = ii;
+    if (gen) {   // an image more for each picture after the first and for the real frame; none free within 4 ms: fewer pictures (evenly spaced still), or the frame alone
+        int want = fgm == 3 ? lsfg_mult() - 1 : 1;
+        for (int k = 0; k < want; k++) { VkResult r2 = vkAcquireNextImageKHR(g_dev, W.sc, 4000000ull, FGE.acqx[sl][k], VK_NULL_HANDLE, &imgs[1 + k]);
+            if (r2 != VK_SUCCESS && r2 != VK_SUBOPTIMAL_KHR) break;
+            npic++; }
+        gen = npic > 0; }
     vkResetFences(g_dev, 1, &W.fence[sl]);
     VkCommandBuffer cb = W.cb[sl]; vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT }; vkBeginCommandBuffer(cb, &bi);
@@ -5465,15 +5592,16 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { cx, cy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { (uint32_t)cw, (uint32_t)ch, 1 } };
         if (!ls) g->hud_on = hf;
         if (hf) { VkImageCopy sc = ic; sc.srcOffset = (VkOffset3D){ 0, 0, 0 };
-            vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
-            vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, g->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
+            vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
+            vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->hud.img : g->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
         else vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
         if (ls) {   // (its own barriers: the copy is made visible to its compute passes)
             ls_ingest(ls, cb, p);
-            if (gen) { ls_generate(ls, cb);
-                if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; }
-                pres_src mid = { NULL, ls->m.img, ls->m.pview, ls->w, ls->h, 0, 0, cw, ch };
-                present_compose(cb, ii, &mid, flip); }
+            if (gen) { for (int k = 0; k < npic; k++) ls_generate(ls, cb, npic, k);
+                if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = npic; }
+                for (int k = 0; k < npic; k++) { ls_img *e = &ls->m[k];
+                    if (hf) { ls_hud(ls, cb, k); e = &ls->o; }   // (its HUD back on top; o is drawn here before the next picture's pass writes it)
+                    pres_src mid = { NULL, e->img, e->pview, ls->w, ls->h, 0, 0, cw, ch }; present_compose(cb, imgs[k], &mid, flip); } }
         } else {
         VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
@@ -5486,30 +5614,39 @@ static void present_window_locked(vtex *x, const int crop[4]) {
             g->z_on = fg_depth_on(); g->z_far1 = g_hp_zfar1;
             fg_depth_ingest(g, cb, p, hf && g_hp_zimg && g_hp_zseq == g_hp_scene_seq && g_hp_Z); }
         if (gen) { fg_generate(g, cb, p);
-            if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; }
+            if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = 1; }
             pres_src mid = { NULL, g->m.img, g->m.view, g->w, g->h, 0, 0, cw, ch };
             present_compose(cb, ii, &mid, flip); }
         }
         FGE.have_prev = 1; FGE.cpu_sum += mono_ns() - c0;
     }
-    present_compose(cb, gen ? i2 : ii, &real, flip);
+    if (!gen) npic = 0;
+    present_compose(cb, imgs[npic], &real, flip);
     vkEndCommandBuffer(cb);
-    VkPipelineStageFlags ws[2] = { VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    VkSemaphore wsem[2] = { W.acq[sl], FGE.acq2[sl] }, ssem[2] = { W.done[sl], FGE.done2[sl] };
-    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = gen ? 2 : 1, .pWaitSemaphores = wsem, .pWaitDstStageMask = ws, .commandBufferCount = 1, .pCommandBuffers = &cb,
-                        .signalSemaphoreCount = gen ? 2 : 1, .pSignalSemaphores = ssem };
+    VkPipelineStageFlags ws[LS_MAXGEN + 1]; VkSemaphore wsem[LS_MAXGEN + 1] = { W.acq[sl] }, ssem[LS_MAXGEN + 1] = { W.done[sl] };
+    for (int k = 0; k <= LS_MAXGEN; k++) ws[k] = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    for (int k = 0; k < npic; k++) { wsem[1 + k] = FGE.acqx[sl][k]; ssem[1 + k] = FGE.donex[sl][k]; }
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = (uint32_t)(1 + npic), .pWaitSemaphores = wsem, .pWaitDstStageMask = ws, .commandBufferCount = 1, .pCommandBuffers = &cb,
+                        .signalSemaphoreCount = (uint32_t)(1 + npic), .pSignalSemaphores = ssem };
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &W.done[sl], .swapchainCount = 1, .pSwapchains = &W.sc, .pImageIndices = &ii };
     VkPresentTimeGOOGLE pt = { 0 }; VkPresentTimesInfoGOOGLE pti = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &pt };
-    g_fg_pace = gen; if (pace_time(&pt)) pi.pNext = &pti; g_fg_pace = 0;   // (a time asked for, nothing waited on: the present mode stays as it is)
+    g_fg_pace = gen; g_fg_mult = npic + 1; if (pace_time(&pt)) pi.pNext = &pti; g_fg_pace = 0;   // (a time asked for, nothing waited on: the present mode stays as it is)
     pthread_mutex_lock(&g_qmu);
     VkResult rs = r = vkQueueSubmit(g_q, 1, &si, W.fence[sl]);
     if (!r) r = vkQueuePresentKHR(g_q, &pi);
     pthread_mutex_unlock(&g_qmu);
-    if (gen && !rs) {   // the real frame: handed over by fg_thread half an interval after the picture before it
-        uint64_t now = mono_ns(); FGE.pending = 1; FGE.pii = i2; FGE.pdone = FGE.done2[sl]; FGE.arrived = t_arr; FGE.seq++;
-        FGE.due = fg_real_due(now, pt.desiredPresentTime, period / 2, pace_off() ? 0 : g_refresh_ns, g_fg_early);
-        FGE.n_gen++; sem_post(&FGE.wake); }
+    if (gen && !rs) {   // the pictures after the first and the real frame: handed over by fg_thread, each an interval / (npic + 1) after the one before
+        uint64_t now = mono_ns(), sp = period / (uint64_t)(npic + 1), rf = pace_off() ? 0 : g_refresh_ns, want = pt.desiredPresentTime;
+        FGE.pending = npic; FGE.phead = 0; FGE.pmult = npic + 1; FGE.arrived = t_arr; FGE.seq++;
+        for (int k = 1; k <= npic; k++) {
+            FGE.pii[k - 1] = imgs[k]; FGE.pdone[k - 1] = FGE.donex[sl][k - 1];
+            // with a display time asked: each handed over early hundredths of a refresh before the time of the picture ahead of it (it asks its own an interval / n later);
+            // without: at its own time
+            uint64_t at = want + (uint64_t)(k - 1) * sp, ea = rf * (uint64_t)g_fg_early / 100;
+            FGE.pdue[k - 1] = want && rf ? (at > now + ea ? at - ea : now) : now + (uint64_t)k * sp; }
+        FGE.n_gen += (uint64_t)npic; sem_post(&FGE.wake); }
     else if (fg) FGE.n_plain++;
+    if (fgm) fg_adapt(t_arr, gen && !rs);
     if (fgm && t_arr - FGE.last_log >= 10000000000ull) {
         if (FGE.last_log && FGE.n_gen + FGE.n_plain)
             VLOG("frame generation: %llu in-between pictures in the last 10 s, %llu frames without one; GPU %.2f ms a picture (longest %.2f), recorded in %.2f ms; "

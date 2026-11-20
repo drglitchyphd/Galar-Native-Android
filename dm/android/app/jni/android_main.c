@@ -216,6 +216,11 @@ static int g_bg_off = -1;   // DM_BACKGROUND=off: pause in the background (defau
 static int bg_play(void) { if (g_bg_off < 0) { const char *e = getenv("DM_BACKGROUND"); g_bg_off = e && !strcmp(e, "off"); } return !g_bg_off; }
 extern int dm_fps_live __attribute__((weak));   // loader.c: the live frame-rate target (30 / 60), 0 when the start has none (another game, a fixed 90 / 120, DM_FPS_LIVE=0)
 static void window_rate(ANativeWindow *w);
+// GameMenu.java: why frame generation is not making pictures right now (nvn_vk.c nvn_vk_framegen_note: "", "paused:<fps>", "slow:<ms>", "cost:<fps>", "off"), for the line under its choice
+extern void nvn_vk_framegen_note(char *buf, size_t n) __attribute__((weak));
+JNIEXPORT jstring JNICALL Java_com_nxnative_GameMenu_nativeFramegenNote(JNIEnv *env, jclass c) {
+    (void)c; char b[48] = ""; if (nvn_vk_framegen_note) nvn_vk_framegen_note(b, sizeof b); return (*env)->NewStringUTF(env, b);
+}
 JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env, jclass c, jstring jk, jstring jv) {
     (void)c; const char *k = (*env)->GetStringUTFChars(env, jk, NULL), *v0 = (*env)->GetStringUTFChars(env, jv, NULL); const char *v = *v0 ? v0 : NULL; int now = 1;
     if (!strcmp(k, "DM_BACKGROUND")) g_bg_off = v && !strcmp(v, "off");
@@ -240,6 +245,7 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
     else if (!strcmp(k, "DM_SCALER")) { extern volatile int dm_scaler_mode; if (!v || !*v) v = getenv("DM_AUTO_SCALER"); dm_scaler_mode = v && !strcmp(v, "sgsr") ? 1 : v && !strcmp(v, "fsr") ? 3 : v && !strcmp(v, "smooth") ? 2 : 0; }   // (Auto: the app's pick)
     else if (!strcmp(k, "DM_FRAMEGEN")) { extern volatile int dm_framegen_mode; dm_framegen_mode = v && (!strcmp(v, "on") || !strcmp(v, "1")) ? 1 : v && !strcmp(v, "debug") ? 2 : v && !strcmp(v, "lsfg") ? 3 : 0; window_rate(atomic_load(&g_window));   // nvn_vk.c present_window_locked
         window_rate(atomic_load(&g_window)); }   // (Android is told the doubled rate, or the game's own again)
+    else if (!strcmp(k, "DM_LSFG_MULT")) { extern volatile int dm_lsfg_mult; int m = v ? atoi(v) : 0; dm_lsfg_mult = m >= 2 && m <= 4 ? m : 0; }   // nvn_vk.c lsfg_mult: 0 auto
     else if (!strcmp(k, "DM_SCALER_SHARPNESS")) { extern volatile float dm_scaler_sharpness; dm_scaler_sharpness = !v || !strcmp(v, "sharp") ? 0.7f : !strcmp(v, "smooth") ? -1.0f : (float)atof(v); }   // nvn_vk.c scale_draw
     else if (!strcmp(k, "DM_PAD_LAYOUT") || !strcmp(k, "DM_PAD_MAPPING")) {
         pthread_mutex_lock(&g_padset_mu);

@@ -402,3 +402,9 @@ Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; 
 Record the frame's passes	Gravar os passes do quadro
 For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Para cenas lentas: feche este menu em até 3 segundos e fique onde o jogo está lento. Os passes de renderização de três quadros, com o tempo de GPU quando o telefone informa, são salvos em Download (um arquivo terminado em framegraph.txt). Anexe à sua issue.
 Recording in 3 seconds: close the menu.	Gravando em 3 segundos: feche o menu.
+Lossless Scaling pictures	Imagens do Lossless Scaling
+2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: uma imagem entre cada dois quadros do jogo (30 fps se movem como 60)
+3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: duas imagens entre cada dois quadros (como 90 fps; uniforme só numa tela de 90 Hz)
+4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: três imagens entre cada dois quadros (como 120 fps; precisa de uma tela de 120 Hz e uma GPU rápida)
+Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, leve (a taxa de quadros do jogo, mostrada em dobro)
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	Pausada: aqui o jogo roda a %s fps, abaixo da taxa de quadros configurada. Volta sozinha quando o jogo a mantém de novo.
