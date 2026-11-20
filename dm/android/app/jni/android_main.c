@@ -221,6 +221,11 @@ extern void nvn_vk_framegen_note(char *buf, size_t n) __attribute__((weak));
 JNIEXPORT jstring JNICALL Java_com_nxnative_GameMenu_nativeFramegenNote(JNIEnv *env, jclass c) {
     (void)c; char b[48] = ""; if (nvn_vk_framegen_note) nvn_vk_framegen_note(b, sizeof b); return (*env)->NewStringUTF(env, b);
 }
+// Graphics → Mode (DM_DISPLAY_MODE, live): Auto (the Graphics level decides), Quality (docked: TV mode, 1080p, the game's full effects), Performance (handheld mode:
+//   720p and the game's lighter settings). The game takes a change as a real dock / undock (hle_oe.c dm_set_opmode → notifications 30 / 31: Legends: Arceus redrew
+//   at 1280x720 and back at once, clean, at 60 fps; Galaxy S25+ 2026-11-20). With Quality or Performance chosen, Graphics Auto switches the mode no more
+void dm_set_opmode(int m);   // (host/hle_oe.c)
+static int display_mode(void) { const char *m = getenv("DM_DISPLAY_MODE"); return m && !strcmp(m, "quality") ? 1 : m && !strcmp(m, "performance") ? 2 : 0; }   // 0 Auto
 JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env, jclass c, jstring jk, jstring jv) {
     (void)c; const char *k = (*env)->GetStringUTFChars(env, jk, NULL), *v0 = (*env)->GetStringUTFChars(env, jv, NULL); const char *v = *v0 ? v0 : NULL; int now = 1;
     if (!strcmp(k, "DM_BACKGROUND")) g_bg_off = v && !strcmp(v, "off");
@@ -236,6 +241,11 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
     else if (!strcmp(k, "DM_RUMBLE")) { touch_ui_setting(k, v); now = 0; }
     else if (!strcmp(k, "DM_LSTICK_SENS")) { extern _Atomic int dm_lstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 50 || p > 300) p = 100; if (&dm_lstick_pct) atomic_store(&dm_lstick_pct, p); else now = 0; }   // (hle_hid.c lsens)
     else if (!strcmp(k, "DM_RSTICK_SENS")) { extern _Atomic int dm_rstick_pct __attribute__((weak)); int p = v ? atoi(v) : 100; if (p < 25 || p > 400) p = 100; if (&dm_rstick_pct) atomic_store(&dm_rstick_pct, p); else now = 0; }   // (the touch click follows it at once; the game's motors are GameActivity's, GameMenu decides)
+    else if (!strcmp(k, "DM_DISPLAY_MODE")) {
+        if (v && *v) setenv("DM_DISPLAY_MODE", v, 1); else unsetenv("DM_DISPLAY_MODE");
+        int m = display_mode(); const char *g = getenv("DM_GRAPHICS");
+        int tv = m == 1 ? 1 : m == 2 ? 0 : !(g && (!strcmp(g, "low") || !strcmp(g, "lowest")));   // (Auto: what the Graphics level gives)
+        dm_set_opmode(tv); fprintf(stderr, "mode: %s: %s, set while playing\n", m == 2 ? "performance" : m == 1 ? "quality" : "auto", tv ? "TV mode (docked)" : "handheld mode"); }
     else if (!strcmp(k, "DM_RES_CAP")) {   // Legends: Arceus's 3D render scale (loader.c arc_scale): live; Auto = the game's own (1.0)
         extern void dm_arc_scale_set(float) __attribute__((weak)); float c = v ? (float)atof(v) : 1.0f; if (!(c >= 0.5f && c <= 1.0f)) c = 1.0f;
         if (v) setenv("DM_RES_CAP", v, 1); else unsetenv("DM_RES_CAP");
@@ -825,6 +835,7 @@ static void graphics_auto(void) {
         }
         return;
     }
+    if (display_mode()) return;   // (Graphics → Mode chosen: the mode stays as the player set it; heat_guard and the scale do the rest)
     if (mode == 1) {
         if (full) held++;
         if (held >= 24) wait = 12;   // two minutes held in TV mode: the next fall back waits a minute again
@@ -975,6 +986,7 @@ static void host_start(void) {
     // graphics (the app's settings screen): high = the console's TV mode (1080p, full effects), low = handheld mode (720p, the game's own lighter settings),
     // auto = TV mode, made lighter while the phone is hot or slow (graphics_auto below), lowest = handheld mode with the game's 3D render scale capped at 75 % (960x540 in
     // Pokémon Sword / Shield, hle_resscale.c; other games: as low). DM_OPMODE and DM_RES_CAP in env.txt still win
+    { int m = display_mode(); if (m) setenv("DM_OPMODE", m == 1 ? "1" : "0", 1); }   // (Graphics → Mode: Quality / Performance, before the level's defaults)
     { const char *g = getenv("DM_GRAPHICS"); if (g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) setenv("DM_OPMODE", "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0);
       if (g && !strcmp(g, "lowest")) setenv("DM_RES_CAP", "0.75", 0); }
 #if defined(DM_GAME_ANDROID_OPMODE) && DM_GAME_ANDROID_OPMODE >= 0

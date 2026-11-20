@@ -315,6 +315,10 @@ public final class GameMenu {
             // Lowest: handheld mode with the game's 3D render scale capped (Pokémon Sword / Shield: the engine's hle_resscale.c; Scarlet / Violet have no such scale)
             { "lowest", t(a, "Lowest"), t(a, "Lowest: handheld mode, 3D at 960x540, coolest") } };
         choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) || GameSettings.arceus(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);   // (Lowest: Sword / Shield's render scale only)
+        // Quality (docked) or Performance (handheld), live (android_main.c DM_DISPLAY_MODE)
+        choice(a, "DM_DISPLAY_MODE", t(a, "Mode"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: as the Graphics setting decides") },
+            { "quality", t(a, "Quality"), t(a, "Quality: docked: 1080p and the game's full effects") },
+            { "performance", t(a, "Performance"), t(a, "Performance: handheld: 720p and the game's lighter settings: cooler and steadier") } });
         // Legends: Arceus's TV-mode render size (loader.c arc_res): 1080p as the game is made, or 1440p (sharper, heavier); from the next start
         if (false && GameSettings.arceus(a)) choice(a, "DM_ARC_RES", t(a, "Resolution"), new String[][] { { "", "1080p", t(a, "1080p, as the game is made") },
             { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)") } });

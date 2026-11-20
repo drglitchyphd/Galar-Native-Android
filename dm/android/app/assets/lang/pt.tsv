@@ -408,3 +408,8 @@ Lossless Scaling pictures	Imagens do Lossless Scaling
 4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: três imagens entre cada dois quadros (como 120 fps; precisa de uma tela de 120 Hz e uma GPU rápida)
 Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, leve (a taxa de quadros do jogo, mostrada em dobro)
 Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	Pausada: aqui o jogo roda a %s fps, abaixo da taxa de quadros configurada. Volta sozinha quando o jogo a mantém de novo.
+Mode	Modo
+Auto: as the Graphics setting decides	Auto: o que o ajuste de Gráficos decidir
+Quality	Qualidade
+Quality: docked: 1080p and the game's full effects	Qualidade: no dock: 1080p e todos os efeitos do jogo
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Desempenho: portátil: 720p e os ajustes mais leves do jogo: mais fresco e estável

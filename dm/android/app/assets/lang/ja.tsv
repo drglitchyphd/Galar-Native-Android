@@ -398,3 +398,8 @@ Off: this GPU needs %s ms for each picture, more than the game can spare. Switch
 Off until the next start (see the log for why).	次回の起動までオフ（理由はログにあります）。
 Auto: 2x, light (the game's frame rate shown doubled)	自動：2x、軽め（ゲームのフレームレートを2倍で表示）
 Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	一時停止中：ここではゲームが %s fps で、設定したフレームレートを下回っています。ゲームが再びそのレートを保つと自動で再開します。
+Mode	モード
+Auto: as the Graphics setting decides	自動：グラフィック設定に従います
+Quality	画質優先
+Quality: docked: 1080p and the game's full effects	画質優先：TVモード：1080p、ゲーム本来のすべての効果
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	パフォーマンス優先：携帯モード：720p、ゲームの軽い設定：より涼しく安定

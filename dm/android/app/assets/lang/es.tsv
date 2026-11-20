@@ -398,3 +398,8 @@ Off: this GPU needs %s ms for each picture, more than the game can spare. Switch
 Off until the next start (see the log for why).	Desactivada hasta el próximo inicio (el motivo está en el registro).
 Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, ligero (la tasa de fotogramas del juego, mostrada al doble)
 Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	En pausa: aquí el juego va a %s fps, por debajo de su ajuste de tasa de fotogramas. Vuelve a activarse sola cuando el juego la mantiene de nuevo.
+Mode	Modo
+Auto: as the Graphics setting decides	Auto: lo que decida el ajuste de Gráficos
+Quality	Calidad
+Quality: docked: 1080p and the game's full effects	Calidad: en el dock: 1080p y todos los efectos del juego
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Rendimiento: portátil: 720p y los ajustes más ligeros del juego: más fresco y estable
