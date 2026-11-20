@@ -1813,7 +1813,9 @@ static void hp_learn(vtex *shown) {
     for (int i = 0; i < g_hp_n; i++) if (g_hp[i].c0 == shown) s = i;
     if (s >= 0 && g_hp[s].nr == 1) F = g_hp[s].r[0];
     int j = 0, last_scene = 0, k = 0, ik = -1;
-    for (int i = 0; i < g_hp_n; i++) { if (g_hp[i].c0 != F || !g_hp[i].draws) continue; j++;
+    // (j counts every pass into F, drawing or not, as hp_pass_begin counts them when it takes the copy: Legends: Arceus begins F with no draws between its
+    //   passes, 61 / 65 / 67 of 62..70; counting only the drawing ones took the copy before the scene's own pass, the picture split, 2026-11-20)
+    for (int i = 0; i < g_hp_n; i++) { if (g_hp[i].c0 != F) continue; j++; if (!g_hp[i].draws) continue;
         if (g_hp[i].rr) { last_scene = j; k = 0; ik = -1; } else if (!k && j > last_scene) { k = j; ik = i; } }
     {   // the scene's depth: the last depth target before the first HUD pass of the final image's shape and at least a quarter of its size, and which way round its depth is
         //   (what a pass clears it to is the far plane); unknown either way: none
