@@ -578,6 +578,22 @@ static int arc_wide(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     LOG("%s: widescreen for Legends: Arceus 1.1.1: camera aspect %.4f (%08x), HUD kept to 16:9 in the middle (x %.3f of the width)", m->name, ratio, bits, (double)k);
     return 8;
 }
+// The render-target pool of Legends: Arceus 1.1.1, grown for a bigger render size (1440p, the screen's shape). The config builder (main+0x277d798) sets three NVN pools that
+//   graphics setup (main+0x29d6a64 → 0x2aa24c4 → the pool ctor main+0x2a8cf9c) creates: config+0x28 300 MB general, config+0x30 250 MB render targets (CPU no access,
+//   GPU cached, compressible), config+0x38 40 MB commands. Their storage comes from the GFX2 heap (main+0x2626d50, 800 MB), which holds them plus the NVN driver's
+//   63 MB (config+0x08 / +0x10: driver memory, NOT a render-target block: the old 15 → 32 MB change there is gone) and ~147 MB of other users, with no NULL check on
+//   the storage: so GFX2 grows by exactly what the pool grows. Both MOVZ Wn, #imm, LSL #16, each word checked first. 1 applied
+static int arc_gpu_pool(module_t *m, unsigned pool_mb, int64_t p0, int64_t p1) {
+    if (pool_mb <= 250) return 1;
+    if (pool_mb > 600) pool_mb = 600;
+    static const struct { uint64_t off; uint32_t orig; unsigned mb; } G[] = { { 0x277d7f0, 0x52a1f409u, 250 }, { 0x2626d50, 0x52a64001u, 800 } };
+    for (unsigned i = 0; i < 2; i++) { uint32_t w; memcpy(&w, m->base + G[i].off, 4);
+        if (G[i].off + 4 > m->text_end || w != G[i].orig || overlaps_rewrite(m, G[i].off, 4, p0, p1)) return 0; }
+    for (unsigned i = 0; i < 2; i++) { unsigned mb = G[i].mb + (pool_mb - 250); uint32_t w = (G[i].orig & ~(0xffffu << 5)) | (mb * 16u) << 5;
+        memcpy(m->base + G[i].off, &w, 4); mod_page_note(m, G[i].off, 4); }
+    LOG("%s: GPU memory for the bigger render size: render-target pool %u MB (was 250), GFX2 heap %u MB (was 800)", m->name, pool_mb, 800 + pool_mb - 250);
+    return 1;
+}
 // 1440p for Legends: Arceus 1.1.1 (DM_ARC_RES=1440, the menu's Graphics → Resolution; off by default): the game's TV-mode render size, 1920x1080, becomes
 //   2560x1440 at the five places it is set (after Fl4sh's "2560x1440" mod for 1.1.1): sharper, and heavier on the GPU. Handheld mode keeps its own 720p.
 //   Each word is checked first (MOV / MOVK of 0x780 or 0x438 into the register the game uses); a build or code that differs is left alone
@@ -595,12 +611,8 @@ static int arc_res(module_t *m, int64_t p0, int64_t p1) {
     for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w; memcpy(&w, m->base + R[i].off, 4);
         if (R[i].off + 4 > m->text_end || w != R[i].orig || overlaps_rewrite(m, R[i].off, 4, p0, p1)) { LOG("[RED] %s: 1440p not applied (Legends: Arceus 1.1.1's render size code differs at +%#llx)", m->name, (unsigned long long)R[i].off); return 0; } }
     for (unsigned i = 0; i < sizeof R / sizeof *R; i++) { uint32_t w = (R[i].orig & ~(0xffffu << 5)) | R[i].imm << 5; memcpy(m->base + R[i].off, &w, 4); }
-    // The GPU memory the config builder (main+0x277d798) gives graphics setup (main+0x29d6a64): the render-target pool, config+0x30, 250 MB → 400 MB, and config+0x08,
-    //   15 MB (0xf00000: exactly the 2560x1440 target that found no free block) → 32 MB. Both MOVZ Wn, #imm, LSL #16, patched in place (the user's analysis, verified)
-    static const struct { uint64_t off; uint32_t orig, now; } G[] = { { 0x277d7f0, 0x52a1f409u, 0x52a32009u }, { 0x277d7f4, 0x52a01e0bu, 0x52a0400bu } };
-    int g = 1; for (unsigned i = 0; i < 2; i++) { uint32_t w; memcpy(&w, m->base + G[i].off, 4); g &= G[i].off + 4 <= m->text_end && w == G[i].orig && !overlaps_rewrite(m, G[i].off, 4, p0, p1); }
-    if (g) for (unsigned i = 0; i < 2; i++) { memcpy(m->base + G[i].off, &G[i].now, 4); mod_page_note(m, G[i].off, 4); }
-    LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)%s", m->name, g ? "; render-target pool 400 MB (was 250), config+0x08 32 MB (was 15)" : "; [RED] the GPU memory sizes differ: left as they are");
+    int g = arc_gpu_pool(m, 400, p0, p1);
+    LOG("%s: 1440p: the TV-mode render size is 2560x1440 (DM_ARC_RES)%s", m->name, g ? "; render-target pool 400 MB (was 250), GFX2 heap +150 MB" : "; [RED] the GPU memory sizes differ: left as they are");
     return (int)(sizeof R / sizeof *R);
 }
 // True aspect ratio for Legends: Arceus 1.1.1 (experimental, DM_WIDE_RENDER=1 with Widescreen): the game renders at the screen's own shape instead of 16:9 stretched to
@@ -619,6 +631,7 @@ static int arc_wide_render(module_t *m, int64_t p0, int64_t p1) {
     for (unsigned i = 0; i < sizeof S / sizeof *S; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4);
         if (S[i].off + 4 > m->text_end || w != S[i].orig || overlaps_rewrite(m, S[i].off, 4, p0, p1)) { LOG("[RED] %s: true aspect ratio not applied (the render size code differs at +%#llx, or 1440p is on)", m->name, (unsigned long long)S[i].off); return 0; } }
     for (unsigned i = 0; i < sizeof S / sizeof *S; i++) { uint32_t w = (S[i].orig & ~(0xffffu << 5)) | (S[i].tv ? w1080 : w720) << 5; memcpy(m->base + S[i].off, &w, 4); }
+    arc_gpu_pool(m, (unsigned)(250.0 * w1080 / 1920.0 + 0.999), p0, p1);   // (the render targets grow with the width)
     LOG("%s: true aspect ratio for Legends: Arceus 1.1.1: the game renders %ux1080 in TV mode, %ux720 handheld (screen %.4f), instead of 16:9 stretched", m->name, w1080, w720, ratio);
     return (int)(sizeof S / sizeof *S);
 }

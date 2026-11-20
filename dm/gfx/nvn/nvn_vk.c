@@ -1389,7 +1389,12 @@ static int barrier_bits_on(void) { static int v = -1; if (v < 0) { const char *e
     int ab = dm_ab ? dm_ab("barbits") : -1; return ab >= 0 ? ab : v; }
 // (relaxed only on Adreno unless DM_VK_BARRIER says otherwise, as Galar: measured there, where each full barrier idles the GPU. On Xclipse, PowerVR and Mali shadows
 //   flickered and surfaces broke up with them on, Arceus-Native-Android #20 #31 #32: a full barrier before each pass there)
-static int barrier_relaxed(void) { static int v = -1; if (v < 0) { v = arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") && (getenv("DM_VK_BARRIER") || g_props.vendorID == 0x5143); VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
+// Qualcomm's own driver before Vulkan 1.3 (Adreno 6xx / 7xx phones on driver 1.1.128 and the like; not Turnip, which names itself "Turnip Adreno"): skinned and
+//   swaying models explode into spikes there with barriers narrowed between draw passes (Arceus-Native-Android #34 #46 #59 on the Adreno 710, Galar #209 on the
+//   Adreno 650), as on Xclipse until v0.39 made its barriers full (#31 → #48 #78). The vertex-stride fix and the stride canary did not change it; Turnip on the same
+//   phone draws them right. So these drivers get a full barrier before each pass, as Xclipse, PowerVR and Mali (DM_VK_BARRIER=relaxed: narrowed again)
+static int old_qcom_driver(void) { return g_props.vendorID == 0x5143 && VK_API_VERSION_MINOR(g_props.apiVersion) < 3 && !strncmp(g_props.deviceName, "Adreno", 6); }
+static int barrier_relaxed(void) { static int v = -1; if (v < 0) { v = arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") && (getenv("DM_VK_BARRIER") || (g_props.vendorID == 0x5143 && !old_qcom_driver())); VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
 static void barrier_all(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
