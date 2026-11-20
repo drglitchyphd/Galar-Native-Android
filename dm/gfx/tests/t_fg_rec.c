@@ -20,7 +20,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateQueryPool(VkDevice d, const VkQueryPoolCr
 VKAPI_ATTR VkResult VKAPI_CALL vkDeviceWaitIdle(VkDevice d) { (void)d; return VK_SUCCESS; }
 #include "fg_rec.h"
 
-static int A, B, D, S;   // the images (their addresses are what the recorder keys on)
+static int A, B, D, S, U;   // U: a UI texture (never rendered: uploaded only)   // the images (their addresses are what the recorder keys on)
 static void pass(int *img, int depth, int clear, int draws) {
     fgr_attin a[2]; int n = 0;
     a[n++] = (fgr_attin){ img, 1280, 720, 37, 0, 0, 0, (uint8_t)clear, 0 };
@@ -32,7 +32,7 @@ static void frame(uint64_t n) {
     { fgr_attin s = { &S, 2048, 2048, 126, 0, 0, 8, 1, 0 }; fgr_pass_begin(NULL, 2048, 2048, 1, 1, &s, 1); fgr_draw(); fgr_pass_end(NULL); }   // shadow map, never read
     pass(&A, 1, 1, 300); fgr_pass_end(NULL);                         // 3D
     pass(&B, 0, 1, 1); fgr_read_img(&A, 1280, 720, 37, FGR_READ); fgr_pass_end(NULL);   // composite samples A
-    pass(&B, 0, 0, 40); fgr_pass_end(NULL);                          // HUD on B
+    pass(&B, 0, 0, 40); fgr_read_img(&U, 256, 256, 37, FGR_READ); fgr_pass_end(NULL);   // HUD on B, reading only its UI texture
     fgr_present(n, &B, 1280, 720, 37);
 }
 int main(void) {
@@ -49,7 +49,7 @@ int main(void) {
     CHECK(strstr(t, "depth img0 2048x2048 vk126 L0/0: cleared, store -> overwritten unread in a later frame") != NULL, "the shadow map's store is never read");
     CHECK(strstr(t, "(SHOWN)") != NULL, "the shown image is marked");
     CHECK(strstr(t, "merge candidate") != NULL, "back-to-back passes of one size are merge candidates");
-    CHECK(strstr(t, "last pass with depth (the 3D scene): pass 1; after it, into the shown image img3: pass 2 (1 draws) pass 3 (40 draws)") != NULL, "the scene / HUD split: the composite and HUD passes after the 3D pass");
+    CHECK(strstr(t, "scene / HUD split: the final image img3 (shown: img3); the scene is complete after pass 2; HUD drawn on it: pass 3 (40 draws)") != NULL, "the scene / HUD split: the composite (reads the rendered scene) is the scene's last pass, the pass reading only a UI texture is the HUD");
     {   // the held frame's verdict (fgr_fate_exact, DM_VK_FRAME_HOLD=2): what decides that a store can be left out
         fgr_cont_start(); fgr_cont_reset();
         static int X, Y;   // X a 1024x1024 depth image with two layers, Y a colour image

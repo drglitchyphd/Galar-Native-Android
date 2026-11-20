@@ -139,10 +139,26 @@ static void fgr_write(void) {
         }
         fprintf(f, "frame %llu summary: %u passes, GPU %.2f ms in passes; stores %d: needed %d, overwritten unread %d (tile-memory candidates), unread then overwritten in a later frame %d, not seen again %d\n",
                 (unsigned long long)g_fgr.frame0 + (unsigned)fi, a1 - a0, gpu, stores, need, unread, later, unknown);
-        if (last3d >= 0) {
-            fprintf(f, "  last pass with depth (the 3D scene): pass %d; after it, into the shown image img%d:", last3d, shown);
-            for (uint32_t k = (uint32_t)last3d + 1; k < a1; k++) for (uint32_t t = 0; t < g_fgr.p[k].natt; t++) if (g_fgr.p[k].a[t].img == shown) fprintf(f, " pass %u (%u draws)", k, g_fgr.p[k].draws);
-            fprintf(f, "\n");
+        (void)last3d;
+        if (shown >= 0) {   // the scene / HUD split (where frame generation would take the picture without the HUD)
+            // the final image: what the pass drawing the shown image reads, when that pass is a copy of one rendered image (Sword / Shield: pass 156 copies img2); else the shown one
+            int fin = shown, wrote_shown = -1;
+            for (uint32_t k = a0; k < a1; k++) for (uint32_t t = 0; t < g_fgr.p[k].natt; t++) if (g_fgr.p[k].a[t].img == shown) wrote_shown = (int)k;
+            if (wrote_shown >= 0) { int cand = -1, nc = 0;
+                for (int i = g_fgr_rstart[wrote_shown + 1]; i < g_fgr_rstart[wrote_shown + 2]; i++) { const fgr_read *r = &g_fgr.r[i]; if (!r->in_pass || r->img < 0 || r->img == shown) continue;
+                    int rendered = 0; for (uint32_t q = a0; q < (uint32_t)wrote_shown && !rendered; q++) for (uint32_t t = 0; t < g_fgr.p[q].natt; t++) if (g_fgr.p[q].a[t].img == r->img) rendered = 1;
+                    if (rendered && r->img != cand) { cand = r->img; nc++; } }
+                if (nc == 1) fin = cand; }
+            // the passes drawing into it: a scene / post pass reads something rendered earlier in this frame; a HUD pass reads only textures not rendered this frame
+            int last_scene = -1; char hud[512] = ""; size_t hl = 0;
+            for (uint32_t k = a0; k < a1; k++) { int writes = 0; for (uint32_t t = 0; t < g_fgr.p[k].natt; t++) if (g_fgr.p[k].a[t].img == fin && g_fgr.p[k].a[t].slot < 8) writes = 1;
+                if (!writes || !g_fgr.p[k].draws) continue;
+                int reads_rendered = 0;
+                for (int i = g_fgr_rstart[k + 1]; i < g_fgr_rstart[k + 2] && !reads_rendered; i++) { const fgr_read *r = &g_fgr.r[i]; if (!r->in_pass || r->img < 0) continue;
+                    for (uint32_t q = a0; q < k && !reads_rendered; q++) for (uint32_t t = 0; t < g_fgr.p[q].natt; t++) if (g_fgr.p[q].a[t].img == r->img) { reads_rendered = 1; break; } }
+                if (reads_rendered) { last_scene = (int)k; hl = 0; hud[0] = 0; }   // (a later scene pass: what came before it was not the HUD on top)
+                else if (hl < sizeof hud - 32) hl += (size_t)snprintf(hud + hl, sizeof hud - hl, " pass %u (%u draws)", k, g_fgr.p[k].draws); }
+            fprintf(f, "  scene / HUD split: the final image img%d (shown: img%d); the scene is complete after pass %d; HUD drawn on it:%s\n", fin, shown, last_scene, hl ? hud : " none found");
         }
         fputc('\n', f);
     }
