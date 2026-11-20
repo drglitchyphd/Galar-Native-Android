@@ -327,6 +327,11 @@ public final class GameMenu {
             { "quality", t(a, "Quality"), t(a, "Quality: docked: 1080p and the game's full effects") },
             { "performance", t(a, "Performance"), galarMode ? t(a, "Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)")
                                                              : t(a, "Performance: handheld: 720p and the game's lighter settings: cooler and steadier") } });
+        // Sword / Shield: the TV-mode window size (loader.c galar_res_patch), from the next start
+        if (galarMode) choice(a, "DM_GALAR_RES", t(a, "Resolution"), new String[][] {
+            { "720", "720p", t(a, "720p: lightest, for phones that cannot hold 30 (from the next start)") },
+            { "", "1080p", t(a, "1080p, as the game is made") },
+            { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)") } });
         // the game's own 3D render scale, capped (android_main.c DM_RES_CAP, hle_resscale.c): Sword / Shield, at once. The HUD and text stay sharp; only the 3D is drawn smaller
         // Battery saver (android_main.c power_saver, #333): live
         choice(a, "DM_POWER", t(a, "Power"), new String[][] { { "", t(a, "Balanced"), t(a, "Balanced: the best picture this phone holds at a steady frame rate") },

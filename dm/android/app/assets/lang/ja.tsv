@@ -401,3 +401,7 @@ Quality	画質優先
 Quality: docked: 1080p and the game's full effects	画質優先：TVモード：1080p、ゲーム本来のすべての効果
 Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	パフォーマンス優先：3Dを720pで描画：より涼しく安定（HUDと文字は鮮明なまま）
 Performance: handheld: 720p and the game's lighter settings: cooler and steadier	パフォーマンス優先：携帯モード：720p、ゲームの軽い設定：より涼しく安定
+Resolution	解像度
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p：最も軽い、30を保てない端末向け（次回起動から）
+1080p, as the game is made	1080p、ゲーム本来の解像度
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p：より鮮明だがGPU負荷が増加（fps低下・発熱、次回起動から）

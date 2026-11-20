@@ -401,3 +401,7 @@ Quality	Qualidade
 Quality: docked: 1080p and the game's full effects	Qualidade: no dock: 1080p e todos os efeitos do jogo
 Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	Desempenho: o 3D em 720p: mais fresco e estável (o HUD e o texto continuam nítidos)
 Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Desempenho: portátil: 720p e os ajustes mais leves do jogo: mais fresco e estável
+Resolution	Resolução
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p: o mais leve, para celulares que não mantêm 30 (a partir do próximo início)
+1080p, as the game is made	1080p, como o jogo foi feito
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p: mais nítido, mas mais pesado para a GPU (menos fps, celular mais quente; a partir do próximo início)

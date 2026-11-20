@@ -594,11 +594,26 @@ static int wide_render_patch(module_t *m, int64_t p0, int64_t p1) {
     LOG("%s: true aspect ratio for %s: the game renders %ux1080 in TV mode, %ux720 handheld (screen %.4f), instead of 16:9 stretched", m->name, WIDE_SITES[si].game, w1080, w720, ratio);
     return 4;
 }
+// Resolution (DM_GALAR_RES, Graphics → Resolution: 720 / 1080 the game's own / 1440) for Pokémon Sword and Shield 1.3.2: the TV-mode window size the graphics
+//   config's constructor packs into one register, MOVZ X9, #1920 then MOVK X9, #1080, LSL #32 (main+0x5e860c / +0x5e8610, and the inlined copy at +0x5e871c / +0x5e8728;
+//   the same words in both games). Handheld mode keeps its own 1280x720. Checked word by word; with it the true aspect ratio (wide_render_patch) is left out (same words).
+//   1440p's render targets are 78 % larger: not yet run on a phone
+static int galar_res_patch(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_GALAR_RES"); int res = e ? atoi(e) : 0; if (res != 720 && res != 1440) return 0;
+    uint32_t W = res == 1440 ? 2560 : 1280, H = res == 1440 ? 1440 : 720;
+    static const struct { uint64_t off; uint32_t orig; int h; } S[] = { { 0x5e860c, 0xd280f009u, 0 }, { 0x5e8610, 0xf2c08709u, 1 }, { 0x5e871c, 0xd280f009u, 0 }, { 0x5e8728, 0xf2c08709u, 1 } };
+    for (unsigned i = 0; i < 4; i++) { uint32_t w; memcpy(&w, m->base + S[i].off, 4);
+        if (S[i].off + 4 > m->text_end || w != S[i].orig || overlaps_rewrite(m, S[i].off, 4, p0, p1)) { LOG("[RED] %s: resolution %dp not applied (the graphics config code differs at +%#llx)", m->name, res, (unsigned long long)S[i].off); return 0; } }
+    for (unsigned i = 0; i < 4; i++) { uint32_t w = (S[i].orig & ~(0xffffu << 5)) | (S[i].h ? H : W) << 5; memcpy(m->base + S[i].off, &w, 4); }
+    LOG("%s: resolution: the TV-mode window is %ux%u (DM_GALAR_RES; handheld keeps 1280x720)", m->name, W, H);
+    return 4;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
     n += wide_patch(m, lim, p0, p1);
+    n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
     n += wide_render_patch(m, p0, p1);
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
 }
