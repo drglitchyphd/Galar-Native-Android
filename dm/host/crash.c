@@ -136,6 +136,24 @@ __attribute__((weak)) int dm_crypto_emu(ucontext_t *uc);
 __attribute__((weak)) int dm_lse_emu(ucontext_t *uc);   // crypto_emu.c: LSE swaps on ARMv8.0 CPUs (#33)   // crypto_emu.c (Linux / Android on ARM64)
 __attribute__((weak)) void dm_crash_log_copy(void);   // android_main.c: the log copied to Download/ now (its copy there is refreshed every 5 s: a crash's record was missing from it, #57); open / read / write only
 __attribute__((weak)) void dm_crash_note(int in_game);   // android_main.c: "this run crashed" for the next start (boot_state), and whether the pc was in the game's own code; only write() inside
+#ifdef __ANDROID__
+// Android's own crash report after ours: the handler that was there before crash_install (bionic's debuggerd handler, handed over by ART's libsigchain) runs once
+//   our record is written, so the system writes its tombstone (every thread's backtrace, registers, memory maps) and the run counts as a native crash. Before,
+//   the handler ended the run with _exit(139): Android saw a plain exit (ApplicationExitInfo "exit self", status 139) and kept no tombstone for the debug report
+//   (DebugBundle.java) to collect. DM_CRASH_CHAIN=0 in env.txt: the old _exit only
+static struct sigaction g_prev_sa[NSIG]; static unsigned char g_prev_ok[NSIG]; static int g_chain = 1;
+static void on_crash(int sig, siginfo_t *si, void *uc_);
+// 1: the earlier handler ran and the caller returns from the signal handler. The debuggerd handler writes the tombstone and puts back the default action, so
+//   returning runs the faulting instruction again, which now ends the process the default way (a signal the kernel did not raise is sent again by that handler).
+//   Should neither happen, crash_gate's 15 s alarm still ends the run (on_crash again → _exit)
+static int crash_chain(int sig, siginfo_t *si, void *uc) {
+    if (!g_chain || sig <= 0 || sig >= NSIG || sig == SIGALRM || !g_prev_ok[sig]) return 0;
+    struct sigaction *o = &g_prev_sa[sig];
+    if (o->sa_flags & SA_SIGINFO) { if (!o->sa_sigaction || o->sa_sigaction == on_crash) return 0; o->sa_sigaction(sig, si, uc); }
+    else { if (o->sa_handler == SIG_DFL || o->sa_handler == SIG_IGN || !o->sa_handler) return 0; o->sa_handler(sig); }
+    return 1;
+}
+#endif
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
@@ -160,6 +178,9 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         n += snprintf(b + n, sizeof b - n, "\n");
         if (write(2, b, (size_t)n) < 0) {}
         if (dm_crash_log_copy) dm_crash_log_copy();
+#ifdef __ANDROID__
+        if (crash_chain(sig, si, uc)) return;
+#endif
         _exit(128 + sig);
     }
     funlockfile(stderr);
@@ -207,7 +228,11 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         }
         fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
+    { extern void nvn_vk_crumbs_dump(const char *why) __attribute__((weak)); if (nvn_vk_crumbs_dump) nvn_vk_crumbs_dump("CPU crash"); }   // (vk_crumbs.h: the GPU work in flight; a driver crash in a submit names it)
     fflush(stderr); if (dm_crash_log_copy) dm_crash_log_copy();   // (the crash record into the copy a player finds: android_main.c)
+#ifdef __ANDROID__
+    if (crash_chain(sig, si, uc)) return;
+#endif
     _exit(128 + sig);
 }
 // The signal alternate stack is per thread: every guest thread must call this when it starts running (only then can the crash state be printed on the alternate stack on a stack overflow)
@@ -236,5 +261,14 @@ void crash_install(void) {
         pthread_t th; if (pthread_create(&th, NULL, watchdog_main, NULL)) die("watchdog thread");
         pthread_detach(th);
     }
+#ifdef __ANDROID__
+    { const char *e = getenv("DM_CRASH_CHAIN"); g_chain = !(e && *e == '0'); }
+    { int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGTRAP };
+      for (unsigned i = 0; i < sizeof sigs / sizeof *sigs; i++) { struct sigaction o; memset(&o, 0, sizeof o);
+          if (sigaction(sigs[i], &sa, &o)) continue;
+          if ((o.sa_flags & SA_SIGINFO) && o.sa_sigaction == on_crash) continue;   // (installed twice: the handler from before the first time stays the one chained to)
+          g_prev_sa[sigs[i]] = o; g_prev_ok[sigs[i]] = 1; } }
+#else
     sigaction(SIGSEGV, &sa, 0); sigaction(SIGBUS, &sa, 0); sigaction(SIGILL, &sa, 0); sigaction(SIGTRAP, &sa, 0);
+#endif
 }
