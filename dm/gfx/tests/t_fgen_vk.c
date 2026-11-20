@@ -25,6 +25,7 @@ typedef void (*paint)(int x, int y, int which, float *rgb);   // which: 0 the fr
 static void fill(uint8_t *m, paint f, int which) { for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { float c[3]; f(x, y, which, c);
     for (int k = 0; k < 3; k++) { m[(y * W + x) * 4 + k] = (uint8_t)(fminf(fmaxf(c[k], 0), 1) * 255 + 0.5f); }
     m[(y * W + x) * 4 + 3] = 255; } }
+static int HF;   // HUD-free (nvn_fgen.h hud): c[] get the frames without the HUD, hud the frame as shown (from buf[2], before the result goes there)
 static void run(void) {
     VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
     VkCommandBuffer cb; vkAllocateCommandBuffers(dev, &ai, &cb);
@@ -32,6 +33,7 @@ static void run(void) {
     fg_begin(&G, cb);
     VkBufferImageCopy bc = { 0, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { W, H, 1 } };
     vkCmdCopyBufferToImage(cb, buf[0], G.c[0].img, VK_IMAGE_LAYOUT_GENERAL, 1, &bc); vkCmdCopyBufferToImage(cb, buf[1], G.c[1].img, VK_IMAGE_LAYOUT_GENERAL, 1, &bc);
+    G.hud_on = HF; if (HF) vkCmdCopyBufferToImage(cb, buf[2], G.hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &bc);
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     fg_ingest(&G, cb, 0); fg_ingest(&G, cb, 1); fg_generate(&G, cb, 1);
@@ -112,6 +114,13 @@ int main(int argc, char **argv) {
       double eo = err(map[2], truth, M, 90, W - M, 280, NULL), eb = err(blend, truth, M, 90, W - M, 280, NULL);
       printf("HUD over a pan: boxes off by %.3f / %.3f (worst %d / %d), the scene between them %.2f (plain mix %.2f)\n", e1, e2, w1, worst, eo, eb);
       CHECK(w1 <= 1 && worst <= 1, "the HUD moved: worst %d / %d", w1, worst); CHECK(eo < 4.0 && eo < 0.35 * eb, "the scene under a HUD: %.2f, plain mix %.2f", eo, eb); }
+    {   // HUD-free: the generator works from the scene alone (the copies before the HUD pass), and puts the HUD of the frame as shown back on top
+        PX = 12; PY = -8; fill(map[0], p_pan, 0); fill(map[1], p_pan, 1); fill(map[2], p_hud, 1); fill(truth, p_hud, 2);
+        HF = 1; run(); HF = 0; ppm(dir, "hudfree_mid", map[2]);
+        double e1 = err(map[2], truth, 40, 30, 200, 70, &worst); int w1 = worst; double e2 = err(map[2], truth, 500, 300, 600, 330, &worst);
+        double eo = err(map[2], truth, M, 90, W - M, 280, NULL), en = err(map[2], truth, 210, 30, 400, 80, NULL);
+        printf("HUD-free: boxes off by %.3f / %.3f (worst %d / %d), the scene %.2f, right next to a box %.2f\n", e1, e2, w1, worst, eo, en);
+        CHECK(w1 <= 1 && worst <= 1, "HUD-free: the HUD is not the shown frame's: worst %d / %d", w1, worst); CHECK(eo < 4.0 && en < 4.0, "HUD-free: the scene %.2f, next to a box %.2f", eo, en); }
     do_case(dir, "obj", p_obj);
     { double e = err(map[2], truth, 180, 100, 360, 230, &worst), eb = err(blend, truth, 180, 100, 360, 230, NULL), es = err(map[2], truth, 400, 0, W, H, &worst);
       printf("a block crossing a still scene: around the block off by %.2f (plain mix %.2f); the still part %.3f (worst %d); difference left %.3f\n", e, eb, es, worst, stat());

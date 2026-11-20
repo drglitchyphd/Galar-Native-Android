@@ -1219,7 +1219,8 @@ static void completion_start(void) {
     pthread_t t; pthread_create(&t, NULL, completion_main, NULL); pthread_detach(t);
 }
 uint64_t mtl_last_fence(void) { return g_fence; }
-static void hold_flush(int why); static _Atomic uint64_t g_submitted; static _Atomic int g_nheld;   // (the whole frame held: below)
+static void hold_flush(int why); static _Atomic uint64_t g_submitted; static _Atomic int g_nheld;
+static int g_hp_scene_ok;   // (HUD-free: the frame being presented has its scene copy; mtl_present → present_window_locked)   // (the whole frame held: below)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
     if (atomic_load(&g_done) >= fence) return 1;
     if (fence > atomic_load(&g_submitted) && atomic_load(&g_nheld)) hold_flush(1);   // waited on (or polled): held work goes to the GPU now
@@ -1672,6 +1673,7 @@ typedef struct vtex {
     struct vtex *alt; int alt_fmt;         // BC decoded / transcoded on this GPU, viewed as another BC kind (tex_view_for): the same blocks converted for that kind
     _Atomic int pre;                       // uploaded ahead (mtl_tex_preupload) and not drawn yet: counted in g_pre_unused
     struct { uint64_t key, frame; uint16_t lv, ly; uint8_t asp, dc; } sk[8]; int nsk; int presented;   // stores of its attachments not yet read or overwritten (sk_*); shown in the window
+    uint64_t hp_stamp;                     // HUD-free frame generation: g_hp_seq + 1 of the frame it was last a render target in (hp_*)
 } vtex;
 // the queue family takes timestamps (the frame recorder's pass times, fg_rec.h); looked up once
 static int g_tsq_ok(void) {
@@ -1680,6 +1682,71 @@ static int g_tsq_ok(void) {
     v = g_qf < nq && qp[g_qf].timestampValidBits && g_props.limits.timestampPeriod > 0; return v;
 }
 #include "fg_rec.h"   // renderer phase 1: the frame recorder (records only)
+// ================= HUD-free frame generation: the scene / HUD split learnt each frame (fg_rec.h's rule, kept small) =================
+// The final image is what the pass drawing the shown image reads when it copies one image rendered this frame (Sword / Shield: img2, copied into the shown one); of
+// the passes drawing into it, one reading anything rendered this frame is the scene or post-processing, one reading only textures not rendered this frame is the HUD.
+// Learnt at each present for the next frame: which of the passes drawing into the final image is the first HUD pass. Then, as that pass begins, the final image is
+// copied (the scene, HUD-less) and frame generation is fed that copy, with the frame as shown for fg_gen.frag to put the HUD back on top (nvn_fgen.h hud).
+// Our own frame generation only (DM_FRAMEGEN=on); DM_FRAMEGEN_HUDFREE=0 leaves it out. Everything here runs on the thread that builds the GPU's work
+static int framegen_mode(void);
+enum { HP_N = 512 };
+static struct { vtex *c0; uint32_t draws; uint8_t rr, nr; vtex *r[4]; } g_hp[HP_N]; static int g_hp_n;   // this frame's passes so far
+static struct { vtex *c0; uint32_t draws; uint8_t rr, nr; vtex *r[4]; int open; } g_hpc;                 // the open pass
+static uint64_t g_hp_seq;                       // presents so far (the frame number HUD-free uses: hle_nvn.c's g_frame_no is set from the game's thread)
+static vtex *g_hp_F; static int g_hp_k;         // learnt: the final image, and which pass drawing into it is the first HUD pass (1-based; 0: none)
+static int g_hp_count; static uint64_t g_hp_scene_seq;   // passes into F begun this frame; the frame the scene copy was made in (+1)
+static VkImage g_hp_simg; static vmalloc_t g_hp_sa; static uint32_t g_hp_sw, g_hp_sh; static VkFormat g_hp_sfmt; static int g_hp_sfresh;
+static int hudfree_on(void) {
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_FRAMEGEN_HUDFREE"); v = !(e && !strcmp(e, "0")); }
+    return v && framegen_mode() == 1;
+}
+static void hp_read(vtex *x) {   // (sk_read: sampled, copied, loaded, shown)
+    if (!g_hpc.open || !x || x == g_hpc.c0 || x->hp_stamp != g_hp_seq + 1) return;
+    g_hpc.rr = 1; for (int i = 0; i < g_hpc.nr; i++) if (g_hpc.r[i] == x) return;
+    if (g_hpc.nr < 4) g_hpc.r[g_hpc.nr++] = x;
+}
+static void hp_draw(void) { if (g_hpc.open) g_hpc.draws++; }
+static void hp_pass_end(void) {
+    if (!g_hpc.open) return; g_hpc.open = 0;
+    if (g_hp_n < HP_N) { g_hp[g_hp_n].c0 = g_hpc.c0; g_hp[g_hp_n].draws = g_hpc.draws; g_hp[g_hp_n].rr = g_hpc.rr; g_hp[g_hp_n].nr = g_hpc.nr; memcpy(g_hp[g_hp_n].r, g_hpc.r, sizeof g_hpc.r); g_hp_n++; }
+}
+// a game pass begins (after its barrier, before vkCmdBeginRendering): its first colour target noted; the learnt first HUD pass into the final image takes the scene copy first
+static void hp_pass_begin(VkCommandBuffer cb, vtex *c0) {
+    if (!hudfree_on()) return;
+    memset(&g_hpc, 0, sizeof g_hpc); g_hpc.c0 = c0; g_hpc.open = 1;
+    if (!c0 || c0 != g_hp_F || !g_hp_k || ++g_hp_count != g_hp_k) return;
+    if (c0->is3d || c0->samples > 1 || !(c0->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return;
+    if (!g_hp_simg || g_hp_sw != c0->w || g_hp_sh != c0->h || g_hp_sfmt != c0->fmt) {   // (made, or made again at a new size / format; the old one goes when the GPU is done)
+        if (g_hp_simg) { defer_add((dfr){ .kind = DF_IMAGE, .h.img = g_hp_simg, .a = g_hp_sa }); g_hp_simg = VK_NULL_HANDLE; }
+        VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = c0->fmt, .extent = { c0->w, c0->h, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+        if (vkCreateImage(g_dev, &ii, NULL, &g_hp_simg)) { g_hp_simg = VK_NULL_HANDLE; return; }
+        VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, g_hp_simg, &rq); g_hp_sa = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+        VKCHECK(vkBindImageMemory(g_dev, g_hp_simg, g_hp_sa.b->mem, g_hp_sa.off)); g_hp_sw = c0->w; g_hp_sh = c0->h; g_hp_sfmt = c0->fmt; g_hp_sfresh = 1; }
+    if (g_hp_sfresh) {   // (first use: UNDEFINED to GENERAL, as every image here)
+        VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = g_hp_simg, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib); g_hp_sfresh = 0; }
+    VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { c0->w, c0->h, 1 } };
+    vkCmdCopyImage(cb, c0->img, VK_IMAGE_LAYOUT_GENERAL, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+    barrier_all(cb);   // (the copy reads the scene before the HUD pass draws on it)
+    g_hp_scene_seq = g_hp_seq + 1;
+}
+// at the present (before the window gets the frame): the split learnt from this frame for the next one, and a fresh frame begins
+static void hp_learn(vtex *shown) {
+    if (!hudfree_on()) { g_hp_n = 0; return; }
+    hp_pass_end();
+    vtex *F = shown; int s = -1;
+    for (int i = 0; i < g_hp_n; i++) if (g_hp[i].c0 == shown) s = i;
+    if (s >= 0 && g_hp[s].nr == 1) F = g_hp[s].r[0];
+    int j = 0, last_scene = 0, k = 0;
+    for (int i = 0; i < g_hp_n; i++) { if (g_hp[i].c0 != F || !g_hp[i].draws) continue; j++;
+        if (g_hp[i].rr) { last_scene = j; k = 0; } else if (!k && j > last_scene) k = j; }
+    if (F != g_hp_F || k != g_hp_k) { static int said; if (said < 12) { said++; VLOG("frame generation, HUD-free: the final image %ux%u, the HUD from its %d%s pass drawing into it%s", F ? F->w : 0, F ? F->h : 0, k,
+                                                                                   k == 1 ? "st" : k == 2 ? "nd" : k == 3 ? "rd" : "th", k ? "" : " (none found: the frame as it is)"); } }
+    g_hp_F = F; g_hp_k = k; g_hp_n = 0; g_hp_count = 0; g_hp_seq++;
+}
+static void depth_read(vtex *x) { (void)x; }   // (Galar: DM_VK_DEPTH_DISCARD keeps a read depth image stored; this engine has no such discard)
 // ================= Stores no one reads (tilers: Adreno, Mali; from the Arceus engine) =================
 // On a tiler every render pass ends by writing its attachments from tile memory to the image, and a pass whose next user clears the image first or never looks at it again wrote
 // for nothing (depth buffers above all). Vulkan needs the store decision when the pass begins, before its commands are known, so it is learnt: each attachment of a pass is keyed
@@ -1721,7 +1788,7 @@ static void sk_resolve_locked(vtex *x, uint32_t lv, uint32_t ly, int asp, int ov
         x->sk[i] = x->sk[--x->nsk];
     }
 }
-static void sk_read(vtex *x) { if (x) fgr_read_img(x, x->w, x->h, (uint32_t)x->fmt, FGR_READ); if (!x || !x->nsk) return; pthread_mutex_lock(&g_skmu); sk_resolve_locked(x, ~0u, ~0u, 0, 0); pthread_mutex_unlock(&g_skmu); }
+static void sk_read(vtex *x) { if (x) { fgr_read_img(x, x->w, x->h, (uint32_t)x->fmt, FGR_READ); hp_read(x); } if (!x || !x->nsk) return; pthread_mutex_lock(&g_skmu); sk_resolve_locked(x, ~0u, ~0u, 0, 0); pthread_mutex_unlock(&g_skmu); }
 // A pass begins with x's subresource as attachment slot (0-7 colour, 8 depth, 9 stencil), cleared or loaded: what was pending resolves, and whether this pass stores comes back
 static uint64_t g_sk_sig, g_sk_last;   // the pass's key so far (pass_begin); the key sk_attach made last
 static int sk_attach(vtex *x, uint32_t lv, uint32_t ly, int asp, int slot, int cleared) {
@@ -2940,7 +3007,7 @@ static int P_tf;   // the open pass is transform feedback captures' (tf_pass_beg
 static struct { uint64_t lo, hi; } g_tfw[64]; static int g_ntfw;   // what the captures in the open capture pass wrote
 static void ubd_flush(void);
 static int g_nubd;
-static void pass_end(void) { g_rt_stale = 0; if (P.open) { rend_end(CB()); fgr_pass_end(CB()); P.open = 0;
+static void pass_end(void) { g_rt_stale = 0; if (P.open) { rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0;
     if (!P_tf && P.hd) sk_ro_note(P.dkey, P.dwrote, 0);
     if (!P_tf && P.hs) sk_ro_note(P.skey, P.swrote, 0);
     g_after_pass = !P_tf; g_bar_clean = 0;
@@ -3103,6 +3170,7 @@ static int pass_begin(void) {
     memset(&P, 0, sizeof P); uint32_t tw = 16384, th = 16384, nlay = 0; int any = 0, ncol = 0;   // nlay: the fewest layers of the attachments (a layered pass over a 3D target)
     uint64_t dkey = 0, skey = 0; int dnone = 0, snone = 0;
     fgr_attin fga[10]; int fgn = 0;   // (the frame recorder, while it records)
+    vtex *hp_c0 = NULL;   // (HUD-free: the pass's first colour target)
     for (int i = 0; i < 8; i++) { ca[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO }; }
     if (sk_on()) {   // this pass's key for the store learning (sk_attach): its render targets and how many times they were set before in this frame
         static struct { uint64_t sig; uint32_t n; } occ[256]; static uint64_t occ_frame = ~0ull;
@@ -3129,6 +3197,7 @@ static int pass_begin(void) {
         ca[i].loadOp = R.clear_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; ca[i].clearValue.color = R.cc[i];
         VkFormat f = x->fmt; if (R.rt.has_cview[i] && R.rt.cview[i].set_format) { uint32_t vf = 0; uint8_t s[4]; if (nvn_fmt_to_vk(R.rt.cview[i].format, &vf, s) && vf) f = (VkFormat)vf; }
         P.cfmt[i] = (uint32_t)f; P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1; ncol = i + 1;
+        x->hp_stamp = g_hp_seq + 1; if (!hp_c0) hp_c0 = x;
         if (atomic_load(&g_fgr.on) && fgn < 10) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)f, (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0),
             (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_layers ? R.rt.cview[i].min_layer : 0), (uint8_t)i, (uint8_t)(ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(ca[i].storeOp) };
         if (TD_TRACE) VLOG("[trace] pass colour %d ser=%llu %ux%u fmt %d %s", i, (unsigned long long)R.rt.color[i]->serial, w, h, (int)x->fmt, R.clear_c[i] ? "clear" : "load");
@@ -3147,7 +3216,7 @@ static int pass_begin(void) {
                 sa.storeOp = sk_on() && sk_attach(x, dl, dy, 3, 9, R.clear_s) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE; skey = g_sk_last;
                 if (sa.storeOp == VK_ATTACHMENT_STORE_OP_STORE && g_store_none && sk_ro(skey, R.clear_s)) { sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE; snone = 1; }
                 sa.loadOp = R.clear_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; sa.clearValue.depthStencil.stencil = R.cs; P.hs = 1; P.sfmt = (uint32_t)x->fmt; }
-            P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1;
+            P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1; x->hp_stamp = g_hp_seq + 1;
             if (atomic_load(&g_fgr.on) && fgn < 9) { if (P.hd) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)x->fmt, (uint16_t)dl, (uint16_t)dy, 8, (uint8_t)(da.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(da.storeOp) };
                 if (P.hs) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)x->fmt, (uint16_t)dl, (uint16_t)dy, 9, (uint8_t)(sa.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(sa.storeOp) }; }
         }
@@ -3183,6 +3252,7 @@ static int pass_begin(void) {
     uint64_t pt2 = prof ? mono_ns() : 0;
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {tw, th}}, .layerCount = nlay ? nlay : 1, .colorAttachmentCount = (uint32_t)ncol, .pColorAttachments = ca,
                            .pDepthAttachment = P.hd ? &da : NULL, .pStencilAttachment = P.hs ? &sa : NULL };
+    if (!P_tf) hp_pass_begin(CB(), hp_c0);   // (HUD-free frame generation: the scene copy before the first HUD pass)
     if (!P_tf) g_seg_fgp = fgr_pass_begin(CB(), tw, th, nlay ? nlay : 1, P.samples, fga, fgn);   // (the held frame decides this pass's stores by it)   // (the transform feedback capture passes are ours, not the game's)
     rend_begin(CB(), &ri, P.cfmt, P.hd ? P.dfmt : P.hs ? P.sfmt : 0, P.samples, 0); g_stat_begins++;
     if (prof) { uint64_t pt3 = mono_ns(); g_pb_ns[0] += pt1 - pt0; g_pb_ns[1] += pt2 - pt1; g_pb_ns[2] += pt3 - pt2; }
@@ -4470,8 +4540,8 @@ void mtl_exec(const uint8_t *p) {
                 if (c->stencil_mask) { R.clear_s = 1; R.cs = (uint32_t)c->stencil; }
                 break;
             }
-            case OP_DRAW: draw((const p_draw *)a, NULL); g_stat_draws++; fgr_draw(); sub_split(); break;
-            case OP_DRAW_IDX: draw(NULL, (const p_draw_idx *)a); g_stat_draws++; fgr_draw(); sub_split(); break;
+            case OP_DRAW: draw((const p_draw *)a, NULL); g_stat_draws++; fgr_draw(); hp_draw(); sub_split(); break;
+            case OP_DRAW_IDX: draw(NULL, (const p_draw_idx *)a); g_stat_draws++; fgr_draw(); hp_draw(); sub_split(); break;
             case OP_COPY_B2T: copy_b2t((const p_copy_b2t *)a, 0); break;
             case OP_COPY_T2B: copy_b2t((const p_copy_b2t *)a, 1); break;
             case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
@@ -5289,7 +5359,13 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         if (FGE.qp && gen) { vkCmdResetQueryPool(cb, FGE.qp, sl * 2, 2); vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2); }
         if (ls) ls_begin(ls, cb); else fg_begin(g, cb);
         VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { cx, cy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { (uint32_t)cw, (uint32_t)ch, 1 } };
-        vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+        // HUD-free (our own frame generation): the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud)
+        int hf = !ls && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt;
+        if (!ls) { if (hf != g->hud_on && FGE.have_prev) FGE.have_prev = 0; g->hud_on = hf; }   // (a switch between the two: the frame before is of the other kind, no picture from it)
+        if (hf) { VkImageCopy sc = ic; sc.srcOffset = (VkOffset3D){ 0, 0, 0 };
+            vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
+            vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, g->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
+        else vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
         if (ls) {   // (its own barriers: the copy is made visible to its compute passes)
             ls_ingest(ls, cb, p);
             if (gen) { ls_generate(ls, cb);
@@ -5394,6 +5470,8 @@ static void seg_record_prim(sub_t *s) {
     VKCHECK(vkEndCommandBuffer(s->prim)); s->nseg = 0;
 }
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
+    uint64_t hp_scene = g_hp_scene_seq == g_hp_seq + 1;   // (HUD-free: this frame's scene copy was made; read before hp_learn starts the next frame)
+    hp_learn(tex_res(t)); g_hp_scene_ok = hp_scene;
     if (hold_on()) {
         if (hold_dec()) { vtex *sx = tex_res(t); if (sx) fgr_read_img(sx, sx->w, sx->h, (uint32_t)sx->fmt, FGR_SHOWN); }   // (shown: its last stores are needed)
         hold_flush(0);   // the whole frame to the GPU, before it is shown
