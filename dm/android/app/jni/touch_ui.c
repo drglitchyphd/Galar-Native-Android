@@ -916,7 +916,7 @@ static void dex_draw(dm_ovl_item *it, int *n, int max) {
         int R = !e->dexok || r->state == 2 ? 255 : r->state == 1 ? 170 : 85;
         if (e->dexok && r->state == 2 && r->icon == 255) { o = add(it, n, max, x + ch * 0.3f, y, ch * 0.5f, OVL_DISC, 0, 0, 0, 0); if (o) { o->glyph = OVL_G_BALL; o->gscale = 1.0f; o->galpha = 1.0f; } }   // (v61: the ball mark when there is no icon)
         if (r->icon != 255) {   // FORK v61: the Pokémon's icon left of its name (the player's own game files): a black silhouette not seen, faded seen, full colour caught
-            o = add(it, n, max, x + ch * 0.5f, y, ch * 0.66f, OVL_DISC, 0, 0, 0, 0);
+            o = add(it, n, max, x + ch * 0.5f, y, ch * 0.74f, OVL_DISC, 0, 0, 0, 0);
             if (o) { o->glyph = 1000 + r->icon; o->gscale = 1.0f; o->galpha = 1.0f; o->gtint = !e->dexok || r->state == 2 ? 0 : r->state == 1 ? 1 : 2; } }
         if (e->dexok && r->state == 0) nm = "???";   // FORK v60 (Steven, Nov 19): not seen yet: no name, as in the Pokédex
         snprintf(ln, sizeof ln, "%.12s%s", nm, r->flags & 2 && !(r->flags & 1) ? "!" : ""); otext_c(it, n, max, x + ch * 0.6f * 2, y, ch, ln, 1.0f, R, R, R);

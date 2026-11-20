@@ -16,7 +16,7 @@ static struct { int16_t sp, form; int8_t st; } g_cell[NCELL]; static int g_ncell
 static char g_dir[1024]; static int g_dir_tried;
 static char (*g_files)[96]; static int g_nfiles;
 static int g_lines;
-#define ILOG(...) do { if (g_lines < 40) { g_lines++; LOG(__VA_ARGS__); } } while (0)
+#define ILOG(...) do { if (g_lines < 80) { g_lines++; LOG(__VA_ARGS__); } } while (0)
 
 const uint8_t *dm_fork_icons(unsigned *gen) { *gen = g_gen; return g_atlas; }
 
@@ -47,7 +47,7 @@ static void index_dir(void) {
         snprintf(g_files[g_nfiles++], 96, "%s", e->d_name); }
     if (D) closedir(D);
     ILOG("[FORK] icons: %d icon files in %s", g_nfiles, g_dir);
-    for (int i = 0; i < g_nfiles && i < 8; i++) ILOG("[FORK] icons: file %s", g_files[i * (g_nfiles / 8 + 1) % g_nfiles]);   // (v62: a spread of names)
+    for (int i = 0; i < g_nfiles && i < 16; i++) ILOG("[FORK] icons: file %s", g_files[i * (g_nfiles / 16 + 1) % g_nfiles]);   // (v62: a spread of names)
 }
 // the file for a species / form. v62: Sword names them poke_icon_SSSS_FFg_x.bntx (Steven's v61 log: "poke_icon_0000_00s_n.bntx": a 2-digit form, then the
 //   gender (s both / m / f), then n (normal; g Gigantamax?)): the m / s one, then any
@@ -83,13 +83,18 @@ static uint8_t *bntx_rgba(const uint8_t *d, size_t n, int *W, int *H) {
     if (kind) bc_decode_image(kind, lin, rowb, w, h, out, (size_t)w * 4); else for (int y = 0; y < h; y++) memcpy(out + (size_t)y * w * 4, lin + (size_t)y * rowb, (size_t)w * 4);
     free(lin); *W = w; *H = h; return out;
 }
-static void draw_cell(int c, const uint8_t *px, int w, int h) {   // fitted into the cell, aspect kept, box-filtered
+static void draw_cell(int c, const uint8_t *px0, int W0, int H0) {   // fitted into the cell, aspect kept, box-filtered
+    // v63 (Steven, Nov 20: "really tiny"): cropped to the Pokémon first (the pixels not see-through), a square around it
+    int bx0 = W0, by0 = H0, bx1 = -1, by1 = -1;
+    for (int y = 0; y < H0; y++) for (int x = 0; x < W0; x++) if (px0[((size_t)y * W0 + x) * 4 + 3] > 16) { if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+    if (bx1 < 0) { bx0 = by0 = 0; bx1 = W0 - 1; by1 = H0 - 1; }
+    int w = bx1 - bx0 + 1, h = by1 - by0 + 1; const uint8_t *px = px0 + ((size_t)by0 * W0 + bx0) * 4; int pitch = W0;
     int cx = (c % 16) * CELL, cy = (c / 16) * CELL; float s = (float)(w > h ? w : h) / (CELL - 2); int ow = (int)(w / s), oh = (int)(h / s), x0 = (CELL - ow) / 2, y0 = (CELL - oh) / 2;
     for (int y = 0; y < CELL; y++) memset(g_atlas + ((size_t)(cy + y) * AW + cx) * 4, 0, CELL * 4);
     for (int y = 0; y < oh; y++) for (int x = 0; x < ow; x++) {
         int sx0 = (int)(x * s), sy0 = (int)(y * s), sx1 = (int)((x + 1) * s), sy1 = (int)((y + 1) * s); if (sx1 <= sx0) sx1 = sx0 + 1; if (sy1 <= sy0) sy1 = sy0 + 1;
         unsigned acc[4] = { 0 }, k = 0;
-        for (int yy = sy0; yy < sy1 && yy < h; yy++) for (int xx = sx0; xx < sx1 && xx < w; xx++) { const uint8_t *q = px + ((size_t)yy * w + xx) * 4; unsigned a = q[3]; acc[0] += q[0] * a; acc[1] += q[1] * a; acc[2] += q[2] * a; acc[3] += a; k++; }
+        for (int yy = sy0; yy < sy1 && yy < h; yy++) for (int xx = sx0; xx < sx1 && xx < w; xx++) { const uint8_t *q = px + ((size_t)yy * pitch + xx) * 4; unsigned a = q[3]; acc[0] += q[0] * a; acc[1] += q[1] * a; acc[2] += q[2] * a; acc[3] += a; k++; }
         uint8_t *o = g_atlas + ((size_t)(cy + y0 + y) * AW + cx + x0 + x) * 4;
         if (acc[3]) { o[0] = (uint8_t)(acc[0] / acc[3]); o[1] = (uint8_t)(acc[1] / acc[3]); o[2] = (uint8_t)(acc[2] / acc[3]); } o[3] = (uint8_t)(k ? acc[3] / k : 0); }
 }
@@ -111,6 +116,7 @@ void dm_fork_icons_work(void) {
         int ok = 0; if (f) { char p[1200]; snprintf(p, sizeof p, "%s/%s", g_dir, f); size_t n = 0; uint8_t *d = read_file(p, &n), *px = NULL; int w = 0, h = 0;
             if (d) px = bntx_rgba(d, n, &w, &h); free(d); if (px) { draw_cell(c, px, w, h); free(px); ok = 1; } }
         if (!ok) ILOG("[FORK] icons: no icon for species %d form %d%s", sp, form, f ? " (file not read)" : "");
+        else ILOG("[FORK] icons: species %d form %d <- %s (cell %d)", sp, form, f, c);   // v63 (Steven: the wrong Pokémon: which file each one got)
         pthread_mutex_lock(&g_mu); g_cell[c].st = ok ? 1 : -1; pthread_mutex_unlock(&g_mu);
         if (ok) g_gen++;
     }
