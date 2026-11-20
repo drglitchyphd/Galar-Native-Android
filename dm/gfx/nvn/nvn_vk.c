@@ -1424,7 +1424,11 @@ static VkRenderPass rp_get(const rpkey *k) {
     VkSubpassDependency dep[2] = {
         { VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 },
         { 0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 } };
-    VkRenderPassCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = na, .pAttachments = a, .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = 2, .pDependencies = dep };
+    // The order around a pass is the engine's own barriers before and after it (barrier_all / barrier_pass / barrier_before), as with dynamic rendering: the two full
+    //   dependencies made every one of ~140 passes a frame wait for all work before and after it, the relaxed barriers included (Vulkan 1.0 path on a Galaxy S25+:
+    //   GPU 44-46 ms a frame, the dynamic rendering path 19 ms there, 2026-11-20). DM_VK_RP_DEPS=full: the two dependencies as before
+    static int full = -1; if (full < 0) { const char *e = getenv("DM_VK_RP_DEPS"); full = e && !strcmp(e, "full"); }
+    VkRenderPassCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = na, .pAttachments = a, .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = full ? 2u : 0u, .pDependencies = full ? dep : NULL };
     VkResult r = vkCreateRenderPass(g_dev, &ci, NULL, &rp);
     if (r) VDIE("render pass (%u colour, depth / stencil format %u, %u samples) failed: %d", (unsigned)k->n, k->dsfmt, (unsigned)k->samples, (int)r);
     pthread_mutex_lock(&g_rpmu);
