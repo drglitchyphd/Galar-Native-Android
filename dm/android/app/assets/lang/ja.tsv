@@ -407,3 +407,5 @@ Resolution	解像度
 1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p：より鮮明だがGPU負荷が増加（fps低下・発熱、次回起動から）
 Dynamic	ダイナミック
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます
+100 % (as on the Switch)	100 %（Switchと同じ）
+How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick.	右スティックとタッチ操作でカメラが回る速さです。低い：ゆっくり細かく。高い：スティックを少し倒すだけで最高速。
