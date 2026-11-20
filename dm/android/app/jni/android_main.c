@@ -749,16 +749,29 @@ static void fps_guard_init(void) {
 // The heat guard, for every Graphics level the guard above does not run on (High, Low, Lowest, a scale set by hand): only heat, never the frame rate. Hot (thermal
 //   status moderate or worse, or the throttling forecast at 0.9): the 3D render scale goes to the 720p step through the game's own setter; back to the game's size
 //   after a calm minute. A Galaxy S25+ on High at 1080p ran its GPU down to 160 MHz (51 °C), the game at 20 fps, 2026-11-20. DM_HEAT_GUARD=0 leaves it out
-static void heat_guard(void) {
+// Adreno's own GPU limit (kgsl): the thermal engine caps the clock directly, and Android's thermal status can stay "none" or "light" meanwhile (a Galaxy S25+ held at
+//   160 MHz of 1200, power level 14 of 15, status not raised, 2026-11-20). Returns the cap as a share of the top clock (1: no cap), -1 where it cannot be read
+static float gpu_cap_share(void) {
+    static int ok = 1; if (!ok) return -1;
+    long cap = 0, top = 0; FILE *f = fopen("/sys/class/kgsl/kgsl-3d0/max_gpuclk", "r");
+    if (f) { if (fscanf(f, "%ld", &cap) != 1) cap = 0; fclose(f); }
+    f = fopen("/sys/class/kgsl/kgsl-3d0/gpu_available_frequencies", "r");
+    if (f) { if (fscanf(f, "%ld", &top) != 1) top = 0; fclose(f); }   // (the first, the highest)
+    if (cap <= 0 || top <= 0) { ok = 0; fprintf(stderr, "heat: the GPU's clock limit cannot be read here (not Adreno, or not allowed): Android's thermal status alone\n"); return -1; }
+    return (float)cap / (float)top;
+}
+static void heat_guard(void) {   // (Legends: Arceus: the 3D render scale through loader.c arc_scale, under the slider's own value)
     static int off = -1, on, calm_n; if (off < 0) { const char *e = getenv("DM_HEAT_GUARD"); off = e && !strcmp(e, "0"); }
-    if (off || !g_th_mgr || !g_th_st || !dm_res_scale_ready() || !dm_res_scale_applies()) return;
+    extern void dm_arc_scale_set(float) __attribute__((weak));
+    if (off || !g_th_mgr || !g_th_st || !dm_arc_scale_set) return;
     int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
     int hot = st >= 2 || hr >= 0.9f, calm = st <= 1 && (hr < 0 || hr < 0.75f);
-    if (power_saver()) { hot = st >= 1 || hr >= 0.75f; calm = st == 0 && (hr < 0 || hr < 0.6f); }
+    float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
     calm_n = calm ? calm_n + 1 : 0;
-    if (hot && !on) { on = 1; calm_n = 0; dm_res_factor_set(k_res_steps[RES_HOT]);
-        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f): 3D render scale %d %% (about 720p) until it cools\n", st, (double)hr, (int)(k_res_steps[RES_HOT] * 100 + 0.5f)); }
-    else if (on && calm_n >= 12) { on = 0; dm_res_factor_set(k_res_steps[0]); fprintf(stderr, "heat guard: cooled down: the game's own 3D render scale again\n"); }
+    const char *ce = getenv("DM_RES_CAP"); float cap = ce ? (float)atof(ce) : 1.0f; if (!(cap >= 0.5f && cap <= 1.0f)) cap = 1.0f;   // (the slider's value: the guard only ever goes under it)
+    if (hot && !on) { on = 1; calm_n = 0; float h = cap < 0.67f ? cap : 0.67f; dm_arc_scale_set(h);
+        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(h * 100 + 0.5f)); }
+    else if (on && calm_n >= 12) { on = 0; dm_arc_scale_set(cap); fprintf(stderr, "heat guard: cooled down: 3D render scale %d %% again\n", (int)(cap * 100 + 0.5f)); }
 }
 static void graphics_auto(void) {
     static int mode = 1, cool, slow, held, wait = 12, primed, lv, since; static uint64_t last_fr;
@@ -767,7 +780,8 @@ static void graphics_auto(void) {
     int hot = 0, calm = 1;
     if (g_th_mgr && g_th_st) { int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
         // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate
-        hot = st >= 2 || hr >= 0.9f; calm = st <= 1 && (hr < 0 || hr < 0.75f); }
+        hot = st >= 2 || hr >= 0.9f; calm = st <= 1 && (hr < 0 || hr < 0.75f);
+        float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; } }   // (Adreno's own GPU limit: heat_guard)
     double fps = -1;
     // (the first minute of frames does not count: a save loading in runs slow while the game reads the world, Legends: Arceus at 22.6 fps for its first 20 s; that
     //   dropped TV mode for two minutes on a phone that then held 30 in it, Galaxy S25+ 2026-11-09)
