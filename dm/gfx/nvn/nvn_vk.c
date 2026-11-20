@@ -5738,7 +5738,11 @@ static void present_window_locked(vtex *x, const int crop[4]) {
             vok[p] = fg_cam_on() && dm_cam_viewproj && dm_cam_viewproj(vp[p]);
             float m[16]; int ok = gen && vok[p] && vok[p ^ 1] && fg_cam_m(vp[p ^ 1], vp[p], m);
             fg_camera(g, p, ok ? m : NULL, atomic_load(&g_depth_zero));
-            if (ok && g->camb[0] > 0.5f && !said) { said = 1; VLOG("frame generation, camera guidance: on (the game's camera and depth start the motion search; DM_FG_CAMERA=0 off)"); } }
+            if (ok && g->camb[0] > 0.5f && !said) { said = 1; VLOG("frame generation, camera guidance: on (the game's camera and depth start the motion search; DM_FG_CAMERA=0 off)"); }
+            static unsigned n, nread, nz; n++; nread += vok[p] != 0; nz += g->z_on && g->z_ok[p];   // (why not, once a while: the camera read or the depth)
+            if (n == 300 && !said) VLOG("frame generation, camera guidance: not on yet: camera read %u of %u frames%s, depth %u of %u", nread, n,
+                                        !dm_cam_viewproj ? " (no reader for this game)" : "", nz, n);
+            if (n >= 300) n = nread = nz = 0; }
         if (gen) { fg_generate(g, cb, p);
             if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = 1; }
             pres_src mid = { NULL, g->m.img, g->m.view, g->w, g->h, 0, 0, cw, ch };
