@@ -483,13 +483,17 @@ void mtl_init(void) {
     int dynren = old ? x_dynren && fdr.dynamicRendering : f13.dynamicRendering, timeline = old11 ? fts.timelineSemaphore : f12.timelineSemaphore;
     int eds = old ? x_eds && fed.extendedDynamicState : 1;
     if (!timeline && g_tlsem) { g_tlsem = 0; VLOG("timeline semaphores listed but not supported: a fence for each submission instead"); }
-    g_dynren = dynren && !(getenv("DM_VK_NO_DYNREN") && atoi(getenv("DM_VK_NO_DYNREN")));
+    // Adreno: render passes by default (Galar Native #205). Its vkCmdBeginRendering callocs a large block at every pass begin (freed again when the command pool is
+    //   reset): on a Galaxy S25+ that was a third of the replay's CPU time in Sword / Shield, and with render passes and their framebuffers kept (fb_cache.h, FBC_N
+    //   1024) the replay went from 27.5 to 17.3 ms a frame. DM_VK_NO_DYNREN=0 / 1 decides on any GPU; Mali and the rest as before
+    { const char *e = getenv("DM_VK_NO_DYNREN"); int no = e ? atoi(e) != 0 : g_props.vendorID == 0x5143;
+      g_dynren = dynren && !no; }
     // Qualcomm's Vulkan 1.1 drivers (Adreno 6xx / 710 stock, API 1.1.x) misread vertex strides passed per draw (vkCmdBindVertexBuffers2): exploded, stretched
     //   polygons across the view (Arceus #34, Galar #209). Built into each pipeline there unless DM_VK_NO_EDS=0
     const char *ne = getenv("DM_VK_NO_EDS");
     int old_qc = g_props.vendorID == 0x5143 && VK_API_VERSION_MINOR(g_props.apiVersion) < 2 && VK_API_VERSION_MAJOR(g_props.apiVersion) == 1;
     g_eds = eds && !(ne ? atoi(ne) != 0 : old_qc);
-    VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : dynren ? "render passes (DM_VK_NO_DYNREN)" : "render passes (the driver has no dynamic rendering)",
+    VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : dynren ? (g_props.vendorID == 0x5143 && !getenv("DM_VK_NO_DYNREN") ? "render passes (Adreno's default: DM_VK_NO_DYNREN=0 for dynamic rendering)" : "render passes (DM_VK_NO_DYNREN)") : "render passes (the driver has no dynamic rendering)",
          g_eds ? "set per draw (extended dynamic state)" : !eds ? "built into each pipeline (the driver has no extended dynamic state)"
                : ne ? "built into each pipeline (DM_VK_NO_EDS)" : "built into each pipeline (Qualcomm Vulkan 1.1 driver: per-draw vertex strides drawn wrong; DM_VK_NO_EDS=0 to try)");
     if (!fcc.depthClipControl) g_clipctl = 0;
@@ -1550,6 +1554,7 @@ static VkFramebuffer fbc_create(VkRenderPass rp, const VkImageView *views, uint3
 #define FBC_CREATE(rp, v, nv, w, h, l) fbc_create(rp, v, nv, w, h, l)
 #define FBC_DESTROY(x) vkDestroyFramebuffer(g_dev, (x), NULL)
 #define FBC_DEFER(x) defer_add((dfr){ .kind = DF_FRAMEBUFFER, .h.fb = (x) })
+#define FBC_N 1024   // (Sword / Shield use about 380 in the field: with 256 the oldest went and most passes made a framebuffer again, 174 a frame)
 #include "fb_cache.h"
 static int fbc_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_FB_CACHE"); on = !e || atoi(e) != 0; } return on; }
 // Begins a pass described as dynamic rendering. cf: each colour slot's format (a slot with no view: ignored), dsfmt: the depth / stencil attachment's format,
