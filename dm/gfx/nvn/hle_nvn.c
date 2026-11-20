@@ -1089,7 +1089,13 @@ static void rq_wait(const char *who) {
 #else
 #define DM_THREAD_NAME(n) ((void)0)
 #endif
+static _Atomic int g_rq_tid;   // the replay thread's id (android_main.c: its loads profiled)
+int nvn_rq_tid(void) { return atomic_load(&g_rq_tid); }
 static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
+#ifdef __linux__
+    atomic_store(&g_rq_tid, (int)gettid());
+#endif
+
     (void)a;
     for (;;) {
         pthread_mutex_lock(&g_rq_mu);
