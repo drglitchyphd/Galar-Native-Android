@@ -541,8 +541,11 @@ void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32
                 sb = part == SEL_LEFT ? DM_BTN_L : part == SEL_RIGHT ? DM_BTN_R : part == SEL_SWAP ? DM_BTN_X : DM_BTN_ZR; }
             if (sb) { dm_input_press_frames(sb, 150000000ull, 4); click_locked(); static int nl; if (nl++ < 20) fprintf(stderr, "[touch] selector %s\n", sb == DM_BTN_L ? "L" : sb == DM_BTN_R ? "R" : sb == DM_BTN_X ? "X" : "ZR"); }
         }
-        // quick swipes on the camera side (under 0.35 s, a tenth of the screen height or more): left / right = L / R (the item or Pokémon), down = X (items / Pokémon)
-        for (int i = 0; i < 10; i++) if (GESTURES && field_gest() && g_ptr[i].id == id && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !g_ptr[i].lp && now_s() - g_ptr[i].t0 < 0.35 && !touch_menu_active()) {
+        // quick swipes on the camera side (under 0.35 s, a tenth of the screen height or more): left / right = L / R (the item or Pokémon), down = X (items / Pokémon).
+        //   Off unless DM_TOUCH_CAM_SWIPES=1: a quick turn of the camera is the same swipe, and it switched the Pokémon as the camera turned (Galaxy S25+, 2026-11-20).
+        //   The selector's own swipes and taps (above) and the L / R buttons switch them
+        static int cam_sw = -1; if (cam_sw < 0) { const char *e = getenv("DM_TOUCH_CAM_SWIPES"); cam_sw = e && !strcmp(e, "1"); }
+        for (int i = 0; i < 10; i++) if (cam_sw && GESTURES && field_gest() && g_ptr[i].id == id && g_ptr[i].target == C_CAM && !g_ptr[i].thr && !g_ptr[i].lp && now_s() - g_ptr[i].t0 < 0.35 && !touch_menu_active()) {
             float sx = g_ptr[i].x - g_ptr[i].x0, sy = g_ptr[i].y - g_ptr[i].y0; uint64_t sb = 0;
             if (fabsf(sx) > g_h * 0.10f && fabsf(sy) < fabsf(sx) * 0.6f) sb = sx > 0 ? DM_BTN_R : DM_BTN_L;
             else if (sy > g_h * 0.10f && fabsf(sx) < sy * 0.6f) sb = DM_BTN_X;
