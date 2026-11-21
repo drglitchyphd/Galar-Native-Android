@@ -366,7 +366,11 @@ void mtl_init(void) {
         VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pd }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (pd.maxPushDescriptors) g_maxpush = pd.maxPushDescriptors; if (getenv("DM_VK_MAXPUSH")) g_maxpush = (uint32_t)atoi(getenv("DM_VK_MAXPUSH"));   // a lower limit tests the set path
         VLOG("push descriptors: up to %u per program", g_maxpush); }
-    if ((g_host_import = has_ext(de, nde, "VK_EXT_external_memory_host"))) dext[ndext++] = "VK_EXT_external_memory_host";
+    // Vulkan 1.0 GPUs: every external-memory extension needs VK_KHR_external_memory beside it (core from 1.1); without it listed, no external-memory route
+    //   (simdev: Turnip on Adreno 610 with a 1.0 device, VUID-vkCreateDevice-ppEnabledExtensionNames-01387 for VK_EXT_external_memory_host)
+    int dev10 = VK_API_VERSION_MAJOR(g_props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_props.apiVersion) == 0;
+    int xmem_ok = !dev10 || has_ext(de, nde, "VK_KHR_external_memory");
+    if (xmem_ok && (g_host_import = has_ext(de, nde, "VK_EXT_external_memory_host"))) { dext[ndext++] = "VK_EXT_external_memory_host"; if (dev10) dext[ndext++] = "VK_KHR_external_memory"; }
     if ((g_has_swapchain = has_ext(de, nde, "VK_KHR_swapchain"))) dext[ndext++] = "VK_KHR_swapchain";
     if (g_has_swapchain && (g_dtiming = has_ext(de, nde, "VK_GOOGLE_display_timing"))) dext[ndext++] = "VK_GOOGLE_display_timing";   // frame pacing (pace_time)
     if ((g_clipctl = !as_mali && has_ext(de, nde, "VK_EXT_depth_clip_control"))) dext[ndext++] = "VK_EXT_depth_clip_control";
@@ -423,9 +427,8 @@ void mtl_init(void) {
     else mark_file("heap_route_skipped", "", -1);
     // Vulkan 1.0 GPUs (Adreno 5xx's 1.0 drivers, Mali r14p0): external memory is three extensions there, not core. The buffer query only through its instance
     //   extension; the fd routes only with VK_KHR_external_memory beside VK_KHR_external_memory_fd (simdev: adreno-512-vk10, VUID-vkCreateDevice-...-01387)
-    int dev10 = VK_API_VERSION_MAJOR(g_props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_props.apiVersion) == 0;
+    //   (dev10 / xmem_ok: worked out before the host-import route, which needs the same)
     if (dev10 && !g_inst_xmemcaps) vkGetPhysicalDeviceExternalBufferProperties = NULL;
-    int xmem_ok = !dev10 || has_ext(de, nde, "VK_KHR_external_memory");
     if (!g_host_import && (!fd_crashed || !heap_crashed) && xmem_ok && has_ext(de, nde, "VK_KHR_external_memory_fd") && !(getenv("DM_VK_NO_FDMAP") && atoi(getenv("DM_VK_NO_FDMAP")))) {
         VkExternalMemoryHandleTypeFlagBits cand[2] = { VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
         int dmabuf = has_ext(de, nde, "VK_EXT_external_memory_dma_buf") && !(getenv("DM_VK_NO_DMABUF") && atoi(getenv("DM_VK_NO_DMABUF")));
@@ -762,7 +765,8 @@ void dm_vk_mem_stats(double *blocks_mb, double *used_mb) {
 static vmalloc_t vk_alloc(VkMemoryRequirements rq, VkMemoryPropertyFlags want, int map) {
     int t = mem_type(rq.memoryTypeBits, want, map ? 0 : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     if (t < 0) VDIE("no memory type for bits %#x flags %#x", rq.memoryTypeBits, want);
-    VkDeviceSize al = rq.alignment > g_props.limits.bufferImageGranularity ? rq.alignment : g_props.limits.bufferImageGranularity;
+    VkDeviceSize gr = g_props.limits.bufferImageGranularity; while (gr & (gr - 1)) gr = (gr | (gr - 1)) + 1;   // (a power of two: one 2016 PowerVR driver reports 9990)
+    VkDeviceSize al = rq.alignment > gr ? rq.alignment : gr;
     pthread_mutex_lock(&g_amu);
     for (int k = 0; k < g_nblocks; k++) {
         vblock *b = g_blocks[k]; if (b->type != (uint32_t)t || (map && !b->map)) continue;

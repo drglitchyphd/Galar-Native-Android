@@ -118,7 +118,10 @@ int main(int argc, char **argv) {
         while (t < mp.memoryTypeCount && !((rq.memoryTypeBits >> t & 1) && (mp.memoryTypes[t].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) t++;
         VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = t }; vkAllocateMemory(dev, &mai, NULL, &bmem[i]);
         vkBindBufferMemory(dev, buf[i], bmem[i], 0); void *m; vkMapMemory(dev, bmem[i], 0, VK_WHOLE_SIZE, 0, &m); map[i] = m; }
-    if (!fg_setup(&G, dev, pd, VK_FORMAT_R8G8B8A8_UNORM, W, H)) { printf("FAIL: frame generation cannot be set up on %s: %s\n", pp.deviceName, G.why ? G.why : "?"); return 1; }
+    // a GPU whose formats cannot carry frame generation: it is refused (the game runs without it), which is right, not a failure
+    int set_up = fg_setup(&G, dev, pd, VK_FORMAT_R8G8B8A8_UNORM, W, H);
+    if (!set_up && G.why && strstr(G.why, "the driver cannot")) { printf("SKIP: no frame generation on %s: %s\n", pp.deviceName, G.why); return 0; }
+    if (!set_up) { printf("FAIL: frame generation cannot be set up on %s: %s\n", pp.deviceName, G.why ? G.why : "?"); return 1; }
     {   // the depth copy (as nvn_vk.c's: the game's depth format, here D16, which every driver samples) and its two frames' data
         VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_D16_UNORM, .extent = { W, H, 1 }, .mipLevels = 1, .arrayLayers = 1,
             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
