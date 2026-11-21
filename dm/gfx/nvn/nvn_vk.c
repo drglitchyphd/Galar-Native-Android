@@ -73,6 +73,7 @@ static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; s
 static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperties g_memp;
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
 static int g_mclamp;   // MIRROR_CLAMP_TO_EDGE samplers allowed (VK_KHR_sampler_mirror_clamp_to_edge, or Vulkan 1.2's samplerMirrorClampToEdge); else wrapm falls back
+static int g_inst_xmemcaps;   // VK_KHR_external_memory_capabilities enabled on the instance
 // Passes as dynamic rendering (1) or as Vulkan 1.0 render passes (0: rend_begin); draw state set per draw (1, extended dynamic state) or built into each pipeline (0: sst).
 //   0 where the driver lacks them (Arm's r3x drivers for Mali-G57 / G68 / G77 / G78, Vulkan 1.1: A25 5G); DM_VK_NO_DYNREN=1 / DM_VK_NO_EDS=1 force 0 on any driver
 static int g_dynren = 1, g_eds = 1;
@@ -282,9 +283,11 @@ void mtl_init(void) {
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative", .apiVersion = instance_api };
     uint32_t nie = 0; vkEnumerateInstanceExtensionProperties(NULL, &nie, NULL);
     VkExtensionProperties *ie = calloc(nie ? nie : 1, sizeof *ie); vkEnumerateInstanceExtensionProperties(NULL, &nie, ie);
-    const char *iext[6]; uint32_t niext = 0; VkInstanceCreateFlags ifl = 0;
+    const char *iext[8]; uint32_t niext = 0; VkInstanceCreateFlags ifl = 0;
     if (has_ext(ie, nie, "VK_KHR_portability_enumeration")) { iext[niext++] = "VK_KHR_portability_enumeration"; ifl |= 0x00000001; /* VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR */ }
     if (has_ext(ie, nie, "VK_KHR_get_physical_device_properties2")) iext[niext++] = "VK_KHR_get_physical_device_properties2";
+    // (a Vulkan 1.0 GPU: vkGetPhysicalDeviceExternalBufferProperties is this extension's; the core name of a 1.3 instance is not allowed on a 1.0 device)
+    if ((g_inst_xmemcaps = has_ext(ie, nie, "VK_KHR_external_memory_capabilities"))) iext[niext++] = "VK_KHR_external_memory_capabilities";
     if (has_ext(ie, nie, "VK_KHR_surface")) iext[niext++] = "VK_KHR_surface";
 #ifdef __ANDROID__
     if (has_ext(ie, nie, "VK_KHR_android_surface")) iext[niext++] = "VK_KHR_android_surface";
@@ -418,7 +421,12 @@ void mtl_init(void) {
     if (heap_crashed) { mark_file("heap_route_skipped", "a start that left the dma-buf heap route out (heap_import_crashed); if it crashes too, the next start uses the route again\n", 1);
         VLOG("[RED] memory pools: importing dma-bufs failed last time: not this start"); }
     else mark_file("heap_route_skipped", "", -1);
-    if (!g_host_import && (!fd_crashed || !heap_crashed) && has_ext(de, nde, "VK_KHR_external_memory_fd") && !(getenv("DM_VK_NO_FDMAP") && atoi(getenv("DM_VK_NO_FDMAP")))) {
+    // Vulkan 1.0 GPUs (Adreno 5xx's 1.0 drivers, Mali r14p0): external memory is three extensions there, not core. The buffer query only through its instance
+    //   extension; the fd routes only with VK_KHR_external_memory beside VK_KHR_external_memory_fd (simdev: adreno-512-vk10, VUID-vkCreateDevice-...-01387)
+    int dev10 = VK_API_VERSION_MAJOR(g_props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_props.apiVersion) == 0;
+    if (dev10 && !g_inst_xmemcaps) vkGetPhysicalDeviceExternalBufferProperties = NULL;
+    int xmem_ok = !dev10 || has_ext(de, nde, "VK_KHR_external_memory");
+    if (!g_host_import && (!fd_crashed || !heap_crashed) && xmem_ok && has_ext(de, nde, "VK_KHR_external_memory_fd") && !(getenv("DM_VK_NO_FDMAP") && atoi(getenv("DM_VK_NO_FDMAP")))) {
         VkExternalMemoryHandleTypeFlagBits cand[2] = { VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
         int dmabuf = has_ext(de, nde, "VK_EXT_external_memory_dma_buf") && !(getenv("DM_VK_NO_DMABUF") && atoi(getenv("DM_VK_NO_DMABUF")));
         for (int i = dmabuf ? 0 : 1; i < 2 && !g_fdmap && !fd_crashed; i++) {
@@ -456,6 +464,7 @@ void mtl_init(void) {
         }
         if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && g_props.vendorID == 0x13B5) { g_fdtype = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; g_fdmap = -1;
             VLOG("memory pools: Mali lists no exportable buffer: the dma-buf route tried anyway (it falls back by itself)"); }
+        if ((g_heapmap || g_fdmap) && dev10) dext[ndext++] = "VK_KHR_external_memory";   // (core from 1.1)
         if (g_heapmap) { dext[ndext++] = "VK_KHR_external_memory_fd"; dext[ndext++] = "VK_EXT_external_memory_dma_buf"; }
         else if (g_fdmap) { dext[ndext++] = "VK_KHR_external_memory_fd"; if (g_fdtype == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) dext[ndext++] = "VK_EXT_external_memory_dma_buf"; }
     }
@@ -535,6 +544,10 @@ void mtl_init(void) {
         if (!tc) setenv("DM_VK_BC_TRANSCODE", "off", 0);
         VLOG("PowerVR: BC textures %s (DM_VK_BC_TRANSCODE=%s, %s)", tc && strcmp(tc, "off") ? "transcoded to ETC2 / ASTC" : "decoded to RGBA", tc ? tc : "off", tc ? "env.txt" : "default here"); }
     { const char *tc = getenv("DM_VK_BC_TRANSCODE"); nvn_fmt_vk_etc(!f2.features.textureCompressionBC && f2.features.textureCompressionETC2 && !(tc && !strcmp(tc, "off")), f2.features.textureCompressionASTC_LDR); }
+    // Descriptors updated after binding: the engine never makes such a layout, and with robustBufferAccess on (f2 passes every feature as queried) a driver whose
+    //   robustBufferAccessUpdateAfterBind is false must not have them enabled (Turnip on Adreno 740, VUID-VkDeviceCreateInfo-robustBufferAccess-10247): left off
+    if (!old11) { f12.descriptorBindingUniformBufferUpdateAfterBind = f12.descriptorBindingStorageBufferUpdateAfterBind = f12.descriptorBindingUniformTexelBufferUpdateAfterBind =
+                  f12.descriptorBindingStorageTexelBufferUpdateAfterBind = f12.descriptorBindingSampledImageUpdateAfterBind = f12.descriptorBindingStorageImageUpdateAfterBind = VK_FALSE; }
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_qf, .queueCount = 1, .pQueuePriorities = &prio };
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext };
