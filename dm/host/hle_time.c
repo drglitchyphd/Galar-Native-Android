@@ -28,6 +28,8 @@ HLE_FORCE("_ZN2nn4time13IsInitializedEv", "the time service is taken over, alway
 // from 0 after a reboot (spans went negative). Now: seconds since boot counting sleep (CLOCK_BOOTTIME) + a base kept next to the save (<DM_SAVE>.clock): the same boot keeps
 // the base; after a reboot the clock goes on from the wall clock with the last known steady - wall difference (never backwards). A clock set by hand while the game runs
 // moves the user clock only, as on a Switch. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match. DM_FIXED_TIME: the plain monotonic seconds
+#define STEADY_ID "dmhost-steady-02"       // (16 bytes, no terminator used: the clock counting sleep and reboots)
+#define STEADY_ID_OLD "dmhost-steady-01"   // (the phone's uptime clock before 2026-11-21, still in older saves)
 static int64_t boot_secs(void) {
 #ifdef CLOCK_BOOTTIME
     struct timespec t; clock_gettime(CLOCK_BOOTTIME, &t); return (int64_t)t.tv_sec;
@@ -65,7 +67,17 @@ static int64_t steady_secs(void) {
 }
 HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock → host seconds counting sleep and reboots, fixed source ID", Result, h_time_SteadyNow, uint8_t *out) {
     int64_t s = steady_secs();
-    memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
+    memcpy(out, &s, 8); memcpy(out + 8, STEADY_ID, 16); return RES_OK;
+}
+// Time between two steady time points (Sword / Shield main+0x5c58f8, before the clock check below). The SDK's subtracts when the source IDs match and fails otherwise;
+// a time point from the old host clock (STEADY_ID_OLD: phone uptime, kept in saves from before) against the new one counts as time gone forward (1 s), not a failure,
+// so the update itself does not look like a clock change
+HLE_FORCE("_ZN2nn4time14GetSpanBetweenEPlRKNS0_20SteadyClockTimePointES4_", "steady clock span; the old host clock's time points count as earlier", Result, h_time_Span, int64_t *out, const uint8_t *a, const uint8_t *b) {
+    int64_t va, vb; memcpy(&va, a, 8); memcpy(&vb, b, 8);
+    if (!memcmp(a + 8, b + 8, 16)) { *out = vb - va; return RES_OK; }
+    if (!memcmp(a + 8, STEADY_ID_OLD, 16) && !memcmp(b + 8, STEADY_ID, 16)) { *out = 1; return RES_OK; }
+    if (!memcmp(a + 8, STEADY_ID, 16) && !memcmp(b + 8, STEADY_ID_OLD, 16)) { *out = -1; return RES_OK; }
+    return RES_FAIL;
 }
 // The SDK's now() asks the time service object, which the host never makes (Initialize is taken over): it returned 0 every time. Sword / Shield call it from 19 places
 // (main+0x10f65c4, +0x11182b4 ...): their real-time timers stood still
@@ -167,8 +179,8 @@ HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "sna
     memcpy(s, &off, 8); memcpy(s + 0x08, tp, 0x18); memcpy(s + 0x40, &now, 8);
     h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
     memcpy(s + 0x90, tp, 0x18);
-    dm_time_location((char *)s + 0xa8);
-    return RES_OK;
+    tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);   // (the zone's abbreviation, as before: saves keep snapshots, and Sword /
+    return RES_OK;                                                                             //  Shield count another location name as a clock change, main+0x5c5970)
 }
 // How far the user clock was moved between two snapshots (Pokémon Shield 1.3.2, SDK 7.3.2, main+0x5c5920, a few minutes into the intro): the sdk's version aborts because the time service object is null
 // (the host takes over Initialize) and would ask the service. As the service computes it (Ryujinx): the change of the user clock's offset over its steady clock, in seconds; 0 when the
@@ -177,6 +189,10 @@ HLE_FORCE("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_1
           int64_t, h_time_UserDiff, const uint8_t *a, const uint8_t *b) {
     int64_t oa, ob; memcpy(&oa, a, 8); memcpy(&ob, b, 8);
     if (memcmp(a + 0x10, b + 0x10, 0x10) || (a[0xcc] && b[0xcc])) return 0;   // steady clock source IDs (+0x08 time point: value, then the 16-byte source ID); automatic correction
+    // Under 2 minutes is the phone's own network time correction (and a second of rounding between the two clocks), not the player: Sword / Shield take ANY difference as a
+    // clock change (main+0x5c5920) and lock their timed events for 24 hours (main+0x1419a30: 1440 minutes, counted down by main+0x1419b00) - Poké Jobs and berry trees
+    // stood still. A date or hour set by hand still counts, as on a Switch
+    if (llabs(ob - oa) < 120) return 0;
     return (ob - oa) * 1000000000;
 }
 // The reverse: local calendar → absolute seconds (13 Sentinels). Around a daylight-saving switch one local time maps to 0 or 2 absolute seconds; the host's mktime gives one
