@@ -67,8 +67,8 @@ def cmd_index(a):
         if start % 1000 == 0: save("index.json", idx)
     save("index.json", idx); print(f"\nindex: {len(idx)} Android reports in {CACHE}/index.json")
 
-CUSTOM = re.compile(r"turnip|panvk|panfrost|mesa|freedreno|v3dv|nvk|venus|virgl|swiftshader|llvmpipe|lavapipe", re.I)
-FAKE = re.compile(r"waydroid|emulator|sdk_gphone|\bavd\b|genymotion|bluestacks|ldplayer|nox|memu|virtual", re.I)
+CUSTOM = re.compile(r"turnip|panvk|panfrost|mesa|freedreno|v3dv|nvk|venus|virgl|virtio|radv|swiftshader|llvmpipe|lavapipe", re.I)
+FAKE = re.compile(r"virtio|waydroid|emulator|sdk_gphone|\bavd\b|genymotion|bluestacks|ldplayer|nox|memu|virtual", re.I)
 
 def release(vendor, driver):
     if vendor.lower().startswith("qualcomm") and re.fullmatch(r"512\.\d+\.\d+", driver): return ".".join(driver.split(".")[:2])
@@ -85,6 +85,7 @@ def cmd_pick(a):
     for rid, r in idx.items():
         if r["type"].lower().replace("_gpu", "") not in ("integrated", "discrete"): continue   # (CPU / virtual: software renderers, not phones)
         if FAKE.search(r["device"]) or FAKE.search(r["gpu"]): continue
+        if not a.desktop and r["vendor"].upper() in ("AMD", "INTEL", "APPLE", "NONE", ""): continue   # (x86 Android, Chromebooks, Waydroid on a PC: not phones)
         custom = bool(CUSTOM.search(r["gpu"]))
         if custom and not (a.custom or a.by == "driver"): continue
         if vendors and not any(r["vendor"].lower().startswith(v) for v in vendors): continue
@@ -140,7 +141,7 @@ ap = argparse.ArgumentParser(description="Find, fetch and list many more simulat
 sp = ap.add_subparsers(dest="cmd", required=True)
 s = sp.add_parser("index"); s.add_argument("--full", action="store_true", help="list every page again, not only up to the first known one"); s.set_defaults(f=cmd_index)
 s = sp.add_parser("pick"); s.add_argument("--by", choices=("driver", "release", "gpu"), default="driver"); s.add_argument("--min-reports", type=int, default=1)
-s.add_argument("--vendor"); s.add_argument("--min-android", type=float, default=0); s.add_argument("--limit", type=int, default=0); s.add_argument("--custom", action="store_true"); s.set_defaults(f=cmd_pick)
+s.add_argument("--vendor"); s.add_argument("--min-android", type=float, default=0); s.add_argument("--limit", type=int, default=0); s.add_argument("--custom", action="store_true"); s.add_argument("--desktop", action="store_true", help="keep AMD / Intel / Apple GPUs"); s.set_defaults(f=cmd_pick)
 s = sp.add_parser("fetch"); s.add_argument("--limit", type=int, default=0); s.set_defaults(f=cmd_fetch)
 s = sp.add_parser("list"); s.add_argument("--vendor"); s.set_defaults(f=cmd_list)
 a = ap.parse_args(); a.f(a)
