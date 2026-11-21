@@ -107,6 +107,7 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
+#include "golden_rec.h"   // golden-frame recordings (DM_GOLDEN_REC): GOLDEN_SUB_BEGIN / _END around a submission, GOLDEN_PRESENT before a present
 
 // ---------- Device ----------
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
@@ -1114,7 +1115,7 @@ static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
         pthread_mutex_unlock(&g_rq_mu);
         if (it.kind == RQ_SUBMIT) { g_rq_at = "submit"; sub_run(it.q, it.n, (const NVNcommandHandle *)it.h); free(it.h); }
         else if (it.kind == RQ_FENCE) { g_rq_at = "fence"; it.s->fence = mtl_last_fence(); }
-        else { g_rq_at = "present"; gfx_enter(); uint64_t t = mtl_present(CTX(it.o->tex[it.idx]), it.period, it.crop); it.o->ticket[it.idx] = t; gfx_leave(); }
+        else { g_rq_at = "present"; gfx_enter(); GOLDEN_PRESENT(CTX(it.o->tex[it.idx]), it.crop); uint64_t t = mtl_present(CTX(it.o->tex[it.idx]), it.period, it.crop); it.o->ticket[it.idx] = t; gfx_leave(); }
         g_rq_at = "idle";
         pthread_mutex_lock(&g_rq_mu);
         g_rq_tail++; if (it.kind == RQ_PRESENT) g_rq_presents--;
@@ -1152,12 +1153,14 @@ static void sub_run(NVNqueue *q, int n, const NVNcommandHandle *h) {
     pthread_mutex_lock(&g_sub_mu);
     uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
     ((queue_t *)q)->submits++;
+    GOLDEN_SUB_BEGIN(n, h);
     mtl_sub_begin();
     nvn_ft_poll();
     mtl_sub_index((const uint64_t *)h, n);
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
     mtl_sub_commit();
+    GOLDEN_SUB_END();
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
@@ -1719,7 +1722,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           atomic_store(&g_nvn_game_work_avg_ns, a ? a + (uint64_t)(((int64_t)w - (int64_t)a) / 16) : w); } }   // (the average over about 16 frames: the fps guard's CPU test)
     if (idx >= 0 && idx < o->ntex && idx < 4) {
         if (rq_on()) { rq_item it = { .kind = RQ_PRESENT, .o = o, .idx = idx, .period = present_period(o) / 1e9 }; memcpy(it.crop, o->crop, sizeof it.crop); gfx_leave(); rq_push(it); gfx_enter(); }
-        else { o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
+        else { GOLDEN_PRESENT(CTX(o->tex[idx]), o->crop); o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);

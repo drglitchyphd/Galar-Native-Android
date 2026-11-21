@@ -1,0 +1,111 @@
+# Golden frames
+
+A frame recorded on a phone (title screen, overworld, battle, menu) becomes an automatic PC check: the PC replays the recorded frame through the engine's own
+Vulkan replay layer (`dm/gfx/nvn/nvn_vk.c`, built for x86-64 Linux in `dm/pc`) on Mesa's lavapipe, writes a PNG and compares it with the expected picture.
+The recordings are NVN-level, not Vulkan-level, so a second (GLES) backend can later replay the same files.
+
+| File | What it is |
+|---|---|
+| `dm/gfx/nvn/golden_fmt.h` | the recording format (`.nxgold`) |
+| `dm/gfx/nvn/golden_rec.h`, `golden_rec.c` | the recorder (backend-neutral); off unless `DM_GOLDEN_REC` is set |
+| `dm/gfx/nvn/golden_vk.inc` | the Vulkan backend's side of it (`golden_be_*`), `#include`d at the end of `nvn_vk.c` |
+| hooks | `hle_nvn.c`: `GOLDEN_SUB_BEGIN` / `GOLDEN_SUB_END` around a submission, `GOLDEN_PRESENT` before both `mtl_present` calls; `nvn_vk.c`: `GOLDEN_MEM` in `pool_buf` and `push_stage_h`, one line in `tex_res`, `DM_VK_DEVICE` in `mtl_init` |
+| `dm/pc/` | the replay layer for x86-64 Linux: `compat/pc_compat.h` (the PC's `darwin.h`), `pc_host.c` (the host symbols the layer needs, weak), `Makefile`, `build.sh` → `out/pc-<engine>/libnvnvk.a` for any PC tool |
+| `golden_play.c` | the player: recording → PNG |
+| `golden_check.py` | the checker: `run`, `accept`, `synth` |
+| `golden_synth.c`, `synth/*.vert/.frag` | a frame made on the PC with the recorder on: the round-trip test |
+
+## Recording format (`golden_fmt.h`)
+
+`golden_file_hdr` (`NXGOLDN1`, version 1), then chunks `{type, flags, raw, stored}` + payload (zlib when `flags & 1`), in replay order. What `POOL`, `MEM`,
+`TREG`, `SREG`, `SHDR`, `PROG`, `LIVE`, `CPUW` and `TEXI` set up applies before the next `PROL` / `SUBM` / `PRES`.
+
+- `META`: `title` (the running game, `DM_PROGRAM_ID`), `engine` (the build's game: picks the player), `present`, `label`, `gpu`, `date`, the NVN object sizes, `origin_ll`, `depth_zero`, `tex_pool_n`.
+- `POOL`: memory pools (address, size), as `mtl_pool_add` had them; more before a submission that added some.
+- `MEM`: runs `{address, length, bytes}`: the memory as the next submission reads it, in 4 KB pages, at the phone's addresses: pools (vertex / index / uniform / storage data, texture storage the CPU fills, indirect arguments, copy sources), command memory, NVN objects (textures, programs, syncs, pool objects). A page is written again only when it changed since it was last written (the CPU fills uniform blocks between submissions).
+- `TREG` / `SREG`: texture / sampler descriptor registrations (`tex_t` + `view_t` copies, `samp_par`): the whole table at the start, changes before each submission.
+- `SHDR`: a shader by its 8-byte key: stage, translated SPIR-V, reflection (`.vkr`), GL-depth SPIR-V. `PROG`: a program serial's per-stage keys.
+- `LIVE` / `CPUW`: texture serials that were initialized (`mtl_tex_init`) / filled by the CPU (`mtl_tex_cpu_written`).
+- `TEXI`: an image whose content comes from earlier frames (a render target sampled before it is drawn, a texture filled by a copy): all levels and layers, read before the frame touched it. Colour as raw texels with their VkFormat; depth as float32 0..1 plus stencil bytes, so any backend can load it.
+- `PROL`: command records that rebuild the replay state the frame starts from (programs, vertex layout, uniform / storage / texture bindings, blend / depth / raster state, viewports, scissor, render targets, pending clears): a frame relies on state earlier frames left bound.
+- `SUBM`: one queue submission: its command handles (records followed through `JUMP` / `CALL`, exactly as `hle_nvn.c` wrote them, `nvn_obj.h`).
+- `PRES`: the present that ends the frame: the texture to picture and its crop. `END`.
+
+Addresses stay the phone's: the player maps memory at the same addresses before anything else takes address space (the phone's 39-bit user addresses fit the PC's 47-bit space).
+
+While recording, each submission first waits for the one before (so memory read then is what it reads on the GPU) and `DM_VK_SPLIT` is 0. The recorder writes
+`<title>-<label>-p<present>.nxgold` and, beside it, `<...>.phone.png`: the phone's own picture of that frame (for people; the expected picture comes from the PC).
+
+## Build and run (WSL)
+
+From Windows, write the commands into a script and run it with `wsl bash /mnt/c/.../script.sh` (Git Bash rewrites `/mnt/c` paths).
+
+```bash
+cd /mnt/c/Users/daniel/galar-golden/dm/pc
+bash build.sh                       # Sword / Shield engine (GAME=01008DB008C2C000): out/pc-01008DB008C2C000/{libnvnvk.a,golden_play,golden_synth}
+bash build.sh GAME=01008F6008C5E000 # Scarlet / Violet engine
+cd ../gfx/golden
+python3 golden_check.py synth                                  # the round trip without a phone (Shield's title)
+python3 golden_check.py synth --title 0100ABF008968000 --out /tmp/gsyn-sword   # the same frame as Sword's
+python3 golden_check.py run   ~/galar-golden-data/swsh         # every recording in the folder: PASS / FAIL / NEW / ERROR, exit 0 / 1 / 2
+python3 golden_check.py accept ~/galar-golden-data/swsh [name] # this run's pictures become <name>.expected.png
+../../pc/out/pc-01008DB008C2C000/golden_play <rec.nxgold> <out.png> [--info] [--keep <shader folder>]
+```
+
+`build.sh` takes the system's Vulkan headers, else the NDK's (`~/psa-build/android-ndk-r27c`), and `glslc` from `PATH`, else the NDK's shader tools. No
+`libvulkan-dev` needed: the replay opens `libvulkan.so.1` (the loader) itself.
+
+Tolerance: a pixel differs when a channel differs by more than `--threshold` (default 2); a recording fails above `--max-diff` percent (default 0.1);
+`<folder>/<name>.tolerance` (`<threshold> <max-diff>`) overrides both for one recording. A failure writes `<out>/<name>.diff.png` (differing pixels red, the rest dimmed).
+
+Devices and layers: the checker uses lavapipe unless `VK_ICD_FILENAMES` (or `VK_DRIVER_FILES`) is set. The player goes through the Vulkan loader, so
+`VK_INSTANCE_LAYERS`, `VK_LOADER_LAYERS_ENABLE`, `VK_ADD_LAYER_PATH`, `VK_LOADER_DEBUG` work as for any program (checked with `VK_LAYER_MESA_overlay`):
+run it under a Vulkan Profiles layer that makes lavapipe pose as Mali / PowerVR / Xclipse. `DM_VK_DEVICE=<index>` or `=<part of the device name>` picks the device
+when several are listed. The engine's own switches (`DM_VK_AS_MALI=1`, `DM_VK_MIN_FEATURES=1`, `DM_VK_API=10`, `DM_VK_NO_PUSH=1`, ...) work too: the same frame
+through the Mali or Vulkan 1.0 routes. Expected pictures belong to one device / route: keep a folder per combination. On the synthetic frame `DM_VK_MIN_FEATURES=1`,
+`DM_VK_API=10`, `DM_VK_NO_PUSH=1`, `DM_VK_NO_DYNREN=1`, `DM_VK_NO_BC=1` and `DM_VK_POOL_SHADOW=1` give the identical picture. `DM_VK_NO_HOST_IMPORT=1` (and so
+`DM_VK_AS_MALI=1`) does not: on lavapipe the exported-memory pool route (the one Mali / Xclipse phones take without host import) draws only the clear colour,
+in the live run as well as in the replay (the replay matches its own live run). Not looked into further: lavapipe's opaque-fd export or the route itself.
+
+`GOLDEN_SKIP=texi,prol,mem,treg,live,...` (player) leaves chunk types out: for diagnosis, and the synthetic test's proof that its picture depends on them.
+
+## The synthetic round trip (no phone)
+
+`golden_synth` plays the game's part through the PC replay with the recorder on: frame 1 draws a vertex-coloured triangle into an offscreen target and leaves
+the lit program, vertex layout, uniform blocks, texture handle and depth state bound; frame 2 (recorded) copies a checkerboard from a buffer into a texture, clears,
+draws a full-screen quad sampling frame 1's target, the CPU rewrites a uniform block in place between its two submissions, then an inline uniform update and a lit,
+textured, depth-tested cube. `golden_check.py synth` replays the recording in a fresh process and requires the identical picture, and a different one with
+`TEXI`, `PROL` or `MEM` left out. Result on lavapipe (Mesa 26, 2026-11-21): identical (0 of 76,800 pixels differ) for Shield, Sword and Scarlet titles; 67,641 /
+76,800 / 76,800 pixels differ without TEXI / PROL / MEM.
+
+## Recording on the phone (S25+)
+
+1. Install a build of this branch (the recorder is in the engine; off unless asked for).
+2. In the game's folder on the phone, `Android/data/<the app's package>/files/` (Sword: `files/0100ABF008968000/`), add lines to `env.txt` (the app rewrites
+   env.txt when settings change in its menu: check the lines are still there before starting):
+   - `DM_GOLDEN_REC=req` and, optionally, `DM_GOLDEN_LABEL=overworld`, or
+   - `DM_GOLDEN_REC=900` (the frame ending with present 900; `900,1800,2700` for several).
+3. With `req`: start the game, go where the frame should be (title, overworld, battle, menu), then put `golden.req` in the same folder holding `<frames to wait> <label>`,
+   e.g. `0 battle` (it is read every 30 presents and deleted). The log (`log.txt`) says `[golden] recording ...` then `[golden] recorded <path>: N submissions ...`.
+   The game stalls for a moment while it records (each submission waits for the one before; images from earlier frames are read back).
+4. The recordings are in `files/golden/` (`DM_GOLDEN_DIR` puts them elsewhere): `<title>-<label>-p<present>.nxgold` and `.phone.png`. Copy them to the PC, into a
+   folder outside the repository (for example `~/galar-golden-data/swsh/`), one per game / scene set.
+5. On the PC: `python3 golden_check.py run <folder>` (all NEW the first time), look at `<folder>/out/<name>.png` against `.phone.png`, then
+   `python3 golden_check.py accept <folder>`; from then on `run` is the check.
+6. Remove the `DM_GOLDEN_*` lines from env.txt afterwards.
+
+Sword and Shield both: one engine build (`01008DB008C2C000`) runs both games; the recording's `title` names the game and the player checks it is one of its
+family. Scarlet / Violet: `GAME=01008F6008C5E000` (Violet's engine, which runs Scarlet `0100A3D008C5C000`). Legends: Arceus (`01001F5010DFA000`): once its engine
+is merged into this tree with the same hooks, `bash build.sh GAME=01001F5010DFA000`.
+
+## Not tested yet
+
+- Recording on a phone: the recorder only ran on the PC (golden_synth). The Android objects (`hle_nvn.o`, `nvn_vk.o`, `golden_rec.o`) compile with the NDK;
+  nothing was installed or run on a phone.
+- Real game frames: their size (expect tens to a few hundred MB per recording: images from earlier frames dominate), multisampled images (not recorded: they start
+  cleared), shaders the pack lacks (named in the log, missing in the player), BC textures, texture buffers, transform feedback, indirect draws whose arguments
+  the GPU writes (index ranges captured generously), uniform / storage blocks reached only through addresses in other buffers (the replay's own lookups are
+  hooked, the shader's raw pointers are not).
+- Phones whose kernel uses 48-bit user addresses: memory above 2^47 cannot be mapped on the PC (the recorder logs it).
+- The Mac / Metal and iOS builds compile `golden_rec.c` (its backend functions are weak there: recording says it is unavailable); not built here.
+- A GLES backend: it needs its own `golden_be_*` (the state as records, the tables, image read-back / fill, the picture) and the player's loop over its `mtl_*`.
