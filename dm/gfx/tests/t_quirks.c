@@ -33,6 +33,7 @@ static int old(int q, const gpu_id *g) {
     case Q_NAN_MINMAX: return g->arm_rel ? 2 : 0;
     case Q_EXACT_MATH: return g->arm_rel ? 1 : 0;            // (EXACT_ALL at the site either way)
     case Q_INIT_LOCALS: return g->arm_rel != 0;
+    case Q_QUERY_LOD: return g->arm_rel != 0;                // (new with the table: dEQP texturequerylod on Arm's own driver, both ports)
     case Q_VIEW_QUARANTINE: return g->arm_rel && g->dynren ? 2048 : 0;
     case Q_TEX_HALF_UNSAFE: return g->arm_rel && g->arm_rel < 49;
     case Q_ARM_FORMATS: return g->vendor == 0x13B5;

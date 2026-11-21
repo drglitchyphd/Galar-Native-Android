@@ -178,6 +178,7 @@ static int g_arm_beta;           // ... a beta build of it (driverInfo "v1.r49p1
 static int g_clampzero; static _Atomic int g_clampzero_n;   // shaders get spv_clamp_zero (Arm erratum 3779215: mtl_init decides); how many it changed
 static int g_fmz; static _Atomic int g_fmz_n;   // shaders get spv_fmz (every multiply by 0 gives 0, as Maxwell's FMZ: DM_VK_FMZ=1, a test); how many it changed
 static unsigned g_exact; static _Atomic int g_exact_n;
+static int g_qlod; static _Atomic int g_qlod_n;   // shaders get spv_query_lod (textureQueryLod's level clamped: mtl_init decides)
 static int g_initloc; static _Atomic int g_initloc_n;   // shaders get spv_init_locals (the translator's registers start at zero, as Mesa's compilers treat undefined values: mtl_init decides)   // shaders get spv_exact_math (Maxwell's log2 / exp2 / inversesqrt / sqrt / F2I at their edge cases: mtl_init decides)
 static int g_nanmm; static _Atomic int g_nanmm_n;           // shaders get spv_nan_minmax (min / max / saturate drop NaN as on Maxwell: mtl_init decides; 2: spv_nan_select too); how many it changed
 static int g_dualsrc = 1;        // the device blends with a second shader output (dualSrcBlend): Arm's own Mali driver has none (r44p1)
@@ -643,6 +644,10 @@ void mtl_init(void) {
     //   five classes (#47, mali-white-test1). On by default with Arm's own driver; DM_VK_INIT_LOCALS=0 / 1 decides on any driver
     { const char *e = getenv("DM_VK_INIT_LOCALS"); g_initloc = quirk_note(Q_INIT_LOCALS, e ? atoi(e) != 0 : quirk_default(Q_INIT_LOCALS, &g_gpuid), e != NULL);
       if (g_initloc) VLOG("shaders: the translator's registers start at zero (undefined values as Mesa's compilers make them%s)", e ? ", DM_VK_INIT_LOCALS" : ", Arm's own driver"); }
+    // textureQueryLod's level (spv_query_lod): Arm's own driver returns floor (LOD) for it, ignoring the texture's level count (dEQP-VK texturequerylod on a Mali-G615 MC6
+    //   stock driver: 63 of 190 failed, the LOD component right in all); the game's TMML reads only that component. On by default with Arm's own driver; DM_VK_QUERY_LOD=0 / 1
+    { const char *e = getenv("DM_VK_QUERY_LOD"); g_qlod = quirk_note(Q_QUERY_LOD, e ? atoi(e) != 0 : quirk_default(Q_QUERY_LOD, &g_gpuid), e != NULL);
+      if (g_qlod) VLOG("shaders: texture LOD queries give the level as clamp (LOD, 0, levels - 1)%s", e ? " (DM_VK_QUERY_LOD)" : " (Arm's own driver)"); }
     // Dual-source blending (the game's blend factors SRC1_*) needs dualSrcBlend; Arm's own driver has none (r44p1), and a pipeline using it there is undefined: those
     //   factors become the first output's (bfac_dev), named once in the log. DM_VK_DUALSRC=keep passes them as they are
     g_dualsrc = f2.features.dualSrcBlend || (getenv("DM_VK_DUALSRC") && !strcmp(getenv("DM_VK_DUALSRC"), "keep"));
@@ -2982,6 +2987,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     if (g_probe && spst == 4) { size_t nw; uint32_t *c2 = spv_probe(code, ns / 4, &nw, (unsigned)g_probe); if (c2) { free(code); code = c2; ns = nw * 4; } }   // (DM_VK_PROBE, fragment shaders)
     if (g_exact) { size_t nw; uint32_t *c2 = spv_exact_math(code, ns / 4, &nw, g_exact); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_exact_n, 1); } }
     if (g_initloc) { size_t nw; uint32_t *c2 = spv_init_locals(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_initloc_n, 1); } }
+    if (g_qlod) { size_t nw; uint32_t *c2 = spv_query_lod(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_qlod_n, 1); } }
     if (spst == 0 || spst == 2) { size_t nw; uint32_t *c2 = spv_init_outputs(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }   // outputs start at (0, 0, 0, 1) as on the hardware
     if (st == 0 && glcode) {
         size_t nw;
@@ -2997,6 +3003,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         if (g_fmz && (c2 = spv_fmz(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_exact && (c2 = spv_exact_math(glcode, ngl / 4, &nw, g_exact))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_initloc && (c2 = spv_init_locals(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
+        if (g_qlod && (c2 = spv_query_lod(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         c2 = spv_init_outputs(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
         { spv_res gres[64]; int gnr = 0, gst; uint32_t gls[3]; if (spv_reflect(glcode, ngl / 4, gres, 64, &gnr, s->glin, 32, &s->nglin, &gst, gls)) s->nglin = 0; }
         if (!g_drawp) { nw = ngl / 4; glcode = dp_fix(s, glcode, &nw, hex); ngl = nw * 4; }

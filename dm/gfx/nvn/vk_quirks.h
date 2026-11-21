@@ -48,6 +48,7 @@ enum {
     Q_PCACHE_GAPS_OFF,   // a pipeline with a colour gap made without the pipeline cache: PowerVR's driver crashes on it
     Q_NO_EDS,            // draw state built into each pipeline: Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34; Galar #209 reported the same)
     Q_BC_GPU_OFF,        // BC textures converted on the CPU, not the GPU: PowerVR's compute results differ, objects purple (Arceus #32)
+    Q_QUERY_LOD,         // textureQueryLod's level as clamp (LOD, 0, levels - 1): Arm's own driver gives floor (LOD) (dEQP texturequerylod, Mali-G615 MC6)
     Q_N
 };
 static const struct { const char *env, *what; } Q_INFO[Q_N] = {
@@ -73,6 +74,7 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] = {
     [Q_PCACHE_GAPS_OFF] = { "", "colour-gap pipelines without the pipeline cache" },
     [Q_NO_EDS] = { "DM_VK_NO_EDS", "draw state built into each pipeline" },
     [Q_BC_GPU_OFF] = { "DM_VK_BC_GPU", "BC textures converted on the CPU" },
+    [Q_QUERY_LOD] = { "DM_VK_QUERY_LOD", "texture LOD queries give the level clamped" },
 };
 // Arm's own driver: by driver ID where the driver gives one, else by vendor (PanVK reports Arm's vendor ID with its own driver ID)
 static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }
@@ -94,7 +96,7 @@ static int quirk_default(int q, const gpu_id *g) {
     case Q_FLOAT_CONTROLS: return gpu_is_arm_driver(g) || gpu_is_samsung_driver(g);
     case Q_CLAMP_ZERO: return g->arm_rel && ((v >= 3801 && v < 4901) || (g->arm_beta && v >= 4901 && v < 4902) || (v >= 5000 && v < 5101));
     case Q_NAN_MINMAX: return g->arm_rel ? 2 : 0;
-    case Q_EXACT_MATH: case Q_INIT_LOCALS: return g->arm_rel != 0;
+    case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: return g->arm_rel != 0;
     case Q_VIEW_QUARANTINE: return g->arm_rel && g->dynren ? 2048 : 0;
     case Q_TEX_HALF_UNSAFE: return g->arm_rel && g->arm_rel < 49;
     case Q_PIPE_KEEP: return g->vendor == VEN_ARM || (g->ram_kb > 0 && g->ram_kb < 7500000) ? 800 : 0;
