@@ -720,6 +720,14 @@ static int res_lowest(void) {
 extern double dm_gpu_avg_ms(int frames) __attribute__((weak));
 extern _Atomic uint64_t g_nvn_game_work_avg_ns __attribute__((weak));
 #define RES_HOT 2   // the step heat goes straight to: 720p from 1080p (the upscaler brings it back to the screen's size)
+// One governor with frame generation (nvn_vk.c fg_gov_absorb): when its pictures cost the game frames, the render scale gives way first. dm_guard_fg_absorb: 1 when this
+//   guard has a step left that can help (running, the scale applies, not at its lowest, not after a step that did not help, not CPU-bound): it takes the next step at
+//   its next check, judged as its own. dm_guard_heat: 0 cool, 1 hot, 2 hot with the scale already at its heat step (frame generation then gets lighter too).
+//   nvn_vk_fg_gpu_ms: frame generation's GPU time a game frame, counted into the budget the steps are judged by
+static _Atomic int g_fg_pressure, g_guard_room, g_guard_heat;
+int dm_guard_fg_absorb(void) { if (!atomic_load(&g_guard_room)) return 0; atomic_store(&g_fg_pressure, 1); atomic_store(&g_guard_room, 0); return 1; }
+int dm_guard_heat(void) { return atomic_load(&g_guard_heat); }
+extern double nvn_vk_fg_gpu_ms(void) __attribute__((weak));
 #define RES_START 1   // where Auto starts: 85 % (between 720p and 1080p), up to the game's full size after a calm minute at a steady 30, down to 720p when short (DM_RES_START=0..3 picks another step)
 static int g_fps_guard;   // set at start (fps_guard_init): the target, 0 off
 static void fps_guard_init(void) {
@@ -752,6 +760,7 @@ static void heat_guard(void) {
     if (power_saver()) { hot = st >= 1 || hr >= 0.75f; calm = st == 0 && (hr < 0 || hr < 0.6f); }
     float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
     calm_n = calm ? calm_n + 1 : 0;
+    atomic_store(&g_guard_heat, hot ? 2 : 0);   // (no frame-rate steps here: hot means the scale is at its heat step already)
     if (hot && !on) { on = 1; calm_n = 0; dm_res_factor_set(k_res_steps[RES_HOT]);
         fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% (about 720p) until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(k_res_steps[RES_HOT] * 100 + 0.5f)); }
     else if (on && calm_n >= 12) { on = 0; dm_res_factor_set(k_res_steps[0]); fprintf(stderr, "heat guard: cooled down: the game's own 3D render scale again\n"); }
@@ -798,11 +807,11 @@ static void graphics_auto(void) {
     cool = calm && (!g_fps_guard || full) ? cool + 1 : 0;
     if (dm_res_scale_ready()) {   // the render scale (a cap set by hand, DM_RES_CAP or Lowest, is left alone)
         static int probe, probe_hot, nogain, noheat; static double fps_was;
-        if (getenv("DM_RES_CAP")) return;
+        if (getenv("DM_RES_CAP")) { atomic_store(&g_guard_room, 0); return; }
         since++;
         if (nogain > 0) nogain--;
         if (noheat > 0) noheat--;
-        if (!dm_res_scale_applies()) { probe = 0; slow = 0; return; }
+        if (!dm_res_scale_applies()) { probe = 0; slow = 0; atomic_store(&g_guard_room, 0); return; }
         if (power_saver() && lv < RES_HOT) { lv = RES_HOT; dm_res_factor_set(k_res_steps[lv]); probe = 0; cool = 0; held = 0; slow = 0; since = 0;   // (battery saver: no larger than the 720p step)
             fprintf(stderr, "power: battery saver: 3D render scale %d %%\n", (int)(k_res_steps[lv] * 100 + 0.5f)); return; }   // (a scene at the game's full size: see above)
         // Start at 85 % and settle: a phone that holds 30 there for a calm minute goes up to the game's full size, one short of it goes down to 720p, and back when a step falls
@@ -827,6 +836,7 @@ static void graphics_auto(void) {
         // the bottleneck, measured (2 s of frames): with the GPU over 85 % of the frame's budget a short frame rate steps down at the first short check (still judged after 15 s);
         //   with the GPU under 70 % and the game thread over 85 %, the CPU is the limit and the picture stays (a lower one would only look worse). No timestamps: as before
         double budget = 1000.0 / (g_fps_guard > 0 ? g_fps_guard : 30), gpu = dm_gpu_avg_ms ? dm_gpu_avg_ms(60) : -1, cpu = &g_nvn_game_work_avg_ns ? atomic_load(&g_nvn_game_work_avg_ns) / 1e6 : -1;
+        if (gpu > 0 && nvn_vk_fg_gpu_ms) gpu += nvn_vk_fg_gpu_ms();   // (frame generation's pictures share the GPU with the game's frame: one budget)
         int gpu_bound = gpu > 0 && gpu > 0.85 * budget, cpu_bound = gpu > 0 && gpu < 0.70 * budget && cpu > 0.85 * budget;
         { static int said_cpu; if (short_ && cpu_bound && !probe && !(said_cpu++ % 12))   // (said once a minute at most)
               fprintf(stderr, "fps guard: %.1f fps, short of %d, but the CPU is the limit (game thread %.1f ms, GPU %.1f ms of %.1f): the 3D render scale stays\n", fps, g_fps_guard, cpu, gpu, budget); }
@@ -835,8 +845,12 @@ static void graphics_auto(void) {
           lite_calm = g_fps_guard == 30 && lv == 0 && full && !hot && cpu > 0 && cpu < 0.5 * budget && gpu > 0 && gpu < 0.5 * budget ? lite_calm + 1 : 0;
           if (lite_short >= 6) { lite_short = 0; lock30_lite(1, fps_avg, gpu, cpu, budget); }
           else if (lite_calm >= 120) { lite_calm = 0; lock30_lite(0, fps_avg, gpu, cpu, budget); } }
+        int fgp = atomic_exchange(&g_fg_pressure, 0);   // (frame generation's pictures cost the game frames: a step now, judged like any other)
         int for_heat = hot && lv < RES_HOT && since >= 6 && !noheat && !probe,   // (heat alone stops at 720p; only a frame rate short of 30 goes lower)
-            for_rate = slow >= (gpu_bound ? 1 : 3) && !nogain && !probe && !cpu_bound;   // (one step at a time: the last one judged first)
+            for_rate = (slow >= (gpu_bound ? 1 : 3) || fgp) && !nogain && !probe && !cpu_bound;   // (one step at a time: the last one judged first)
+        atomic_store(&g_guard_heat, hot ? (lv >= RES_HOT ? 2 : 1) : 0);
+        atomic_store(&g_guard_room, g_fps_guard && lv < res_lowest() && !nogain && !probe && !cpu_bound && !fgp);
+        if (fgp && for_rate) fprintf(stderr, "fps guard: frame generation costs the game frames: a lighter 3D picture first\n");
         // up early: the GPU's time projected to the next larger size (pixels grow with the square of the scale) fits in 75 % of the budget, after 10 s calm at the full rate
         double r_up = lv > 0 ? k_res_steps[lv - 1] / k_res_steps[lv] : 1;
         int up_early = lv > 0 && !probe && gpu > 0 && cool >= 2 && full && !hot && gpu * r_up * r_up < 0.75 * budget;
