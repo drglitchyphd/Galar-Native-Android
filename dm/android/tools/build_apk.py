@@ -34,13 +34,14 @@ def png(size, top=(220, 40, 50), bg=(24, 32, 64)):   # the app's icon, drawn her
     chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
     return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)) + chunk(b'IDAT', raw) + chunk(b'IEND', b'')
 
-def zipdir(z, src, arc, skip=()):
+def zipdir(z, src, arc, skip=(), sub=None):   # sub: {name in the zip: the file written there instead} (a shader chain generation's frozen tools, chain_tree.py)
     if not os.path.isdir(src): sys.exit('[RED] missing folder: ' + src)
     for d, ds, fs in os.walk(src):
         ds[:] = [x for x in ds if x not in skip and x not in ('out', 'obj', 'bin')]
         for f in fs:
             if f.endswith(('.pyc', '.dll', '.dylib')): continue
-            p = os.path.join(d, f); z.write(p, os.path.join(arc, os.path.relpath(p, src)).replace(os.sep, '/'))
+            p = os.path.join(d, f); n = os.path.join(arc, os.path.relpath(p, src)).replace(os.sep, '/')
+            z.write((sub or {}).get(n, p), n)
 
 def shader_chain(g):   # the translation chain the engine is compiled for (DMSH_CHAIN in the game's dmsh_chain.h, nvn_vk.c)
     h = g.table('dmsh_chain.h')
@@ -93,6 +94,12 @@ def main():
         so = f.read()
         if shader_chain(g).encode() not in so:
             sys.exit('[RED] libnxnative.so was not built for shader chain ' + shader_chain(g) + ' (dmsh_chain.h): rebuild it (delete it and run win_build_lib.py)')
+    # ... and the shader tools this APK carries compute that same chain (the game's generation, dm/gfx/chains/chain_tree.py: a profile on the wrong xlate_chain would
+    #   make every player's setup build a pack the engine refuses)
+    sys.path.insert(0, os.path.join(DM, 'gfx/chains')); import chain_tree
+    if chain_tree.run_chain(g) != shader_chain(g): sys.exit(f'[RED] the shader tools for {g.id} (chain generation {chain_tree.gen_of(g) or "live"}) compute chain {chain_tree.run_chain(g)}, dmsh_chain.h says {shader_chain(g)}')
+    with open(os.path.join(a.libs, 'libnxnative.so'), 'rb') as f:
+        so = f.read()
         if any(f.id.encode() not in so for f in fam):   # the engine is built per profile (game_profile.h: DM_GAME_FAMILY, the games it runs)
             sys.exit(f'[RED] libnxnative.so was not built for {g.get("name")} ({g.id}): run win_build_lib.py {g.id}')
     w = tempfile.mkdtemp(prefix='apk_')
@@ -143,10 +150,16 @@ def main():
         z.writestr('assets/python.zip', b.getvalue(), compress_type=zipfile.ZIP_STORED)
         b = io.BytesIO()
         with zipfile.ZipFile(b, 'w', zipfile.ZIP_DEFLATED) as dz:
+            # the game's shader translation chain generation (dm/gfx/chains/chain_tree.py, the profile's xlate_chain): its frozen tool files in place of the live ones,
+            #   so the phone's setup computes and builds that game's own chain (Arceus Native, Paldea Native: the translator before FMZ); gfx/tools/CHAIN names it
+            sys.path.insert(0, os.path.join(DM, 'gfx/chains')); import chain_tree
+            gen = chain_tree.gen_of(g); sub = chain_tree.overlay(gen)
             for part in DM_PARTS + ['games/' + p.id for p in _game.all_games()]:
                 p = os.path.join(DM, part)
-                if os.path.isdir(p): zipdir(dz, p, part)
-                else: dz.write(p, part)
+                if os.path.isdir(p): zipdir(dz, p, part, sub=sub)
+                else: dz.write(sub.get(part, p), part)
+            dz.writestr('gfx/tools/CHAIN', gen + '\n')
+            if gen: print(f'shader tools: chain generation {gen} (dm/gfx/chains/{gen})')
             zipdir(dz, os.path.join(ANDROID, 'pyshim'), 'android/pyshim')
             zipdir(dz, a.capstone_py, 'android/pyshim/capstone', ('lib', 'include', '__pycache__'))
             for f in ('nintendo_ext.ttf', 'nintendo_ext.LICENSE.txt'):

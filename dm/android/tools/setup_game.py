@@ -20,6 +20,25 @@ sys.path.insert(0, os.path.join(DM, 'games')); import game as _game
 PROFILE = _game.load()
 NAME = PROFILE.get('name')
 
+_TOOLS = None
+def chain_tool(name):
+    """dmsh_chain.py / dmsh_build.py of this game's shader chain generation (dm/gfx/chains/chain_tree.py, the profile's xlate_chain): dm/gfx/tools itself when it
+    is that generation (an APK carries its game's generation there, named in gfx/tools/CHAIN; a checkout's live tools for a game on them), else a tool tree with
+    the generation's frozen files, made once a run in the temp folder (a checkout setting up Legends: Arceus or Scarlet / Violet: the translator before FMZ)"""
+    global _TOOLS
+    if _TOOLS is None:
+        live = os.path.join(DM, 'gfx/tools'); mark = os.path.join(live, 'CHAIN'); chains = os.path.join(DM, 'gfx/chains')
+        have = open(mark).read().strip() if os.path.isfile(mark) else ''
+        _TOOLS = live
+        if os.path.isdir(chains):   # (an APK has no gfx/chains: its gfx/tools is the generation already)
+            sys.path.insert(0, chains); import chain_tree
+            gen = chain_tree.gen_of(PROFILE)
+            if gen != have:
+                import tempfile; t = os.path.join(tempfile.gettempdir(), f'dm-chain-{gen or "live"}-{os.getpid()}')
+                _TOOLS = os.path.join(chain_tree.materialize(gen, t), 'gfx/tools')
+                print(f'shader tools: chain generation {gen or "live"} ({_TOOLS})', flush=True)
+    return os.path.join(_TOOLS, name)
+
 def write_runtime_shader_map(found_map, profile_map, output):
     """Use shader locations found in this dump, retaining profile slots for runtime-captured shaders."""
     with open(found_map, encoding='utf-8') as f: rows = f.readlines()
@@ -361,7 +380,7 @@ def main():
         import json
         json.dump({'out': a.out, 'game': env.get('DM_GAME'), 'games': games, 'files': files}, open(state, 'w', encoding='utf-8'))
     step(4)
-    chain = subprocess.run([py, os.path.join(DM, 'gfx/tools/dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
+    chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     # The other game of the pair already set up with the same translation chain (Scarlet and Violet share every one of their 35,937 shaders; Sword and Shield most of
     # theirs): its pack is linked (or copied) in, and only the shaders it lacks are translated and merged into it, instead of the hours of translating them all
     found_keys = {bytes.fromhex(c[3][:16]) for c in (l.rstrip('\n').split('\t') for l in open(os.path.join(a.work, 'shader_map.found.tsv'), encoding='utf-8'))
@@ -391,7 +410,7 @@ def main():
             os.makedirs(vk, exist_ok=True)
             gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
             xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=S) if gate else dict(XLATE=tool('dmsh_xlate'))
-            run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *missing], retry_killed=3,
+            run([py, chain_tool('dmsh_build.py'), pkg, cache, *missing], retry_killed=3,
                 env=dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(S, 'cas'), WORK=S,
                          DMSH_SOURCE_MAP=os.path.join(a.work, 'shader_map.found.tsv'), DMSH_FACTS=os.path.join(a.work, 'shader_facts.found.tsv'),
                          DMSH_PAIRS=os.path.join(a.work, 'shader_pairs.found.tsv'), MAIN=os.path.join(exefs, 'main')))
@@ -418,7 +437,7 @@ def main():
         gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
         xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=S) if gate else dict(XLATE=tool('dmsh_xlate'))
         log.write(f'translators: {env.get("J", "8")} at most, ' + ('started as memory allows (dmsh_gate)\n' if gate else 'all at once (no dmsh_gate)\n'))
-        try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache], retry_killed=3,
+        try: run([py, chain_tool('dmsh_build.py'), pkg, cache], retry_killed=3,
             env=dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(S, 'cas'), WORK=S,
                      DMSH_SOURCE_MAP=os.path.join(a.work, 'shader_map.found.tsv'),
                      DMSH_FACTS=os.path.join(a.work, 'shader_facts.found.tsv'),
@@ -582,7 +601,7 @@ def mod_shaders(a):
     log.write(f'== {time.strftime("%H:%M:%S")} mod shaders: {", ".join(roots) or "no mod folders"}\n')
     trinity_index(a, roots, log)
     if not roots: print('DONE', flush=True); return
-    chain = subprocess.run([py, os.path.join(DM, 'gfx/tools/dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
+    chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     pak = os.path.join(a.out, 'shaders.pak'); have, pchain = pak_keys(pak)
     if pchain != chain: raise RuntimeError(f'the shader pack is version {pchain}, this app makes {chain}: set the game up again')
     mw = os.path.join(a.work, 'mods'); shutil.rmtree(mw, ignore_errors=True)
@@ -604,7 +623,7 @@ def mod_shaders(a):
     gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
     xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=mw) if gate else dict(XLATE=tool('dmsh_xlate'))
     benv = dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(mw, 'cas'), WORK=mw, DMSH_SOURCE_MAP=smap, DMSH_FACTS=facts, DMSH_PAIRS=pairs)
-    try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *keys], env=benv)
+    try: run([py, chain_tool('dmsh_build.py'), pkg, cache, *keys], env=benv)
     except RuntimeError as e: log.write(f'mod shaders: {e}; the ones translated are kept\n')
     ok = [k for k in keys if os.path.exists(os.path.join(vk, k + '.spv')) and os.path.exists(os.path.join(built, k + '_b.json'))]
     for k in keys:
@@ -665,7 +684,7 @@ def captures(a):
         log.write('$ ' + ' '.join(map(str, cmd)) + '\n')
         r = subprocess.run(list(map(str, cmd)), stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
         if r.returncode: raise RuntimeError(f'{os.path.basename(str(cmd[1]))} failed ({r.returncode}): see {log.name}')
-    chain = subprocess.run([py, os.path.join(DM, 'gfx/tools/dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
+    chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     pak = os.path.join(a.out, 'shaders.pak'); have, pchain = pak_keys(pak)
     if pchain != chain: raise RuntimeError(f'the shader pack is version {pchain}, this app makes {chain}: set the game up again')
     slots = {}
@@ -713,9 +732,9 @@ def captures(a):
     with open(smap, 'w', encoding='utf-8') as f: f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n'); f.writelines('\t'.join(map(str, r)) + '\n' for r in rows)
     print(f'STEP 2/3 translate {len(new) + len(extra)} shaders', flush=True)
     benv = dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, XLATE=os.path.join(a.bin, 'dmsh_xlate'), DMSH_CAS=os.path.join(cw, 'cas'), WORK=cw, DMSH_SOURCE_MAP=smap)
-    if got: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *got], env=benv)
+    if got: run([py, chain_tool('dmsh_build.py'), pkg, cache, *got], env=benv)
     if added:
-        try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *(r[3] for r in added)], env=benv)
+        try: run([py, chain_tool('dmsh_build.py'), pkg, cache, *(r[3] for r in added)], env=benv)
         except RuntimeError as e: log.write(f'the captured shaders not in the shader map: {e}; the ones translated are kept\n')
         ok = [r for r in added if os.path.exists(os.path.join(vk, r[3] + '.spv')) and os.path.exists(os.path.join(built, r[3] + '_b.json'))]
         for r in added:

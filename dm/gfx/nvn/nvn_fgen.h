@@ -241,7 +241,6 @@ static void fg_depth_ingest(fgen *g, VkCommandBuffer cb, int p, int have) {
     if (!have || !g->zsrc || !g->z[p].img) return;
     fg_pass(g, cb, 3, &g->z[p], g->w, g->h, 4, g->ds_z, g->z_far1 ? 1.0f : 0.0f, 0, 0, 0); g->z_ok[p] = 1;
 }
-#endif
 // Camera guidance for the next fg_generate(g, cb, p): m = the game's view-projection of frame p ^ 1 times the inverse of frame p's (column-major, the game's clip
 //   space), depth01: the game's depth runs 0..1 (else GL's -1..1). Used only with frame p's nearness (depth guidance); m NULL: off. The flow search then also
 //   starts from the camera's motion where that matches the pictures better, so a fast turn is found beyond the search's own reach
@@ -250,6 +249,7 @@ static void fg_camera(fgen *g, int p, const float *m, int depth01) {
     g->camb[0] = on ? 1.0f : 0.0f; g->camb[1] = depth01 ? 1.0f : 0.0f; g->camb[2] = g->z_far1 ? 1.0f : 0.0f; g->camb[3] = 0;
     if (on) memcpy(g->camm, m, sizeof g->camm); else memset(g->camm, 0, sizeof g->camm);
 }
+#endif   // FG_PLAN_ONLY (fg_camera uses the Vulkan part's fgen: inside it, so tests/t_fgen.c builds again)
 // ---------- When to generate, and when the real frame goes out (pure: tests/t_fgen.c) ----------
 typedef struct { uint64_t last, cost_sum, cost_n, cost_max, win; int over; } fg_plan;
 // A real frame arrived at now (ns); period: the game's frame time. 1: make an in-between picture (the frame before came about one period ago: after a pause, a

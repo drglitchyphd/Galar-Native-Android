@@ -273,7 +273,7 @@ public final class GameMenu {
         heading(a, t(a, "Screen"));
         choice(a, "DM_ASPECT", t(a, "Picture"), new String[][] { { "", "16:9", t(a, "16:9, as the game is made") }, { "fill", t(a, "Fill"), t(a, "Fill the screen (stretched)") },
                                                                     { "20:9", "20:9", t(a, "20:9, for a widescreen mod") },
-            { "wide", t(a, "Widescreen"), GameSettings.arceus(a) ? t(a, "Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle" : t(a, "Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)" } });
+            { "wide", t(a, "Widescreen"), GameSettings.arceus(a) ? t(a, "Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle") : t(a, "Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)") } });
         String rec = GameSettings.profile(a)[6].equals("sgsr") ? "SGSR" : t(a, "Sharp");
         choice(a, "DM_SCALER", t(a, "Upscaling"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", rec) },
             { "sharp", t(a, "Sharp"), t(a, "Sharp: the picture upscaled with sharpening (lighter settings keep their detail)") },

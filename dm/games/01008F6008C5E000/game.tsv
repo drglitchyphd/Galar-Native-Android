@@ -70,3 +70,5 @@ touch_zlzr	on
 # the released app (Paldea Native; Pokémon Scarlet takes these through tables_from); the shared save folder Documents/Paldea Native/<title id>/save, as its releases made it
 port	paldea
 docs_dir	Paldea Native
+# the shader translation chain generation (dm/gfx/chains/chain_tree.py): the translator Paldea Native's releases ship (Scarlet takes it through tables_from)
+xlate_chain	pre-fmz

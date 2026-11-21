@@ -6091,7 +6091,8 @@ static void present_window_locked(vtex *x, const int crop[4]) {
 #else
         if (!FGE.min_fps) { const char *e = getenv("DM_FRAMEGEN_MIN_FPS"); int f = e ? atoi(e) : 0; FGE.min_fps = f >= 1 && f <= 120 ? f : 58; }
         if (game_fps() < 60 && FGE.min_fps >= 30) {
-#endif if (strcmp(FGE.note, "need60")) VLOG("frame generation off at the %d fps setting: it needs the game at a locked 60", game_fps());
+#endif
+            if (strcmp(FGE.note, "need60")) VLOG("frame generation off at the %d fps setting: it needs the game at a locked 60", game_fps());
             FGE.held = 1; FGE.rate_n = 0; FGE.rate_ivl = 0; FGE.rate_last = 0; FGE.base_fps = 0; FGE.aw_t = 0;   // (the game's own rate is measured again at 60)
             if (!FGE.off) snprintf(FGE.note, sizeof FGE.note, "need60"); }
         else {

@@ -94,3 +94,5 @@ port	arceus
 docs_dir	NXNative
 # where Arceus Native's engine differed from Galar Native's when the two were merged (dm/games/game.py ENGINE_QUIRKS): kept as its releases ran
 engine_quirks	qc11_no_eds gpu_time_auto_only frame_hold_off async_pso_off framegen_game_rate nvn_async_never driver_selftests
+# the shader translation chain generation (dm/gfx/chains/chain_tree.py): the translator its releases ship, so players' installed shader packs keep loading
+xlate_chain	pre-fmz

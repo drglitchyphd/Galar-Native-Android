@@ -63,7 +63,7 @@ cp "$A/out/host-$GAME-vulkan/lib/libnxnative.so" "$LIBS/"
 
 step "3/8 the NSP / XCI unpacker and the shader translator (.NET NativeAOT for Android)"
 bash "$A/extract_aot/build_extract_aot.sh" | tail -1; cp "$A/extract_aot/out/libnx_extract.so" "$LIBS/"
-bash "$A/xlate_aot/build_xlate_aot.sh" | tail -1; cp "$A/xlate_aot/out/libdmsh_xlate.so" "$LIBS/"
+GAME=$GAME bash "$A/xlate_aot/build_xlate_aot.sh" | tail -1; cp "$A/xlate_aot/out/libdmsh_xlate.so" "$LIBS/"
 
 step "4/8 spirv-cross"
 NDK=$NDK API=$API bash "$A/spirv_cross/build_spirv_cross.sh" | tail -1; cp "$A/spirv_cross/out/libspirv_cross.so" "$LIBS/"
