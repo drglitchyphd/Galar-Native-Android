@@ -47,6 +47,10 @@ enum { SPV_NEED_GEOM = 1u << 0, SPV_NEED_TESS = 1u << 1, SPV_NEED_F64 = 1u << 2,
 uint32_t spv_feature_needs(const uint32_t *code, size_t words);
 // Vulkan 1.0 without VK_KHR_storage_buffer_storage_class: StorageBuffer storage made Uniform + BufferBlock, in place (1 changed, 0 nothing to do, -1 not possible)
 int spv_sb_to_uniform(uint32_t *code, size_t words);
+// Vulkan 1.0 without VK_KHR_maintenance1 (no negative viewport height): a vertex shader copy whose gl_Position.y is multiplied by the float specialization constant
+//   SPV_FLIP_Y_SPEC_ID (default 1; the pipeline gives -1 for NVN's upper-left origin). NULL if not a vertex shader or it has no position
+#define SPV_FLIP_Y_SPEC_ID 0x5946u
+uint32_t *spv_flip_y(const uint32_t *code, size_t words, size_t *out_words);
 // Fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
 void spv_frag_outputs(const uint32_t *code, size_t words, uint8_t cls[8]);
 // A copy whose float outputs at the locations in umask / smask hold the same bits as uint / int outputs (integer colour targets). NULL if nothing to do or not possible
@@ -54,6 +58,7 @@ uint32_t *spv_int_outputs(const uint32_t *code, size_t words, uint32_t umask, ui
 // A copy of a vertex shader that stores its transform feedback captures into storage buffers (binding0 + b in set 0): tf[b] = { output location, components } (components 0 = buffer unused),
 // at word (VertexIndex - first) * components + base[b], first and base[4] in push constants (5 uints). NULL if not possible
 uint32_t *spv_tf_variant(const uint32_t *code, size_t words, const int tf[4][2], uint32_t binding0, size_t *out_words);
+uint32_t *spv_tf_points_variant(const uint32_t *code, size_t words, const int tf[4][2], uint32_t w_px, size_t *out_words);   // the point route for drivers without vertex stores
 // A copy that declares StorageImageWriteWithoutFormat / StorageImageReadWithoutFormat where the shader writes / reads a storage image of format Unknown without them. NULL if none is missing
 uint32_t *spv_image_caps(const uint32_t *code, size_t words, size_t *out_words);
 // A copy whose 2D / 2D-array texture gathers have their coordinate nudged by 1/512 of a texel (the host picks Maxwell's 2x2 block on a texel centre: Adreno). NULL if none

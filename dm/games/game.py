@@ -12,6 +12,18 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 STAGES = {'vs': 0, 'ps': 1, 'gs': 2, 'hs': 3, 'ds': 4, 'cs': 5}   # NVN shader stage numbers
+PORTS = ('galar', 'arceus', 'paldea')   # the released Android apps (profile key port): Galar Native, Arceus Native, Paldea Native
+# Per-game engine behaviour (profile key engine_quirks, words): each one keeps what that game's own release did where the merged engines disagree.
+#   Everything listed here is documented in docs/ENGINE_UNIFY.md; a game that leaves one out gets the shared default
+ENGINE_QUIRKS = {
+    'qc11_no_eds': 'nvn_vk.c: draw state built into each pipeline on Qualcomm Vulkan 1.1 drivers (per-draw vertex strides misread; Arceus #34)',
+    'gpu_time_auto_only': 'nvn_vk.c: GPU timestamps by default only with Graphics Auto',
+    'frame_hold_off': 'nvn_vk.c: the held frame (DM_VK_FRAME_HOLD) off by default even with the replay on its own thread',
+    'async_pso_off': 'nvn_vk.c: background pipeline builds (DM_VK_ASYNC_PSO) off by default on Adreno too',
+    'nvn_async_never': 'hle_nvn.c: the replay never on its own thread (DM_NVN_ASYNC Auto would turn it on for Adreno)',
+    'driver_selftests': 'nvn_vk.c: the start-up vertex-stride canary (vtx_canary.h) and transform feedback self-test (tf_selftest.h, Arm driver)',
+    'framegen_game_rate': "nvn_vk.c: frame generation runs at the game's own 30 or 60 (floor = that rate - 2) instead of needing a locked 60",
+}
 
 
 class Game:
@@ -126,6 +138,8 @@ def header(g):
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
     afr = g.words('alpha_from_red', '')   # fragment shader key prefixes that read single-channel textures mapped (R, 0, 0, 1) with alpha = red (nvn_mtl.m tex_alpha_red); none by default
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in afr): sys.exit(f'{g.id}: alpha_from_red takes fragment shader keys (8-16 lowercase hex digits): {afr}')
+    tuo = g.words('tex_unwritten_one', '')   # <fragment shader key>:<texture binding> pairs whose texture the game never draws on this host: sampled as 1 (nvn_vk.c DM_VK_TEXOVR's default); none by default
+    if any(not re.fullmatch(r'[0-9a-f]{16}:[A-Za-z0-9_]+', k) for k in tuo): sys.exit(f'{g.id}: tex_unwritten_one takes <16 hex digit key>:<binding> pairs: {tuo}')
     rcd = g.get('render_cond', 'off')   # NVN conditional rendering evaluated at replay, timestamp reports with counter 0 (nvn_mtl.m OP_RENDER_COND): on / off
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond must be on or off: {rcd}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
@@ -150,18 +164,32 @@ def header(g):
     if tm not in ('on', 'off'): sys.exit(f'{g.id}: touch_menu must be on or off: {tm}')
     tmb = g.get('touch_menu_build', '') if tm == 'on' else ''   # the main build (32 hex digits) the pane class addresses below were found in
     tmp = g.words('touch_menu_panes', '') if tm == 'on' else []   # the ui2d pane classes' vtable offsets in main (hex)
+    tml = g.words('touch_menu_lists', '') if tm == 'on' else []   # the list selection classes' vtable offsets in main (hex): taps select by index
+    if any(not re.fullmatch(r'0x[0-9a-f]+', v) for v in tml): sys.exit(f'{g.id}: touch_menu_lists must be 0x… offsets')
+    tmq = g.words('touch_menu_popups', '') if tm == 'on' else []   # the pop-up choice classes' vtable offsets in main (hex)
+    if any(not re.fullmatch(r'0x[0-9a-f]+', v) for v in tmq): sys.exit(f'{g.id}: touch_menu_popups must be 0x… offsets')
     if tm == 'on' and (not re.fullmatch(r'[0-9a-f]{32}', tmb) or not tmp or any(not re.fullmatch(r'0x[0-9a-f]+', v) for v in tmp)):
         sys.exit(f'{g.id}: touch_menu on needs touch_menu_build (32 hex digits) and touch_menu_panes (0x… offsets)')
     aom = g.get('android_op_mode', 'follow')   # the operation mode the Android app starts in (android_main.c sets DM_OPMODE unless env.txt does): follow = op_mode, console, handheld (lower resolution: faster on phones)
     if aom not in ('follow', 'console', 'handheld'): sys.exit(f'{g.id}: android_op_mode must be follow, console or handheld: {aom}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
+    # Engine unification (docs/ENGINE_UNIFY.md): one source tree builds Galar Native (Sword / Shield), Arceus Native and Paldea Native. What differs per released
+    #   app is chosen here, never by a separate copy of the code. None of these keys starts with nvn_ / shader_, so none enters the shader chain (dmsh_chain.py)
+    port = g.get('port', '') or (load(g.get('tables_from')).get('port', '') if g.get('tables_from', '') else '')   # the released app this profile ships in
+    if port not in PORTS: sys.exit(f'{g.id}: port must be one of {", ".join(PORTS)} (or come from tables_from): {port!r}')
+    eq = g.words('engine_quirks', '') or (load(g.get('tables_from')).words('engine_quirks', '') if g.get('tables_from', '') else [])
+    if any(q not in ENGINE_QUIRKS for q in eq): sys.exit(f'{g.id}: engine_quirks takes {", ".join(sorted(ENGINE_QUIRKS))}: {eq}')
+    docs = g.get('docs_dir', '') or (load(g.get('tables_from')).get('docs_dir', '') if g.get('tables_from', '') else '') or 'NXNative'   # Documents/<docs_dir>/<title id>/save (android_main.c save_place)
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
     L = [f'// Generated by dm/games/game.py from {src}/game.tsv; do not edit',
          '#pragma once',
          f'#define DM_GAME_ID {q(g.id)}',
          f'#define DM_GAME_NAME {q(g.get("name"))}',
          f'#define DM_GAME_FILE_STEM {q(file_stem(g))}',
+         *[f'#define DM_PORT_{p.upper()} {int(p == port)}' for p in PORTS],
+         *[f'#define DM_GAME_ENG_{k.upper()} {int(k in eq)}' for k in sorted(ENGINE_QUIRKS)],
+         f'#define DM_GAME_DOCS_DIR {q(docs)}',
          '#define DM_GAME_FAMILY {' + ', '.join('{' + q(f.id) + ', ' + q(file_stem(f)) + '}' for f in fam) + '}',
          f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id"), 16):016X}ull',
          f'#define DM_GAME_MODULES {{{", ".join(map(q, mods))}}}',
@@ -195,8 +223,11 @@ def header(g):
          f'#define DM_GAME_TOUCH_MENU {int(tm == "on")}',
          f'#define DM_GAME_TOUCH_MENU_BUILD {q(tmb)}',
          f'#define DM_GAME_TOUCH_MENU_PANES {{{", ".join(v + "ull" for v in tmp) or "0"}}}',
+         f'#define DM_GAME_TOUCH_MENU_LISTS {{{", ".join(v + "ull" for v in tml) or "0"}}}',
+         f'#define DM_GAME_TOUCH_MENU_POPUPS {{{", ".join(v + "ull" for v in tmq) or "0"}}}',
          f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
          f'#define DM_GAME_ALPHA_FROM_RED {q(" ".join(afr))}',
+         f'#define DM_GAME_TEX_UNWRITTEN_ONE {q(" ".join(tuo))}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',

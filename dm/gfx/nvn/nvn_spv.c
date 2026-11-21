@@ -444,6 +444,131 @@ uint32_t *spv_tf_variant(const uint32_t *code, size_t words, const int tf[4][2],
     return o;
 }
 
+// Transform feedback capture as points, for drivers whose vertex shaders cannot store into buffers (Arm's own Mali driver: vertexPipelineStoresAndAtomics off, the
+//   self-test's A and B write nothing while its compute leg C writes all: the player, Pokemon and NPCs vanish, Arceus #47 #51 #54 #57 #58). A copy of a vertex shader
+//   that, before each return of its entry function, puts the vertex on a pixel of its own in a W x H target: column (i % W), row (i / W) for i = VertexIndex - pc.first,
+//   H = pc.h, gl_PointSize 1; and writes the captured outputs as their bits into new outputs: buffer b's output tf[b][0], its first tf[b][1] components, at Location 28 + b
+//   as a uvec4 (the rest 0). Drawn as points with tf_points.frag, which writes each into an RGBA32UI colour target, then copied into the capture buffers by
+//   tf_repack.comp (compute writes work there). Push constants { uint first; uint h; uint pad[3]; } (the layout spv_tf_variant's have). NULL if the code cannot be read
+uint32_t *spv_tf_points_variant(const uint32_t *code, size_t words, const int tf[4][2], uint32_t w_px, size_t *out_words) {
+    enum { OpMemberDecorate = 72, OpLoad = 61, OpStore = 62, OpAccessChain = 65, OpCompositeConstruct = 80, OpCompositeExtract = 81, OpConvertUToF = 112, OpBitcast = 124,
+           OpISub = 130, OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpUDiv = 134, OpFDiv = 136, OpUMod = 137, SC_Output = 3, SC_PushConstant = 9 };
+    if (words < 5 || code[0] != 0x07230203u || !w_px) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    int32_t *loc = malloc(sizeof(int32_t) * bound); uint8_t *bi = calloc(bound, 1); if (!loc || !bi) { free(loc); free(bi); return NULL; }
+    for (uint32_t i = 0; i < bound; i++) loc[i] = -1;
+    uint32_t entry = 0, t_uint = 0, t_int = 0, t_float = 0, vid = 0, vid_ty = 0, outv[64] = {0}, out_ty[64] = {0}, out_nc[64] = {0}, out_ct[64] = {0};
+    uint32_t blk = 0, blk_ps = 0, pos_var = 0, t_v4f = 0, t_v4u = 0, t_pov4f = 0, t_pof = 0, t_pov4u = 0, blk_var = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) { free(loc); free(bi); return NULL; } const uint32_t *x = code + i;
+        if (op == OpDecorate && n >= 4 && x[1] < bound) { if (x[2] == DecLocation) loc[x[1]] = (int32_t)x[3]; else if (x[2] == DecBuiltIn) { bi[x[1]] = 1; if (x[3] == 42 /* VertexIndex */) vid = x[1]; if (x[3] == 0 /* Position */) pos_var = x[1]; } }
+        else if (op == OpMemberDecorate && n >= 5 && x[3] == DecBuiltIn) { if (x[2] == 0 && x[4] == 0) blk = x[1]; if (x[2] == 1 && x[4] == 1) blk_ps = x[1]; }
+        else if (op == OpEntryPoint && n >= 3 && !entry) entry = x[2];
+        else if (op == OpTypeInt && n >= 4 && x[2] == 32) { if (x[3]) { if (!t_int) t_int = x[1]; } else if (!t_uint) t_uint = x[1]; }
+        else if (op == OpTypeFloat && n >= 3 && x[2] == 32 && !t_float) t_float = x[1];
+        i += n; }
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpTypeVector && n >= 4 && x[3] == 4) { if (t_float && x[2] == t_float && !t_v4f) t_v4f = x[1]; if (t_uint && x[2] == t_uint && !t_v4u) t_v4u = x[1]; }
+        i += n; }
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpTypePointer && n >= 4 && x[2] == SC_Output) { if (t_v4f && x[3] == t_v4f && !t_pov4f) t_pov4f = x[1]; if (t_float && x[3] == t_float && !t_pof) t_pof = x[1]; if (t_v4u && x[3] == t_v4u && !t_pov4u) t_pov4u = x[1]; }
+        if (op == OpVariable && n >= 4 && x[2] < bound) {
+            const uint32_t *p = def_of(code, words, x[1]); uint32_t pointee = p && (p[0] & 0xffff) == OpTypePointer ? p[3] : 0;
+            if (x[2] == vid) vid_ty = pointee;
+            if (blk && pointee == blk && x[3] == SC_Output) blk_var = x[2];
+            if (x[3] == SC_Output && loc[x[2]] >= 0 && loc[x[2]] < 64 && !bi[x[2]] && pointee) {
+                const uint32_t *t = def_of(code, words, pointee), *c = t; uint32_t nc = 1;
+                if (t && (t[0] & 0xffff) == OpTypeVector) { nc = t[3]; c = def_of(code, words, t[2]); }
+                if (c && ((c[0] & 0xffff) == OpTypeFloat || (c[0] & 0xffff) == OpTypeInt) && c[2] == 32) {
+                    int l = loc[x[2]]; outv[l] = x[2]; out_ty[l] = pointee; out_nc[l] = nc; out_ct[l] = (c[0] & 0xffff) == OpTypeFloat ? 0 : c[3] ? 2 : 1;
+                    if (nc > 1) out_ct[l] |= (uint32_t)t[2] << 2; else out_ct[l] |= (uint32_t)pointee << 2; } }
+        }
+        i += n; }
+    int used28 = 0; for (uint32_t v = 0; v < bound; v++) if (loc[v] >= 28 && loc[v] < 32) used28 = 1;
+    free(loc); free(bi);
+    if (!entry || !t_float || !t_v4f || (!blk_var && !pos_var) || used28) return NULL;   // (no float vec4, no position to place, or Location 28-31 already in use)
+    int pre14 = code[1] < 0x00010400u;
+    uint32_t nb = bound;
+    uint32_t n_uint = t_uint ? 0 : nb++; if (!t_uint) t_uint = n_uint;
+    uint32_t n_v4u = t_v4u ? 0 : nb++; if (!t_v4u) t_v4u = n_v4u;
+    uint32_t n_pov4u = t_pov4u ? 0 : nb++; if (!t_pov4u) t_pov4u = n_pov4u;
+    uint32_t n_pov4f = t_pov4f ? 0 : nb++; if (!t_pov4f) t_pov4f = n_pov4f;
+    uint32_t n_pof = t_pof ? 0 : nb++; if (!t_pof) t_pof = n_pof;
+    uint32_t c[6]; for (int k = 0; k < 6; k++) c[k] = nb++;
+    uint32_t c_w = nb++, f_half = nb++, f_one = nb++, f_two = nb++, f_zero = nb++, f_scale = nb++;
+    uint32_t t_pcs = nb++, t_ppcs = nb++, t_ppu = nb++, v_pc = nb++, v_out[4] = {0};
+    for (int b = 0; b < 4; b++) if (tf[b][1]) v_out[b] = nb++;
+    uint32_t t_pint = 0; if (!vid) { if (!t_int) return NULL; t_pint = nb++; vid = nb++; vid_ty = t_int; }
+    size_t cap = words * 2 + 2048; uint32_t *o = malloc(4 * cap); if (!o) return NULL; size_t w = 5; memcpy(o, code, 20);
+    int decorated = 0, typed = 0, in_entry = 0;
+    #define E(...) do { uint32_t e_[] = { __VA_ARGS__ }; size_t k_ = sizeof e_ / 4; if (w + k_ + 8 > cap) { cap = cap * 2 + k_; o = realloc(o, 4 * cap); } memcpy(o + w, e_, 4 * k_); w += k_; } while (0)
+    union { float f; uint32_t u; } fv;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (w + n + 512 > cap) { cap = cap * 2 + n; o = realloc(o, 4 * cap); }
+        if (op == OpEntryPoint && x[2] == entry) {   // the interface: the new outputs, the vertex index if it is new, and from SPIR-V 1.4 the push constants
+            size_t at = w; memcpy(o + w, x, 4 * n); w += n;
+            if (t_pint) o[w++] = vid;
+            for (int b = 0; b < 4; b++) if (v_out[b]) o[w++] = v_out[b];
+            if (!pre14) o[w++] = v_pc;
+            o[at] = (uint32_t)(w - at) << 16 | op; i += n; continue; }
+        if (!decorated && op >= 19 && op <= 39) {   // the first type: annotations end here
+            decorated = 1;
+            for (int b = 0; b < 4; b++) if (v_out[b]) E(4u << 16 | OpDecorate, v_out[b], DecLocation, 28u + (uint32_t)b);
+            E(3u << 16 | OpDecorate, t_pcs, DecBlock); for (uint32_t m = 0; m < 5; m++) E(5u << 16 | OpMemberDecorate, t_pcs, m, 35 /* Offset */, 4 * m);
+            if (t_pint) E(4u << 16 | OpDecorate, vid, DecBuiltIn, 42);
+        }
+        if (!typed && op == 54 /* OpFunction */) {   // before the first function: the new types, constants and variables
+            typed = 1;
+            if (n_uint) E(4u << 16 | OpTypeInt, n_uint, 32, 0);
+            if (n_v4u) E(4u << 16 | OpTypeVector, n_v4u, t_uint, 4);
+            if (n_pov4u) E(4u << 16 | OpTypePointer, n_pov4u, SC_Output, t_v4u);
+            if (n_pov4f) E(4u << 16 | OpTypePointer, n_pov4f, SC_Output, t_v4f);
+            if (n_pof) E(4u << 16 | OpTypePointer, n_pof, SC_Output, t_float);
+            for (uint32_t k = 0; k < 6; k++) E(4u << 16 | OpConstant, t_uint, c[k], k);
+            E(4u << 16 | OpConstant, t_uint, c_w, w_px);
+            fv.f = 0.5f; E(4u << 16 | OpConstant, t_float, f_half, fv.u); fv.f = 1.0f; E(4u << 16 | OpConstant, t_float, f_one, fv.u);
+            fv.f = 2.0f; E(4u << 16 | OpConstant, t_float, f_two, fv.u); fv.f = 0.0f; E(4u << 16 | OpConstant, t_float, f_zero, fv.u);
+            fv.f = 2.0f / (float)w_px; E(4u << 16 | OpConstant, t_float, f_scale, fv.u);
+            E(7u << 16 | OpTypeStruct, t_pcs, t_uint, t_uint, t_uint, t_uint, t_uint);
+            E(4u << 16 | OpTypePointer, t_ppcs, SC_PushConstant, t_pcs); E(4u << 16 | OpTypePointer, t_ppu, SC_PushConstant, t_uint);
+            E(4u << 16 | OpVariable, t_ppcs, v_pc, SC_PushConstant);
+            for (int b = 0; b < 4; b++) if (v_out[b]) E(4u << 16 | OpVariable, t_pov4u, v_out[b], SC_Output);
+            if (t_pint) { E(4u << 16 | OpTypePointer, t_pint, SC_Input, t_int); E(4u << 16 | OpVariable, t_pint, vid, SC_Input); }
+        }
+        if (op == 54 && n >= 3) in_entry = x[2] == entry;
+        if (in_entry && op == 253 /* OpReturn */) {
+            uint32_t vi = nb++, viu = vi, pf = nb++, first = nb++, ph = nb++, hh = nb++, rel = nb++, col = nb++, row = nb++, fx = nb++, fy = nb++, fh = nb++;
+            uint32_t x1 = nb++, x2 = nb++, px = nb++, y1 = nb++, y2 = nb++, y3 = nb++, py = nb++, pos = nb++;
+            E(4u << 16 | OpLoad, vid_ty, vi, vid);
+            if (vid_ty != t_uint) { viu = nb++; E(4u << 16 | OpBitcast, t_uint, viu, vi); }
+            E(5u << 16 | OpAccessChain, t_ppu, pf, v_pc, c[0]); E(4u << 16 | OpLoad, t_uint, first, pf);
+            E(5u << 16 | OpAccessChain, t_ppu, ph, v_pc, c[1]); E(4u << 16 | OpLoad, t_uint, hh, ph);
+            E(5u << 16 | OpISub, t_uint, rel, viu, first); E(5u << 16 | OpUMod, t_uint, col, rel, c_w); E(5u << 16 | OpUDiv, t_uint, row, rel, c_w);
+            E(4u << 16 | OpConvertUToF, t_float, fx, col); E(4u << 16 | OpConvertUToF, t_float, fy, row); E(4u << 16 | OpConvertUToF, t_float, fh, hh);
+            E(5u << 16 | OpFAdd, t_float, x1, fx, f_half); E(5u << 16 | OpFMul, t_float, x2, x1, f_scale); E(5u << 16 | OpFSub, t_float, px, x2, f_one);
+            E(5u << 16 | OpFAdd, t_float, y1, fy, f_half); E(5u << 16 | OpFMul, t_float, y2, y1, f_two); E(5u << 16 | OpFDiv, t_float, y3, y2, fh); E(5u << 16 | OpFSub, t_float, py, y3, f_one);
+            E(7u << 16 | OpCompositeConstruct, t_v4f, pos, px, py, f_zero, f_one);
+            if (blk_var) { uint32_t pp = nb++; E(5u << 16 | OpAccessChain, t_pov4f, pp, blk_var, c[0]); E(3u << 16 | OpStore, pp, pos);
+                           if (blk_ps == blk) { uint32_t ps = nb++; E(5u << 16 | OpAccessChain, t_pof, ps, blk_var, c[1]); E(3u << 16 | OpStore, ps, f_one); } }
+            else E(3u << 16 | OpStore, pos_var, pos);
+            for (int b = 0; b < 4; b++) { if (!v_out[b]) continue; int l = tf[b][0], nc = tf[b][1]; uint32_t val = 0, comps[4];
+                if (l >= 0 && l < 64 && outv[l]) { val = nb++; E(4u << 16 | OpLoad, out_ty[l], val, outv[l]); }
+                for (int k = 0; k < 4; k++) {
+                    uint32_t bits = c[0];
+                    if (k < nc && val && (uint32_t)k < out_nc[l]) {
+                        uint32_t comp = val; if (out_nc[l] > 1) { comp = nb++; E(5u << 16 | OpCompositeExtract, out_ct[l] >> 2, comp, val, (uint32_t)k); }
+                        bits = comp; if ((out_ct[l] & 3) != 1) { bits = nb++; E(4u << 16 | OpBitcast, t_uint, bits, comp); } }
+                    comps[k] = bits; }
+                uint32_t v = nb++; E(7u << 16 | OpCompositeConstruct, t_v4u, v, comps[0], comps[1], comps[2], comps[3]); E(3u << 16 | OpStore, v_out[b], v);
+            }
+        }
+        memcpy(o + w, x, 4 * n); w += n; i += n;
+    }
+    #undef E
+    if (!typed || !decorated) { free(o); return NULL; }
+    o[3] = nb; *out_words = w;
+    return o;
+}
+
 // Storage images without a format that the shader writes / reads need StorageImageWriteWithoutFormat / StorageImageReadWithoutFormat, which the translator does not always
 // declare (Pokémon Legends: Arceus compute shaders: spirv-val error on OpImageWrite; a strict driver may refuse the module). A copy with the missing ones added; NULL if none is missing
 uint32_t *spv_image_caps(const uint32_t *code, size_t words, size_t *out_words) {
@@ -1124,4 +1249,75 @@ uint32_t spv_feature_needs(const uint32_t *code, size_t words) {
     free(sc); free(ty);
     if (frag && fstore) need |= SPV_NEED_FRAGSTORE;
     return need;
+}
+
+// ---- Vulkan 1.0 without VK_KHR_maintenance1: no negative viewport height, so NVN's upper-left origin is made in the vertex shader instead ----
+// Before every return of the vertex entry point: gl_Position.y *= s, s a float specialization constant (SPV_FLIP_Y_SPEC_ID, default 1.0) that the pipeline sets to -1 while the
+// game's window origin is upper left. y_ndc -> -y_ndc under a positive viewport puts every pixel where the flipped viewport did (same rows, same winding, same gl_FragCoord)
+uint32_t *spv_flip_y(const uint32_t *code, size_t words, size_t *out_words) {
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint32_t entry = 0, posvar = 0, blk = 0, mem = 0, f32 = 0, v4 = 0, i32 = 0, pv4 = 0, cmem = 0;
+    int nret = 0, vertex = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return NULL; const uint32_t *x = code + i;
+        if (op == OpEntryPoint && n >= 3 && !entry) { entry = x[2]; vertex = x[1] == 0; }
+        else if (op == OpDecorate && n >= 4 && x[2] == DecBuiltIn && x[3] == 0 /* Position */) posvar = x[1];
+        else if (op == 72 /* OpMemberDecorate */ && n >= 5 && x[3] == DecBuiltIn && x[4] == 0) { blk = x[1]; mem = x[2]; }
+        i += n; }
+    if (!vertex || !entry || (!posvar && !blk)) return NULL;
+    if (blk) {   // the gl_PerVertex block: its Output variable, and the member's type
+        const uint32_t *s = def_of(code, words, blk); if (!s || (s[0] & 0xffff) != OpTypeStruct || 2 + mem >= (s[0] >> 16)) return NULL;
+        v4 = s[2 + mem];
+        for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+            if (op == OpVariable && n >= 4 && x[3] == SC_Output) { const uint32_t *p = def_of(code, words, x[1]); if (p && p[3] == blk) posvar = x[2]; }
+            i += n; }
+        if (!posvar) return NULL;
+    } else {
+        for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+            if (op == OpVariable && n >= 4 && x[2] == posvar) { const uint32_t *p = def_of(code, words, x[1]); if (p) v4 = p[3]; }
+            i += n; }
+    }
+    const uint32_t *v = def_of(code, words, v4); if (!v || (v[0] & 0xffff) != OpTypeVector || v[3] != 4) return NULL;
+    f32 = v[2];
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpTypePointer && n >= 4 && x[2] == SC_Output && x[3] == v4 && !pv4) pv4 = x[1];
+        if (op == OpTypeInt && n >= 4 && x[2] == 32 && !i32) i32 = x[1];
+        i += n; }
+    if (blk && i32) for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpConstant && n == 4 && x[1] == i32 && x[3] == mem) { cmem = x[2]; break; }
+        i += n; }
+    for (size_t i = 5, in = 0; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff;
+        if (op == 54 /* OpFunction */) in = code[i + 2] == entry; else if (op == 253 /* OpReturn */ && in) nret++;
+        i += n; }
+    if (!nret) return NULL;
+    uint32_t nb = bound, spec = nb++;
+    int add_i32 = blk && !i32, add_c = blk && !cmem, add_p = blk && !pv4;
+    if (add_i32) i32 = nb++;
+    if (add_c) cmem = nb++;
+    if (add_p) pv4 = nb++;
+    size_t cap = words + 4 + 16 + (size_t)nret * 28; uint32_t *o = malloc(4 * cap); if (!o) return NULL;   // per return: access chain 5, load 4, extract 5, multiply 5, insert 6, store 3
+    memcpy(o, code, 20); size_t w = 5; int dec = 0, decl = 0, in = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (!dec && ((op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == OpVariable)) {   // the SpecId decoration, after the other annotations
+            o[w++] = 4u << 16 | OpDecorate; o[w++] = spec; o[w++] = 1 /* SpecId */; o[w++] = SPV_FLIP_Y_SPEC_ID; dec = 1; }
+        if (!decl && op == 54) {   // the new types / constants, before the first function
+            if (add_i32) { o[w++] = 4u << 16 | OpTypeInt; o[w++] = i32; o[w++] = 32; o[w++] = 1; }
+            if (add_c) { o[w++] = 4u << 16 | OpConstant; o[w++] = i32; o[w++] = cmem; o[w++] = mem; }
+            if (add_p) { o[w++] = 4u << 16 | OpTypePointer; o[w++] = pv4; o[w++] = SC_Output; o[w++] = v4; }
+            o[w++] = 4u << 16 | 50 /* OpSpecConstant */; o[w++] = f32; o[w++] = spec; o[w++] = 0x3f800000u; decl = 1; }
+        if (op == 54) in = x[2] == entry;
+        if (op == 253 && in) {
+            uint32_t ptr = posvar;
+            if (blk) { ptr = nb++; o[w++] = 5u << 16 | OpAccessChain; o[w++] = pv4; o[w++] = ptr; o[w++] = posvar; o[w++] = cmem; }
+            uint32_t ld = nb++, y = nb++, ny = nb++, nv = nb++;
+            o[w++] = 4u << 16 | 61 /* OpLoad */; o[w++] = v4; o[w++] = ld; o[w++] = ptr;
+            o[w++] = 5u << 16 | 81 /* OpCompositeExtract */; o[w++] = f32; o[w++] = y; o[w++] = ld; o[w++] = 1;
+            o[w++] = 5u << 16 | 133 /* OpFMul */; o[w++] = f32; o[w++] = ny; o[w++] = y; o[w++] = spec;
+            o[w++] = 6u << 16 | 82 /* OpCompositeInsert */; o[w++] = v4; o[w++] = nv; o[w++] = ny; o[w++] = ld; o[w++] = 1;
+            o[w++] = 3u << 16 | 62 /* OpStore */; o[w++] = ptr; o[w++] = nv;
+        }
+        memcpy(o + w, x, 4 * n); w += n; i += n;
+    }
+    if (!dec || !decl) { free(o); return NULL; }
+    o[3] = nb; *out_words = w; return o;
 }

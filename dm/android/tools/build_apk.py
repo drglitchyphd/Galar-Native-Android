@@ -72,7 +72,7 @@ def main():
     a = ap.parse_args()
     g = _game.load(a.game); fam = _game.family(g)   # the games the engine built for g runs (Pokémon Shield: Shield and Sword, one app)
     ic = g.get('app_icon', 'dc2832 182040').split(); icon = [tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)) for h in ic[:2]]   # app_icon: top colour, ground colour (hex)
-    a.name = a.name or (g.get('app_name', 'Galar Native') if len(fam) > 1 else g.get('name'))   # the app's name (the base game's app_name: Galar Native runs Sword and Shield, Paldea Native Scarlet and Violet; each game's own shortcut names it)
+    a.name = a.name or g.get('app_name', '') or ('Galar Native' if len(fam) > 1 else g.get('name'))   # the app's name (the base game's app_name: Galar Native runs Sword and Shield, Paldea Native Scarlet and Violet, Arceus Native Legends: Arceus; each game's own shortcut names it)
     a.package = a.package or 'com.nxnative.' + _game.file_stem(g).lower()   # com.nxnative.pokemonshield: the Shield app's package, so its players update in place
     exe = '.exe' if os.name == 'nt' else ''; bat = '.bat' if os.name == 'nt' else ''
     bt = a.bt or os.path.expanduser('~/nxnative-work/tools/android-15'); jar = a.jar or os.path.expanduser('~/nxnative-work/tools/android-35/android.jar')
@@ -100,7 +100,7 @@ def main():
     open(os.path.join(w, 'AndroidManifest.xml'), 'w', encoding='utf-8').write(f'''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{a.package}" android:versionCode="{a.version}" android:versionName="0.{a.version}">
     <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="35" />
-    <uses-permission android:name="android.permission.VIBRATE" />
+{''.join(f'    <queries><package android:name="{p}" /></queries>' + chr(10) for p in sorted({f.get('setup_from_app', '') for f in fam} - {''}))}    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -156,6 +156,7 @@ def main():
             if os.path.isfile(p): z.write(p, 'assets/' + f)
         z.writestr('assets/shader_chain', shader_chain(g) + '\n')   # the launcher sends players back to setup when their shader pack was made for another chain
         z.writestr('assets/games', ''.join(f'{f.id}\t{f.get("name")}\t{_game.file_stem(f)}\t{list(f.builds().values())[-1]["display"]}\t{"heavy" if f.get("android_heavy", "off") == "on" else ""}\n' for f in fam))   # the games this app runs, its own first, with the version they need (GameSettings.games)
+        z.writestr('assets/setup_from', ''.join(f'{f.id}\t{f.get("setup_from_app")}\n' for f in fam if f.get('setup_from_app', '')))   # an installed app a game can be set up from (SetupActivity)
         z.writestr('assets/app', f'{a.name}\t{g.get("app_repo", "github.com/simipoB/Galar-Native-Android")}\n')   # the app's name and where its official releases are (SetupActivity)
         for t in sorted(glob.glob(os.path.join(ANDROID, 'app/assets/lang/*.tsv'))): z.write(t, 'assets/lang/' + os.path.basename(t))   # the app's text in other languages (T.java)
         # the licences (GameMenu's About page): the app's own (NOTICE, then the GPL-3.0 text and the MIT notice its older code keeps), whose notice must stay with every

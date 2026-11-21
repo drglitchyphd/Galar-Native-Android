@@ -49,6 +49,7 @@ Deleted: applies the next time you start the game.	Excluído: vale a partir da p
 Display	Tela
 Done	Concluído
 Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset).	Arraste um controle para movê-lo. Para redimensionar, toque nele e depois faça pinça com dois dedos em qualquer lugar. Toque duas vezes para ocultar. Segure − por 2 s para salvar (segure + para redefinir).
+Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	Arraste um controle para movê-lo, faça pinça para redimensionar, toque duas vezes para ocultar. Segure − por 2 s para salvar (segure + e − juntos para redefinir).
 Edit notes	Editar notas
 Enter both the server and the room code.	Insira o servidor e o código da sala.
 Export save data	Exportar dados salvos
@@ -264,6 +265,15 @@ Auto: on with ARM's driver (v0.52)	Auto: ligado com o driver da ARM (v0.52)
 Off: the shaders as before v0.52	Desligado: os shaders como antes da v0.52
 Merge render passes	Unir passagens de renderização
 Off: every render target change starts a new pass	Desligado: cada mudança de alvo de renderização inicia uma nova passagem
+Lower specs	Requisitos menores
+Off: the world as the game draws it	Não: o mundo como o jogo o desenha
+On: shorter draw distance for Pokémon, people and trees, lighter shadows	Sim: menor distância de desenho para Pokémon, pessoas e árvores, sombras mais leves
+Lowest: shorter draw distance and no shadows	Mínimo: menor distância de desenho e sem sombras
+No reflections	Sem reflexos
+On: smooth ground lighting, no purple shadows	Sim: iluminação suave do chão, sem sombras roxas
+Off: the ground's full lighting detail (purple shadows in places)	Não: todo o detalhe de iluminação do chão (sombras roxas em alguns lugares)
+Preparing the ground's lighting (No reflections)...	Preparando a iluminação do chão (Sem reflexos)...
+Could not prepare No reflections (%s); the game plays as it draws itself.	Não foi possível preparar Sem reflexos (%s); o jogo aparece como ele mesmo desenha.
 Close	Fechar
 Choose a driver	Escolher um driver
 Start anyway	Iniciar mesmo assim
@@ -273,6 +283,8 @@ No replacement driver supports this GPU yet. Please report it with the log in Do
 Faster rendering (experimental)	Renderização mais rápida (experimental)
 On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub	Ligado: o trabalho gráfico roda na própria thread, ao lado da do jogo. Ainda não foi testado em todos os celulares: se o jogo der problema, desligue e avise no GitHub
 Freed %s GB left over from an earlier setup.	Foram liberados %s GB que sobraram de uma configuração anterior.
+Or use the game from the %s app already on this phone (no dump or keys needed):	Ou use o jogo do app %s que já está neste telefone (sem dump nem chaves):
+Set up from the installed app	Preparar a partir do app instalado
 Min / max as on the Switch	Mín / máx como no Switch
 Auto: on with ARM's driver (v0.57)	Auto: ligado com o driver da ARM (v0.57)
 Off: the shaders as before v0.57	Desligado: os shaders como antes da v0.57
@@ -330,7 +342,7 @@ Save folder	Pasta do save
 App folder	Pasta do app
 App folder: Android/data, as before	Pasta do app: Android/data, como antes
 Documents	Documentos
-Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/Galar Native/%s/save, para ferramentas de sincronização como o Syncthing. Seu save é copiado para lá no próximo início; o que já estiver lá é mantido como backup. Requer acesso a todos os arquivos
+Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/%s/%s/save, para ferramentas de sincronização como o Syncthing. Seu save é copiado para lá no próximo início; o que já estiver lá é mantido como backup. Requer acesso a todos os arquivos
 The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	A última configuração traduziu só parte dos shaders do jogo, por isso partes do jogo não apareciam. Toque em Configurar mais uma vez: ela termina o resto (os já feitos são mantidos).
 FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0: o escalonador da AMD, ampliação que respeita as bordas e depois nitidez
 Faster rendering	Renderização mais rápida
@@ -409,3 +421,55 @@ Dynamic	Dinâmico
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinâmico: 60 onde o celular consegue, 30 onde não, com a imagem completa; a velocidade do jogo fica certa
 100 % (as on the Switch)	100 % (como no Switch)
 How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick.	A velocidade com que o analógico direito e a câmera por toque giram. Menos: mais lenta e precisa. Mais: velocidade máxima com menos analógico.
+Auto: on for a Mali-G615 on ARM's driver older than r49, which needed it to start	Auto: ligado num Mali-G615 com o driver da ARM anterior ao r49, que precisava disso para iniciar
+Off: the GPU reads the game's uniform data directly (a test for invisible characters and Pokémon; if the game then closes at start, set Auto again)	Desligado: a GPU lê diretamente os dados uniformes do jogo (um teste para personagens e Pokémon invisíveis; se o jogo fechar ao iniciar, volte para Auto)
+Animated models: a render target for their capture	Modelos animados: um alvo de renderização para a captura
+Auto: a quick test at each start on ARM's driver decides (the log says which)	Auto: um teste rápido a cada início com o driver da ARM decide (o registro diz qual)
+Off: as before v0.35	Desligado: como antes da v0.35
+On: for a driver that skips the work of a pass with nothing to draw into (invisible characters and Pokémon)	Ligado: para um driver que pula o trabalho de uma passagem sem nada onde desenhar (personagens e Pokémon invisíveis)
+Style move effects	Efeitos dos estilos
+Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before	Desligado: sem a animação em tela cheia ao iniciar um golpe de estilo forte ou ágil (deixava quadros cinza em muitos celulares); os golpes funcionam como antes
+On: the game's own animation (grey boxes on some phones)	Ligado: a animação do próprio jogo (quadros cinza em alguns celulares)
+Touch camera sensitivity	Sensibilidade da câmera de toque
+Touch camera	Câmera de toque
+Drag	Arrastar
+Drag: the camera follows the finger's movement and stops when it stops	Arrastar: a câmera segue o movimento do dedo e para quando ele para
+Stick	Analógico
+Stick: where the finger lands is the centre; hold it away to keep turning, faster the further (hold-to-lock-on is off)	Analógico: onde o dedo encosta é o centro; segure afastado para continuar girando, mais rápido quanto mais longe (travar mira segurando fica desligado)
+Right stick on screen	Analógico direito na tela
+Show	Mostrar
+Hide	Ocultar
+Hide: the camera is turned with a finger only	Ocultar: a câmera é girada só com o dedo
+Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle	Panorâmico: a câmera do jogo tão larga quanto a sua tela, sem esticar nada; a interface fica em 16:9 no centro
+Barriers between passes	Barreiras entre passadas
+Fewer	Menos
+Every pass	Cada passada
+Auto: fewer on Adreno, one before every pass on other GPUs	Auto: menos na Adreno, uma antes de cada passada nas outras GPUs
+Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	Menos: mais rápido, a GPU continua ocupada; em Xclipse, Mali e PowerVR as sombras podem piscar
+Every pass: the safest picture, slower	Cada passada: a imagem mais segura, mais lento
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p: mais nítido, mas mais pesado para a GPU (menos fps, celular mais quente)
+Model tests (Adreno)	Testes de modelos (Adreno)
+For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	Para polígonos esticados ou explodindo. Reinicie o jogo depois de mudar e diga no GitHub se sumiram.
+Copy shared data on the GPU	Copiar dados compartilhados na GPU
+On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	Ligado: os dados que o jogo coloca fora do alinhamento do driver são copiados na GPU, depois do que a GPU escreveu antes, em vez de na CPU (um teste para polígonos explodindo em Adreno antigos)
+Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	Esquerda: Automático, a resolução do próprio jogo. Mais baixo: mais frio e rápido, o 3D mais suave; texto e menus continuam nítidos.
+Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, leve (a taxa de quadros do jogo, mostrada em dobro)
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	Pausada: aqui o jogo roda a %s fps, abaixo da taxa de quadros configurada. Volta sozinha quando o jogo a mantém de novo.
+Draw distance	Distância de desenho
+Near	Perto
+Default	Padrão
+Far	Longe
+Very far	Muito longe
+Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)	Perto: árvores e detalhes mais perto, menos pessoas e Pokémon carregados: mais leve (a partir do próximo início)
+Default: as the game draws it	Padrão: como o jogo desenha
+Far: trees, terrain detail and animation half as far again (from the next start)	Longe: árvores, detalhe do terreno e animação 50 % mais longe (a partir do próximo início)
+Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	Muito longe: árvores, detalhe do terreno e animação o dobro mais longe: mais pesado para a GPU (a partir do próximo início)
+Edge-run	Correr na borda
+On: push the stick past its ring to dash	Sim: empurre o analógico além do anel para correr
+Off: the stick only walks and runs	Não: o analógico só anda e corre
+Ride button	Botão de montaria
+Tap or swipe	Tocar ou deslizar
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	Toque em + para chamar um Pokémon de montaria; deslize para a esquerda / direita para trocá-lo
+Tap only	Só tocar
++ works as on the console	+ funciona como no console
+the game's own (100 %)	o do jogo (100 %)

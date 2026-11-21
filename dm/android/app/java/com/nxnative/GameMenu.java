@@ -55,7 +55,7 @@ public final class GameMenu {
         String n; try { n = nativeFramegenNote(); } catch (UnsatisfiedLinkError e) { return null; }
         if (n == null || n.isEmpty()) return null;
         if (n.equals("need60")) return t(a, "Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).");
-        if (n.startsWith("paused:")) return t(a, "Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.", n.substring(7));
+        if (n.startsWith("paused:")) return GameSettings.arceus(a) ? t(a, "Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.", n.substring(7)) : t(a, "Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.", n.substring(7));
         if (n.startsWith("cost:")) return t(a, "Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.", n.substring(5));
         if (n.startsWith("slow:")) return t(a, "Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.", n.substring(5));
         return t(a, "Off until the next start (see the log for why).");
@@ -63,9 +63,9 @@ public final class GameMenu {
 
     // ---------- look ----------
     private static final int BG = 0xF0121419, CARD = 0xFF1C1F26, CARD_LINE = 0xFF2A2E37, TEXT = 0xFFF2F3F5, SUB = 0xFF9AA0AB, CHIP = 0xFF262A33, WARN = 0xFFFFB74D;
-    private static int accent(Activity a) {   // the game's colour: Sword blue, Shield magenta, Violet purple, Scarlet red
+    private static int accent(Activity a) {   // the game's colour: Sword blue, Shield magenta, Violet purple, Scarlet red, Legends: Arceus gold
         String id = GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT);
-        return id.startsWith("0100ABF") ? 0xFF2E9BFF : id.startsWith("01008DB") ? 0xFFE0306E : id.startsWith("01008F6") ? 0xFF9B5CFF : id.startsWith("0100A3D") ? 0xFFFF4D3D : 0xFF3DDC97;
+        return id.startsWith("0100ABF") ? 0xFF2E9BFF : id.startsWith("01008DB") ? 0xFFE0306E : id.startsWith("01008F6") ? 0xFF9B5CFF : id.startsWith("0100A3D") ? 0xFFFF4D3D : id.startsWith("01001F5") ? 0xFFD9B45A : 0xFF3DDC97;
     }
     private static int dp(Activity a, float v) { return Math.round(v * a.getResources().getDisplayMetrics().density); }
     private static GradientDrawable round(int color, float r, int stroke, int strokeColor) {
@@ -246,9 +246,10 @@ public final class GameMenu {
         String was = GameSettings.get(a, key);
         GameSettings.set(a, key, value);
         boolean now;
-        if (a instanceof GameActivity && (key.equals("DM_FRAMEGEN") || key.equals("DM_FPS_TARGET"))) ((GameActivity) a).displayMode();   // (the screen's rate follows the pictures shown)
+        if (a instanceof GameActivity && (key.equals("DM_FRAMEGEN") || key.equals("DM_FPS_TARGET"))) ((GameActivity) a).displayMode();
+        if (a instanceof GameActivity && key.equals("DM_GYRO")) ((GameActivity) a).gyro();
         if (key.equals("DM_SAVE_SHARED") && value.equals("1") && android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager())   // (save_place needs it)
-            try { a.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, android.net.Uri.parse("package:" + a.getPackageName()))); } catch (Exception e) { }
+            try { a.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, android.net.Uri.parse("package:" + a.getPackageName()))); } catch (Exception e) { }   // (the sensor listened to only while it is on)   // (the screen's rate follows the pictures shown)
         if (key.equals("DM_PERF_OVERLAY")) { if (a instanceof GameActivity) ((GameActivity) a).perfOverlay(value.equals("on")); now = true; }
         else if (key.equals("DM_SUSTAINED")) { if (a instanceof GameActivity) ((GameActivity) a).sustained(); now = true; }
         else if (key.equals("DM_LANG")) now = true;
@@ -272,7 +273,7 @@ public final class GameMenu {
         heading(a, t(a, "Screen"));
         choice(a, "DM_ASPECT", t(a, "Picture"), new String[][] { { "", "16:9", t(a, "16:9, as the game is made") }, { "fill", t(a, "Fill"), t(a, "Fill the screen (stretched)") },
                                                                     { "20:9", "20:9", t(a, "20:9, for a widescreen mod") },
-            { "wide", t(a, "Widescreen"), t(a, "Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)") } });
+            { "wide", t(a, "Widescreen"), GameSettings.arceus(a) ? t(a, "Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle" : t(a, "Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)" } });
         String rec = GameSettings.profile(a)[6].equals("sgsr") ? "SGSR" : t(a, "Sharp");
         choice(a, "DM_SCALER", t(a, "Upscaling"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", rec) },
             { "sharp", t(a, "Sharp"), t(a, "Sharp: the picture upscaled with sharpening (lighter settings keep their detail)") },
@@ -291,7 +292,7 @@ public final class GameMenu {
         { String fn = framegenNote(a); if (fn != null) note(a, fn); }   // (paused under 25 fps, or cut off for the GPU's time: said here, not only in the log)
         if (GameSettings.hasLsfg(a))   // Lossless Scaling's pictures a game frame (nvn_vk.c lsfg_mult); Auto: as many as the display's rate divides evenly
             choice(a, "DM_LSFG_MULT", t(a, "Lossless Scaling pictures"), new String[][] {
-                { "", t(a, "Auto"), t(a, "Auto: 2x, light (the game at a locked 60 shown at 120)") },
+                { "", t(a, "Auto"), GameSettings.arceus(a) ? t(a, "Auto: 2x, light (the game's frame rate shown doubled)") : t(a, "Auto: 2x, light (the game at a locked 60 shown at 120)") },
                 { "2", "2x", t(a, "2x: one picture between each two of the game's frames (30 fps moves like 60)") },
                 { "3", "3x", t(a, "3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)") },
                 { "4", "4x", t(a, "4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)") } });
@@ -320,7 +321,7 @@ public final class GameMenu {
             { "low", t(a, "Low"), t(a, GameSettings.paldea(a) ? "Low: handheld mode, 720p, lighter" : "Low: 3D at about 600p, lighter") }, { "auto", t(a, "Adaptive"), t(a, "Adaptive: High, a lighter picture while the phone is hot or slow") },
             // Lowest: handheld mode with the game's 3D render scale capped (Pokémon Sword / Shield: the engine's hle_resscale.c; Scarlet / Violet have no such scale)
             { "lowest", t(a, "Lowest"), t(a, GameSettings.paldea(a) ? "Lowest: handheld mode, 3D at 960x540, coolest" : "Lowest: 3D at 960x540, coolest") } };
-        choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);
+        choice(a, "DM_GRAPHICS", t(a, "Graphics"), GameSettings.paldea(a) || GameSettings.arceus(a) ? java.util.Arrays.copyOf(gfx, 4) : gfx);   // (Lowest: Sword / Shield's render scale only)
         // Quality (docked) or Performance (handheld), live (android_main.c DM_DISPLAY_MODE); Sword / Shield keep TV mode and draw the 3D at 720p for Performance
         boolean galarMode = GameSettings.isShield(a) || "0100ABF008968000".equalsIgnoreCase(GameSettings.game(a)[0]);
         choice(a, "DM_DISPLAY_MODE", t(a, "Mode"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: as the Graphics setting decides") },
@@ -332,18 +333,38 @@ public final class GameMenu {
             { "720", "720p", t(a, "720p: lightest, for phones that cannot hold 30 (from the next start)") },
             { "", "1080p", t(a, "1080p, as the game is made") },
             { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)") } });
+        // Legends: Arceus's TV-mode render size (loader.c arc_res): 1080p as the game is made, or 1440p (sharper, heavier); from the next start
+        // Legends: Arceus: the TV-mode render size (loader.c arc_res; the GPU memory grows with it), from the next start
+        if (GameSettings.arceus(a)) choice(a, "DM_ARC_RES", t(a, "Resolution"), new String[][] {
+            { "720", "720p", t(a, "720p: lightest, for phones that cannot hold 30 (from the next start)") },
+            { "", "1080p", t(a, "1080p, as the game is made") },
+            { "1440", "1440p", t(a, "1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)") } });
+        // Legends: Arceus: the POTATO mod's draw distance and shadows (android_main.c lowspec, DM_LOWSPEC 1 / 2), for phones that cannot hold its frame rate
+        // Legends: Arceus: flat normal maps on the field's ground and tree bark (setup_game.py flat_normals): on this engine their detail lights shadowed ground purple
+        if (GameSettings.arceus(a)) choice(a, "DM_FLAT_NORMALS", t(a, "No reflections"), new String[][] { { "", t(a, "On"), t(a, "On: smooth ground lighting, no purple shadows") },
+            { "0", t(a, "Off"), t(a, "Off: the ground's full lighting detail (purple shadows in places)") } });
+        if (GameSettings.arceus(a)) choice(a, "DM_LOWSPEC", t(a, "Lower specs"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s", t(a, p[8].isEmpty() ? "Off" : "On")) },
+            { "0", t(a, "Off"), t(a, "Off: the world as the game draws it") },
+            { "1", t(a, "On"), t(a, "On: shorter draw distance for Pokémon, people and trees, lighter shadows") }, { "2", t(a, "Lowest"), t(a, "Lowest: shorter draw distance and no shadows") } });
+        // Legends: Arceus: how far trees, terrain detail and animation reach (android_main.c draw_distance: the player's own config files, changed at start)
+        // Legends: Arceus: how far trees, terrain detail, people and Pokémon reach (android_main.c draw_distance: the player's own config files, changed at start)
+        if (GameSettings.arceus(a)) slider(a, t(a, "Draw distance"), "DM_DRAW_DIST", 50, 200, 100, v -> v == 100 ? t(a, "the game's own (100 %)") : v + " %");
+        // Legends: Arceus: the strong / agile style moves' start effects (android_main.c style_fx, the No More Styles 1.2 mod): off by default, they covered the screen with grey boxes
+        if (GameSettings.arceus(a)) choice(a, "DM_ARC_STYLE_FX", t(a, "Style move effects"), new String[][] { { "", t(a, "Off"), t(a, "Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before") },
+            { "1", t(a, "On"), t(a, "On: the game's own animation (grey boxes on some phones)") } });
         // the game's own 3D render scale, capped (android_main.c DM_RES_CAP, hle_resscale.c): Sword / Shield, at once. The HUD and text stay sharp; only the 3D is drawn smaller
         // Battery saver (android_main.c power_saver, #333): live
-        choice(a, "DM_POWER", t(a, "Power"), new String[][] { { "", t(a, "Balanced"), t(a, "Balanced: the best picture this phone holds at a steady frame rate") },
+        if (!GameSettings.arceus(a)) choice(a, "DM_POWER", t(a, "Power"), new String[][] { { "", t(a, "Balanced"), t(a, "Balanced: the best picture this phone holds at a steady frame rate") },
             { "saver", t(a, "Battery saver"), t(a, "Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up") } });
         // a slider (the user, 2026-11-19): positions 9..20 = Auto, then 50 % to 100 % in steps of 5; stored as before ("" Auto, "0.85"), so env.txt and the engine are unchanged
         if (!GameSettings.paldea(a)) {
             slider(a, t(a, "3D render scale"), "DM_RES_CAP", 9, 20, 9, v -> v == 9 ? t(a, "Auto") : (v * 5) + " %",
                    v -> v == 9 ? "" : String.format(java.util.Locale.ROOT, "%.2f", v * 5 / 100.0),
                    st -> { try { double d = Double.parseDouble(st); return Math.max(10, Math.min(20, (int) Math.round(d * 20))); } catch (RuntimeException e) { return 9; } });
-            note(a, t(a, "Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp."));
+            note(a, GameSettings.arceus(a) ? t(a, "Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.")
+                                           : t(a, "Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp."));
         }
-        if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", p[5]) },
+        if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", GameSettings.arceus(a) ? "30" : p[5]) },
             { "30", "30 fps", t(a, "30 fps, as the game is made") }, { "60", "60 fps", GameSettings.paldea(a) ? t(a, "Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)")
                                                                                                : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") },
             { "dyn", t(a, "Dynamic"), t(a, "Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right") } });
@@ -368,6 +389,18 @@ public final class GameMenu {
                v -> v == 20 ? "" : String.valueOf(v * 5),
                st -> { try { return Math.max(10, Math.min(40, Math.round(Integer.parseInt(st.trim()) / 5f))); } catch (RuntimeException e) { return 20; } });
         note(a, t(a, "How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick."));
+        if (GameSettings.arceus(a)) {   // (Legends: Arceus's own: the movement stick, the touch camera, the on-screen right stick, gyro aiming; the engine has them for every game)
+            // the left stick / movement, touch and controller alike (hle_hid.c lsens): full speed with less of the stick (Arceus-Native-Android#9: running needs a near-full push)
+            slider(a, t(a, "Movement stick sensitivity"), "DM_LSTICK_SENS", 100, 200, 100, v -> v + " %");   // (drag: at 150 % full speed and running come with less of the stick)
+            // the touch camera (touch_ui.c cam_pct / cam_stick, Arceus-Native-Android #28): its own speed, apart from the right stick's, and how a finger turns it
+            slider(a, t(a, "Touch camera sensitivity"), "DM_TOUCH_CAM_SENS", 25, 300, 100, v -> v + " %");
+            choice(a, "DM_TOUCH_CAMERA", t(a, "Touch camera"), new String[][] { { "", t(a, "Drag"), t(a, "Drag: the camera follows the finger's movement and stops when it stops") },
+                { "stick", t(a, "Stick"), t(a, "Stick: where the finger lands is the centre; hold it away to keep turning, faster the further (hold-to-lock-on is off)") } });
+            choice(a, "DM_TOUCH_RSTICK", t(a, "Right stick on screen"), new String[][] { { "", t(a, "Show"), "" }, { "off", t(a, "Hide"), t(a, "Hide: the camera is turned with a finger only") } });
+            // gyro aiming (GameActivity.gyro, hle_hid.c): the phone's gyroscope turns the camera, at the camera sensitivity above
+            choice(a, "DM_GYRO", t(a, "Gyro aiming"), new String[][] { { "", t(a, "Off"), t(a, "Off: moving the phone does nothing") },
+                { "aim", t(a, "While aiming"), t(a, "While aiming (ZL held): turn and tilt the phone to aim") }, { "on", t(a, "Always"), t(a, "Always: turning the phone turns the camera") } });
+        }
         heading(a, t(a, "Touch controls"));
         // the sticks (touch_ui.c float_on): fixed where the layout puts them, or floating (the left one comes to the thumb; the right half drags the camera)
         choice(a, "DM_TOUCH_STICKS", t(a, "Sticks"), new String[][] { { "", t(a, "Fixed"), t(a, "Fixed: the sticks stay where they are drawn, as on Joy-Cons") },
@@ -379,8 +412,20 @@ public final class GameMenu {
         choice(a, "DM_TOUCH_HAPTIC", t(a, "Vibrate on press"), new String[][] { { "", t(a, "Like rumble"), t(a, "Like rumble: off when Rumble is Off") },
                                                                                 { "on", t(a, "On"), "" }, { "off", t(a, "Off"), "" } });
         slider(a, t(a, "Opacity"), "DM_TOUCH_OPACITY", 20, 100, 100, v -> v + " %");
+        slider(a, t(a, "Button size"), "DM_TOUCH_SIZE", 80, 130, 100, v -> v + " %");
+        // the world's touch gestures (touch_ui.c field_gest, Arceus-Native-Android#5): the games with touch menus only
+        if (GameSettings.arceus(a)) choice(a, "DM_TOUCH_GESTURES", t(a, "Touch gestures"), new String[][] {
+            { "", t(a, "On"), t(a, "On: tap = A, swipe up = throw, left / right = L / R, down = X, taps on the item bubbles") },
+            { "off", t(a, "Off"), t(a, "Off: the screen only turns the camera; use the buttons (menus still take taps)") } });   // (touch_ui.c size_k: every control, the moved ones too)
+        // Legends: Arceus's own moves on the controls (touch_ui.c edge_run / ride_swipe): the buttons from the game's own help text and HUD guide table
+        if (GameSettings.arceus(a)) choice(a, "DM_TOUCH_EDGE_RUN", t(a, "Edge-run"), new String[][] {
+            { "", t(a, "On"), t(a, "On: push the stick past its ring to dash") },
+            { "off", t(a, "Off"), t(a, "Off: the stick only walks and runs") } });
+        if (GameSettings.arceus(a)) choice(a, "DM_TOUCH_RIDE_SWIPE", t(a, "Ride button"), new String[][] {
+            { "", t(a, "Tap or swipe"), t(a, "Tap + to call a ride Pokémon, swipe it left / right to change Pokémon") },
+            { "off", t(a, "Tap only"), t(a, "+ works as on the console") } });
         slider(a, t(a, "Fade after"), "DM_TOUCH_FADE", 0, 10, 3, v -> v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v));
-        action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset)."), () -> {
+        action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + and − together to reset)."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); } catch (UnsatisfiedLinkError e) { } });
     }
     // Remapping (PadMapping.java, DM_PAD_MAPPING): tap a Switch button, then press the controller key for it (the panel takes the key: remapKey)
@@ -506,11 +551,11 @@ public final class GameMenu {
     }
 
     // ---------- saves, online, system ----------
-    // the folder the save is in now (android_main.c save_place: save_place.txt says "shared" while it is in Documents/Galar Native/<title id>/save)
+    // the folder the save is in now (android_main.c save_place: save_place.txt says "shared" while it is in Documents/<docs dir>/<title id>/save: GameSettings.docsDir)
     static File activeSave(Activity a, File files) {
         try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(new File(files, "save_place.txt")))) {
             String l = r.readLine();
-            if (l != null && l.trim().equals("shared")) return new File("/storage/emulated/0/Documents/Galar Native/" + GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT) + "/save");
+            if (l != null && l.trim().equals("shared")) return new File("/storage/emulated/0/Documents/" + GameSettings.docsDir(a) + "/" + GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT) + "/save");
         } catch (java.io.IOException e) { }
         return new File(files, "save");
     }
@@ -521,7 +566,7 @@ public final class GameMenu {
         action(a, t(a, "Import save data"), t(a, "Your current save is kept as a backup."), () -> pick(a, Intent.ACTION_OPEN_DOCUMENT, null, REQ_IMPORT));
         // where the save lives (android_main.c save_place, Arceus-Native-Android#8): Documents for a sync tool; copied over at the next start, the earlier save there kept as a backup
         choice(a, "DM_SAVE_SHARED", t(a, "Save folder"), new String[][] { { "", t(a, "App folder"), t(a, "App folder: Android/data, as before") },
-            { "1", t(a, "Documents"), t(a, "Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access", GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT)) } });
+            { "1", t(a, "Documents"), t(a, "Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access", GameSettings.docsDir(a), GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT)) } });
     }
     // Online room (hle_relay.c, dm/server): local play with players elsewhere through a room server someone hosts (their own Railway service, or any PC); everyone enters the
     // same server address and room code. Applies from the next start; mods stay off for local play, as on Wi-Fi
@@ -595,9 +640,15 @@ public final class GameMenu {
         // the replay on its own thread (hle_nvn.c DM_NVN_ASYNC): the game's thread hands each frame's graphics work over instead of translating it itself (about a quarter
         //   of a frame on a slow CPU, #99). Off by default until players have run it on many phones
         heading(a, t(a, "Performance"));
-        choice(a, "DM_NVN_ASYNC", t(a, "Faster rendering"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on for Adreno GPUs, off for others") },
+        // (not for Legends: Arceus: with it the game crashed at loading screens, Arceus-Native-Android#3; android_main.c / hle_nvn.c keep it off there)
+        if (!GameSettings.arceus(a)) choice(a, "DM_NVN_ASYNC", t(a, "Faster rendering"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on for Adreno GPUs, off for others") },
             { "1", t(a, "On"), t(a, "On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub") },
             { "0", t(a, "Off"), t(a, "Off: the graphics work runs on the game's own thread") } });
+        // barriers between the game's draw passes (nvn_vk.c barrier_relaxed, DM_VK_BARRIER): Auto = fewer on Adreno, a full one before each pass elsewhere, where shadows
+        //   flickered with fewer (#20 #31 #32). A full barrier leaves the GPU idle between passes, which cost Xclipse 530 players their frame rate (#48): their choice. From the next start
+        if (GameSettings.arceus(a)) choice(a, "DM_VK_BARRIER", t(a, "Barriers between passes"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: fewer on Adreno, one before every pass on other GPUs") },
+            { "relaxed", t(a, "Fewer"), t(a, "Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker") },
+            { "full", t(a, "Every pass"), t(a, "Every pass: the safest picture, slower") } });
         // a frame capture for a bug report (nvn_vk.c, Frame capture): the engine reads capture.req (frames to wait, so the menu can be closed first) and writes the ZIP
         heading(a, t(a, "Bug reports"));
         action(a, t(a, "Capture a frame"), t(a, "Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue."),
@@ -612,8 +663,15 @@ public final class GameMenu {
         if (DriverPackages.gpu(a).contains("mali")) {
             heading(a, t(a, "White screen tests (Mali)"));
             note(a, t(a, "Try one at a time, restart the game, and tell us on GitHub whether the picture changed (a capture helps)."));
-            choice(a, "DM_VK_UBO_SNAPSHOT", t(a, "Copy the game's uniform data"), new String[][] { { "", t(a, "Off"), "" },
+            // (Auto: mtl_init turns it on for a Mali-G615 on ARM's driver before r49; "0" is a real Off there, for the invisible-models tests of Arceus-Native-Android#6)
+            choice(a, "DM_VK_UBO_SNAPSHOT", t(a, "Copy the game's uniform data"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on for a Mali-G615 on ARM's driver older than r49, which needed it to start") },
+                { "0", t(a, "Off"), t(a, "Off: the GPU reads the game's uniform data directly (a test for invisible characters and Pokémon; if the game then closes at start, set Auto again)") },
                 { "1", t(a, "On"), t(a, "On: each draw's uniform data is copied when it is recorded, instead of the GPU reading the game's memory directly") } });
+            // transform feedback captures (nvn_vk.c tf_selftest.h): Auto = the start-up test on ARM's driver decides
+            if (GameSettings.arceus(a)) choice(a, "DM_VK_TF_ATT", t(a, "Animated models: a render target for their capture"), new String[][] {
+                { "", t(a, "Auto"), t(a, "Auto: a quick test at each start on ARM's driver decides (the log says which)") },
+                { "0", t(a, "Off"), t(a, "Off: as before v0.35") },
+                { "1", t(a, "On"), t(a, "On: for a driver that skips the work of a pass with nothing to draw into (invisible characters and Pokémon)") } });
             choice(a, "DM_VK_FLOAT_CONTROLS", t(a, "Exact infinities in shaders"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on with ARM's driver (v0.52)") },
                 { "0", t(a, "Off"), t(a, "Off: the shaders as before v0.52") } });
             choice(a, "DM_VK_NAN_MINMAX", t(a, "Min / max as on the Switch"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on with ARM's driver (v0.57)") },
@@ -639,6 +697,15 @@ public final class GameMenu {
                 { "1", t(a, "On"), t(a, "On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory") } });
             choice(a, "DM_VK_NO_PASS_MERGE", t(a, "Merge render passes"), new String[][] { { "", t(a, "On"), "" },
                 { "1", t(a, "Off"), t(a, "Off: every render target change starts a new pass") } });
+        }
+        // Exploding polygons on older Adreno drivers (#34 #46: Adreno 710, storage buffers aligned to 64): a storage buffer the game places off that alignment is
+        //   given to the GPU as a copy taken when the draw is recorded (nvn_vk.c, "bound as a snapshot"), which misses what the GPU wrote earlier in the frame.
+        //   On: copied on the GPU, in order, after those writes (DM_VK_SSBO_GPU_COPY). A test until players confirm it; shown on Adreno phones
+        if (DriverPackages.gpu(a).contains("adreno")) {
+            heading(a, t(a, "Model tests (Adreno)"));
+            note(a, t(a, "For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone."));
+            choice(a, "DM_VK_SSBO_GPU_COPY", t(a, "Copy shared data on the GPU"), new String[][] { { "", t(a, "Off"), "" },
+                { "1", t(a, "On"), t(a, "On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)") } });
         }
     }
     // the graphics driver: the phone's own, an installed package (Turnip, PanVK...), a new package from the file picker, or the releases page for this GPU; from the next start
