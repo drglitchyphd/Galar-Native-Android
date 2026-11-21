@@ -5881,7 +5881,7 @@ static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch, flo
     }
     if (!FGE.cut_tried) { FGE.cut_tried = 1;
         if (fgc_init(&FGE.cut, g_dev, g_pd)) VLOG("frame generation: camera cuts %s (the newer frame shown instead of a blend), still frames and full-screen menus left without pictures%s",
-                                                    !FGE.cut.on ? "not handled (DM_FG_CUT=0)" : FGE.cut.can_select ? "handled for Lossless Scaling" : "only counted (no storage writes without a format)", "");
+                                                    !FGE.cut.on ? "not handled (DM_FG_CUT=0)" : FGE.cut.can_select ? "handled" : "handled for our own frame generation only (no storage writes without a format)", "");
         else VLOG("frame generation: no cut / still check (%s)", FGE.cut.why ? FGE.cut.why : "?"); }
     fgen *g = &FGE.g; lsfg *ls = framegen_mode() == 3 ? &FGE.ls : NULL; float flow = 1; uint32_t cw_work = (uint32_t)cw, ch_work = (uint32_t)ch;
     if (ls) {
@@ -6074,7 +6074,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
         fg_ingest(g, cb, p);
-        if (FGE.have_prev) fgc_stat(&FGE.cut, cb, (int)sl, g->c[p ^ 1].view, g->c[p].view);   // (ours: counted for stills; its picture is a render target, not replaced on a cut)
+        if (FGE.have_prev) fgc_stat(&FGE.cut, cb, (int)sl, g->c[p ^ 1].view, g->c[p].view);   // (ours: its picture is a render target: fgc_select_rt below)
         {   // depth guidance: this frame's scene depth (copied with the scene) → its nearness. A new copy image: named to frame generation once nothing in flight uses the old one
             int zgen = g_hp_zimg ? g_hp_zgen : 0;
             if (FGE.zgen != zgen) { pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);
@@ -6093,6 +6093,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
                                         !dm_cam_viewproj ? " (no reader for this game)" : "", nz, n);
             if (n >= 300) n = nread = nz = 0; }
         if (gen) { fg_generate(g, cb, p);
+            fgc_select_rt(&FGE.cut, cb, (int)sl, hf ? g->hud.view : g->c[p].view, g->m.view, g->fmt, g->w, g->h);   // (a cut: the newer frame as shown instead)
             if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = 1; }
             pres_src mid = { NULL, g->m.img, g->m.view, g->w, g->h, 0, 0, cw, ch };
             present_compose(cb, ii, &mid, flip); }
