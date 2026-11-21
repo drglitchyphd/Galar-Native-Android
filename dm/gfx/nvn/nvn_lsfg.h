@@ -225,6 +225,9 @@ static int ls_hud_base(lsfg *g) {
 static VkPipeline ls_hud_pipe(lsfg *g, VkFormat u) {
     int v = u == VK_FORMAT_R8G8B8A8_UNORM ? 1 : u == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ? 2 : u == VK_FORMAT_R16G16B16A16_SFLOAT ? 3 : 0;
     if (getenv("DM_LS_HUD_NOFMT")) v = 0;   // (test switch: the module without a format wherever the format allows it)
+#ifdef VK_NO_PROTOTYPES
+    if (!v && !vkGetPhysicalDeviceFormatProperties2) return VK_NULL_HANDLE;   // (an instance made below 1.1, DM_VK_API: not loaded)
+#endif
     if (!v) { VkFormatProperties3 f3 = { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 }; VkFormatProperties2 f2 = { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &f3 };
               vkGetPhysicalDeviceFormatProperties2(g->pd, u, &f2);   // (Vulkan 1.3, which Lossless Scaling needs: ls_device_lacks)
               if (!(f3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) return VK_NULL_HANDLE; }

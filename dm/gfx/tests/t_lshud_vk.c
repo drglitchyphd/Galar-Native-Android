@@ -17,6 +17,8 @@ int main(void) {
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app }; VkInstance inst;
     if (vkCreateInstance(&ici, NULL, &inst)) { printf("SKIP: no Vulkan instance\n"); return 0; }
     uint32_t n = 1; VkPhysicalDevice pd; vkEnumeratePhysicalDevices(inst, &n, &pd); if (!n) { printf("SKIP: no Vulkan device\n"); return 0; }
+    { VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pd, &pp);   // (Lossless Scaling needs 1.3; the UNORM views of sRGB images here need 1.1)
+      if (pp.apiVersion < VK_API_VERSION_1_1) { printf("SKIP: a Vulkan 1.0 device (no frame generation there)\n"); return 0; } }
     VkPhysicalDeviceFeatures f; vkGetPhysicalDeviceFeatures(pd, &f);   // (the RGBA8 frames here take the module that names its format: no feature needed)
     VkPhysicalDeviceFeatures en = { .shaderStorageImageWriteWithoutFormat = f.shaderStorageImageWriteWithoutFormat };
     uint32_t nq = 8; VkQueueFamilyProperties qp[8]; vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qp); uint32_t qf = 0; while (qf < nq && !(qp[qf].queueFlags & VK_QUEUE_COMPUTE_BIT)) qf++;
