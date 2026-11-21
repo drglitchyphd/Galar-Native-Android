@@ -10,7 +10,9 @@
 #   capstone 5.0.7 and lz4 1.10.0 (sources), spirv-cross (Khronos), and unless TURNIP=0 libadrenotools
 # Needs on the PC: git, curl, python3 (with venv), a C/C++ compiler (gcc / g++), make, and cmake + ninja unless TURNIP=0,
 #   e.g. sudo apt install git curl python3-venv build-essential cmake ninja-build   (a JDK is fetched too when none is installed)
-# The APK is signed with a debug key made on first use ($WORK/debug.keystore); keep it to install updates over a first install.
+# The APK is signed with a debug key made on first use ($WORK/debug.keystore); keep it to install updates over a first install. Such a build says "Unofficial build".
+#   KS=<keystore> OFFICIAL=1 VERSION=60 bash scripts/build_apk_pc.sh   an official release: signed with KS, and the build fails unless KS is the release key
+#   (build_apk.py --official); VERSION sets versionCode 60 / versionName 0.60 (build_apk.py --version)
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd); A=$REPO/dm/android
 WORK=${WORK:-$HOME/psa-build}; mkdir -p "$WORK"; cd "$WORK"
@@ -99,5 +101,5 @@ else   # an earlier build's copies in $LIBS would otherwise still go into the AP
 step "8/8 the APK"
 OUT="$WORK/$(python3 "$REPO/dm/games/game.py" $GAME app_name | tr -d ' ').apk"   # GalarNative.apk / PaldeaNative.apk
 python3 "$A/tools/build_apk.py" --game $GAME --libs "$LIBS" --pylib "$PY/prefix/lib/python3.14" --capstone-py "$WORK/capstone-py/capstone" --bt "$BT" --jar "$JAR" \
-    --ks "$WORK/debug.keystore" --out "$OUT"
+    --ks "${KS:-$WORK/debug.keystore}" --out "$OUT" $([ "${OFFICIAL:-0}" = 1 ] && echo --official) $([ -n "${VERSION:-}" ] && echo --version "$VERSION")
 echo; echo "done: $OUT (install it, open it, choose your game files and keys)"

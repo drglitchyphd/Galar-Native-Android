@@ -7,7 +7,8 @@
 # Usage: build_apk.py --libs <dir with the .so files> --pylib <CPython for Android's lib/python3.14> --capstone-py <the capstone Python package> --out <app.apk>
 #        [--ks <keystore> (default dm/android/probe/out/debug.keystore; made when missing)] [--bt <build-tools dir>] [--jar <android.jar>]
 #        [--game <title ID> (default 01008DB008C2C000, Pokémon Shield; 0100ABF008968000 Pokémon Sword: libnxnative.so built for that game)] [--name <the profile's name>] [--package <com.nxnative.pokemon<game>>]
-import argparse, glob, hashlib, io, os, shutil, struct, subprocess, sys, tempfile, zipfile, zlib
+#        [--official (a release: fails unless --ks is the release key the app checks, BuildSigner.RELEASE_CERT; Galar Native and Paldea Native share it)]
+import argparse, glob, hashlib, io, os, re, shutil, struct, subprocess, sys, tempfile, zipfile, zlib
 from xml.sax.saxutils import escape as xml_escape   # (the label: "Pokémon Sword & Shield")
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE); DM = os.path.dirname(ANDROID)
@@ -67,6 +68,7 @@ def main():
     ap.add_argument('--libs', required=True); ap.add_argument('--pylib', required=True); ap.add_argument('--capstone-py', required=True); ap.add_argument('--out', required=True)
     ap.add_argument('--ks', default=os.path.join(ANDROID, 'probe/out/debug.keystore')); ap.add_argument('--bt'); ap.add_argument('--jar'); ap.add_argument('--name')
     ap.add_argument('--game', default='01008DB008C2C000'); ap.add_argument('--package'); ap.add_argument('--version', type=int, default=12)
+    ap.add_argument('--official', action='store_true')   # a release: fail unless --ks is the release key (BuildSigner.RELEASE_CERT)
     ap.add_argument('--debuggable', action='store_true', help='test builds: adb run-as can reach the private storage of the app')
     ap.add_argument('--profileable', action='store_true', help='test builds: simpleperf over adb can profile the app (<profileable android:shell="true"/>), without making it debuggable')
     a = ap.parse_args()
@@ -192,6 +194,17 @@ def main():
     run(os.path.join(bt, 'zipalign' + exe), '-f', '-P', '16', '4', os.path.join(w, 'base.apk'), os.path.join(w, 'aligned.apk'))
     run(os.path.join(bt, 'apksigner' + bat), 'sign', '--ks', a.ks, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--v1-signing-enabled', 'false', '--out', a.out, os.path.join(w, 'aligned.apk'))
     shutil.rmtree(w, ignore_errors=True)
+    # Official or not: the APK's signer against the release certificate the app itself checks (BuildSigner.RELEASE_CERT), for every game family (Galar Native,
+    #   Paldea Native). A missing --ks file was just made into a new key above, so a checkout without the release keystore builds an unofficial APK without saying so
+    #   otherwise. --official (cutting a release) fails the build then
+    rel = re.search(r'RELEASE_CERT\s*=\s*"([0-9a-fA-F]{64})"', open(os.path.join(ANDROID, 'app/java/com/nxnative/BuildSigner.java'), encoding='utf-8').read())
+    certs = subprocess.run([os.path.join(bt, 'apksigner' + bat), 'verify', '--print-certs', a.out], capture_output=True, text=True).stdout
+    got = re.findall(r'certificate SHA-256 digest: ([0-9a-fA-F]{64})', certs)
+    official = bool(rel and got and all(d.lower() == rel.group(1).lower() for d in got))
     print('built', a.out, f'({os.path.getsize(a.out) / 1e6:.0f} MB)')
+    print(f'signed with {", ".join(d[:8] + "..." for d in got) or "?"} ({a.ks}): ' + ('official (the release key)' if official else
+          'UNOFFICIAL: not the release key, the app will say "Unofficial build"'))
+    if a.official and not official:
+        os.remove(a.out); sys.exit(f'build_apk: --official, but {a.ks} is not the release key ({rel.group(1)[:8] if rel else "?"}...): APK removed')
 
 if __name__ == '__main__': main()

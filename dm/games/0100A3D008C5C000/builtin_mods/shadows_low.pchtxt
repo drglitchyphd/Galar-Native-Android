@@ -1,0 +1,12 @@
+@nsobid-421C5411B487EB4D049DD065FEC9547773E8E598
+
+# Pokémon Scarlet [0100A3D008C5C000] v4.0.0 - 512 Shadows (Paldea Native, DM_SHADOWS=low)
+
+@flag print_values
+@flag offset_shift 0x100
+
+// The shadow map at 512x512 instead of the game's 1024x1024: the site of Fl4sh's "2K Shadows" (shadows_2k.pchtxt), MOVZ W8, #0x200
+
+@enabled
+0146e80c 08408052 // 512 Shadows
+@stop
