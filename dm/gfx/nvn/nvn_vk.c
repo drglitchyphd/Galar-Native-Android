@@ -5899,6 +5899,121 @@ static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch, flo
          g->lw[0], g->lh[0], g->lw[FG_LEVELS - 1], g->lh[FG_LEVELS - 1], FGE.qp ? "measured" : "cannot be measured on this driver (no timestamps)", FGE.budget / 1e6);
     return 1;
 }
+// ---------- Frame generation's PC score: real frames recorded for tests/t_fg_score.c (DM_FG_DUMP) ----------
+// DM_FG_DUMP=<start present>:<count>[:<scale %>]: from that present on (g_present_n; 0: once fgdump.req appears in the output folder, looked for every 30 presents),
+//   count consecutive presented frames (the frame x with its crop, as frame generation gets it) are read back into one host buffer as they are presented: copied
+//   when kept at their size in an 8-bit RGBA / BGRA format, else blitted (scaled to scale %, or converted to RGBA8). After the last one the GPU is waited for once
+//   and a thread writes them to <DM_CAPTURE_DIR, else the files folder>/fgdump/NNNN.ppm with info.txt, so the writing does not slow the frames being recorded.
+//   The score needs consecutive frames: a present that did not reach the recording (returned early) ends it there. Off: one getenv, then a test of one int a present
+static struct { int st, want, n, scale, flip, bgra, conv; long start; uint64_t first, last; uint32_t sw, sh, cw, ch; VkFormat fmt; VkImage img; VkDeviceMemory imem, bmem; VkBuffer buf;
+                uint8_t *map; char dir[1024]; } FGD;   // st: 0 not read yet, -1 off, 1 waiting for its start, 2 recording, 3 recorded (written at the next present), 5 writing, 4 written
+static void fgd_free(void) {
+    if (FGD.buf) vkDestroyBuffer(g_dev, FGD.buf, NULL);
+    if (FGD.bmem) vkFreeMemory(g_dev, FGD.bmem, NULL);
+    if (FGD.img) vkDestroyImage(g_dev, FGD.img, NULL);
+    if (FGD.imem) vkFreeMemory(g_dev, FGD.imem, NULL);
+    FGD.buf = VK_NULL_HANDLE; FGD.bmem = FGD.imem = VK_NULL_HANDLE; FGD.img = VK_NULL_HANDLE; FGD.map = NULL;
+}
+static void *fgd_write(void *arg) {   // (its own thread: the frames are the GPU's no more, and nothing else touches FGD until st 4)
+    (void)arg; char p[1200]; snprintf(p, sizeof p, "%s/fgdump", FGD.dir); mkdir(p, 0755);
+    for (int i = 0; i < 100000; i++) { snprintf(p, sizeof p, "%s/fgdump/%04d.ppm", FGD.dir, i); if (unlink(p)) break; }   // (a longer recording's frames from before)
+    size_t fs = (size_t)FGD.sw * FGD.sh * 4; uint8_t *row = malloc((size_t)FGD.sw * 3); int ok = row != NULL, i = 0;
+    for (; i < FGD.n && ok; i++) {
+        snprintf(p, sizeof p, "%s/fgdump/%04d.ppm", FGD.dir, i); FILE *f = fopen(p, "wb"); if (!f) { ok = 0; break; }
+        fprintf(f, "P6\n%u %u\n255\n", FGD.sw, FGD.sh);
+        for (uint32_t y = 0; y < FGD.sh; y++) {   // (rows as a display shows them: a GL-origin frame is stored upside down)
+            const uint8_t *s = FGD.map + (size_t)i * fs + (size_t)(FGD.flip ? FGD.sh - 1 - y : y) * FGD.sw * 4;
+            for (uint32_t x = 0; x < FGD.sw; x++) { row[x * 3] = s[x * 4 + (FGD.bgra ? 2 : 0)]; row[x * 3 + 1] = s[x * 4 + 1]; row[x * 3 + 2] = s[x * 4 + (FGD.bgra ? 0 : 2)]; }
+            if (fwrite(row, 1, (size_t)FGD.sw * 3, f) != (size_t)FGD.sw * 3) ok = 0; }
+        if (fclose(f)) ok = 0; }
+    free(row);
+    snprintf(p, sizeof p, "%s/fgdump/info.txt", FGD.dir); FILE *f = fopen(p, "w");
+    if (f) { fprintf(f, "frames %d\nsize %u %u\nsource %u %u\nformat %d\nscale %d\nconverted %d\nfirst present %llu\n", i, FGD.sw, FGD.sh, FGD.cw, FGD.ch, (int)FGD.fmt, FGD.scale, FGD.conv,
+                     (unsigned long long)FGD.first); fclose(f); }
+    VLOG("%sfg dump: %d frames written to %s/fgdump (%ux%u of the frame's %ux%u, format %d)%s", ok ? "" : "[RED] ", i, FGD.dir, FGD.sw, FGD.sh, FGD.cw, FGD.ch, (int)FGD.fmt,
+         ok ? "" : ": writing failed");
+    fgd_free(); FGD.st = 4;
+    return NULL;
+}
+// In the present's cb (after its first barrier): x's crop read back when this present is one of the recorded ones; also arms the recording and starts the writing
+static void fgd_frame(VkCommandBuffer cb, vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
+    if (FGD.st < 0 || FGD.st >= 4) return;
+    uint64_t n = atomic_load(&g_present_n);
+    if (!FGD.st) {
+        const char *e = getenv("DM_FG_DUMP"); long s = 0; int c = 0, sc = 100;
+        if (!e || sscanf(e, "%ld:%d:%d", &s, &c, &sc) < 2 || s < 0 || c < 3) { FGD.st = -1; return; }
+        FGD.start = s; FGD.want = c > 2000 ? 2000 : c; FGD.scale = sc < 10 ? 10 : sc > 100 ? 100 : sc;
+        const char *d = getenv("DM_CAPTURE_DIR"), *t = getenv("DM_TEX_CACHE");   // (the files folder: DM_TEX_CACHE is its texcache/)
+        if (d && *d) snprintf(FGD.dir, sizeof FGD.dir, "%s", d);
+        else { snprintf(FGD.dir, sizeof FGD.dir, "%s", t ? t : "."); char *sl = t ? strrchr(FGD.dir, '/') : NULL; if (sl) *sl = 0; }
+        FGD.st = 1; VLOG("fg dump: %d frames at %d %% from %s, then written to %s/fgdump", FGD.want, FGD.scale, s ? "the present given (DM_FG_DUMP)" : "when fgdump.req appears there", FGD.dir); }
+    if (FGD.st == 3) {   // the last recorded frame went to the GPU with the present before: waited for once, then written on a thread of its own
+        pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);
+        pthread_t th; FGD.st = 5; if (pthread_create(&th, NULL, fgd_write, NULL)) fgd_write(NULL); else pthread_detach(th);
+        return; }
+    if (FGD.st == 1) {
+        if (FGD.start) { if ((long)n < FGD.start) return; }
+        else { if (n % 30) return; char r[1100]; snprintf(r, sizeof r, "%s/fgdump.req", FGD.dir); if (access(r, F_OK)) return; unlink(r); }
+        // the first frame: its size and format decide how the frames are read back (the buffer for all of them made now, not while recording)
+        VkFormat f = x->fmt; int raw = f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB;
+        const char *bad = x->is3d || x->samples > 1 || !(x->aspect & VK_IMAGE_ASPECT_COLOR_BIT) || !(x->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ? "the frame cannot be copied" : NULL;
+        uint32_t sw = (uint32_t)cw, sh = (uint32_t)ch;
+        if (FGD.scale < 100) { sw = ((uint32_t)cw * (uint32_t)FGD.scale / 100) & ~1u; sh = ((uint32_t)ch * (uint32_t)FGD.scale / 100) & ~1u; }
+        VkFormat imf = raw ? f : VK_FORMAT_R8G8B8A8_UNORM; int blit = !raw || sw != (uint32_t)cw || sh != (uint32_t)ch;
+        if (!bad && blit) { VkFormatProperties a, b; vkGetPhysicalDeviceFormatProperties(g_pd, f, &a); vkGetPhysicalDeviceFormatProperties(g_pd, imf, &b);
+            if (!(a.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !(b.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+                if (raw) { sw = (uint32_t)cw; sh = (uint32_t)ch; blit = 0; VLOG("fg dump: the frame's format cannot be blitted here: recorded at its own size"); }
+                else bad = "its format can be neither copied as it is nor blitted"; } }
+        if (sw < 16 || sh < 16) bad = "the frame is too small";
+        uint64_t fs = (uint64_t)sw * sh * 4; int want = FGD.want;
+        if (fs * (uint64_t)want > (1ull << 30)) { want = (int)((1ull << 30) / fs); VLOG("fg dump: %d frames of %ux%u would need over 1 GB: %d frames", FGD.want, sw, sh, want); }
+        if (!bad && want < 3) bad = "not even 3 frames fit in 1 GB";
+        if (!bad && blit) {
+            VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = imf, .extent = { sw, sh, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+            VkMemoryRequirements rq = { 0 }; int t = -1;
+            if (!vkCreateImage(g_dev, &ci, NULL, &FGD.img)) { vkGetImageMemoryRequirements(g_dev, FGD.img, &rq); t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); }
+            else FGD.img = VK_NULL_HANDLE;
+            VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = (uint32_t)t };
+            if (t < 0 || vkAllocateMemory(g_dev, &ai, NULL, &FGD.imem) || vkBindImageMemory(g_dev, FGD.img, FGD.imem, 0)) bad = "no memory for its scaling image"; }
+        if (!bad) {
+            VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = fs * (uint64_t)want, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+            VkMemoryRequirements rq = { 0 }; int t = -1; void *m = NULL;
+            if (!vkCreateBuffer(g_dev, &bci, NULL, &FGD.buf)) { vkGetBufferMemoryRequirements(g_dev, FGD.buf, &rq);   // (cached first: the CPU reads all of it back)
+                t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+                if (t < 0) t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0); }
+            else FGD.buf = VK_NULL_HANDLE;
+            VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = (uint32_t)t };
+            if (t < 0 || vkAllocateMemory(g_dev, &ai, NULL, &FGD.bmem) || vkBindBufferMemory(g_dev, FGD.buf, FGD.bmem, 0) || vkMapMemory(g_dev, FGD.bmem, 0, VK_WHOLE_SIZE, 0, &m))
+                bad = "no host memory for the frames";
+            FGD.map = m; }
+        if (bad) { VLOG("[RED] fg dump: not recorded (%s; %ux%u, format %d)", bad, (unsigned)cw, (unsigned)ch, (int)f); fgd_free(); FGD.st = -1; return; }
+        FGD.want = want; FGD.n = 0; FGD.sw = sw; FGD.sh = sh; FGD.cw = (uint32_t)cw; FGD.ch = (uint32_t)ch; FGD.fmt = f; FGD.first = n; FGD.last = n - 1;
+        FGD.flip = atomic_load(&g_origin_ll); FGD.bgra = f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB; FGD.conv = !raw; FGD.st = 2;
+        VLOG("fg dump: recording %d frames from present %llu (%ux%u, format %d, %s)", want, (unsigned long long)n, sw, sh, (int)f, blit ? "blitted" : "copied");
+        if (FGD.img) { VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = FGD.img,
+                .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib); } }
+    // recording: this present's frame, unless the frame changed (size, format) or a present was missed, which ends the recording with the frames so far
+    if (n != FGD.last + 1 || x->fmt != FGD.fmt || (uint32_t)cw != FGD.cw || (uint32_t)ch != FGD.ch) {
+        VLOG("fg dump: ended after %d frames (%s)", FGD.n, n != FGD.last + 1 ? "a present was missed" : "the frame's size or format changed");
+        if (FGD.n >= 3) FGD.st = 3; else { fgd_free(); FGD.st = -1; }
+        return; }
+    VkDeviceSize off = (VkDeviceSize)FGD.n * FGD.sw * FGD.sh * 4;
+    if (!FGD.img) { VkBufferImageCopy bc = { off, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { cx, cy, 0 }, { (uint32_t)cw, (uint32_t)ch, 1 } };
+        vkCmdCopyImageToBuffer(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, FGD.buf, 1, &bc); }
+    else {   // (the full barrier before this in cb orders the blit after the last frame's copy out of the image)
+        VkImageBlit b = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { cx, cy, 0 }, { cx + cw, cy + ch, 1 } }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)FGD.sw, (int32_t)FGD.sh, 1 } } };
+        vkCmdBlitImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, FGD.img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+        VkBufferImageCopy bc = { off, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { FGD.sw, FGD.sh, 1 } };
+        vkCmdCopyImageToBuffer(cb, FGD.img, VK_IMAGE_LAYOUT_GENERAL, FGD.buf, 1, &bc); }
+    VkMemoryBarrier hb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };   // (read by the CPU later)
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL);
+    FGD.last = n; if (++FGD.n >= FGD.want) FGD.st = 3;
+}
 static void present_window_locked(vtex *x, const int crop[4]);
 static void present_window(vtex *x, const int crop[4]) { pthread_mutex_lock(&g_wmu); present_window_locked(x, crop); pthread_mutex_unlock(&g_wmu); }
 // The window is going away (android_main.c APP_CMD_TERM_WINDOW): its swapchain and surface are released before that returns, as Android expects
@@ -6019,6 +6134,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
     VkCommandBuffer cb = W.cb[sl]; vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT }; vkBeginCommandBuffer(cb, &bi);
     barrier_all(cb);
+    fgd_frame(cb, x, cx, cy, cw, ch);   // (DM_FG_DUMP: real frames for the PC score; nothing while off)
     int flip = atomic_load(&g_origin_ll);
     pres_src real = { x, VK_NULL_HANDLE, VK_NULL_HANDLE, 0, 0, cx, cy, cw, ch };
     if (fg) {   // the frame copied (the game draws over its own next), its brightness pyramid, and with a frame before it the picture between the two
