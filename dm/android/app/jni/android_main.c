@@ -1013,6 +1013,13 @@ static void host_start(void) {
     { const char *le = getenv("DM_LAST_EXIT"); if (le && *le) fprintf(stderr, "boot: Android says the previous run ended: %s\n", le); }
     // Frame rate Dynamic (DM_FPS_TARGET=dyn): 60 wherever the phone holds it and 30 where it does not, frame by frame (the host's hold, hle_nvn.c vstep_tick), at the
     //   full picture: the fps guard defends 30 only (60 lowers the resolution to hold 60). Everything that reads the target sees 60; DM_FPS_DYN tells the guard
+    // Pokémon Sword / Shield: 30 fps for every player (the owner's call, 2026-11-21): 60 and Dynamic slowed the game on phones that could not hold 60 (the game's
+    //   own step chooser, main+0x5df360, reads the GPU time too short and picks the 16.67 ms step), and Dynamic stayed at 30. A saved 60 / Dynamic and Auto's 60 are
+    //   ignored; DM_UNLOCK_EXPERIMENTS=1 in env.txt lifts the lock (development)
+    { const char *u = getenv("DM_UNLOCK_EXPERIMENTS"), *ft = getenv("DM_FPS_TARGET");
+      if (display_galar() && !(u && !strcmp(u, "1"))) {
+        if (ft && *ft && strcmp(ft, "30")) fprintf(stderr, "boot: frame rate is 30 for Sword / Shield (env.txt had DM_FPS_TARGET=%s)\n", ft);
+        unsetenv("DM_FPS_TARGET"); unsetenv("DM_AUTO_FPS"); unsetenv("DM_FPS_DYN"); } }
     { const char *ft = getenv("DM_FPS_TARGET"); if (ft && !strcmp(ft, "dyn")) { setenv("DM_FPS_TARGET", "60", 1); setenv("DM_FPS_DYN", "1", 1); }
       extern _Atomic int dm_fps_dyn __attribute__((weak)); if (&dm_fps_dyn) atomic_store(&dm_fps_dyn, getenv("DM_FPS_DYN") != NULL); }
     fps_guard_init();   // (before the phone profile: Graphics chosen by hand only)

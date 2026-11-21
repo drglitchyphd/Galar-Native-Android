@@ -81,7 +81,9 @@ final class GameSettings {
     // the games the built-in 60 fps patch knows (loader.c FPS_SITES: Pokémon Shield and Sword 1.3.2)
     // the frame-rate setting: Sword / Shield 1.3.2 (loader.c fps_patch), Scarlet / Violet 4.0.0 (loader.c's built-in Dynamic FPS mod)
     static final boolean AUTO_60 = false;
-    static boolean has60(Context c) { String id = game(c)[0]; return "01008DB008C2C000".equalsIgnoreCase(id) || "0100ABF008968000".equalsIgnoreCase(id) || paldea(c); }
+    // Sword / Shield: 30 fps for every player (2026-11-21; android_main.c ignores a saved 60): no Frame rate choice unless DM_UNLOCK_EXPERIMENTS=1 (development)
+    static boolean has60(Context c) { return galar(c) ? experimentsUnlocked(c) : paldea(c); }
+    static boolean galar(Context c) { String id = game(c)[0]; return "01008DB008C2C000".equalsIgnoreCase(id) || "0100ABF008968000".equalsIgnoreCase(id); }
     // Frame generation and Faster rendering are locked off for now (android_main.c forces them off); env.txt DM_UNLOCK_EXPERIMENTS=1 lifts the lock (development)
     static boolean experimentsUnlocked(Context c) { return get(c, "DM_UNLOCK_EXPERIMENTS").equals("1"); }
     static boolean paldea(Context c) { String id = game(c)[0]; return "0100A3D008C5C000".equalsIgnoreCase(id) || "01008F6008C5E000".equalsIgnoreCase(id); }
