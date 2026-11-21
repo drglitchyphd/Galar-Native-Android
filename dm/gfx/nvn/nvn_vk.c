@@ -334,7 +334,12 @@ void mtl_init(void) {
         // without timeline semaphores (a Vulkan 1.1 Adreno 6xx stock driver: #99, Adreno 613) every submission signals a fence of its own instead (g_tlsem)
         if (has_ext(de, nde, "VK_KHR_timeline_semaphore")) dext[ndext++] = "VK_KHR_timeline_semaphore";
         else { g_tlsem = 0; VLOG("Vulkan %u.%u device without timeline semaphores: a fence for each submission instead", VK_API_VERSION_MAJOR(g_api), VK_API_VERSION_MINOR(g_api)); }
-        if ((x_dynren = has_ext(de, nde, "VK_KHR_dynamic_rendering"))) {
+        // before 1.2 its prerequisites must all be there: depth_stencil_resolve and create_renderpass2, and on a 1.0 device multiview and maintenance2 as well
+        //   (core in 1.1). One missing: render passes (simdev: Turnip on a Vulkan 1.0 Adreno 610 lists create_renderpass2 without multiview, VUID-...-01387)
+        x_dynren = has_ext(de, nde, "VK_KHR_dynamic_rendering");
+        if (x_dynren && old11) for (unsigned k = 0; k < sizeof deps11 / sizeof *deps11; k++)
+            if ((k < 2 || g_api < VK_API_VERSION_1_1) && !has_ext(de, nde, deps11[k])) { VLOG("dynamic rendering listed without %s: render passes", deps11[k]); x_dynren = 0; break; }
+        if (x_dynren) {
             dext[ndext++] = "VK_KHR_dynamic_rendering";
             if (old11) for (unsigned k = 0; k < sizeof deps11 / sizeof *deps11; k++) if (has_ext(de, nde, deps11[k])) dext[ndext++] = deps11[k];
         }
