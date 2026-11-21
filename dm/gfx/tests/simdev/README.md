@@ -94,6 +94,19 @@ t_vkdev has no hand-written row for these: `profile_env.py` computes the expecta
 profile, so the layer does not read the whole cache. `JOBS=8` does about one run a second on a 22-thread PC (16 profiles x 3 tests in 48 s): ~75 min for 1,500 profiles.
 Over 60 profiles, the summary lists only the runs that are not clean, then counts per test and result and the VUIDs hit.
 
+## OpenGL ES data and the coverage report
+
+`gles_gpuinfo.py` does the same for opengles.gpuinfo.org (8,328 reports on 2026-11-21): `index`, `pick --by renderer|all`, `fetch`,
+`summary`. The site has no export, so each report page is parsed into a small JSON (`~/simdev-cache/gles/reports/<id>.json`: the
+GL_* strings, limits, GL and EGL extensions, compressed formats). There is no GLES profiles layer, so nothing is run on these: they are
+data for planning an OpenGL ES backend.
+
+`coverage.py` turns both caches into one table (`~/simdev-cache/coverage.md`): Vulkan versions and vendors; for each Vulkan feature,
+extension, compressed format and key limit, the share of devices that have it (weighted by gpuinfo's report count per combination);
+for GLES, versions, the ANGLE share, extensions on 3.1+ devices, compressed formats and limits. `--min-android 10`, `--vendor arm`,
+`--weight combos`. gpuinfo's submitters lean to enthusiasts and newer phones: read the shares as a map, not a census, and weigh them
+against the GPUs players report.
+
 ## t_vkdev
 
 The engine's own device set-up, `nvn_vk.c` `mtl_init`, compiled as it is (`#include`d into the test, so its decisions can be read; the few
