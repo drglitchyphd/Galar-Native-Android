@@ -719,6 +719,65 @@ uint32_t *spv_gather_bias(const uint32_t *code, size_t words, size_t *out_words)
     o[3] = next; *out_words = w; return o;
 }
 
+// textureQueryLod's first component (the mip level the sample would read) as clamp (computed LOD, 0, levels - 1), for Arm's own driver: on a Mali-G615 MC6 (stock
+//   driver, Android 16) dEQP-VK.glsl.texture_functions.query.texturequerylod failed 63 of 190 cases, all the same way: the second component (the LOD) right, the first
+//   one floor (LOD) whatever the texture's level count and the sampler's mip mode (level 2 on a texture with no mips; 2 where trilinear wants 2.43). Ryujinx's
+//   translator writes Maxwell's TMML as OpImageQueryLod and reads component 0 only: 1,635 of Sword / Shield's 38,501 shaders. Not exact either: the sampler's min / max
+//   LOD and a nearest mip mode are not known to the shader, so it is the answer for a linear-mip sampler without LOD clamps, the common case. 1D / 2D / 3D / cube
+//   (arrayed or not) only, as OpImageQueryLevels allows. The query keeps its place under a new id; OpCompositeInsert takes the old id. NULL when the module has none
+uint32_t *spv_query_lod(const uint32_t *code, size_t words, size_t *out_words) {
+    enum { OpCapability = 17, OpFunction = 54, OpExtInstImport = 11, OpExtInst = 12, OpCompositeExtract = 81, OpCompositeInsert = 82, OpImage = 100,
+           OpImageQueryLod = 105, OpImageQueryLevels = 106, OpConvertSToF = 111, OpConvertUToF = 112, OpFSub = 131, FClamp = 43, CapImageQuery = 50 };
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint32_t *ty = calloc(bound, 4), *info = calloc(bound, 4);   // ty: an id's result type (of a sampled image type: its image type); info: 1 f32, 2 / 3 i32 signed / unsigned, image 0x1000 | dim << 4 | arrayed << 2 | ms << 1 | sampled==1, sampled image 0x2000
+    if (!ty || !info) { free(ty); free(info); return NULL; }
+    size_t first_fn = 0, last_cap = 0; int has_cap = 0, nq = 0; uint32_t f32 = 0, i32 = 0, i32u = 0, glsl = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) { free(ty); free(info); return NULL; } const uint32_t *x = code + i;
+        if (op == OpCapability && n == 2) { last_cap = i + n; if (x[1] == CapImageQuery) has_cap = 1; }
+        else if (op == OpExtInstImport && n >= 3 && !strncmp((const char *)(x + 2), "GLSL.std.450", 4 * (n - 2))) glsl = x[1];
+        else if (op == OpTypeFloat && n >= 3 && x[2] == 32 && x[1] < bound) { info[x[1]] = 1; if (!f32) f32 = x[1]; }
+        else if (op == OpTypeInt && n == 4 && x[2] == 32 && x[1] < bound) { info[x[1]] = x[3] ? 2 : 3; if (x[3] && !i32) i32 = x[1]; if (!x[3] && !i32u) i32u = x[1]; }
+        else if (op == OpTypeImage && n >= 9 && x[1] < bound) info[x[1]] = 0x1000 | (x[3] & 0xf) << 4 | (x[5] ? 4 : 0) | (x[6] ? 2 : 0) | (x[7] == 1);
+        else if (op == OpTypeSampledImage && n == 3 && x[1] < bound && x[2] < bound) { info[x[1]] = 0x2000; ty[x[1]] = x[2]; }
+        else if (op == OpFunction && !first_fn) first_fn = i;
+        else if (op == OpImageQueryLod && n == 5) nq++;
+        if (first_fn && n >= 3 && (op == 61 /* OpLoad */ || op == 86 /* OpSampledImage */ || op == 245 /* OpPhi */ || op == 169 /* OpSelect */) && x[2] < bound) ty[x[2]] = x[1];
+        i += n; }
+    if (!nq || !first_fn || !f32 || !glsl || !last_cap) { free(ty); free(info); return NULL; }
+    uint32_t it = i32 ? i32 : i32u, next = bound;
+    uint32_t *o = malloc(4 * (words + 32 + 32 * (size_t)nq)); if (!o) { free(ty); free(info); return NULL; }
+    size_t w = 0; memcpy(o, code, 4 * last_cap); w = last_cap;
+    if (!has_cap) { o[w++] = 2u << 16 | OpCapability; o[w++] = CapImageQuery; }
+    memcpy(o + w, code + last_cap, 4 * (first_fn - last_cap)); w += first_fn - last_cap;
+    if (!it) { it = next++; o[w++] = 4u << 16 | OpTypeInt; o[w++] = it; o[w++] = 32; o[w++] = 1; }
+    int isigned = it != i32u;
+    uint32_t c0 = next++, c1 = next++;
+    o[w++] = 4u << 16 | 43 /* OpConstant */; o[w++] = f32; o[w++] = c0; o[w++] = 0;
+    o[w++] = 4u << 16 | 43; o[w++] = f32; o[w++] = c1; o[w++] = 0x3F800000u;
+    int done = 0;
+    for (size_t i = first_fn; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpImageQueryLod && n == 5 && x[3] < bound) {
+            uint32_t sit = ty[x[3]], imt = sit && sit < bound && info[sit] == 0x2000 ? ty[sit] : 0, ii = imt && imt < bound ? info[imt] : 0, dim = ii >> 4 & 0xf;
+            if ((ii & 0xf000) == 0x1000 && dim <= 3 && !(ii & 2)) {   // Dim 1D / 2D / 3D / Cube, not multisampled
+                uint32_t q = next++, img = next++, lv = next++, lvf = next++, mx = next++, y = next++, l = next++;
+                memcpy(o + w, x, 4 * n); o[w + 2] = q; w += n;
+                o[w++] = 4u << 16 | OpImage; o[w++] = imt; o[w++] = img; o[w++] = x[3];
+                o[w++] = 4u << 16 | OpImageQueryLevels; o[w++] = it; o[w++] = lv; o[w++] = img;
+                o[w++] = 4u << 16 | (isigned ? OpConvertSToF : OpConvertUToF); o[w++] = f32; o[w++] = lvf; o[w++] = lv;
+                o[w++] = 5u << 16 | OpFSub; o[w++] = f32; o[w++] = mx; o[w++] = lvf; o[w++] = c1;
+                o[w++] = 5u << 16 | OpCompositeExtract; o[w++] = f32; o[w++] = y; o[w++] = q; o[w++] = 1;
+                o[w++] = 8u << 16 | OpExtInst; o[w++] = f32; o[w++] = l; o[w++] = glsl; o[w++] = FClamp; o[w++] = y; o[w++] = c0; o[w++] = mx;
+                o[w++] = 6u << 16 | OpCompositeInsert; o[w++] = x[1]; o[w++] = x[2]; o[w++] = l; o[w++] = q; o[w++] = 0;
+                i += n; done++; continue;
+            }
+        }
+        memcpy(o + w, x, 4 * n); w += n; i += n; }
+    free(ty); free(info);
+    if (!done) { free(o); return NULL; }
+    o[3] = next; *out_words = w; return o;
+}
+
 // Float controls (SPV_KHR_float_controls): a copy whose entry points ask for SignedZeroInfNanPreserve on 32-bit floats. Without it a driver may assume no value is ever
 // infinite or NaN and optimize on that: ARM's Mali driver then drops the translated shaders' NaN guards (mix(x, 0, isnan(x)) before each texture read) and reorders
 // maths that Maxwell evaluates exactly; the lit scene came out at the format's maximum on every Mali-G615 / G720 / G925 with ARM's driver, while PanVK on the same
