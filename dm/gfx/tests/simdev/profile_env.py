@@ -30,3 +30,24 @@ env = {
     "SIMDEV_DRIVER_ID": str(DRIVER_IDS.get(drv.get("driverID", ""), "")), "SIMDEV_DRIVER_NAME": drv.get("driverName", ""), "SIMDEV_DRIVER_INFO": drv.get("driverInfo", ""),
 }
 for k, v in env.items(): print(f"export {k}={shlex.quote(str(v))}")
+
+# t_vkdev's expectations for a profile it has no hand-written row for (the auto-discovered ones, discover.py): computed here from the profile's own data, the same
+#   rules the hand-written rows follow. SIMDEV_EXPECT = vendor,api_minor,arm_rel,arm_p,arm_beta,dualsrc,clampzero,dynren,tlsem,bc (t_vkdev.c expect_t)
+caps = j["capabilities"]["device"]; feats = caps.get("features", {}); exts = set(caps.get("extensions", {}).keys())
+def feat(s, n): return bool(feats.get(s, {}).get(n, False))
+api = p.get("apiVersion", 0)
+mn = int(str(api).split(".")[1]) if isinstance(api, str) else (api >> 12) & 0x3ff
+mn = min(mn, 3)   # (the engine's instance asks for 1.3 at most)
+vendor, dv = p["vendorID"], p["driverVersion"]
+rel = pp = beta = 0
+if vendor == 0x13B5 and drv.get("driverID", "VK_DRIVER_ID_ARM_PROPRIETARY") == "VK_DRIVER_ID_ARM_PROPRIETARY":
+    rel, pp = dv >> 22, dv >> 12 & 0x3ff; beta = int("bet" in drv.get("driverInfo", ""))
+x = rel * 100 + pp
+clamp = int(bool(rel) and ((3801 <= x < 4901) or (beta and 4901 <= x < 4902) or (5000 <= x < 5101)))
+if mn >= 3: dr = feat("VkPhysicalDeviceVulkan13Features", "dynamicRendering")
+else: dr = "VK_KHR_dynamic_rendering" in exts and (feat("VkPhysicalDeviceDynamicRenderingFeatures", "dynamicRendering") or feat("VkPhysicalDeviceDynamicRenderingFeaturesKHR", "dynamicRendering"))
+if mn >= 2: ts = feat("VkPhysicalDeviceVulkan12Features", "timelineSemaphore")
+else: ts = "VK_KHR_timeline_semaphore" in exts and (feat("VkPhysicalDeviceTimelineSemaphoreFeatures", "timelineSemaphore") or feat("VkPhysicalDeviceTimelineSemaphoreFeaturesKHR", "timelineSemaphore"))
+expect = [vendor, mn, rel, pp, beta, int(feat("VkPhysicalDeviceFeatures", "dualSrcBlend")), clamp, 0 if vendor == 0x5143 else int(bool(dr)), int(bool(ts)),
+          int(feat("VkPhysicalDeviceFeatures", "textureCompressionBC"))]
+print("export SIMDEV_EXPECT=" + shlex.quote(",".join(str(v) for v in expect)))

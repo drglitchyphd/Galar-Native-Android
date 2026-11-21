@@ -5,6 +5,8 @@
 #   bash run_simdev.sh all                           builds and runs t_vkdev, t_fgen_vk and t_lshud_vk (t_lsfg_vk too when LSFG_SHADERS=<folder of its .spv>)
 # Environment: PROFILES="mali-g720-r44p1 xclipse-920" (default: all, plus "lavapipe" for the plain run); OUT=<folder for logs> (default /tmp/simdev-out);
 #   VKP=<layers prefix> (default ~/vkprofiles, from setup_layers.sh); TIMEOUT=<seconds per run> (default 300).
+#   PROFILE_DIRS=<dir>[:<dir>...]: more folders of profiles beside profiles/ (discover.py's cache); JOBS=<n>: runs at once (default 1; ~8 on 16 GB).
+#   With more than 60 profiles the summary lists only the runs that are not clean, plus counts per result (every row stays in rows.tsv).
 # t_vkdev is given SIMDEV_PROFILE=<name> so it can check the engine's decisions against that GPU's known facts.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -14,7 +16,9 @@ LAYERS="$VKP/share/vulkan/explicit_layer.d"
 [ -f "$LAYERS/VkLayer_khronos_profiles.json" ] && [ -f "$LAYERS/VkLayer_khronos_validation.json" ] || { echo "no layers in $LAYERS: run setup_layers.sh first"; exit 2; }
 [ -f "$ICD" ] || { echo "no lavapipe ICD at $ICD"; exit 2; }
 mkdir -p "$OUT"
-ALL_PROFILES="lavapipe $(cd "$HERE/profiles" && ls *.json | sed 's/\.json$//' | tr '\n' ' ')"
+PROFILE_DIRS="$HERE/profiles${PROFILE_DIRS:+:$PROFILE_DIRS}"; JOBS=${JOBS:-1}
+ALL_PROFILES="lavapipe $(IFS=:; for d in $PROFILE_DIRS; do [ -d "$d" ] && (cd "$d" && ls *.json 2>/dev/null | sed 's/\.json$//'); done | tr '\n' ' ')"
+profile_file() { local IFS=:; for d in $PROFILE_DIRS; do [ -f "$d/$1.json" ] && { echo "$d/$1.json"; return; }; done; }
 PROFILES=${PROFILES:-$ALL_PROFILES}
 
 # one run: $1 profile (or lavapipe), $2 label, rest the command. Writes $OUT/<label>.<profile>.{log,vvl} and one row to $OUT/rows.tsv
@@ -36,8 +40,11 @@ run_one() {
         else
             # application -> validation -> profiles -> lavapipe: the validation layer judges the application against the simulated device
             export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation:VK_LAYER_KHRONOS_profiles SIMDEV_PROFILE="$prof"
-            export VK_KHRONOS_PROFILES_PROFILE_DIRS="$HERE/profiles"   # (every profile there is loaded; the name picks one)
-            eval "$(python3 -I "$HERE/profile_env.py" "$HERE/profiles/$prof.json")"   # (the profile's name, and the GPU identity the layer does not simulate: SIMDEV_*)
+            # the layer loads every profile in its folders: a folder holding a link to this one alone, so runs with thousands cached do not read them all
+            local pf pd; pf=$(profile_file "$prof"); [ -n "$pf" ] || { echo "no profile $prof in $PROFILE_DIRS"; exit 3; }
+            pd=$(mktemp -d); ln -s "$pf" "$pd/$prof.json"; trap 'rm -rf "$pd"' EXIT
+            export VK_KHRONOS_PROFILES_PROFILE_DIRS="$pd"
+            eval "$(python3 -I "$HERE/profile_env.py" "$pf")"   # (the profile's name, and the GPU identity the layer does not simulate: SIMDEV_*)
             export VK_KHRONOS_PROFILES_SIMULATE_CAPABILITIES=SIMULATE_API_VERSION_BIT,SIMULATE_FEATURES_BIT,SIMULATE_PROPERTIES_BIT,SIMULATE_EXTENSIONS_BIT,SIMULATE_FORMATS_BIT
             export VK_KHRONOS_PROFILES_EMULATE_PORTABILITY=false VK_KHRONOS_PROFILES_PROFILE_VALIDATION=false
             export VK_KHRONOS_PROFILES_DEBUG_REPORTS=DEBUG_REPORT_ERROR_BIT   # (its warnings list every format lavapipe cannot do as the profile says: hundreds of lines a run)
@@ -62,7 +69,8 @@ run_one() {
 run_binary() {   # label, command...
     local label=$1; shift
     echo "== $label: $*"
-    for p in $PROFILES; do run_one "$p" "$label" "$@"; done
+    if [ "$JOBS" -le 1 ]; then for p in $PROFILES; do run_one "$p" "$label" "$@"; done
+    else printf '%s\n' $PROFILES | xargs -P "$JOBS" -I{} bash "$0" __one {} "$label" "$@"; fi   # (each run appends one short row: whole lines)
 }
 
 build_all() {
@@ -77,6 +85,7 @@ build_all() {
     fi
 }
 
+if [ "${1:-}" = __one ]; then shift; run_one "$@"; exit 0; fi   # (one run, for JOBS > 1)
 rm -f "$OUT/rows.tsv"
 if [ "${1:-}" = all ]; then
     build_all
@@ -92,6 +101,16 @@ fi
 
 echo
 echo "Summary ($OUT/rows.tsv; logs: $OUT/<test>.<profile>.log, validation: .vvl)"
+sort -o "$OUT/rows.tsv" "$OUT/rows.tsv"
+NP=$(cut -f2 "$OUT/rows.tsv" | sort -u | wc -l)
 printf "%-11s %-20s %-9s %5s %7s %6s %5s  %s\n" test profile result FAILs vvl-err vvl-wn prof VUIDs
-while IFS=$'\t' read -r t p r f e w s v; do printf "%-11s %-20s %-9s %5s %7s %6s %5s  %s\n" "$t" "$p" "$r" "$f" "$e" "$w" "$s" "$v"; done <"$OUT/rows.tsv"
+while IFS=$'\t' read -r t p r f e w s v; do
+    if [ "$NP" -gt 60 ] && { [ "$r" = PASS ] || [ "$r" = SKIP ]; } && [ "$f" = 0 ] && [ "$e" = 0 ]; then continue; fi
+    printf "%-11s %-20s %-9s %5s %7s %6s %5s  %s\n" "$t" "$p" "$r" "$f" "$e" "$w" "$s" "$v"; done <"$OUT/rows.tsv"
+if [ "$NP" -gt 60 ]; then
+    echo; echo "$NP profiles; runs per test and result:"
+    awk -F'\t' '{k=$1" "$3; if ($5>0) k=k" with validation errors"; n[k]++} END {for (k in n) printf "  %-50s %d\n", k, n[k]}' "$OUT/rows.tsv" | sort
+    echo "VUIDs (test, VUID, runs that hit it):"
+    awk -F'\t' '$8 != "-" {n=split($8, a, " "); for (i=1;i<=n;i++) {v=a[i]; sub(/\(.*/, "", v); c[$1" "v]++}} END {for (k in c) printf "  %-100s %d\n", k, c[k]}' "$OUT/rows.tsv" | sort -k3 -rn | head -40
+fi
 ! grep -q -v -P '\t(PASS|SKIP)\t0\t0\t' "$OUT/rows.tsv"

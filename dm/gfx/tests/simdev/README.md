@@ -74,6 +74,26 @@ On Windows: `wsl bash /mnt/c/.../simdev/run_simdev.sh all`. Logs: `/tmp/simdev-o
 The summary counts per run: the test's result, its FAIL lines, validation errors / warnings (by VUID) and the profiles layer's errors.
 `fetch_profiles.py` refreshes the profiles (network); the runs themselves need none.
 
+## Many more GPUs: discover.py
+
+Every Android GPU / driver combination gpuinfo has a report for, fetched into a cache outside the repository (`~/simdev-cache`, or
+`$SIMDEV_CACHE`; ~150 KB a profile), and run beside the hand-picked ones:
+
+    python3 discover.py index                      # every Android report's GPU, driver and Vulkan version (~90 pages; later runs list only the new ones)
+    python3 discover.py pick --by release --custom # one report per GPU + driver release (Qualcomm 512.800, Arm r44p1) + Vulkan version, custom drivers kept
+    python3 discover.py fetch                      # the picked profiles not cached yet (two requests each, one a second)
+    PROFILE_DIRS=~/simdev-cache/profiles PROFILES="$(python3 discover.py list)" JOBS=8 bash run_simdev.sh all
+
+`pick` options: `--by driver` (every driver build; the most), `--by release`, `--by gpu` (newest report of each GPU only);
+`--vendor qualcomm,arm,imgtec,samsung`, `--min-reports N` (combinations seen at least N times), `--min-android 10`, `--limit N`.
+`list --vendor arm` narrows the run. On 2026-11-21 the index held 8,895 Android reports: 213 GPUs, 1,336 GPU + release combinations,
+1,931 GPU + driver builds (custom drivers, virtual and CPU devices and emulators left out); 1,544 with `--by release --custom`.
+
+t_vkdev has no hand-written row for these: `profile_env.py` computes the expectations from the profile by the same rules
+(`SIMDEV_EXPECT`), and for the hand-picked profiles t_vkdev checks that both agree. Each run gets a folder with a link to its one
+profile, so the layer does not read the whole cache. `JOBS=8` ran 59 profiles x 3 tests in 48 s on a 22-thread PC (~20 min for 1,500).
+Over 60 profiles, the summary lists only the runs that are not clean, then counts per test and result and the VUIDs hit.
+
 ## t_vkdev
 
 The engine's own device set-up, `nvn_vk.c` `mtl_init`, compiled as it is (`#include`d into the test, so its decisions can be read; the few

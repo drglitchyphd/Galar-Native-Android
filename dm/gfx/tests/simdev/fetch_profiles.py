@@ -76,6 +76,10 @@ def driver_version(text, vendor):
 
 def fetch(name):
     rid, why = DEVICES[name]
+    fetch_one(name, rid, why)
+
+# one report -> <outdir>/<name>.json (discover.py uses it for its cache, outside the repository)
+def fetch_one(name, rid, why, outdir=None):
     prof = json.loads(get(f"{BASE}api/v3/getprofile.php?id={rid}"))
     ident = identity(rid)
     (old, meta), = prof["profiles"].items()
@@ -93,9 +97,11 @@ def fetch(name):
     meta["description"] = f"{why}. Source: {BASE}displayreport.php?id={rid} (profile export {BASE}api/v3/getprofile.php?id={rid}), fetched {today}; " \
                           f"identity (deviceName, driverVersion {props['driverVersion']:#x}, deviceID, deviceType) from the report page"
     prof["profiles"] = {pname: meta}
-    os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles"), exist_ok=True)
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles", name + ".json")
+    outdir = outdir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, name + ".json")
     with open(path, "w", newline="\n") as f: json.dump(prof, f, indent=1); f.write("\n")
     print(f"{name}: report {rid}, {ident['deviceName']}, api {meta.get('api-version')}, driverVersion {props['driverVersion']:#x}, vendor {vendor:#x} -> {path}")
 
-for n in sys.argv[1:] or DEVICES: fetch(n)
+if __name__ == "__main__":
+    for n in sys.argv[1:] or DEVICES: fetch(n)
