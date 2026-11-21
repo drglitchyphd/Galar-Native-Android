@@ -396,7 +396,7 @@ Lossless Scaling pictures	Imágenes de Lossless Scaling
 Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Desactivada: incluso en su modo más ligero le quitaba al juego sus propios fotogramas aquí (hasta %s fps). Desactívala y actívala para volver a intentarlo.
 Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	Desactivada: esta GPU necesita %s ms por imagen, más de lo que el juego puede ceder. Desactívala y actívala para volver a intentarlo.
 Off until the next start (see the log for why).	Desactivada hasta el próximo inicio (el motivo está en el registro).
-Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, ligero (la tasa de fotogramas del juego, mostrada al doble)
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto: tantas como permita la frecuencia de la pantalla (un juego a 30 fps: 4x a 120 Hz, 3x a 90 Hz, 2x a 60 Hz)
 Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	En pausa: aquí el juego va a %s fps, por debajo de su ajuste de tasa de fotogramas. Vuelve a activarse sola cuando el juego la mantiene de nuevo.
 Mode	Modo
 Auto: as the Graphics setting decides	Auto: lo que decida el ajuste de Gráficos
@@ -425,3 +425,4 @@ Tap only	Solo tocar
 the game's own (100 %)	el del juego (100 %)
 Dynamic	Dinámico
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinámico: 60 donde el teléfono puede, 30 donde no, con la imagen completa; la velocidad del juego se mantiene
+Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	La generación de fotogramas de Lossless Scaling no puede funcionar en este teléfono, así que se usa la de la propia app (el registro explica por qué).

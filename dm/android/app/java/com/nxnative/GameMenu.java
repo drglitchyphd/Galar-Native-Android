@@ -53,6 +53,7 @@ public final class GameMenu {
     private static String framegenNote(Activity a) {
         String n; try { n = nativeFramegenNote(); } catch (UnsatisfiedLinkError e) { return null; }
         if (n == null || n.isEmpty()) return null;
+        if (n.equals("ours")) return t(a, "Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).");
         if (n.startsWith("paused:")) return t(a, "Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.", n.substring(7));
         if (n.startsWith("cost:")) return t(a, "Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.", n.substring(5));
         if (n.startsWith("slow:")) return t(a, "Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.", n.substring(5));
@@ -285,7 +286,7 @@ public final class GameMenu {
         { String fn = framegenNote(a); if (fn != null) note(a, fn); }   // (paused under the game's own rate, or cut off for the GPU's time: said here, not only in the log)
         if (GameSettings.hasLsfg(a))   // Lossless Scaling's pictures a game frame (nvn_vk.c lsfg_mult); Auto: 2x, made lighter or heavier by what it costs
             choice(a, "DM_LSFG_MULT", t(a, "Lossless Scaling pictures"), new String[][] {
-                { "", t(a, "Auto"), t(a, "Auto: 2x, light (the game's frame rate shown doubled)") },
+                { "", t(a, "Auto"), t(a, "Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)") },
                 { "2", "2x", t(a, "2x: one picture between each two of the game's frames (30 fps moves like 60)") },
                 { "3", "3x", t(a, "3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)") },
                 { "4", "4x", t(a, "4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)") } });

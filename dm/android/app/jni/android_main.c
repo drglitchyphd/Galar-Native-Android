@@ -901,6 +901,14 @@ static float gpu_cap_share(void) {
     if (cap <= 0 || top <= 0) { ok = 0; fprintf(stderr, "heat: the GPU's clock limit cannot be read here (not Adreno, or not allowed): Android's thermal status alone\n"); return -1; }
     return (float)cap / (float)top;
 }
+// One governor with frame generation (nvn_vk.c fg_gov_absorb): when its pictures cost the game frames, this guard's ladder gives way first. dm_guard_fg_absorb: 1 when
+//   the guard has a step left that can help (running, not at its lightest step, not after a step that did not help, not CPU-bound): it takes the next step at its next
+//   check, judged as its own. dm_guard_heat: 0 cool, 1 hot, 2 hot with the ladder already at its heat step (frame generation then gets lighter too).
+//   nvn_vk_fg_gpu_ms: frame generation's GPU time a game frame, counted into the budget the steps are judged by
+static _Atomic int g_fg_pressure, g_guard_room, g_guard_heat;
+int dm_guard_fg_absorb(void) { if (!atomic_load(&g_guard_room)) return 0; atomic_store(&g_fg_pressure, 1); atomic_store(&g_guard_room, 0); return 1; }
+int dm_guard_heat(void) { return atomic_load(&g_guard_heat); }
+extern double nvn_vk_fg_gpu_ms(void) __attribute__((weak));
 static void heat_guard(void) {   // (Legends: Arceus: the 3D render scale through loader.c arc_scale, under the slider's own value)
     static int off = -1, on, calm_n; if (off < 0) { const char *e = getenv("DM_HEAT_GUARD"); off = e && !strcmp(e, "0"); }
     extern void dm_arc_scale_set(float) __attribute__((weak));
@@ -909,6 +917,7 @@ static void heat_guard(void) {   // (Legends: Arceus: the 3D render scale throug
     int hot = st >= 2 || hr >= 0.9f, calm = st <= 1 && (hr < 0 || hr < 0.75f);
     float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
     calm_n = calm ? calm_n + 1 : 0;
+    atomic_store(&g_guard_heat, hot ? 2 : 0);   // (no frame-rate steps here: hot means the scale is at its heat step already)
     const char *ce = getenv("DM_RES_CAP"); float cap = ce ? (float)atof(ce) : 1.0f; if (!(cap >= 0.5f && cap <= 1.0f)) cap = 1.0f;   // (the slider's value: the guard only ever goes under it)
     if (hot && !on) { on = 1; calm_n = 0; float h = cap < 0.67f ? cap : 0.67f; dm_arc_scale_set(h);
         fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(h * 100 + 0.5f)); }
@@ -971,6 +980,7 @@ static void graphics_auto(void) {
         if (nogain > 0) nogain--;
         if (noheat > 0) noheat--;
         double budget = 1000.0 / (g_fps_guard > 0 ? g_fps_guard : 30), gpu = dm_gpu_avg_ms ? dm_gpu_avg_ms(60) : -1, cpu = &g_nvn_game_work_avg_ns ? atomic_load(&g_nvn_game_work_avg_ns) / 1e6 : -1;
+        if (gpu > 0 && nvn_vk_fg_gpu_ms) gpu += nvn_vk_fg_gpu_ms();   // (frame generation's pictures share the GPU with the game's frame: one budget)
         int gpu_bound = gpu > 0 && gpu > 0.85 * budget, cpu_bound = gpu > 0 && gpu < 0.70 * budget && cpu > 0.85 * budget;
         double gain_need = fps_was * 0.06 > 1.5 ? fps_was * 0.06 : 1.5;
         if (probe && !--probe && fps_avg > 1 && fps_was > 1 && lv > 0 && (probe_hot ? fps_avg < fps_was - 1.0 : fps_avg < fps_was + gain_need)) {   // the step did not help
@@ -987,8 +997,12 @@ static void graphics_auto(void) {
         if (cpu_short == 2 && !(said_cpu++ % 6)) fprintf(stderr, "fps guard: %.1f fps, short of %d, and the CPU is the limit (game thread %.1f ms, GPU %.1f ms of %.1f)\n", fps, g_fps_guard, cpu, gpu, budget);
         if (cpu_short >= 6 && (lv >= lo || nogain)) lock30_draw(1, cpu, budget);   // (the lightest step and still short, with the CPU the limit: fewer things to draw from the next start)
         if (full && cpu > 0 && cpu < 0.5 * budget && cool >= 120) lock30_draw(0, cpu, budget);   // (ten calm minutes with the CPU half idle: the normal distance may come back)
+        int fgp = atomic_exchange(&g_fg_pressure, 0);   // (frame generation's pictures cost the game frames: a step now, judged like any other)
         int for_heat = hot && since >= 6 && !noheat && !probe,
-            for_rate = slow >= (gpu_bound ? 1 : 2) && !nogain && !probe;
+            for_rate = (slow >= (gpu_bound ? 1 : 2) || fgp) && !nogain && !probe;
+        atomic_store(&g_guard_heat, hot ? (lv >= 2 ? 2 : 1) : 0);   // (heat's step: handheld mode, lv 2)
+        atomic_store(&g_guard_room, g_fps_guard && lv < lo && !nogain && !probe && !cpu_bound && !fgp);
+        if (fgp && for_rate && lv < lo) fprintf(stderr, "fps guard: frame generation costs the game frames: a lighter step first\n");
         double r_up = lv > 0 && LM[lv - 1] == LM[lv] ? LS[lv - 1] / LS[lv] : 9;   // (up to TV mode: no early guess, the mode's cost is not the pixels')
         int up_early = lv > 0 && !probe && gpu > 0 && cool >= 2 && full && !hot && gpu * r_up * r_up < 0.75 * budget;
         if ((for_heat || for_rate) && lv < lo) {

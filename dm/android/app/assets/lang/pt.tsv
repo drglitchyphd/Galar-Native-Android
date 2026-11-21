@@ -406,7 +406,7 @@ Lossless Scaling pictures	Imagens do Lossless Scaling
 2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: uma imagem entre cada dois quadros do jogo (30 fps se movem como 60)
 3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: duas imagens entre cada dois quadros (como 90 fps; uniforme só numa tela de 90 Hz)
 4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: três imagens entre cada dois quadros (como 120 fps; precisa de uma tela de 120 Hz e uma GPU rápida)
-Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, leve (a taxa de quadros do jogo, mostrada em dobro)
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto: quantas a taxa da tela permitir (um jogo a 30 fps: 4x a 120 Hz, 3x a 90 Hz, 2x a 60 Hz)
 Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	Pausada: aqui o jogo roda a %s fps, abaixo da taxa de quadros configurada. Volta sozinha quando o jogo a mantém de novo.
 Mode	Modo
 Auto: as the Graphics setting decides	Auto: o que o ajuste de Gráficos decidir
@@ -435,3 +435,4 @@ Tap only	Só tocar
 the game's own (100 %)	o do jogo (100 %)
 Dynamic	Dinâmico
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinâmico: 60 onde o celular consegue, 30 onde não, com a imagem completa; a velocidade do jogo fica certa
+Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	A geração de quadros do Lossless Scaling não roda neste celular, então a do próprio app é usada no lugar (o log diz por quê).

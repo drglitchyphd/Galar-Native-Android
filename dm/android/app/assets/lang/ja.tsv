@@ -396,7 +396,7 @@ Lossless Scaling pictures	Lossless Scalingの生成枚数
 Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	オフ：最も軽い設定でも、ここではゲーム自身のフレームを奪っていました（%s fpsまで低下）。オフにしてからオンにすると再試行します。
 Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	オフ：このGPUは1枚の画像に%s msかかり、ゲームが割ける時間を超えています。オフにしてからオンにすると再試行します。
 Off until the next start (see the log for why).	次回の起動までオフ（理由はログにあります）。
-Auto: 2x, light (the game's frame rate shown doubled)	自動：2x、軽め（ゲームのフレームレートを2倍で表示）
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	自動：画面のリフレッシュレートに合わせて最大まで（30 fps のゲームなら 120 Hz で 4x、90 Hz で 3x、60 Hz で 2x）
 Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	一時停止中：ここではゲームが %s fps で、設定したフレームレートを下回っています。ゲームが再びそのレートを保つと自動で再開します。
 Mode	モード
 Auto: as the Graphics setting decides	自動：グラフィック設定に従います
@@ -425,3 +425,4 @@ Tap only	タップのみ
 the game's own (100 %)	ゲーム本来（100 %）
 Dynamic	ダイナミック
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます
+Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	この端末では Lossless Scaling のフレーム生成を使えないため、代わりにアプリ独自のフレーム生成を使います（理由はログを参照）。

@@ -61,7 +61,8 @@ typedef struct {
     struct { ls_img t1[3], t2[2], out1, out2; VkDescriptorSet first[3], ds[4], sixth[3], ds2[4]; } de[3];
     VkDescriptorSet ds_mip[2], ds_gen[2][LS_MAXGEN];
     // HUD-free (ls_hud, our own pass): hud the frame as shown, o the picture with its HUD back; hbase: the pipeline is there (else no HUD-free, nothing else lost)
-    ls_img hud, o; VkDescriptorSetLayout hdsl; VkPipelineLayout hpl; VkPipeline hpipe; VkDescriptorPool hdp; VkDescriptorSet hds[2][LS_MAXGEN]; int hbase;
+    // work size (ls_setup_work): w x h is what the chain runs at, ow x oh the frame's own size (o, hud and sfull, the scene at the frame's size for the HUD rule)
+    ls_img hud, o, sfull; uint32_t ow, oh; VkDescriptorSetLayout hdsl; VkPipelineLayout hpl; VkPipeline hpipe; VkDescriptorPool hdp; VkDescriptorSet hds[2][LS_MAXGEN]; int hbase;
 } lsfg;
 static int ls_fail(lsfg *g, const char *why) { g->failed = 1; g->why = why; return 0; }
 
@@ -154,7 +155,7 @@ static void ls_images_free(lsfg *g) {
         if (i->img) vkDestroyImage(g->dev, i->img, NULL);
         if (i->has) fg_mem_put(g->dev, i->mem);
         memset(i, 0, sizeof *i); }
-    g->nall = 0; g->w = g->h = 0;
+    g->nall = 0; g->w = g->h = 0; g->ow = g->oh = 0;
 }
 // pfmt: the format the caller will sample it in (the frame's own, when that is the sRGB twin of fmt)
 static int ls_img_make(lsfg *g, ls_img *i, VkFormat fmt, uint32_t w, uint32_t h, VkFormat pfmt) {
@@ -273,7 +274,7 @@ static int ls_base(lsfg *g) {
 // The HUD pass's sets for the images of this size: set [i][k] = picture k, the newest frame's scene (c[i]), the frame as shown → o
 static void ls_hud_write(lsfg *g) {
     for (int i = 0; i < 2; i++) for (int k = 0; k < LS_MAXGEN; k++) {
-        VkDescriptorImageInfo ii[4] = { { g->samp[LS_S_EDGE], g->m[k].view, VK_IMAGE_LAYOUT_GENERAL }, { g->samp[LS_S_EDGE], g->c[i].view, VK_IMAGE_LAYOUT_GENERAL },
+        VkDescriptorImageInfo ii[4] = { { g->samp[LS_S_EDGE], g->m[k].view, VK_IMAGE_LAYOUT_GENERAL }, { g->samp[LS_S_EDGE], g->sfull.img ? g->sfull.view : g->c[i].view, VK_IMAGE_LAYOUT_GENERAL },
                                         { g->samp[LS_S_EDGE], g->hud.view, VK_IMAGE_LAYOUT_GENERAL }, { VK_NULL_HANDLE, g->o.view, VK_IMAGE_LAYOUT_GENERAL } };
         VkWriteDescriptorSet w[4];
         for (uint32_t j = 0; j < 4; j++) w[j] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g->hds[i][k], .dstBinding = j, .descriptorCount = 1,
@@ -281,11 +282,14 @@ static void ls_hud_write(lsfg *g) {
         vkUpdateDescriptorSets(g->dev, 4, w, 0, NULL); }
 }
 // Ready for frames of this format and size, the motion search at `flow` of the frame's size (0.25..1): 1, or 0 with g->why (g->failed: it cannot run at all, stop asking).
-// A new size, format or flow scale destroys the images: the device must be idle
-static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, uint32_t w, uint32_t h, float flow) {
+// A new size, format or flow scale destroys the images: the device must be idle.
+// ls_setup_work: the chain at w x h, smaller than the frame's ow x oh (the 3D render size: the caller fills c[p] with the frame scaled down, and sfull with the scene at
+//   the frame's size when HUD-free); ls_hud brings each picture back to the frame's size. Cost goes with the pixels the chain works on
+static int ls_setup_work(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, uint32_t w, uint32_t h, float flow, uint32_t ow, uint32_t oh) {
     if (g->failed) return 0;
     flow = flow < 0.25f ? 0.25f : flow > 1 ? 1 : flow;
-    if (g->w == w && g->h == h && g->fmt == fmt && g->flow == flow) return 1;
+    if (ow < w || oh < h) { ow = w; oh = h; }
+    if (g->w == w && g->h == h && g->fmt == fmt && g->flow == flow && g->ow == ow && g->oh == oh) return 1;
     g->dev = dev; g->pd = pd;
     if (!g->base) {
         const char *lack = ls_device_lacks(pd, 0); if (lack) { static char why[96]; snprintf(why, sizeof why, "the graphics driver lacks %s", lack); return ls_fail(g, why); }
@@ -314,7 +318,7 @@ static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
         for (int k = 0; k < 3; k++) MK(&g->de[i].t1[k], C8, e->w, e->h);
         for (int k = 0; k < 2; k++) MK(&g->de[i].t2[k], C8, e->w, e->h);
         MK(&g->de[i].out1, F16, e->w, e->h); MK(&g->de[i].out2, F16, e->w, e->h); }
-    if (ok && g->hbase) ok = ls_img_make(g, &g->hud, u, w, h, fmt) && ls_img_make(g, &g->o, u, w, h, fmt);
+    if (ok && g->hbase) ok = ls_img_make(g, &g->hud, u, ow, oh, fmt) && ls_img_make(g, &g->o, u, ow, oh, fmt) && (ow == w && oh == h ? 1 : ls_img_make(g, &g->sfull, u, ow, oh, fmt));
 #undef MK
     if (!ok) { ls_images_free(g); return ls_fail(g, "no memory for its images"); }
     for (int b = 0; b < LS_BLOCKS; b++) {   // block b > 0: generation slot b - 1 (count 1: slot 0; count 2: slots 1, 2; count 3: slots 3..5)
@@ -357,9 +361,10 @@ static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
         ls_write(g, g->de[i].ds2[1], 295, 0, LS_S_ZERO, LSV(&t1[0]), LSV(&t2[0]));
         ls_write(g, g->de[i].ds2[2], 296, 0, LS_S_ZERO, LSV(&t2[0]), LSV(&t1[0]));
         ls_write(g, g->de[i].ds2[3], 297, ub, LS_S_ZERO, LSV(&t1[0], p2), LSV(&g->de[i].out2)); }
-    g->w = w; g->h = h; g->fw = fw; g->fh = fh; g->fmt = fmt; g->ufmt = u; g->flow = flow; g->fresh = 1; g->n = 0;
+    g->w = w; g->h = h; g->fw = fw; g->fh = fh; g->fmt = fmt; g->ufmt = u; g->flow = flow; g->fresh = 1; g->n = 0; g->ow = ow; g->oh = oh;
     return 1;
 }
+static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, uint32_t w, uint32_t h, float flow) { return ls_setup_work(g, dev, pd, fmt, w, h, flow, w, h); }
 // First use of new images: UNDEFINED → GENERAL and cleared (the history starts black), once
 static void ls_begin(lsfg *g, VkCommandBuffer cb) {
     if (!g->fresh) return;
@@ -424,7 +429,7 @@ static void ls_hud(lsfg *g, VkCommandBuffer cb, int gen) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g->hpipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g->hpl, 0, 1, &g->hds[g->p][gen], 0, NULL);
-    vkCmdDispatch(cb, (g->w + 7) / 8, (g->h + 7) / 8, 1);
+    vkCmdDispatch(cb, (g->ow + 7) / 8, (g->oh + 7) / 8, 1);
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }

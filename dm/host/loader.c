@@ -712,6 +712,9 @@ void dm_arc_scale_set(float c) {
     uint32_t b; memcpy(&b, &c, 4); __atomic_store_n(g_arc_scale_lit, b, __ATOMIC_RELEASE);
     LOG("Legends: Arceus 3D render scale %.2f, set while playing", (double)c);
 }
+// The scale the 3D is drawn at, as far as the host sets it (the slider times the guard's step; the game's own resolution levels come on top): frame generation's
+//   work size follows it (nvn_vk.c fg_work_scale)
+float dm_scene_scale(void) { if (!g_arc_scale_lit) return 1.0f; uint32_t b = __atomic_load_n(g_arc_scale_lit, __ATOMIC_ACQUIRE); float f; memcpy(&f, &b, 4); return f >= 0.3f && f <= 1.0f ? f : 1.0f; }
 static int arc_scale(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     static const struct { uint64_t off; uint32_t orig, call; } S[8] = {
         { 0x29b24b0, 0xf9401be0u, 0x943c5874u }, { 0x29b2504, 0xf9401be0u, 0x943c5862u }, { 0x29fb2d0, 0xf94033e0u, 0x943b34f2u }, { 0x29fb324, 0xf94033e0u, 0x943b34e0u },
