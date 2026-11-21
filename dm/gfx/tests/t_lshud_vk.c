@@ -17,8 +17,8 @@ int main(void) {
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app }; VkInstance inst;
     if (vkCreateInstance(&ici, NULL, &inst)) { printf("SKIP: no Vulkan instance\n"); return 0; }
     uint32_t n = 1; VkPhysicalDevice pd; vkEnumeratePhysicalDevices(inst, &n, &pd); if (!n) { printf("SKIP: no Vulkan device\n"); return 0; }
-    VkPhysicalDeviceFeatures f; vkGetPhysicalDeviceFeatures(pd, &f); if (!f.shaderStorageImageWriteWithoutFormat) { printf("SKIP: no storage writes without a format\n"); return 0; }
-    VkPhysicalDeviceFeatures en = { .shaderStorageImageWriteWithoutFormat = VK_TRUE };
+    VkPhysicalDeviceFeatures f; vkGetPhysicalDeviceFeatures(pd, &f);   // (the RGBA8 frames here take the module that names its format: no feature needed)
+    VkPhysicalDeviceFeatures en = { .shaderStorageImageWriteWithoutFormat = f.shaderStorageImageWriteWithoutFormat };
     uint32_t nq = 8; VkQueueFamilyProperties qp[8]; vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qp); uint32_t qf = 0; while (qf < nq && !(qp[qf].queueFlags & VK_QUEUE_COMPUTE_BIT)) qf++;
     float prio = 1; VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qf, .queueCount = 1, .pQueuePriorities = &prio };
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .pEnabledFeatures = &en }; VkDevice dev;
@@ -43,6 +43,7 @@ int main(void) {
         VkFormat fmt = fmts[fi], u = ls_unorm(fmt); int ok = 1;
         for (int k = 0; k < LS_MAXGEN; k++) ok = ok && ls_img_make(&G, &G.m[k], u, W, H, fmt);
         ok = ok && ls_img_make(&G, &G.c[0], u, W, H, fmt) && ls_img_make(&G, &G.c[1], u, W, H, fmt) && ls_img_make(&G, &G.hud, u, W, H, fmt) && ls_img_make(&G, &G.o, u, W, H, fmt);
+        G.hpipe = ls_hud_pipe(&G, u); CHECK(G.hpipe, "no HUD pipeline for an RGBA8 frame"); if (!G.hpipe) break;
         CHECK(ok, "images"); if (!ok) break;
         G.w = W; G.h = H; G.fresh = 1; ls_hud_write(&G); CHECK(ls_hud_ok(&G), "ls_hud_ok");
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) for (int c = 0; c < 4; c++) { int i = (y * W + x) * 4 + c;

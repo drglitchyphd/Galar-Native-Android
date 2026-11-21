@@ -61,7 +61,7 @@ typedef struct {
     struct { ls_img t1[3], t2[2], out1, out2; VkDescriptorSet first[3], ds[4], sixth[3], ds2[4]; } de[3];
     VkDescriptorSet ds_mip[2], ds_gen[2][LS_MAXGEN];
     // HUD-free (ls_hud, our own pass): hud the frame as shown, o the picture with its HUD back; hbase: the pipeline is there (else no HUD-free, nothing else lost)
-    ls_img hud, o; VkDescriptorSetLayout hdsl; VkPipelineLayout hpl; VkPipeline hpipe; VkDescriptorPool hdp; VkDescriptorSet hds[2][LS_MAXGEN]; int hbase;
+    ls_img hud, o; VkDescriptorSetLayout hdsl; VkPipelineLayout hpl; VkPipeline hpipe, hvar[4]; VkDescriptorPool hdp; VkDescriptorSet hds[2][LS_MAXGEN]; int hbase;   // hpipe: hvar[] for this frame format (ls_hud_pipe), or none
 } lsfg;
 static int ls_fail(lsfg *g, const char *why) { g->failed = 1; g->why = why; return 0; }
 
@@ -211,12 +211,7 @@ static int ls_hud_base(lsfg *g) {
     if (vkCreateDescriptorSetLayout(dev, &dli, NULL, &g->hdsl)) return 0;
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g->hdsl };
     if (vkCreatePipelineLayout(dev, &pli, NULL, &g->hpl)) return 0;
-    VkShaderModuleCreateInfo mi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof ls_hud_comp_spv, .pCode = ls_hud_comp_spv }; VkShaderModule mod;
-    if (vkCreateShaderModule(dev, &mi, NULL, &mod)) return 0;
-    VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = g->hpl,
-        .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = mod, .pName = "main" } };
-    VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &g->hpipe); vkDestroyShaderModule(dev, mod, NULL);
-    if (r) { g->hpipe = VK_NULL_HANDLE; return 0; }
+    // (the pipeline itself once the frame's format is known: ls_hud_pipe)
     VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * LS_MAXGEN * 3 }, { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * LS_MAXGEN } };
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2 * LS_MAXGEN, .poolSizeCount = 2, .pPoolSizes = ps };
     if (vkCreateDescriptorPool(dev, &dpi, NULL, &g->hdp)) return 0;
@@ -224,6 +219,25 @@ static int ls_hud_base(lsfg *g) {
         VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g->hdp, .descriptorSetCount = 1, .pSetLayouts = &g->hdsl };
         if (vkAllocateDescriptorSets(dev, &ai, &g->hds[i][k])) return 0; }
     return 1;
+}
+// The HUD pass's pipeline for output view format u (the frame's, as UNORM): the module that names u's format where GLSL has a name for it; else the one without a format,
+//   only where u has STORAGE_WRITE_WITHOUT_FORMAT (the device feature alone is not enough: Mali / Xclipse / PowerVR leave it off RGBA8). VK_NULL_HANDLE: HUD-free off at this format
+static VkPipeline ls_hud_pipe(lsfg *g, VkFormat u) {
+    int v = u == VK_FORMAT_R8G8B8A8_UNORM ? 1 : u == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ? 2 : u == VK_FORMAT_R16G16B16A16_SFLOAT ? 3 : 0;
+    if (getenv("DM_LS_HUD_NOFMT")) v = 0;   // (test switch: the module without a format wherever the format allows it)
+    if (!v) { VkFormatProperties3 f3 = { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 }; VkFormatProperties2 f2 = { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &f3 };
+              vkGetPhysicalDeviceFormatProperties2(g->pd, u, &f2);   // (Vulkan 1.3, which Lossless Scaling needs: ls_device_lacks)
+              if (!(f3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) return VK_NULL_HANDLE; }
+    if (g->hvar[v]) return g->hvar[v];
+    static const uint32_t *const code[4] = { ls_hud_comp_spv, ls_hud_rgba8_comp_spv, ls_hud_rgb10_a2_comp_spv, ls_hud_rgba16f_comp_spv };
+    static const size_t size[4] = { sizeof ls_hud_comp_spv, sizeof ls_hud_rgba8_comp_spv, sizeof ls_hud_rgb10_a2_comp_spv, sizeof ls_hud_rgba16f_comp_spv };
+    VkShaderModuleCreateInfo mi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size[v], .pCode = code[v] }; VkShaderModule mod;
+    if (vkCreateShaderModule(g->dev, &mi, NULL, &mod)) return VK_NULL_HANDLE;
+    VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = g->hpl,
+        .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = mod, .pName = "main" } };
+    VkResult r = vkCreateComputePipelines(g->dev, VK_NULL_HANDLE, 1, &ci, NULL, &g->hvar[v]); vkDestroyShaderModule(g->dev, mod, NULL);
+    if (r) g->hvar[v] = VK_NULL_HANDLE;
+    return g->hvar[v];
 }
 // Samplers, one pipeline per shader, every descriptor set, the constants' buffer: once
 static int ls_base(lsfg *g) {
@@ -314,7 +328,8 @@ static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
         for (int k = 0; k < 3; k++) MK(&g->de[i].t1[k], C8, e->w, e->h);
         for (int k = 0; k < 2; k++) MK(&g->de[i].t2[k], C8, e->w, e->h);
         MK(&g->de[i].out1, F16, e->w, e->h); MK(&g->de[i].out2, F16, e->w, e->h); }
-    if (ok && g->hbase) ok = ls_img_make(g, &g->hud, u, w, h, fmt) && ls_img_make(g, &g->o, u, w, h, fmt);
+    g->hpipe = g->hbase ? ls_hud_pipe(g, u) : VK_NULL_HANDLE;   // (none: HUD-free off at this format, the rest as before)
+    if (ok && g->hpipe) ok = ls_img_make(g, &g->hud, u, w, h, fmt) && ls_img_make(g, &g->o, u, w, h, fmt);
 #undef MK
     if (!ok) { ls_images_free(g); return ls_fail(g, "no memory for its images"); }
     for (int b = 0; b < LS_BLOCKS; b++) {   // block b > 0: generation slot b - 1 (count 1: slot 0; count 2: slots 1, 2; count 3: slots 3..5)
@@ -325,7 +340,7 @@ static int ls_setup(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
         ls_write(g, g->ds_mip[i], 255, 0, LS_S_ZERO, LSV(&g->c[i]), LSV(&g->mip[0], &g->mip[1], &g->mip[2], &g->mip[3], &g->mip[4], &g->mip[5], &g->mip[6]));
         for (int k = 0; k < LS_MAXGEN; k++) ls_write(g, g->ds_gen[i][k], 256, 0, LS_S_ZERO, LSV(&g->c[1 - i], &g->c[i], &g->ga[6].out, &g->de[2].out1, &g->de[2].out2), LSV(&g->m[k]));
  }
-    if (g->hbase) ls_hud_write(g);
+    if (g->hpipe) ls_hud_write(g);
     for (int l = 0; l < LS_MIPS; l++) {
         ls_write(g, g->al[l].ds[0], 290, 0, LS_S_ZERO, LSV(&g->mip[l]), LSV(&g->al[l].t1));
         ls_write(g, g->al[l].ds[1], 291, 0, LS_S_ZERO, LSV(&g->al[l].t1), LSV(&g->al[l].t2));
@@ -418,7 +433,7 @@ static void ls_generate(lsfg *g, VkCommandBuffer cb, int count, int gen) {
 }
 // HUD-free: picture gen (ls_generate done) with the HUD of the frame as shown (the caller's copy into hud) put back where the shown frame differs from its scene → o,
 //   readable by a fragment shader or a copy like m. o is shared by the pictures: the caller draws each from it before the next ls_hud (this pass waits for that)
-static int ls_hud_ok(const lsfg *g) { return g->hbase && g->hud.img && g->o.img; }
+static int ls_hud_ok(const lsfg *g) { return g->hbase && g->hpipe && g->hud.img && g->o.img; }
 static void ls_hud(lsfg *g, VkCommandBuffer cb, int gen) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);

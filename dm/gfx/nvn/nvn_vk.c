@@ -72,6 +72,7 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperties g_memp;
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
+static int g_mclamp;   // MIRROR_CLAMP_TO_EDGE samplers allowed (VK_KHR_sampler_mirror_clamp_to_edge, or Vulkan 1.2's samplerMirrorClampToEdge); else wrapm falls back
 // Passes as dynamic rendering (1) or as Vulkan 1.0 render passes (0: rend_begin); draw state set per draw (1, extended dynamic state) or built into each pipeline (0: sst).
 //   0 where the driver lacks them (Arm's r3x drivers for Mali-G57 / G68 / G77 / G78, Vulkan 1.1: A25 5G); DM_VK_NO_DYNREN=1 / DM_VK_NO_EDS=1 force 0 on any driver
 static int g_dynren = 1, g_eds = 1;
@@ -367,6 +368,9 @@ void mtl_init(void) {
     if (g_has_swapchain && (g_dtiming = has_ext(de, nde, "VK_GOOGLE_display_timing"))) dext[ndext++] = "VK_GOOGLE_display_timing";   // frame pacing (pace_time)
     if ((g_clipctl = !as_mali && has_ext(de, nde, "VK_EXT_depth_clip_control"))) dext[ndext++] = "VK_EXT_depth_clip_control";
     if ((g_border = has_ext(de, nde, "VK_EXT_custom_border_color"))) dext[ndext++] = "VK_EXT_custom_border_color";
+    // NVN's mirror-clamp wrap modes (MIRROR_CLAMP / _TO_EDGE) are Vulkan's MIRROR_CLAMP_TO_EDGE, which is not core 1.0: Mali-G72 r26p0, Mali-G52, PowerVR BXM and
+    //   Vulkan 1.0 drivers lack it (simdev). The extension where listed; 1.2's feature below; without either, mirrored repeat (wrapm)
+    if ((g_mclamp = has_ext(de, nde, "VK_KHR_sampler_mirror_clamp_to_edge"))) dext[ndext++] = "VK_KHR_sampler_mirror_clamp_to_edge";
     if ((g_divisor = !as_mali && has_ext(de, nde, "VK_EXT_vertex_attribute_divisor"))) dext[ndext++] = "VK_EXT_vertex_attribute_divisor";
     if ((g_eds2 = has_ext(de, nde, "VK_EXT_extended_dynamic_state2"))) dext[ndext++] = "VK_EXT_extended_dynamic_state2";
     int compctl = has_ext(de, nde, "VK_EXT_image_compression_control"); if (compctl) dext[ndext++] = "VK_EXT_image_compression_control";
@@ -655,6 +659,7 @@ void mtl_init(void) {
       const VkPhysicalDeviceFeatures *F = &f2.features;
       g_drawp = g_api < VK_API_VERSION_1_1 ? g_drawp : old11 ? fsdp.shaderDrawParameters != 0 : f11.shaderDrawParameters != 0;
       g_minmax = g_api >= VK_API_VERSION_1_2 && !old11 ? f12.samplerFilterMinmax != 0 : g_minmax;
+      if (g_api >= VK_API_VERSION_1_2 && !old11 && f12.samplerMirrorClampToEdge) g_mclamp = 1;   // (the feature is enabled with the device: f2 is passed as queried)
       g_f_clamp = F->depthClamp; g_f_logic = F->logicOp; g_f_nonsolid = F->fillModeNonSolid; g_f_indblend = F->independentBlend; g_f_biasclamp = F->depthBiasClamp; g_f_aniso = F->samplerAnisotropy;
       g_feat_have = (F->geometryShader ? SPV_NEED_GEOM : 0) | (F->tessellationShader ? SPV_NEED_TESS : 0) | (F->shaderFloat64 ? SPV_NEED_F64 : 0) | (F->shaderInt64 ? SPV_NEED_I64 : 0)
                   | (F->shaderInt16 ? SPV_NEED_I16 : 0) | (F->shaderTessellationAndGeometryPointSize ? SPV_NEED_TGPSIZE : 0) | (F->shaderImageGatherExtended ? SPV_NEED_GATHEREXT : 0)
@@ -663,6 +668,8 @@ void mtl_init(void) {
                   | (F->shaderResourceMinLod ? SPV_NEED_MINLOD : 0) | (F->shaderStorageImageExtendedFormats ? SPV_NEED_EXTFMT : 0)
                   | (F->shaderStorageImageReadWithoutFormat ? SPV_NEED_IMGRNF : 0) | (F->shaderStorageImageWriteWithoutFormat ? SPV_NEED_IMGWNF : 0) | (F->multiViewport ? SPV_NEED_MVP : 0)
                   | (F->fragmentStoresAndAtomics ? SPV_NEED_FRAGSTORE : 0);
+      if (minf || (getenv("DM_VK_NO_MCLAMP") && atoi(getenv("DM_VK_NO_MCLAMP")))) g_mclamp = 0;   // (test switch: the mirrored-repeat fallback on any GPU)
+      if (!g_mclamp) VLOG("samplers: no mirror-clamp-to-edge on this driver: the game's mirror-clamp wrap modes become mirrored repeat (the same inside one mirror)");
       if (minf) { g_drawp = g_minmax = g_f_clamp = g_f_logic = g_f_nonsolid = g_f_indblend = g_f_biasclamp = g_f_aniso = 0; }
       if (getenv("DM_VK_NO_DRAWP")) g_drawp = !atoi(getenv("DM_VK_NO_DRAWP"));   // 1: the push-constant route on any GPU; 0: draw parameters passed as before
       if (!g_drawp) VLOG("draw parameters: the device has none%s: shaders that read them get them from push constants", getenv("DM_VK_NO_DRAWP") ? " (DM_VK_NO_DRAWP)" : "");
@@ -2597,7 +2604,7 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     pthread_mutex_unlock(&g_rmu);
 }
 static VkSamplerAddressMode wrapm(int w) {
-    switch (w) { case 0: case 7: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT; case 2: case 3: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+    switch (w) { case 0: case 7: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT; case 2: case 3: return g_mclamp ? VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;   // (fallback: identical for coordinates in [-1, 1])
                  case 4: case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; case 6: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; }
     return VK_SAMPLER_ADDRESS_MODE_REPEAT;
 }
