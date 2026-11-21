@@ -91,7 +91,7 @@ Every Android GPU / driver combination gpuinfo has a report for, fetched into a 
 
 t_vkdev has no hand-written row for these: `profile_env.py` computes the expectations from the profile by the same rules
 (`SIMDEV_EXPECT`), and for the hand-picked profiles t_vkdev checks that both agree. Each run gets a folder with a link to its one
-profile, so the layer does not read the whole cache. `JOBS=8` ran 59 profiles x 3 tests in 48 s on a 22-thread PC (~20 min for 1,500).
+profile, so the layer does not read the whole cache. `JOBS=8` does about one run a second on a 22-thread PC (16 profiles x 3 tests in 48 s): ~75 min for 1,500 profiles.
 Over 60 profiles, the summary lists only the runs that are not clean, then counts per test and result and the VUIDs hit.
 
 ## t_vkdev
