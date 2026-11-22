@@ -3,7 +3,8 @@
 // workarounds on top of it, each one found on real phones (the issue numbers are in the comments at each site in nvn_vk.c).
 //   quirk_default(q, g): the default for this GPU, a pure function. dm/gfx/tests/t_quirks.c checks it, for each of the three apps, against the per-site rules it
 //   replaced as beta-exit 6e0e1dd had them (the reviewed behaviour; docs/ENGINE_UNIFY.md), Q_ASYNC_PSO as beta-exit has it since f09e58f (background pipelines
-//   on every GPU; the head merged here: 3d21471), and pins it for the GPUs players reported. env.txt still wins at each
+//   on every GPU; the head merged here: 3d21471), Q_B10_STANDIN / Q_MALI_WHITE_CHECK as mali-all e6f6d0c decided them (mali_white.h mw_default_route / mw_enabled:
+//   Sword / Shield's white-screen fix on Arm's own driver), and pins it for the GPUs players reported. env.txt still wins at each
 //   site, as before (the DM_VK_* name in Q_INFO). quirk_note(): what was decided and why, printed together at start ("[quirk]" lines; DebugBundle copies them) so a
 //   log says at once which workarounds a phone runs with.
 // One table for every game (Galar Native: Sword / Shield, Arceus Native, Paldea Native: Scarlet / Violet; docs/ENGINE_UNIFY.md): no rule tests which game it is.
@@ -20,11 +21,14 @@
 //     properties, the driver's name in the log;
 //   - what is decided before any driver is open: android_main.c device_profile (Graphics level, filtering, texture size by chip model and memory: a performance
 //     tier, not a driver workaround), panvk_defaults and the driver check's copy of it (probe/jni/dprobe_jni.c: PanVK's own chip table, for that driver package),
-//     the safe-start ladder (safe_start.h: this phone's own failed starts, any GPU), the heat guard's kgsl clock limit (a sysfs file Adreno phones have);
+//     the safe-start ladder (safe_start.h: this phone's own failed starts, any GPU), the heat guard's kgsl clock limit (a sysfs file Adreno phones have), and
+//     mali_env_migrate (env.txt's float-target "1"s an older Mali tests menu left, taken out on phones whose gpu.txt says Mali: a file only that menu wrote);
 //   - the driver check's self-tests (probe/jni/selftest.c) run on every GPU; what the engine asks of a driver by default comes from this table there too
 //     (Q_FLOAT_CONTROLS: whether float-controls asks for them; Q_CLEAR_BY_PASS: how 3d-layered records its clear inside the layered pass, as clear_in_pass does);
-//   - the Java app: which test sections the menu shows (DriverPackages.gpu: Mali tests, Adreno tests), which driver packages fit the GPU (Turnip on Adreno only),
-//     and texts that describe these rules;
+//   - the Java app: which test sections the menu shows (DriverPackages.gpu: Mali tests, Adreno tests), which driver packages fit the GPU (Turnip on Adreno only,
+//     the white-screen ladder's PanVK offer: MaliLadder.java), and texts that describe these rules;
+//   - the white-screen ladder's own state (mali_white_vk.inc: mali_ladder.txt is kept per driver ID and driver version, so another driver starts it over): whether
+//     the ladder and its route run by default is this table's (Q_MALI_WHITE_CHECK, Q_B10_STANDIN);
 //   - test switches that make a GPU act as another (DM_VK_AS_MALI) or pick a device by name (DM_VK_DEVICE), log and capture texts;
 //   - the frame hold's default (nvn_vk.c hold_on) follows the replay thread's decision (Q_NVN_ASYNC, or the player's setting), not a GPU test of its own;
 //   - what follows from how an image was made rather than from a GPU test: tex_view_for's view of another numeric class for an integer texture is made only
@@ -50,9 +54,10 @@ enum { VEN_QCOM = 0x5143, VEN_ARM = 0x13B5, VEN_SAMSUNG = 0x144D, VEN_IMG = 0x10
 //   tables_from). Only the log names it: no rule tests it
 enum { PORT_GALAR = 0, PORT_ARCEUS = 1, PORT_PALDEA = 2 };
 // The game's own per-GPU choices: the profile's engine_quirks that decide a GPU default (game.tsv → game_profile.h DM_GAME_ENG_*; nvn_vk.c mtl_init maps each one by
-//   name to its bit, so the order of game.py's list cannot move a bit). Today Legends: Arceus sets all four and the other games none:
-//   qc11_no_eds → Q_NO_EDS, async_pso_off → Q_ASYNC_PSO, driver_selftests → Q_DRIVER_SELFTESTS, nvn_async_never → Q_NVN_ASYNC
-enum { ENG_QC11_NO_EDS = 1u << 0, ENG_ASYNC_PSO_OFF = 1u << 1, ENG_DRIVER_SELFTESTS = 1u << 2, ENG_NVN_ASYNC_NEVER = 1u << 3 };
+//   name to its bit, so the order of game.py's list cannot move a bit). Today Legends: Arceus sets the first four, Sword / Shield the fifth, Scarlet / Violet none:
+//   qc11_no_eds → Q_NO_EDS, async_pso_off → Q_ASYNC_PSO, driver_selftests → Q_DRIVER_SELFTESTS, nvn_async_never → Q_NVN_ASYNC,
+//   mali_lit_standin → Q_B10_STANDIN and Q_MALI_WHITE_CHECK
+enum { ENG_QC11_NO_EDS = 1u << 0, ENG_ASYNC_PSO_OFF = 1u << 1, ENG_DRIVER_SELFTESTS = 1u << 2, ENG_NVN_ASYNC_NEVER = 1u << 3, ENG_MALI_LIT_STANDIN = 1u << 4 };
 typedef struct {
     int port;               // PORT_* (nvn_vk.c: from the game profile, DM_PORT_*)
     unsigned eng;           // ENG_* (nvn_vk.c: from the game profile, DM_GAME_ENG_*)
@@ -103,6 +108,9 @@ enum {
     Q_TF_SELFTEST,       // within those: the transform feedback self-test runs on Arm's own driver
     Q_NVN_ASYNC,         // the replay on its own thread (Faster rendering's Auto, hle_nvn.c): Adreno by name (Turnip too), unless the game's profile says
                          //   nvn_async_never (Arceus #3: crashed at loading screens with it)
+    // Mali's white lit scene (#47 #110 #111 #172), a game whose profile says mali_lit_standin (Sword / Shield) on Arm's own driver (mali-all e6f6d0c)
+    Q_B10_STANDIN,       // route A: the lit R11G11B10F target drawn and sampled as an RGBA16F stand-in, converted exactly where it meets the game's memory (b10_on)
+    Q_MALI_WHITE_CHECK,  // the white-screen check while playing and its ladder (mali_white_vk.inc: route A, then B, then the PanVK offer, start by start)
     Q_N
 };
 // (env: the switches that decide the rule at its site, named in its [quirk] line when one of them is set)
@@ -137,6 +145,8 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] VKQ_UNUSED = {
     [Q_DRIVER_SELFTESTS] = { "", "driver self-tests at start" },
     [Q_TF_SELFTEST] = { "DM_VK_TF_SELFTEST", "transform feedback self-test" },
     [Q_NVN_ASYNC] = { "DM_NVN_ASYNC", "the replay on its own thread" },
+    [Q_B10_STANDIN] = { "DM_VK_B10_AS_RGBA16, DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the lit R11G11B10F target drawn as RGBA16F" },
+    [Q_MALI_WHITE_CHECK] = { "DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the white-screen check and its ladder" },
 };
 // Arm's own driver: by driver ID where the driver gives one, else by vendor (PanVK reports Arm's vendor ID with its own driver ID)
 VKQ_UNUSED static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }
@@ -162,6 +172,11 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     case Q_ASYNC_PSO: return !(g->eng & ENG_ASYNC_PSO_OFF);
     case Q_NO_EDS: return (g->eng & ENG_QC11_NO_EDS) && g->vendor == VEN_QCOM && (g->api >> 22 & 0x7f) == 1 && (g->api >> 12 & 0x3ff) < 2;   // (VK_API_VERSION_MAJOR / MINOR)
     case Q_DRIVER_SELFTESTS: return (g->eng & ENG_DRIVER_SELFTESTS) != 0;
+    // Mali's white lit scene on Arm's own driver (#47 #110 #111 #172), for a game whose profile says mali_lit_standin (Sword / Shield): route A (the lit target as
+    //   an RGBA16F stand-in) and the white-screen check that moves on to route B and the PanVK offer when it stays white. Arm's own driver only (by its release:
+    //   not PanVK, which reports Arm's vendor ID and draws the scene right); other games draw their own G-buffer and bloom in R11G11B10F (Legends: Arceus) and
+    //   were never white this way
+    case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: return (g->eng & ENG_MALI_LIT_STANDIN) && g->arm_rel != 0;
     // PowerVR, every game: BC textures converted on the CPU, not by the BC layer, and decoded, not transcoded (Tensor G5, Arceus #32: objects purple, meshes lavender)
     case Q_BC_GPU_OFF: case Q_BC_DECODE: case Q_PCACHE_GAPS_OFF: return g->vendor == VEN_IMG;
     case Q_GPU_TIME_OFF: return g->vendor == VEN_ARM || g->vendor == VEN_IMG;
@@ -184,7 +199,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
 VKQ_UNUSED static int quirk_late(int q) {
     switch (q) {
     case Q_FLOAT_CONTROLS: case Q_CLAMP_ZERO: case Q_NAN_MINMAX: case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST:
-    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: return 1;
+    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: return 1;
     }
     return 0;
 }
@@ -208,7 +223,7 @@ static int g_qval[Q_N] VKQ_UNUSED, g_qenv[Q_N] VKQ_UNUSED, g_qset[Q_N] VKQ_UNUSE
 VKQ_UNUSED static int quirk_note(int q, int value, int from_env) {
     if (q >= 0 && q < Q_N && !__atomic_exchange_n(&g_qset[q], 1, __ATOMIC_ACQ_REL)) { g_qval[q] = value; g_qenv[q] = from_env;
         // (the rules that read the game's profile, gpu_id.eng: their default is this GPU's in this game)
-        int prof = q == Q_NO_EDS || q == Q_ASYNC_PSO || q == Q_DRIVER_SELFTESTS || q == Q_NVN_ASYNC;
+        int prof = q == Q_NO_EDS || q == Q_ASYNC_PSO || q == Q_DRIVER_SELFTESTS || q == Q_NVN_ASYNC || q == Q_B10_STANDIN || q == Q_MALI_WHITE_CHECK;
         if (value || from_env) fprintf(stderr, "[dm] [quirk] %s: %d (%s%s)\n", Q_INFO[q].what, value,
                                        from_env == 2 ? "driver check " : from_env ? "env.txt " : prof ? "default for this GPU in this game's profile" : "default for this GPU", from_env ? Q_INFO[q].env : ""); }
     return value;

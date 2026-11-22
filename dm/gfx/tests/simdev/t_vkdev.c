@@ -412,11 +412,17 @@ static void quirk_checks(void) {
     //   (background pipelines as beta-exit's since f09e58f: every GPU unless async_pso_off)
     CHECK(g->port == (DM_PORT_ARCEUS ? PORT_ARCEUS : DM_PORT_PALDEA ? PORT_PALDEA : PORT_GALAR), "gpu_id: port %d, the profile's %s", g->port, DM_PORT_ARCEUS ? "arceus" : DM_PORT_PALDEA ? "paldea" : "galar");
     CHECK(!!(g->eng & ENG_QC11_NO_EDS) == !!DM_GAME_ENG_QC11_NO_EDS && !!(g->eng & ENG_ASYNC_PSO_OFF) == !!DM_GAME_ENG_ASYNC_PSO_OFF
-          && !!(g->eng & ENG_DRIVER_SELFTESTS) == !!DM_GAME_ENG_DRIVER_SELFTESTS && !!(g->eng & ENG_NVN_ASYNC_NEVER) == !!DM_GAME_ENG_NVN_ASYNC_NEVER, "gpu_id: engine_quirks bits %#x, not the profile's", g->eng);
+          && !!(g->eng & ENG_DRIVER_SELFTESTS) == !!DM_GAME_ENG_DRIVER_SELFTESTS && !!(g->eng & ENG_NVN_ASYNC_NEVER) == !!DM_GAME_ENG_NVN_ASYNC_NEVER
+          && !!(g->eng & ENG_MALI_LIT_STANDIN) == !!DM_GAME_ENG_MALI_LIT_STANDIN, "gpu_id: engine_quirks bits %#x, not the profile's", g->eng);
     CHECK(quirk_default(Q_NO_DYNREN, g) == qc && quirk_default(Q_ASYNC_PSO, g) == !DM_GAME_ENG_ASYNC_PSO_OFF && quirk_default(Q_NO_EDS, g) == (qc11 && DM_GAME_ENG_QC11_NO_EDS),
           "rules for this game: render passes and draw state on Adreno, background pipelines on every GPU (beta-exit f09e58f)");
     CHECK(quirk_default(Q_NVN_ASYNC, g) == (strstr(g->name, "Adreno") && !DM_GAME_ENG_NVN_ASYNC_NEVER) && quirk_default(Q_DRIVER_SELFTESTS, g) == !!DM_GAME_ENG_DRIVER_SELFTESTS,
           "the replay thread's Auto and the start-up self-tests for this game");
+    // Mali's white-screen fix as mali-all e6f6d0c decided it (mw_default_route / mw_enabled with arm_own = Arm's own driver, galar = DM_PORT_GALAR): route A and the
+    //   check on Arm's own driver with Sword / Shield, nowhere else (PanVK's driver ID included)
+    CHECK(quirk_default(Q_B10_STANDIN, g) == (g->arm_rel != 0 && DM_PORT_GALAR) && quirk_default(Q_MALI_WHITE_CHECK, g) == (g->arm_rel != 0 && DM_PORT_GALAR),
+          "the white-screen fix's defaults: stand-in %d, check %d (Arm's own driver %d, Sword / Shield %d)", quirk_default(Q_B10_STANDIN, g), quirk_default(Q_MALI_WHITE_CHECK, g),
+          g->arm_rel != 0, DM_PORT_GALAR);
     if (!getenv("DM_VK_BARRIER")) CHECK(g_qset[Q_BARRIER_RELAXED] && g_qval[Q_BARRIER_RELAXED] == quirk_default(Q_BARRIER_RELAXED, g), "barriers decided as the table says");
     // the table for code outside nvn_vk.c (hle_nvn.c rq_on): while the device was being made, after; every rule's decision at its site so far, where no setting decided
     CHECK(g_up_early == 1 && g_up_late == 1, "while the device was being made: the early rules answered as the table (%d), the late ones -1 (%d)", g_up_early, g_up_late);

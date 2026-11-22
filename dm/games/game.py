@@ -23,6 +23,7 @@ ENGINE_QUIRKS = {
     'nvn_async_never': 'hle_nvn.c: the replay never on its own thread (DM_NVN_ASYNC Auto would turn it on for Adreno)',
     'driver_selftests': 'nvn_vk.c: the start-up vertex-stride canary (vtx_canary.h) and transform feedback self-test (tf_selftest.h, Arm driver)',
     'framegen_game_rate': "nvn_vk.c: frame generation runs at the game's own 30 or 60 (floor = that rate - 2) instead of needing a locked 60",
+    'mali_lit_standin': "vk_quirks.h Q_B10_STANDIN / Q_MALI_WHITE_CHECK: on Arm's own Mali driver, the lit R11G11B10F target drawn as an RGBA16F stand-in and the white-screen check with its ladder (mali_white_vk.inc), Sword / Shield's white-screen fix",
 }
 
 

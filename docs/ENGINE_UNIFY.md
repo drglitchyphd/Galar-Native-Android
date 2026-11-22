@@ -10,6 +10,10 @@ Branch `beta-exit-quirks` (local only) is `beta-exit` 6e0e1dd with the driver pr
 for all three apps ("Per-GPU rules" below); every default is beta-exit's on every GPU, for every game (6e0e1dd's, and background pipelines as beta-exit has them
 since f09e58f), except the new rules listed under "Behaviour changes".
 
+Branch `beta-exit-qm` (local only) is the combined head: `beta-exit-quirks` ef46af1 with `beta-exit` bcf1d76 (setup: each distinct shader translated once)
+and `mali-all` e6f6d0c (the Mali white-screen fix for Sword / Shield on Arm's own driver) merged in. The fix's two per-GPU defaults moved into the same table
+(`Q_B10_STANDIN`, `Q_MALI_WHITE_CHECK`, read through Shield's `engine_quirks` word `mali_lit_standin`): "The combined head" below.
+
 | Game | Profile | `port` | Shader chain (expected = its own main) | Chain generation |
 | --- | --- | --- | --- | --- |
 | Pokémon Shield | `01008DB008C2C000` | galar | bc2f6b2e5f0d = bc2f6b2e5f0d | live (`dm/gfx/tools`) |
@@ -39,10 +43,10 @@ All new switches come from the profile; none is a copy of code per game.
 | --- | --- | --- | --- |
 | `port` | `DM_PORT_GALAR / _ARCEUS / _PALDEA` | Shield galar, Arceus arceus, Violet paldea (Sword / Scarlet through `tables_from`) | the parts of android_main.c that are per app (below); `gpu_id.port` names the app in the `[quirk]` log line (no table rule reads it) |
 | `docs_dir` | `DM_GAME_DOCS_DIR` | Galar Native / NXNative / Paldea Native | the shared save folder `Documents/<docs_dir>/<title id>/save` each app's releases already use (Galar hard-coded "Galar Native", Arceus "NXNative", Paldea took its app name). Players with their save in Documents keep it |
-| `engine_quirks` | `DM_GAME_ENG_<NAME>` 0 / 1 | Arceus: all seven below; others none | where the two engines' defaults disagreed, each game keeps what its releases did; the four that decide a GPU default reach vk_quirks.h as `gpu_id.eng` bits ("Per-GPU rules") |
+| `engine_quirks` | `DM_GAME_ENG_<NAME>` 0 / 1 | Arceus: the first seven below; Shield (Sword through `tables_from`): `mali_lit_standin`; Violet / Scarlet none | where the two engines' defaults disagreed, each game keeps what its releases did, and a game's own GPU fix; the five that decide a GPU default reach vk_quirks.h as `gpu_id.eng` bits ("Per-GPU rules") |
 | `xlate_chain` | (shader tools only) | Arceus, Violet: `pre-fmz` | reproduces each game's shader chain (below) |
 
-### `engine_quirks` (each one keeps Arceus Native's released behaviour; Sword / Shield / Scarlet / Violet take Galar's)
+### `engine_quirks` (each of the first seven keeps Arceus Native's released behaviour, Sword / Shield / Scarlet / Violet take Galar's; `mali_lit_standin` is Sword / Shield's own)
 
 | Quirk | Where | Arceus (on) | Galar (off) |
 | --- | --- | --- | --- |
@@ -53,6 +57,7 @@ All new switches come from the profile; none is a copy of code per game.
 | `framegen_game_rate` | no reader since fg-plan f9ae686 | runs at the game's 30 or 60, floor = rate − 2 | the same since f9ae686 (frame generation is locked off by default for Sword / Shield; Scarlet / Violet also need `DM_FG_PALDEA=1`) |
 | `nvn_async_never` | vk_quirks.h `Q_NVN_ASYNC` (through `gpu_id.eng`) for Auto; hle_nvn.c rq_on (`#if`) refuses the player's setting too | the replay never on its own thread (crashed at loading screens, Arceus #3) | Auto: on for Adreno. **Without this quirk the merge would have turned it back on for Arceus** (hle_nvn.c merged cleanly to Galar's Auto) |
 | `driver_selftests` | vk_quirks.h `Q_DRIVER_SELFTESTS` (through `gpu_id.eng`), nvn_vk.c mtl_init | vtx_canary + tf_selftest at start | not run (unchanged start-up for Galar) |
+| `mali_lit_standin` (Sword / Shield **on**; Arceus, Scarlet / Violet off) | vk_quirks.h `Q_B10_STANDIN`, `Q_MALI_WHITE_CHECK` (through `gpu_id.eng`), mali_white_vk.inc mw_init | off: Legends: Arceus draws its G-buffer and bloom in R11G11B10F (21-31 images a frame) and was never white this way | on Arm's own Mali driver: the lit R11G11B10F target drawn as an RGBA16F stand-in (route A) and the white-screen check with its ladder (route B, then the PanVK offer); mali-all e6f6d0c keyed it on `DM_PORT_GALAR` |
 
 ### `#if DM_PORT_ARCEUS` in android_main.c
 
@@ -85,12 +90,13 @@ game it runs, from its profile:
 - `gpu_id.port`: the profile's `port` (`DM_PORT_*`; Sword and Scarlet through `tables_from`). It only names the app in the `[quirk]` log line (Galar Native,
   Arceus Native, Paldea Native): no rule reads it.
 - `gpu_id.eng`: the profile's `engine_quirks` that decide a GPU default, one bit each, mapped by name: `qc11_no_eds` → `Q_NO_EDS`, `async_pso_off` →
-  `Q_ASYNC_PSO`, `driver_selftests` → `Q_DRIVER_SELFTESTS`, `nvn_async_never` → `Q_NVN_ASYNC`. A game's own choice lives in its `game.tsv`: Sword / Shield
-  would take Arceus's Qualcomm Vulkan 1.1 rule by adding `qc11_no_eds` to Shield's `engine_quirks`, nothing else.
+  `Q_ASYNC_PSO`, `driver_selftests` → `Q_DRIVER_SELFTESTS`, `nvn_async_never` → `Q_NVN_ASYNC`, `mali_lit_standin` → `Q_B10_STANDIN` and
+  `Q_MALI_WHITE_CHECK`. A game's own choice lives in its `game.tsv`: Sword / Shield would take Arceus's Qualcomm Vulkan 1.1 rule by adding `qc11_no_eds` to
+  Shield's `engine_quirks`, nothing else; Scarlet / Violet would take the Mali white-screen fix by adding `mali_lit_standin` to Violet's.
 
 `quirk_default(q, gpu_id)` is each site's default; the site still lets env.txt win with the same `DM_VK_*` switch as before, and `quirk_note` prints a
 `[quirk]` line for each workaround in effect at start (the debug report copies them to `quirks.txt`), saying where its value came from: "default for this
-GPU" (or "… in this game's profile" for the four rules that read `gpu_id.eng`), "env.txt" or "driver check". The first decision of a rule is kept, atomically
+GPU" (or "… in this game's profile" for the six rules that read `gpu_id.eng`), "env.txt" or "driver check". The first decision of a rule is kept, atomically
 (the game's thread and the replay's can decide one lazily). `hle_nvn.c` asks through `nvn_vk_quirk_default`, which answers -1 before the device exists (as
 6e0e1dd's `nvn_vk_gpu_name` test: `rq_on` takes that as Auto off) and, for the rules that read the driver ID or Arm's release (`quirk_late`), until `mtl_init`
 has read them just after the device is made; t_quirks.c checks that no other rule reads those.
@@ -108,9 +114,10 @@ engine records, it asks the table too, on the GPU as `mtl_init` describes it (se
 The other `engine_quirks` decide nothing per GPU and stay `#if DM_GAME_ENG_*` at their sites: `frame_hold_off`, `gpu_time_auto_only`
 (timestamps only with Graphics Auto: a setting), `nvn_async_never`'s refusal of the player's own setting; `framegen_game_rate` has no reader (above).
 GPU tests left outside the table on purpose are listed at the top of vk_quirks.h: building `gpu_id` itself, what is decided before a driver is open
-(android_main.c chip profiles, `panvk_defaults` and the driver check's copy of it, the safe-start ladder, the heat guard's kgsl clock), the driver check's own
-self-tests (they run on every GPU), the Java menu's GPU sections and texts, test switches (`DM_VK_AS_MALI`, `DM_VK_DEVICE`), and the frame hold, which follows
-the replay thread's decision.
+(android_main.c chip profiles, `panvk_defaults` and the driver check's copy of it, the safe-start ladder, the heat guard's kgsl clock, `mali_env_migrate`:
+env.txt's float-target "1"s an older Mali tests menu left, taken out on phones whose `gpu.txt` says Mali), the driver check's own self-tests (they run on every
+GPU), the Java menu's GPU sections, texts and the white-screen ladder's PanVK offer (`MaliLadder.java`), the ladder's own state file (kept per driver ID and
+version), test switches (`DM_VK_AS_MALI`, `DM_VK_DEVICE`), and the frame hold, which follows the replay thread's decision.
 
 What each app runs by default (env.txt still wins). "Arm's own driver": by driver ID where the driver gives one, else Arm's vendor ID and not a driver package
 (PanVK is not). Bold: the games differ, each by its own profile.
@@ -137,19 +144,23 @@ What each app runs by default (env.txt still wins). "Arm's own driver": by drive
 | `Q_TEX_HALF_UNSAFE` (the profile's half textures dropped) | `DM_VK_TEX_QUALITY` | Arm's own driver before r49 | same | same |
 | `Q_BC_GPU_OFF`, `Q_BC_DECODE` BC on the CPU, decoded | `DM_VK_BC_GPU`, `DM_VK_BC_TRANSCODE` | PowerVR | same | same |
 | `Q_PCACHE_GAPS_OFF` | — | PowerVR (render passes) | same | same |
+| `Q_B10_STANDIN` the lit R11G11B10F target as an RGBA16F stand-in (route A); `Q_MALI_WHITE_CHECK` the white-screen check and its ladder | `DM_VK_B10_AS_RGBA16`; `DM_MALI_LADDER`, `DM_MALI_WHITE_SIM` | **Arm's own driver** (by its release: not PanVK) (`mali_lit_standin`, #47 #110 #111 #172) | **never** | **never** |
 
 Checks: `dm/gfx/tests/t_quirks.c` compares the table with beta-exit's per-site expressions (copied, with their line numbers): 6e0e1dd's for every rule (each of
 those 33 lines is the same line at beta-exit 3d21471), and 3d21471's for `Q_ASYNC_PSO` (f09e58f: `!DM_GAME_ENG_ASYNC_PSO_OFF`, no vendor test). It does so for each
 port's profile over 2.57 M GPU descriptions each (vendors, driver IDs or none, Vulkan 1.0-1.4, Arm releases r20p0-r55p2 with and without beta, driver packages,
 names, memory sizes, dynamic rendering), then every port with every combination of the `eng` bits (no rule reads the port), reads the five `game.tsv` files, and
-pins players' phones for each game: 328.6 M comparisons, equal everywhere; `Q_QUERY_LOD` is the one rule without a beta-exit counterpart. 6e0e1dd's
+pins players' phones for each game: 454.4 M comparisons (32 rules), equal everywhere; `Q_QUERY_LOD` is the one rule without a beta-exit counterpart, and
+`Q_B10_STANDIN` / `Q_MALI_WHITE_CHECK` take mali-all e6f6d0c's `mw_default_route` / `mw_enabled` as their reference (the game read from the profile's
+`mali_lit_standin`, and for the real profiles also from e6f6d0c's own `DM_PORT_GALAR`). 6e0e1dd's
 background-pipeline rule stays in the test too: the table differs from it exactly on the GPUs other than Adreno for Sword / Shield and Scarlet / Violet (2.32 M of
 the 2.57 M descriptions each) and nowhere for Legends: Arceus. It also checks, over the same grid,
 that only the `quirk_late` rules change when the driver ID and Arm's release are not known yet and that `Q_FLOAT_CONTROLS` and `Q_CLEAR_BY_PASS` read the vendor
-and driver ID alone (the driver check asks them from those), and where a setting came from (`DM_DRIVER_CHECK_KEYS`): 582.8 M checks in all.
+and driver ID alone (the driver check asks them from those), and where a setting came from (`DM_DRIVER_CHECK_KEYS`): 739.4 M checks in all.
 `simdev/t_vkdev.c`, built for each game, checks the decisions `mtl_init` makes against the same rules on the 42 simulated GPUs, every rule decided at its site
 so far against the table, the GPU timestamps site, `nvn_vk_quirk_default` before, while and after the device is made, (`SIMDEV_DC_FC`) a driver-check value
-under a crash marker, and how `tex_view_for` binds integer textures under a float sampler (with and without `DM_VK_INT_TEX_EMPTY` / `DM_VK_INT_TEX=keep`);
+under a crash marker, how `tex_view_for` binds integer textures under a float sampler (with and without `DM_VK_INT_TEX_EMPTY` / `DM_VK_INT_TEX=keep`), and the
+white-screen fix's route and check against e6f6d0c's own expectation (Arm's own driver with Sword / Shield);
 `t_safe_start` checks the settings order with `driver-check.env`.
 
 ## Shader chains: generations instead of options
@@ -399,6 +410,46 @@ Verification (the same gates as above, on the fixed tree):
   texture, and `DM_VK_INT_TEX=keep` keeps all three in their own format. Built against a copy of nvn_vk.c with 7cfb4fe's default put back, or with no float
   views, the check fails (the unchanged copy passes).
 
+## The combined head: beta-exit-qm (2026-11-22)
+
+`beta-exit-quirks` ef46af1, then `beta-exit` bcf1d76 (setup_game.py only: each distinct shader translated once), then `mali-all` e6f6d0c: one head for both.
+Conflicts (each side kept whole; every line either side added since 3d21471 is in the result): nvn_vk.c mtl_init (gpu_id's driver ID and `Q_FLOAT_CONTROLS`
+from the table; the ladder's `g_drv_id` beside it), android_main.c (`env_file.h`'s start-up order with `mali_env_migrate` before env.txt is read and
+`DM_MALI_LADDER_FILE` after it: env.txt → safe-start → driver-check.env → phone profile), SetupActivity.java (the crash report offer, then the PanVK offer),
+simdev t_vkdev.c (both sides' work checks).
+
+Then the fix's per-GPU defaults moved into the table, the one mechanism: e6f6d0c decided them in `mw_init` from `g_arm_rel != 0` and `DM_PORT_GALAR`. Now
+Shield's `game.tsv` says `engine_quirks mali_lit_standin` (Sword inherits it through `tables_from`; Legends: Arceus and Violet / Scarlet do not), game.py
+generates `DM_GAME_ENG_MALI_LIT_STANDIN`, mtl_init maps it to `ENG_MALI_LIT_STANDIN`, and `Q_B10_STANDIN` (route A's default) and `Q_MALI_WHITE_CHECK` (the check
+and the ladder) are both `(eng & ENG_MALI_LIT_STANDIN) && arm_rel != 0`, in `quirk_late` (they read Arm's release). `mw_init` asks the table and passes the rule
+to `mw_enabled` / `mw_default_route` (their truth table and unit tests unchanged); env.txt's `DM_VK_B10_AS_RGBA16` / `DM_VK_B10_NOCOMPRESS`, `DM_MALI_LADDER`,
+`DM_MALI_WHITE_SIM` and the other `DM_MALI_*` switches act exactly as on e6f6d0c. New `[quirk]` lines: "the white-screen check and its ladder" and "the lit
+R11G11B10F target drawn as RGBA16F" where they are on (on Arm's own driver with Sword / Shield by default; from a test switch elsewhere). The shader chains are
+unchanged (`engine_quirks` is no chain key).
+
+Verification (WSL, NDK r27c, on a copy of the tree outside the worktree):
+
+- Builds: `make -f Makefile.host GAME=<id> lib` for the five profiles, from a clean `out/`: all built, no warning in the changed files; `game_profile.h` has
+  `DM_GAME_ENG_MALI_LIT_STANDIN 1` for Shield and Sword, 0 for Arceus, Violet, Scarlet. (`-j20` from a clean `out/` sometimes fails with `game_profile.h` not
+  found: the `touch_ui.o` rule lacks the header, the same rule as on 3d21471 and ef46af1; making the header first avoids it.) `dm/pc` for the three engines.
+- `t_quirks`: 739.4 M checks, all pass (route A and the check by default on 1.53 M of the 2.57 M descriptions for Sword / Shield, none for Arceus or Scarlet /
+  Violet). 21 mutation runs fail as they must, the unchanged control passes: the 8 earlier ones, the two white-screen rules keyed on the port (both, each
+  alone), on Arm's vendor ID (PanVK on), on `gpu_is_arm_driver`, without the eng bit (both, the check alone), the check out of `quirk_late`, and Shield's
+  `game.tsv` with `async_pso_off` / without `mali_lit_standin`, Arceus's with it, Sword with an `engine_quirks` of its own.
+- `t_mali_white` (206 checks; ASan + UBSan with fixtures, 214), `MaliLadderTest` (34 with the fixtures; 18 without), `t_b10` (6.4 M), `t_b10_spv`, `t_fmz`,
+  `t_nan_minmax`, `t_clamp_zero`, `t_safe_start`, `t_crumbs` and the other Linux gfx tests pass; `test_shader_split_capture.py` fails as on beta-exit.
+- golden_check.py `synth`, `b10` and `mali` (51 starts) for Shield, Sword, Violet, Scarlet and the Arceus engine: PASS; the synth round trips with
+  `DM_VK_API=10`, `DM_VK_MIN_FEATURES=1`, `DM_VK_NO_DYNREN=1`: PASS.
+- simdev `run_simdev.sh all` for the five games (lavapipe + 42 profiles; t_vkdev as recorded and held, t_fgen_vk, t_lshud_vk): only the known failures
+  (adreno-506 / adreno-512-vk10 "b10: the R11G11B10F target's pass did not begin"; Arceus's TF self-test VUIDs on the Mali profiles). Route A and the check
+  are on in exactly the 17 Mali profiles (Arm's own driver) for Shield and Sword and nowhere for Arceus, Violet, Scarlet. Mali env runs (Shield):
+  `DM_MALI_LADDER=1`, `DM_VK_B10_AS_RGBA16=1` / `=0`, `DM_VK_B10_NOCOMPRESS=1`, `DM_VK_PROBE=f16target` on lavapipe + 17 Mali profiles, all PASS with
+  e6f6d0c's decisions; Arm's identity on lavapipe: Shield and Sword route A + check, Arceus and Violet none; PanVK's identity (driver ID 20, Arm's vendor ID)
+  on lavapipe: no route, no check.
+- The probe's self-tests on lavapipe and through the fake-Xclipse shim: the same results and `driver-check.env` lines as ef46af1's run.
+- `chain_tree.py --verify`: bc2f6b2e5f0d / ba40200b20b8 / b72f9b70ebb2 as before. javac + d8 of the app: built. lang_check: no line missing or unused that is
+  not so on one of the two heads (164 missing, as on ef46af1).
+
 ## Not merged yet / open
 
 - READMEs: the root README is Galar's. Arceus's and Paldea's READMEs are not merged (per-game READMEs to do); `docs/HANDOFF.md` took Arceus's edits as git merged them.
@@ -421,8 +472,9 @@ Verification (the same gates as above, on the fixed tree):
   record that call (a crash then writes `DM_VK_NO_LAYERED_3D=1`, since env.txt's 0 wins over the check's settings).
 - `arceus_pass_default` (uniform updates deferred inside a pass, `DM_VK_UB_DEFER`, Arceus only) still picks the game by `DM_GAME_PROGRAM_ID`, as 6e0e1dd: no GPU
   rule, a candidate for an `engine_quirks` word (`ub_defer`).
-- beta-exit moves on: this branch holds it up to 3d21471. At the next merge, a per-GPU default beta-exit adds or changes goes into `vk_quirks.h` and t_quirks.c
+- beta-exit moves on: beta-exit-qm holds it up to bcf1d76. At the next merge, a per-GPU default beta-exit adds or changes goes into `vk_quirks.h` and t_quirks.c
   takes its reference from that head (the copied site lines checked against it as above).
+- The Mali white-screen fix (route A, the check, its ladder and the PanVK offer) has not run on a phone with Arm's own driver; on PC and simulated devices only.
 - Background pipelines on Mali / Xclipse / PowerVR / Turnip (beta-exit f09e58f) ran only on simulated devices here; nothing on a phone.
 - The probe's `fallback-draw` self-test begins its render pass with the attachments in GENERAL without moving them there from UNDEFINED first
   (VUID-vkCmdDraw-None-09600 on lavapipe; beta-exit's own test, as in 6e0e1dd). It passes on lavapipe; on a phone that is undefined in the driver check, where a

@@ -115,11 +115,15 @@ static void mw_route_set(int *a_on, int *b_on, const char *ea, const char *eb, i
     g_mw.record_fine = g_mw.record && !others;
 }
 // mtl_init, before any image is made: whether the ladder runs, the route of this start (*a_on: the RGBA16F stand-in, *b_on: no compression; *why_a / *why_b: who asked)
+//   Who runs the check and route A by default is the quirk table's (vk_quirks.h Q_MALI_WHITE_CHECK, Q_B10_STANDIN: Arm's own driver, in a game whose profile says
+//   mali_lit_standin: Sword / Shield); mw_enabled / mw_default_route take that rule as their arm_own && galar, so the switches keep their order (mali_white.h)
 static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b) {
     int arm = g_arm_rel != 0; const char *le = getenv("DM_MALI_LADDER"), *se = getenv("DM_MALI_WHITE_SIM"), *ea = getenv("DM_VK_B10_AS_RGBA16"), *eb = getenv("DM_VK_B10_NOCOMPRESS");
-    int en = mw_enabled(arm, DM_PORT_GALAR, le, se), reset = 0;
+    int dck = quirk_default(Q_MALI_WHITE_CHECK, &g_gpuid), dra = quirk_default(Q_B10_STANDIN, &g_gpuid);
+    int en = mw_enabled(dck, 1, le, se), reset = 0;
+    quirk_note(Q_MALI_WHITE_CHECK, en != 0, le && *le ? vkq_env_src("DM_MALI_LADDER") : se && *se && atoi(se) > 0 ? vkq_env_src("DM_MALI_WHITE_SIM") : 0);
     g_mw.rules = mw_rules_default(); mw_rules_env(&g_mw.rules);
-    g_mw.want = mw_default_route(arm, DM_PORT_GALAR);
+    g_mw.want = mw_default_route(dra, 1);
     static mw_state was;   // (static: the state is a few hundred bytes; mtl_init runs once)
     if (en) {
         g_mw.on = 1; g_mw.sim = se && *se && atoi(se) > 0;
@@ -203,6 +207,9 @@ static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b
     const char *dflt = en ? "the white-screen ladder's route" : !g_mw.want ? "" : le && *le && !atoi(le) ? "the white-screen fix on Arm's own Mali driver with Sword / Shield; DM_MALI_LADDER=0: no check"
                                                                                                             : "the white-screen fix on Arm's own Mali driver with Sword / Shield";
     *why_a = ea && *ea ? "DM_VK_B10_AS_RGBA16, a Mali test" : dflt; *why_b = eb && *eb ? "DM_VK_B10_NOCOMPRESS, a Mali test" : dflt;
+    // route A as this start runs it, and from where: env.txt's DM_VK_B10_AS_RGBA16; else, where a test switch turned the ladder on (DM_MALI_LADDER=1,
+    //   DM_MALI_WHITE_SIM=1) on a GPU the table leaves without it, that switch; else the table's default (the ladder's own route included)
+    quirk_note(Q_B10_STANDIN, *a_on, ea && *ea ? vkq_env_src("DM_VK_B10_AS_RGBA16") : en && !dck ? g_qenv[Q_MALI_WHITE_CHECK] : 0);
 }
 // pass_begin: a colour target in R11G11B10F or its stand-in (lv: the attachment's level); the pass's largest one is its lit-target candidate
 static void mw_pass_target(vtex *x, uint32_t lv) {

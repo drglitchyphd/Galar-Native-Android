@@ -1,11 +1,13 @@
 // The unified driver layer's quirk table (nvn/vk_quirks.h) against the per-site rules it replaced, as beta-exit decided them (the reviewed behaviour of all three
 // apps, docs/ENGINE_UNIFY.md), copied below as they stood there, for each port with its own profile (game.tsv port and engine_quirks): every rule as beta-exit
 // 6e0e1dd had it (each of those sites is the same line at beta-exit's head 3d21471), and Q_ASYNC_PSO as the head has it (f09e58f, the owner's call: pipelines the
-// lists lacked built in the background on every GPU, not only on Adreno; 6e0e1dd's rule stays below as ref_6e0e1dd_async_pso, and part 1 checks where they differ):
+// lists lacked built in the background on every GPU, not only on Adreno; 6e0e1dd's rule stays below as ref_6e0e1dd_async_pso, and part 1 checks where they differ),
+// and Q_B10_STANDIN / Q_MALI_WHITE_CHECK as mali-all e6f6d0c decided them (Sword / Shield's white-screen fix: mali_white.h mw_default_route / mw_enabled):
 //   1. every quirk's default for Galar Native (Sword / Shield), Arceus Native and Paldea Native (Scarlet / Violet), over a grid of GPU descriptions (vendors, driver
 //      IDs or none, Vulkan 1.0-1.4, driver versions with Arm releases r20p0-r55p2 with and without beta, driver packages, device names, memory sizes, dynamic
 //      rendering): what the reference site decided, so moving the decisions into one table changed no phone's behaviour in any game. Q_QUERY_LOD is the one new
-//      rule; background pipelines differ from 6e0e1dd exactly on the GPUs other than Adreno, in the games without async_pso_off;
+//      rule; background pipelines differ from 6e0e1dd exactly on the GPUs other than Adreno, in the games without async_pso_off; the white-screen fix's two rules
+//      are e6f6d0c's with the game read from the profile's mali_lit_standin, and against e6f6d0c's own test of the port (DM_PORT_GALAR) for the real profiles;
 //   2. no rule reads the port: each port with each combination of the engine_quirks bits gets the rules of a game whose profile says those quirks;
 //   3. the three profiles as dm/games/<id>/game.tsv has them (port, engine_quirks; Sword and Scarlet through tables_from), so a profile change shows up here;
 //   4. the phones from players' logs, by name, in each game;
@@ -24,16 +26,18 @@ static long fails, checks;
 #define VK_API_VERSION_MINOR(v) ((uint32_t)(v) >> 12U & 0x3FFU)
 
 // ---- the ports as their profiles build them: game.tsv port → DM_PORT_*, engine_quirks → DM_GAME_ENG_* (dm/games/game.py ENGINE_QUIRKS; part 3 reads the files) ----
-typedef struct { const char *ids, *app; int port; int qc11_no_eds, gpu_time_auto_only, frame_hold_off, async_pso_off, framegen_game_rate, nvn_async_never, driver_selftests; } profile;
+typedef struct { const char *ids, *app; int port; int qc11_no_eds, gpu_time_auto_only, frame_hold_off, async_pso_off, framegen_game_rate, nvn_async_never, driver_selftests,
+                 mali_lit_standin; } profile;
 static const profile PROFILES[] = {
-    { "01008DB008C2C000 0100ABF008968000", "Galar Native", PORT_GALAR, 0, 0, 0, 0, 0, 0, 0 },    // Pokémon Shield, Sword (tables_from Shield)
-    { "01001F5010DFA000", "Arceus Native", PORT_ARCEUS, 1, 1, 1, 1, 1, 1, 1 },                   // Pokémon Legends: Arceus: all seven
-    { "01008F6008C5E000 0100A3D008C5C000", "Paldea Native", PORT_PALDEA, 0, 0, 0, 0, 0, 0, 0 },  // Pokémon Violet, Scarlet (tables_from Violet)
+    { "01008DB008C2C000 0100ABF008968000", "Galar Native", PORT_GALAR, 0, 0, 0, 0, 0, 0, 0, 1 },    // Pokémon Shield, Sword (tables_from Shield): mali_lit_standin
+    { "01001F5010DFA000", "Arceus Native", PORT_ARCEUS, 1, 1, 1, 1, 1, 1, 1, 0 },                   // Pokémon Legends: Arceus: the first seven
+    { "01008F6008C5E000 0100A3D008C5C000", "Paldea Native", PORT_PALDEA, 0, 0, 0, 0, 0, 0, 0, 0 },  // Pokémon Violet, Scarlet (tables_from Violet)
 };
 enum { NPROF = sizeof PROFILES / sizeof *PROFILES };
 // gpu_id.eng as nvn_vk.c mtl_init packs it from game_profile.h's DM_GAME_ENG_*, each bit by name
 static unsigned eng_of(const profile *P) {
-    return (P->qc11_no_eds ? ENG_QC11_NO_EDS : 0u) | (P->async_pso_off ? ENG_ASYNC_PSO_OFF : 0u) | (P->driver_selftests ? ENG_DRIVER_SELFTESTS : 0u) | (P->nvn_async_never ? ENG_NVN_ASYNC_NEVER : 0u);
+    return (P->qc11_no_eds ? ENG_QC11_NO_EDS : 0u) | (P->async_pso_off ? ENG_ASYNC_PSO_OFF : 0u) | (P->driver_selftests ? ENG_DRIVER_SELFTESTS : 0u) | (P->nvn_async_never ? ENG_NVN_ASYNC_NEVER : 0u)
+         | (P->mali_lit_standin ? ENG_MALI_LIT_STANDIN : 0u);
 }
 
 // ---- beta-exit's per-site defaults (env.txt unset), copied (file:line in 6e0e1dd, nvn_vk.c unless named; a line beta-exit changed since is named with the revision
@@ -41,6 +45,14 @@ static unsigned eng_of(const profile *P) {
 //   g->api; g_arm_rel / g_arm_p / g_arm_beta → g->arm_*; g_dynren → g->dynren; getenv ("DM_VK_DRIVER") set → g->custom; MemTotal → g->ram_kb; DM_GAME_ENG_<X> →
 //   P-><x>; with driver properties (drvp) dp.driverID → g->driver_id, without them g->driver_id is -1 ----
 static int old_qcom_driver(const gpu_id *g) { return g->vendor == 0x5143 && VK_API_VERSION_MINOR(g->api) < 3 && !strncmp(g->name, "Adreno", 6); }   // :1594
+// mali-all e6f6d0c mali_white.h:174-181, copied (MW_ROUTE_A is 1, MW_ROUTE_NONE 0)
+static int ref_mw_enabled(int arm_own, int galar, const char *ladder_env, const char *sim_env) {
+    int l = ladder_env && *ladder_env ? atoi(ladder_env) : -1, s = sim_env && *sim_env ? atoi(sim_env) : 0;
+    if (l == 0) return 0;
+    if (l > 0 || s > 0) return 2;
+    return arm_own && galar ? 1 : 0;
+}
+static int ref_mw_default_route(int arm_own, int galar) { return arm_own && galar ? 1 : 0; }
 static int ref(int q, const gpu_id *g, const profile *P) {
     int v = g->arm_rel * 100 + g->arm_p;
     int arm = g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5;     // :599 arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : g_props.vendorID == 0x13B5
@@ -77,6 +89,11 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     case Q_NVN_ASYNC: return P->nvn_async_never ? 0 : strstr(g->name, "Adreno") != NULL;   // hle_nvn.c:1083 autoon = !(e && *e) && g && strstr (g, "Adreno"); :1085 #if DM_GAME_ENG_NVN_ASYNC_NEVER v = 0
     // new with the merged branches, not in 6e0e1dd (docs/ENGINE_UNIFY.md lists it): galar-driver-probes ad0f638 / arceus-vk10-validation 85e72fd, Arm's own driver
     case Q_QUERY_LOD: return g->arm_rel != 0;
+    // mali-all e6f6d0c (the Mali white-screen fix), mali_white_vk.inc mw_init: arm = g_arm_rel != 0; g_mw.want = mw_default_route (arm, DM_PORT_GALAR);
+    //   en = mw_enabled (arm, DM_PORT_GALAR, le, se), 1 or 0 with the switches unset. DM_PORT_GALAR → P->mali_lit_standin (a game whose profile says it; part 1
+    //   also checks e6f6d0c's own DM_PORT_GALAR for the real profiles)
+    case Q_B10_STANDIN: return ref_mw_default_route(g->arm_rel != 0, P->mali_lit_standin) == 1;   // (MW_ROUTE_A)
+    case Q_MALI_WHITE_CHECK: return ref_mw_enabled(g->arm_rel != 0, P->mali_lit_standin, NULL, NULL) == 1;
     }
     return -999;   // a quirk with no reference here: add its rule above
 }
@@ -119,7 +136,7 @@ static void fail_line(const gpu_id *g, int q, int table, int want, const char *w
            Q_INFO[q].what, table, want, g->port, g->eng, VK_API_VERSION_MAJOR(g->api), VK_API_VERSION_MINOR(g->api), g->vendor, g->driver_id, g->driver_version, g->arm_rel,
            g->arm_p, g->arm_beta ? " beta" : "", g->custom ? " package" : "", g->name, g->ram_kb, g->dynren);
 }
-typedef struct { const profile *P; const char *what; long apso_changed; } cmp_ctx;
+typedef struct { const profile *P; const char *what; long apso_changed, mali_on; } cmp_ctx;
 static void cmp_all(const gpu_id *g, void *u) {   // part 1: this port's profile, the reference rules with its DM_GAME_ENG_*
     cmp_ctx *c = u;
     for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), w = ref(q, g, c->P); checks++; if (t != w && fails++ < 25) fail_line(g, q, t, w, c->what); }
@@ -127,10 +144,16 @@ static void cmp_all(const gpu_id *g, void *u) {   // part 1: this port's profile
     int t = quirk_default(Q_ASYNC_PSO, g), o = ref_6e0e1dd_async_pso(g, c->P), meant = g->vendor != 0x5143 && !c->P->async_pso_off;
     checks++; if ((t != o) != meant && fails++ < 25) fail_line(g, Q_ASYNC_PSO, t, o, "background pipelines against 6e0e1dd's rule: changed where beta-exit f09e58f did not mean it, or kept where it did (6e0e1dd: the second value)");
     c->apso_changed += t != o;
+    // the white-screen fix against e6f6d0c with its own test of the game, the port (DM_PORT_GALAR): for the real profiles, mali_lit_standin stands for it exactly
+    int gal = g->port == PORT_GALAR, wa = ref_mw_default_route(g->arm_rel != 0, gal) == 1, wc = ref_mw_enabled(g->arm_rel != 0, gal, NULL, NULL) == 1;
+    checks++; if (quirk_default(Q_B10_STANDIN, g) != wa && fails++ < 25) fail_line(g, Q_B10_STANDIN, quirk_default(Q_B10_STANDIN, g), wa, "route A against e6f6d0c's DM_PORT_GALAR");
+    checks++; if (quirk_default(Q_MALI_WHITE_CHECK, g) != wc && fails++ < 25) fail_line(g, Q_MALI_WHITE_CHECK, quirk_default(Q_MALI_WHITE_CHECK, g), wc, "the white-screen check against e6f6d0c's DM_PORT_GALAR");
+    c->mali_on += quirk_default(Q_B10_STANDIN, g) != 0;
 }
 static void cmp_eng(const gpu_id *g, void *u) {   // part 2: this port with these bits, the reference rules for a game whose profile says the quirks the bits stand for
     (void)u; profile P = { .ids = "", .app = "", .port = g->port, .qc11_no_eds = !!(g->eng & ENG_QC11_NO_EDS), .async_pso_off = !!(g->eng & ENG_ASYNC_PSO_OFF),
-                           .nvn_async_never = !!(g->eng & ENG_NVN_ASYNC_NEVER), .driver_selftests = !!(g->eng & ENG_DRIVER_SELFTESTS) };
+                           .nvn_async_never = !!(g->eng & ENG_NVN_ASYNC_NEVER), .driver_selftests = !!(g->eng & ENG_DRIVER_SELFTESTS),
+                           .mali_lit_standin = !!(g->eng & ENG_MALI_LIT_STANDIN) };
     for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), w = ref(q, g, &P); checks++; if (t != w && fails++ < 25) fail_line(g, q, t, w, "port and engine_quirks bits"); }
 }
 // part 5: what a rule can answer before gpu_id is complete. Before the device is made (nvn_vk.c mtl_init) gpu_id has no driver ID (-1) and no Arm release: every rule
@@ -192,7 +215,8 @@ static int tsv_get_base(const char *dir, const char *id, const char *key, char *
 static int next_word(const char **s, char *w, size_t n) { while (**s == ' ') (*s)++; size_t l = strcspn(*s, " "); if (!l) return 0; snprintf(w, n, "%.*s", (int)l, *s); *s += l; return 1; }
 static int has_word(const char *words, const char *w) { char x[64]; const char *s = words; while (next_word(&s, x, sizeof x)) if (!strcmp(x, w)) return 1; return 0; }
 static void profiles_check(const char *dir) {
-    static const char *const KNOWN[7] = { "qc11_no_eds", "gpu_time_auto_only", "frame_hold_off", "async_pso_off", "framegen_game_rate", "nvn_async_never", "driver_selftests" };
+    static const char *const KNOWN[8] = { "qc11_no_eds", "gpu_time_auto_only", "frame_hold_off", "async_pso_off", "framegen_game_rate", "nvn_async_never", "driver_selftests",
+                                          "mali_lit_standin" };
     for (int i = 0; i < NPROF; i++) {
         const profile *P = &PROFILES[i]; const char *ids = P->ids; char id[32];
         while (next_word(&ids, id, sizeof id)) {
@@ -202,9 +226,10 @@ static void profiles_check(const char *dir) {
             if (r < 0) continue;
             int pn = !strcmp(port, "galar") ? PORT_GALAR : !strcmp(port, "arceus") ? PORT_ARCEUS : !strcmp(port, "paldea") ? PORT_PALDEA : -1;
             CHECK(pn == P->port, "%s: port \"%s\" in game.tsv, %d here", id, port, P->port);
-            const int want[7] = { P->qc11_no_eds, P->gpu_time_auto_only, P->frame_hold_off, P->async_pso_off, P->framegen_game_rate, P->nvn_async_never, P->driver_selftests };
-            for (int k = 0; k < 7; k++) CHECK(has_word(eq, KNOWN[k]) == want[k], "%s: engine_quirks %s is %d in game.tsv (\"%s\"), %d here", id, KNOWN[k], has_word(eq, KNOWN[k]), eq, want[k]);
-            for (const char *s = eq; next_word(&s, w, sizeof w); ) { int known = 0; for (int k = 0; k < 7; k++) known |= !strcmp(w, KNOWN[k]);
+            const int want[8] = { P->qc11_no_eds, P->gpu_time_auto_only, P->frame_hold_off, P->async_pso_off, P->framegen_game_rate, P->nvn_async_never, P->driver_selftests,
+                                  P->mali_lit_standin };
+            for (int k = 0; k < 8; k++) CHECK(has_word(eq, KNOWN[k]) == want[k], "%s: engine_quirks %s is %d in game.tsv (\"%s\"), %d here", id, KNOWN[k], has_word(eq, KNOWN[k]), eq, want[k]);
+            for (const char *s = eq; next_word(&s, w, sizeof w); ) { int known = 0; for (int k = 0; k < 8; k++) known |= !strcmp(w, KNOWN[k]);
                 CHECK(known, "%s: engine_quirks %s is new: give it a column here (and a gpu_id.eng bit if it decides a GPU default)", id, w); }
         }
         CHECK(!strcmp(gpu_port_app(P->port), P->app), "port %d is named %s in the log, the app is %s", P->port, gpu_port_app(P->port), P->app);
@@ -259,6 +284,13 @@ static void phones(const profile *P) {
           && QD(Q_ASYNC_PSO, bxm) == !arc && QD(Q_ASYNC_PSO, g5) == !arc,
           "%s: pipelines the lists lacked built in the background on Turnip, Mali (Arm's driver and PanVK), Xclipse and PowerVR too (beta-exit f09e58f; Adreno only before), "
           "never for Legends: Arceus (async_pso_off, #34)", gm);
+    int gal = P->port == PORT_GALAR;
+    CHECK(QD(Q_B10_STANDIN, g615) == gal && QD(Q_MALI_WHITE_CHECK, g615) == gal && QD(Q_B10_STANDIN, g925) == gal && QD(Q_MALI_WHITE_CHECK, g925) == gal
+          && QD(Q_B10_STANDIN, g925r) == gal && QD(Q_MALI_WHITE_CHECK, g925r) == gal,
+          "%s, Mali-G615 MC2 r44p1 and G925 r49p1 on Arm's own driver (#110 #111): the lit target as RGBA16F and the white-screen check for Sword / Shield only", gm);
+    CHECK(!QD(Q_B10_STANDIN, panvk) && !QD(Q_MALI_WHITE_CHECK, panvk) && !QD(Q_B10_STANDIN, s25) && !QD(Q_MALI_WHITE_CHECK, s25) && !QD(Q_B10_STANDIN, tu)
+          && !QD(Q_B10_STANDIN, xcl) && !QD(Q_MALI_WHITE_CHECK, xcl) && !QD(Q_B10_STANDIN, bxm) && !QD(Q_MALI_WHITE_CHECK, g5),
+          "%s: no white-screen fix on PanVK (Arm's vendor ID, its own driver ID), Adreno, Turnip, Xclipse or PowerVR", gm);
 }
 
 int main(int argc, char **argv) {
@@ -275,12 +307,14 @@ int main(int argc, char **argv) {
     static const uint32_t dvs[] = { 0, 44u << 22 | 1u << 12, 48u << 22, 49u << 22, 0x80000000u | 512u << 12 | 762u, 0x5d9576 };   // (none, r44p1, r48p0, r49p0, Qualcomm 512.762, PowerVR)
     const grid_t G = { vens, 7, dids, 9, apis, 5, names, 9, rams, 5, dvs, 6, 1 };
     for (int i = 0; i < NPROF; i++) {
-        long c0 = checks; cmp_ctx c = { &PROFILES[i], PROFILES[i].app, 0 };
+        long c0 = checks; cmp_ctx c = { &PROFILES[i], PROFILES[i].app, 0, 0 };
         long n = grid_run(&G, PROFILES[i].port, eng_of(&PROFILES[i]), cmp_both, &c);
         printf("%s (port %d, engine_quirks bits %#x): %ld GPU descriptions x %d quirks = %ld comparisons with the reference sites (and part 5's, before the device); "
                "background pipelines unlike 6e0e1dd on %ld of them (beta-exit f09e58f)\n", PROFILES[i].app, PROFILES[i].port, eng_of(&PROFILES[i]), n, Q_N, checks - c0, c.apso_changed);
         CHECK(PROFILES[i].async_pso_off ? c.apso_changed == 0 : c.apso_changed > 0, "%s: background pipelines unlike 6e0e1dd on %ld GPU descriptions (async_pso_off %d)", PROFILES[i].app,
               c.apso_changed, PROFILES[i].async_pso_off);
+        printf("%s: the white-screen fix (route A and the check) by default on %ld of them\n", PROFILES[i].app, c.mali_on);
+        CHECK(PROFILES[i].port == PORT_GALAR ? c.mali_on > 0 : c.mali_on == 0, "%s: the white-screen fix by default on %ld GPU descriptions (Sword / Shield only)", PROFILES[i].app, c.mali_on);
     }
     // 5. (the rest) every late rule reads what comes after the device somewhere in the grid
     for (int q = 0; q < Q_N; q++) CHECK(!quirk_late(q) || g_late_reads[q], "quirk %d (%s) is in quirk_late but reads neither the driver ID nor Arm's release anywhere in the grid", q, Q_INFO[q].what);
@@ -288,7 +322,7 @@ int main(int argc, char **argv) {
     {   static const char *const nm2[] = { "Mali-G615 MC2", "Adreno (TM) 710", "Turnip Adreno (TM) 650", "" }; static const long ram2[] = { 0, 3800000 };
         static const uint32_t dv2[] = { 0, 38u << 22 | 1u << 12, 44u << 22 | 1u << 12, 49u << 22, 49u << 22 | 1u << 12, 52u << 22 };
         const grid_t G2 = { vens, 7, dids, 9, apis, 5, nm2, 4, ram2, 2, dv2, 6, 0 };
-        long c0 = checks, n = 0; const unsigned all = ENG_QC11_NO_EDS | ENG_ASYNC_PSO_OFF | ENG_DRIVER_SELFTESTS | ENG_NVN_ASYNC_NEVER;
+        long c0 = checks, n = 0; const unsigned all = ENG_QC11_NO_EDS | ENG_ASYNC_PSO_OFF | ENG_DRIVER_SELFTESTS | ENG_NVN_ASYNC_NEVER | ENG_MALI_LIT_STANDIN;
         for (int port = PORT_GALAR; port <= PORT_PALDEA; port++) for (unsigned e = 0; e <= all; e++) if (!(e & ~all)) n += grid_run(&G2, port, e, cmp_eng, NULL);
         printf("every port x every engine_quirks bit combination: %ld GPU descriptions x %d quirks = %ld comparisons (no rule reads the port)\n", n, Q_N, checks - c0); }
     // 3. the profiles

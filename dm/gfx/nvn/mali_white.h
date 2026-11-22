@@ -170,7 +170,10 @@ static inline int mw_judge_mostly_empty(const mw_judge *j) { return j->kinds[MW_
 static inline int mw_judge_mostly_bright(const mw_judge *j) { return j->kinds[MW_K_BRIGHT] * 2 > j->samples; }   // (at the cap: a bright scene, nothing to count)
 
 // ---- who runs it, and the route ----
-// 0 off; 1 on (Arm's own driver with Sword / Shield); 2 on through a test switch on any GPU (DM_MALI_LADDER=1, DM_MALI_WHITE_SIM=1). DM_MALI_LADDER=0 wins over both
+// 0 off; 1 on (Arm's own driver with Sword / Shield); 2 on through a test switch on any GPU (DM_MALI_LADDER=1, DM_MALI_WHITE_SIM=1). DM_MALI_LADDER=0 wins over both.
+//   arm_own && galar is the default: nvn_vk.c mw_init passes the quirk table's rule as arm_own and 1 as galar (vk_quirks.h Q_MALI_WHITE_CHECK, Q_B10_STANDIN below:
+//   Arm's own driver, a game whose profile says mali_lit_standin; dm/gfx/tests/t_quirks.c checks the table against these two with arm_own = Arm's own driver and
+//   galar = Sword / Shield's profile)
 static inline int mw_enabled(int arm_own, int galar, const char *ladder_env, const char *sim_env) {
     int l = ladder_env && *ladder_env ? atoi(ladder_env) : -1, s = sim_env && *sim_env ? atoi(sim_env) : 0;
     if (l == 0) return 0;

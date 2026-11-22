@@ -109,7 +109,9 @@ million texels against `b10_conv.h`.
 
 ## The Mali white-screen check and its ladder (no phone)
 
-On Arm's own Mali driver the engine checks Sword / Shield's lit scene while playing (`nvn_vk.c` `mali_white_vk.inc`, rules in `mali_white.h`): route A (the RGBA16F
+On Arm's own Mali driver the engine checks Sword / Shield's lit scene while playing (`nvn_vk.c` `mali_white_vk.inc`, rules in `mali_white.h`; who gets it by
+default is the quirk table's `Q_MALI_WHITE_CHECK` / `Q_B10_STANDIN`: Arm's own driver, in a game whose profile says `mali_lit_standin`, which Shield's
+`game.tsv` does and Sword takes through `tables_from`): route A (the RGBA16F
 stand-in) first; white or broken → route B (no framebuffer compression) from the next start; that too → route A again and the app offers PanVK. White is quick to
 call (3 samples in a row with a quarter of the texels at 1024+ or infinite, or 5 with 90 % of the picture shown white; or a 8 % mean over 40 samples); NaN is
 counted apart (a quarter of the lit target NaN 3 times in a row, or 10 near-black samples in a row, is BROKEN: a black picture); fine is slow (20 samples over 3

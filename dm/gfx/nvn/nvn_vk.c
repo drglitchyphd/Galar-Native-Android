@@ -439,7 +439,7 @@ void mtl_init(void) {
     //   engine_quirks → DM_GAME_ENG_*, one gpu_id.eng bit each, mapped by name here so the order of game.py's list cannot move them; the table's rules read only these bits)
     g_gpuid.port = DM_PORT_ARCEUS ? PORT_ARCEUS : DM_PORT_PALDEA ? PORT_PALDEA : PORT_GALAR;
     g_gpuid.eng = (DM_GAME_ENG_QC11_NO_EDS ? ENG_QC11_NO_EDS : 0u) | (DM_GAME_ENG_ASYNC_PSO_OFF ? ENG_ASYNC_PSO_OFF : 0u) | (DM_GAME_ENG_DRIVER_SELFTESTS ? ENG_DRIVER_SELFTESTS : 0u)
-                | (DM_GAME_ENG_NVN_ASYNC_NEVER ? ENG_NVN_ASYNC_NEVER : 0u);
+                | (DM_GAME_ENG_NVN_ASYNC_NEVER ? ENG_NVN_ASYNC_NEVER : 0u) | (DM_GAME_ENG_MALI_LIT_STANDIN ? ENG_MALI_LIT_STANDIN : 0u);
     { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); g_gpuid.ram_kb = kb; }
     if (getenv("DM_VK_NO_HOST_IMPORT")) g_host_import = 0;
     // Imported host memory pins the game's pools (about 3 GB) for every submission. Samsung's Xclipse driver of the late-2026 One UI update refuses that a few frames into play
@@ -700,19 +700,20 @@ void mtl_init(void) {
     //   kept, its render targets made without framebuffer compression, for the case that Arm's driver mishandles the packed float format in AFBC; the log names how it
     //   was done and what the driver then reports for each target, "b10 target"): Mali's white lit scene. Route A is the default on Arm's own driver with Sword /
     //   Shield, where the white-screen ladder (mali_white_vk.inc) checks the lit scene while playing and moves on to route B, then to offering PanVK, start by start;
-    //   both are off on every other driver and game. DM_VK_B10_AS_RGBA16 / DM_VK_B10_NOCOMPRESS in env.txt (the menu's Mali tests) always win
+    //   both are off on every other driver and game (vk_quirks.h Q_B10_STANDIN / Q_MALI_WHITE_CHECK: Arm's own driver, a game whose profile says mali_lit_standin).
+    //   DM_VK_B10_AS_RGBA16 / DM_VK_B10_NOCOMPRESS in env.txt (the menu's Mali tests) always win
     { int a = 0, b = 0; const char *wa = "", *wb = "";
       mw_init(&a, &b, &wa, &wb);
       if (a) { nvn_fmt_vk_b10_as_rgba16(1); VLOG("formats: R11G11B10F drawn and sampled as RGBA16F (%s): texels converted where the game's memory meets the image, its alpha read as 1 ('b10 swap:' lines name each kind once)", wa); }
       // (a result of route A alone does not tell the format from the compression: RGBA16F may get no framebuffer compression where R11G11B10F gets it, on a GPU
       //   without FP16 AFBC. Read it beside DM_VK_B10_NOCOMPRESS's (route B: the ladder's next step), by the picture. Both are Sword / Shield fixes: see b10_on)
       if (nvn_fmt_vk_b10_swapped(0x3F)) VLOG("formats: the float-target test changes the format and may change the compression with it (a GPU without FP16 framebuffer compression): read its result beside DM_VK_B10_NOCOMPRESS's%s",
-                                             DM_PORT_GALAR ? "" : "; a Sword / Shield test: here it only makes every R11G11B10F image twice the size (Legends: Arceus draws its G-buffer and bloom in it)");
+                                             g_gpuid.eng & ENG_MALI_LIT_STANDIN ? "" : "; a Sword / Shield test: here it only makes every R11G11B10F image twice the size (Legends: Arceus draws its G-buffer and bloom in it)");
       g_b10nc = b;
       if (g_b10nc) VLOG("formats: R11G11B10F render targets made without framebuffer compression (%s): %s%s", wb, g_compctl
             ? "VK_EXT_image_compression_control, compression disabled image by image"
             : "the driver has no VK_EXT_image_compression_control: made mutable with no list of view formats, which keeps Mali's AFBC (and Adreno's UBWC) off",
-            DM_PORT_GALAR ? "" : " (a Sword / Shield test: see b10_on)"); }
+            g_gpuid.eng & ENG_MALI_LIT_STANDIN ? "" : " (a Sword / Shield test: see b10_on)"); }
     //   Since chain 91294b095153 the translator writes FMZ into the multiplies the game marked (as yuzu / Eden do), on every GPU: PanVK keeps its fix and the multiplies
     //   the game did not mark keep their NaN (the dark outlines on Mali-G52, #215), with a fraction of the cost. The every-multiply copy is off by default, DM_VK_FMZ=1 to compare
     { const char *e = getenv("DM_VK_FMZ"); g_fmz = e && *e && atoi(e) > 0;
@@ -2373,8 +2374,9 @@ static VkClearColorValue clear_for(VkFormat f, const float rgba[4]) {
 // Each kind of meeting is logged once ("b10 swap: ..."), so a player's log shows what the swap met.
 // Not a per-game choice: both float-target tests (this one and DM_VK_B10_NOCOMPRESS) key on the format alone. They are tests for Sword / Shield's white lit scene on
 //   Arm's own driver; Legends: Arceus draws 21-31 R11G11B10F images a frame (a 1080p G-buffer, its bloom chain), which the stand-in makes twice the size and wider
-//   than many Mali GPUs' tile budget, for no white to fix there. Any default-on of either must key on the game (Sword / Shield) as well as on the driver
-//   (DM_PORT_GALAR and Arm's vendor ID), never on the driver alone; the Android menu offers them for Sword / Shield only
+//   than many Mali GPUs' tile budget, for no white to fix there. Any default-on of either must key on the game (Sword / Shield) as well as on the driver, never on
+//   the driver alone: route A's is the quirk table's Q_B10_STANDIN (Arm's own driver, in a game whose profile says mali_lit_standin); the Android menu offers both
+//   for Sword / Shield only
 static int b10_on(void) { return nvn_fmt_vk_b10_swapped(0x3F); }   // (DM_VK_B10_AS_RGBA16, or DM_VK_PROBE=f16target)
 static int b10_swapped_tex(const vtex *x) { return x && x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT && nvn_fmt_vk_b10_swapped(x->nvn_fmt); }
 static void b10_note(const char *what, const vtex *x, int other) {
