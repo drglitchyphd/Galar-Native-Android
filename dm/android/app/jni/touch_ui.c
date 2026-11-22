@@ -130,7 +130,7 @@ static void layout(float w, float h) {
 #endif
     g_c[C_MINUS] = (ctl){ w * 0.5f - 0.13f * s, 0.06f * s, mr, OVL_G_MINUS, 1, DM_BTN_MINUS };
     g_c[C_PLUS] = (ctl){ w * 0.5f + 0.13f * s, 0.06f * s, mr, OVL_G_PLUS, 1, DM_BTN_PLUS };
-    g_c[C_STICK] = (ctl){ 0.36f * s, h - 0.36f * s, 0.14f * s, OVL_G_NONE, 1, 0 };   // (raised: its ring sat on the bottom edge)
+    g_c[C_STICK] = (ctl){ 0.36f * s, h - (GESTURES_ON ? 0.36f : 0.27f) * s, 0.14f * s, OVL_G_NONE, 1, 0 };   // (Legends: Arceus raised it: its ring sat on the bottom edge; the other games keep their released place)
     {   // the D-pad below-right of the left stick, as on a left Joy-Con (bag pockets, menus): four small buttons with a dot towards their direction
         float dx = 0.80f * s, dy = h - 0.19f * s, dg = 0.085f * s, dr = 0.050f * s;
         g_c[C_UP] = (ctl){ dx, dy - dg, dr, OVL_G_NONE, 1, DM_BTN_UP }; g_c[C_DOWN] = (ctl){ dx, dy + dg, dr, OVL_G_NONE, 1, DM_BTN_DOWN };
@@ -403,7 +403,7 @@ static void recompute_locked(void) {
         else g_pinch_d0 = 0;
     }
     g_btn = b; g_lx = ax(lx); g_ly = ax(ly);
-    { extern _Atomic int dm_touch_cam_own __attribute__((weak)); if (&dm_touch_cam_own) atomic_store(&dm_touch_cam_own, !rstick && !map); }   // (hle_hid.c: the touch camera has its own sensitivity, the right stick's is not applied again)
+    { extern _Atomic int dm_touch_cam_own __attribute__((weak)); if (&dm_touch_cam_own) atomic_store(&dm_touch_cam_own, GESTURES_ON && !rstick && !map); }   // (hle_hid.c: Legends: Arceus's touch camera has its own sensitivity, DM_TOUCH_CAM_SENS, so the right stick's is not applied again; the other games' menus have no such slider, and their touch camera follows Camera sensitivity, DM_RSTICK_SENS, as released: Galar #2)
     if (map) { g_rx = rstick ? ax(rx) : 0; g_ry = rstick ? ax(ry) : 0; }   // (the map's right stick is its own: no camera drag)
     else if (rstick) { g_rx = ax(rx); g_ry = ax(ry); }
     else if (cam_stick()) {   // a stick under the finger: its offset from where it landed, full at 12 % of the screen height (less at a higher sensitivity), a small dead zone
@@ -414,7 +414,8 @@ static void recompute_locked(void) {
             break; }
         if (g_aim) { sx *= AIM_FINE_PCT / 100.0f; sy *= AIM_FINE_PCT / 100.0f; }
         g_rx = ax(sx); g_ry = ax(sy); }
-    else { static float ex, ey; static double et; double dt = et > 0 ? t - et : 0; et = t;
+    else if (!GESTURES_ON) { g_rx = ax(g_cam_vx / vmax); g_ry = ax(-g_cam_vy / vmax); }   // Sword / Shield, Scarlet / Violet: the finger's speed straight to the stick, as released
+    else { static float ex, ey; static double et; double dt = et > 0 ? t - et : 0; et = t;   // Legends: Arceus: the finger's speed followed over 70 ms
         float k = dt > 0 ? 1.0f - expf(-(float)dt / 0.07f) : 1.0f, tx = g_cam_vx / vmax, ty = -g_cam_vy / vmax;
         ex += (tx - ex) * k; ey += (ty - ey) * k; if (fabsf(ex) < 0.01f && tx == 0) ex = 0; if (fabsf(ey) < 0.01f && ty == 0) ey = 0;
         g_rx = ax(ex); g_ry = ax(ey); }
@@ -664,7 +665,8 @@ static dm_ovl_item *add(dm_ovl_item *it, int *n, int max, float cx, float cy, fl
 //   a button over it keeps only its light rim and label, so the icons there are never dulled by the grey glass. The top is 800, where the item / party circles
 //   start: B's default place ends at 760, and a top there made B flip between the two looks as it shrank and grew when pressed
 // Legends: Arceus's block only (the touch-menu game, GESTURES_ON): Sword / Shield and Scarlet / Violet have no such block there, and with it their A, B and Y
-//   (inside those coordinates) lost the grey body while X (above them) kept it; every button of theirs keeps the frosted look, as before the shared tree
+//   (inside those coordinates) lost the grey body while X (above them) kept it; every button of theirs now has the frosted body (the shared tree's look: before
+//   it, Galar's and Paldea's buttons were blue)
 static int over_hud(float x, float y, float r) {
     if (!GESTURES_ON) return 0;
     float x0, y0, x1, y1; sel_to_win(1460, 800, &x0, &y0); sel_to_win(1920, 1080, &x1, &y1);
@@ -763,6 +765,7 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     if (g_visible && g_edit) {   // the editor: every control at full strength with a yellow ring, the hidden ones as ghosts
         for (int c = 0; c < NCTL; c++) { if (c == C_CAM || ctl_off(c)) continue; const ctl *k = &g_c[c];
             if (c == C_BACK || c == C_SEL) continue;   // (placed by the game's own list / HUD: not the player's to move)
+            if (!GESTURES_ON && (c == C_THROW || c == C_LOCK)) continue;   // (the Poké Ball and lock-on are Legends: Arceus's: no ghosts of them in the other games' editor)
             if (GESTURES_ON && !k->shown && !g_ov[c].set && c != C_PLUS && c != C_MINUS && c != C_STICK && c != C_MENU) continue;
             float a = k->shown ? 1.0f : 0.3f;
             if (c == C_STICK || c == C_RSTICK) compass(it, &n, max, a, k->cx, k->cy, k->cx, k->cy, k->r);
@@ -772,9 +775,10 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
     } else if (g_visible) {
         double t = now_s(); int idle = (g_fade > 0 && t - g_touch_t > g_fade) && !g_btn && !g_stick_on && !g_rstick_on;   // nothing touched for the fade time: everything faint (in menus and cutscenes too: hiding them there broke the flow of play)
         float ia = idle ? 0.22f : 1.0f;
-        // every control at the same strength (the lower ones had faded on their own, 2 s after their last touch, and the sticks were drawn at 75 %: the bottom of the
-        //   screen looked more see-through than the top). Opacity and the idle fade still apply to all
-        int faint = 0;
+        // Legends: Arceus: every control at the same strength (the lower ones had faded on their own, 2 s after their last touch, and the sticks were drawn at 75 %: the
+        //   bottom of the screen looked more see-through than the top). Sword / Shield and Scarlet / Violet as released: the D-pad and the right stick fade 2 s
+        //   after their last touch (they sit over the dialogue box) and the sticks are drawn at 75 %. Opacity and the idle fade still apply to all
+        int faint = !GESTURES_ON && t - g_inner_t > 2.0;
         int menu = GESTURES_ON && touch_menu_active();   // its items are tapped: the buttons go (target_at)
         for (int c = C_A; c < NCTL; c++) { if (!g_c[c].shown || (menu && (c == C_THROW || c == C_LOCK))) continue;
             int on = (g_btn & g_c[c].btn) != 0; float al = c >= C_UP && c <= C_RIGHT && faint && !on ? 0.25f : 1.0f; if (idle) al = fminf(al, ia);
@@ -792,8 +796,8 @@ int front_overlay(dm_ovl_item *it, int max, int width, int height) {
             bubble(it, &n, max, &g_c[c], on, 0, al);
             if (c >= C_UP && c <= C_RIGHT && al == 1.0f) { float r = g_c[c].r, ox = c == C_LEFT ? -0.42f : c == C_RIGHT ? 0.42f : 0, oy = c == C_UP ? -0.42f : c == C_DOWN ? 0.42f : 0;
                 add(it, &n, max, g_c[c].cx + ox * r, g_c[c].cy + oy * r, r * 0.22f, OVL_DISC, 255, 255, 255, 0.9f); } }
-        compass(it, &n, max, g_stick_on ? 1.0f : idle ? ia : 1.0f, g_stick_x, g_stick_y, g_knob_x, g_knob_y, g_c[C_STICK].r);
-        if (g_c[C_RSTICK].shown) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : 1.0f, g_c[C_RSTICK].cx,
+        compass(it, &n, max, g_stick_on ? 1.0f : idle ? ia : GESTURES_ON ? 1.0f : 0.75f, g_stick_x, g_stick_y, g_knob_x, g_knob_y, g_c[C_STICK].r);
+        if (g_c[C_RSTICK].shown) compass(it, &n, max, g_rstick_on ? 1.0f : idle ? ia : GESTURES_ON ? 1.0f : faint ? 0.25f : 0.75f, g_c[C_RSTICK].cx,
              g_c[C_RSTICK].cy, g_rknob_x, g_rknob_y, g_c[C_RSTICK].r);
         for (int i = 0; i < n; i++) { it[i].a *= g_opacity; it[i].galpha *= g_opacity; }
     }

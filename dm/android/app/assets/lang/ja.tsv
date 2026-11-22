@@ -50,6 +50,8 @@ Display	表示
 Done	完了
 Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset).	ドラッグで移動。サイズを変えるには、ボタンに触れてから画面のどこでも2本指でピンチ。ダブルタップで非表示。−を2秒長押しで保存（+の長押しでリセット）。
 Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	ドラッグで移動、ピンチでサイズ変更、ダブルタップで非表示。−を2秒長押しで保存（+と−を同時に長押しでリセット）。
+Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	ドラッグで移動。サイズを変えるには、ボタンに触れてから画面のどこでも2本指でピンチ。ダブルタップで非表示。−を2秒長押しで保存（+と−を同時に長押しでリセット）。
+Button size	ボタンのサイズ
 Edit notes	メモを編集
 Enter both the server and the room code.	サーバーとルームコードの両方を入力してください。
 Export save data	セーブデータを書き出す
