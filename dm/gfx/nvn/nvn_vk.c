@@ -1521,6 +1521,7 @@ static uint64_t g_frame_no;
 uint64_t g_tfchk_at, g_tfchk_frame; uint32_t g_tfchk_n;   // the transform feedback check (draw_, the first capture on Arm's driver)
 static uint64_t g_dsc_gen = 1;   // descriptor pools reset (desc_flush's reuse: a set from an older generation is gone)
 static uint64_t g_wait_ring_ns;   // DM_VK_PROF: waits for a free submission slot (the GPU 6 submissions behind)
+_Atomic uint64_t g_st_slot_ns, g_st_submit_ns;   // the same, and the queue submissions, never reset (hle_nvn.c's long-frame log takes per-frame differences)
 static int hold_dec(void); static void seg_gap_begin(sub_t *s);   // (the held frame's pieces: below)
 void mtl_sub_begin(void) {
     mtl_init();
@@ -1528,7 +1529,7 @@ void mtl_sub_begin(void) {
     if (g_sub) VDIE("submit re-entered");
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     sub_t *s = &g_subs[g_sub_next]; g_sub_next = (g_sub_next + 1) % NSUB;
-    if (s->fence) { uint64_t t0 = mono_ns(); mtl_wait(s->fence, UINT64_MAX); g_wait_ring_ns += mono_ns() - t0; }
+    if (s->fence) { uint64_t t0 = mono_ns(); mtl_wait(s->fence, UINT64_MAX); uint64_t d = mono_ns() - t0; g_wait_ring_ns += d; atomic_fetch_add(&g_st_slot_ns, d); }
     defer_drain();
     VKCHECK(vkResetCommandPool(g_dev, s->pool, 0)); arena_reset(s);
     for (int i = 0; i < s->ndp; i++) vkResetDescriptorPool(g_dev, s->dp[i], 0); s->cdp = 0; g_dsc_gen++;   // (desc_flush's reused sets were in these pools)
@@ -1910,7 +1911,7 @@ uint64_t mtl_sub_commit(void) {
     if (s->ucb_open) { barrier_all(s->ucb); VKCHECK(vkEndCommandBuffer(s->ucb)); cbs[n++] = s->ucb; s->ucb_open = 0; }
     cbs[n++] = s->cb;
     g_sub = NULL;
-    uint64_t vt0 = mono_ns(); uint64_t r = submit_tracked(s, cbs, n); g_vp_c += mono_ns() - vt0;   // (DM_VK_PROF: the queue submission)
+    uint64_t vt0 = mono_ns(); uint64_t r = submit_tracked(s, cbs, n); uint64_t vd = mono_ns() - vt0; g_vp_c += vd; atomic_fetch_add(&g_st_submit_ns, vd);   // (DM_VK_PROF: the queue submission)
     return r;
 }
 void mtl_drain(void) { mtl_finish(); }
@@ -4056,20 +4057,34 @@ static pthread_mutex_t g_pw_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_
 int nvn_vk_prewarm_progress(int *done, int *total) { *done = atomic_load(&g_pw_done); *total = atomic_load(&g_pw_total); return atomic_load(&g_pw_hold); }
 static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
 // the game's first submission: waits until the prewarm is done (at most DM_VK_PREWARM_WAIT seconds, 300 by default; then the rest is built while it plays)
+// the game is playing (its first submission past prewarm_wait): from then on the prewarm builds on one thread, one pipeline after each present (prewarm_pace)
+static atomic_int g_pw_playing;
 static void prewarm_wait(void) {
-    if (!atomic_load(&g_pw_hold)) return;
+    if (!atomic_load(&g_pw_hold)) { atomic_store(&g_pw_playing, 1); return; }
     const char *e = getenv("DM_VK_PREWARM_WAIT"); double lim = e ? atof(e) : 300; uint64_t t0 = mono_ns();
     pthread_mutex_lock(&g_pw_mu);
     while (atomic_load(&g_pw_hold) && (mono_ns() - t0) / 1e9 < lim) {
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
         pthread_cond_timedwait(&g_pw_cv, &g_pw_mu, &ts);
     }
-    int late = atomic_load(&g_pw_hold); atomic_store(&g_pw_hold, 0); pthread_mutex_unlock(&g_pw_mu);
+    int late = atomic_load(&g_pw_hold); atomic_store(&g_pw_hold, 0); atomic_store(&g_pw_playing, 1); pthread_mutex_unlock(&g_pw_mu);
     VLOG("prewarm: the game waited %.1f s for its pipelines (%d of %d)%s", (mono_ns() - t0) / 1e9, atomic_load(&g_pw_done), atomic_load(&g_pw_total),
          late ? ": the wait ran out, the rest are built while it plays" : "");
 }
+// During play (S25+ Arceus, Xclipse 530 Violet: hitches of 60-580 ms with the render thread stuck in its submit while background pipelines were being built, the driver
+//   and the cores shared with it): one pipeline right after each present, so a build overlaps the start of the next frame's work, not its submission; at most
+//   one per frame, at a lower priority. DM_VK_PREWARM_PLAY=free: as before (3 ms apart)
+__attribute__((weak)) uint64_t dm_guest_frame(void) { return 0; }   // (presents so far: host hle_os.c's; this one only for the graphics tests, which run no prewarm)
+static int prewarm_play_free(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREWARM_PLAY"); v = e && !strcmp(e, "free"); } return v; }
+static void prewarm_pace_play(void) {
+    if (!atomic_load(&g_pw_playing) || prewarm_play_free()) return;
+    static __thread int lowered; if (!lowered) { lowered = 1; setpriority(PRIO_PROCESS, (id_t)gettid(), 10); }
+    static _Atomic uint64_t last; uint64_t f0 = atomic_load(&last);
+    for (int k = 0; k < 2000 && dm_guest_frame() <= f0; k++) usleep(2000);   // (the next present, at most 4 s: a paused game still gets its pipelines)
+    atomic_store(&last, dm_guest_frame());
+}
 static void prewarm_pace(int i, int *waits) {
-    if (!prewarm_all()) usleep(3000);
+    if (!prewarm_all() && prewarm_play_free()) usleep(3000);
     if (i % 8) return;
     static long floor_mb = -1; if (floor_mb < 0) { const char *e = getenv("DM_VK_PREWARM_MIN_MB"); floor_mb = e ? atol(e) : 1536; }
     for (int k = 0; k < 600; k++) { long m = mem_avail_mb(); if (m < 0 || m >= floor_mb) break; if (!k) (*waits)++; usleep(100000); }   // at most a minute per wait
@@ -4099,6 +4114,7 @@ static void *prewarm_static(void) {
         pkey_s ks; memset(&ks, 0, sizeof ks); ks.k = k; ks.s = r.s;
         pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso_s, &ks) != NULL; pthread_mutex_unlock(&g_psomu);
         if (have) { had++; continue; }
+        prewarm_pace_play();
         if (pso_lookup_s(pr, &k, &r.s, 0)) built++; else failed++;
         prewarm_pace(built + failed, &waits);
     }
@@ -4145,9 +4161,12 @@ static void *prewarm_worker(void *arg) {
         pkey k = g_pw.rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
         pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
         if (have) { atomic_fetch_add(&g_pw.had, 1); continue; }
+        int last_one = arg && atomic_load(&g_pw_playing) && !prewarm_play_free();   // (the game started: this extra thread builds the one it took, then one thread builds the rest)
+        prewarm_pace_play();
         if (g_pw.cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); atomic_fetch_add(&g_pw.built, 1); } else atomic_fetch_add(&g_pw.failed, 1); }   // (into the driver's cache, not kept)
         else if (pso_lookup(pr, &k, 0)) atomic_fetch_add(&g_pw.built, 1); else atomic_fetch_add(&g_pw.failed, 1);
         prewarm_pace(atomic_load(&g_pw.built) + atomic_load(&g_pw.failed), &waits);
+        if (last_one) break;
     }
     atomic_fetch_add(&g_pw.waits, waits);
     return NULL;
