@@ -141,6 +141,7 @@ static int fd_export_mark(int op);   // (mtl_init, mtl_pool_add)
 static int mark_file(const char *name, const char *what, int op);
 static int heap_import_mark(int op);   // the same for the dma-buf heap route (its own file: a crash of one route does not close the other)
 static void pcache_open(void); static void *prewarm_main(void *arg);   // pipeline list and cache (below)
+static atomic_int g_pw_hold; static int prewarm_all(void); static void prewarm_wait(void);   // the game waiting for the prewarm (below)
 // The Vulkan driver: DM_VK_DRIVER=<folder>/<library> (a driver package chosen on the setup screen: Mesa Turnip for Adreno, Mesa PanVK for Mali) is opened through
 // libadrenotools (BSD-2-Clause, shipped in the app with its hook libraries); when that is missing or fails, the library itself (PanVK talks to the Mali kernel driver,
 // kbase, on its own and needs none of the Adreno hooks); when that fails too, the system's libvulkan
@@ -749,7 +750,10 @@ void mtl_init(void) {
 #endif
     tfp_decide();    // (and whether they go as points: tf_points.h)
     pcache_open();
-    if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) { pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); }
+    if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) {
+        if (prewarm_all()) atomic_store(&g_pw_hold, 1);   // (the game's first submission waits for it: prewarm_wait)
+        pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); else atomic_store(&g_pw_hold, 0);
+    }
 }
 
 // ================= Device memory (images, internal buffers) =================
@@ -1520,6 +1524,7 @@ static uint64_t g_wait_ring_ns;   // DM_VK_PROF: waits for a free submission slo
 static int hold_dec(void); static void seg_gap_begin(sub_t *s);   // (the held frame's pieces: below)
 void mtl_sub_begin(void) {
     mtl_init();
+    prewarm_wait();   // the first one: every listed pipeline is built before the game draws (DM_VK_PREWARM)
     if (g_sub) VDIE("submit re-entered");
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     sub_t *s = &g_subs[g_sub_next]; g_sub_next = (g_sub_next + 1) % NSUB;
@@ -4007,8 +4012,31 @@ static long mem_avail_mb(void) {
     return -1;
 #endif
 }
+// DM_VK_PREWARM: "all" (the default) builds every listed pipeline before the game draws its first frame, on several threads (the game waits at its first submission
+//   and the app shows the count, nvn_vk_prewarm_progress), so nothing is built while playing: on Adreno a pipeline still being built skips its draw (objects missing
+//   or popping in for the first minutes), elsewhere it is a hitch. An S25+ built its 1,400-1,600 recorded pipelines in 7-21 s one at a time. "background": as before,
+//   one at a time with a pause after each while the game plays
+static int prewarm_all(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREWARM"); v = !(e && !strcmp(e, "background")); } return v; }
+static atomic_int g_pw_done, g_pw_total, g_pw_hold;   // pipelines handled / listed, and 1 while the game waits for them
+static pthread_mutex_t g_pw_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pw_cv = PTHREAD_COND_INITIALIZER;
+// for the app's progress line (android_main.c nativePrewarm): 1 while the game waits for the pipelines
+int nvn_vk_prewarm_progress(int *done, int *total) { *done = atomic_load(&g_pw_done); *total = atomic_load(&g_pw_total); return atomic_load(&g_pw_hold); }
+static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
+// the game's first submission: waits until the prewarm is done (at most DM_VK_PREWARM_WAIT seconds, 300 by default; then the rest is built while it plays)
+static void prewarm_wait(void) {
+    if (!atomic_load(&g_pw_hold)) return;
+    const char *e = getenv("DM_VK_PREWARM_WAIT"); double lim = e ? atof(e) : 300; uint64_t t0 = mono_ns();
+    pthread_mutex_lock(&g_pw_mu);
+    while (atomic_load(&g_pw_hold) && (mono_ns() - t0) / 1e9 < lim) {
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_pw_cv, &g_pw_mu, &ts);
+    }
+    int late = atomic_load(&g_pw_hold); atomic_store(&g_pw_hold, 0); pthread_mutex_unlock(&g_pw_mu);
+    VLOG("prewarm: the game waited %.1f s for its pipelines (%d of %d)%s", (mono_ns() - t0) / 1e9, atomic_load(&g_pw_done), atomic_load(&g_pw_total),
+         late ? ": the wait ran out, the rest are built while it plays" : "");
+}
 static void prewarm_pace(int i, int *waits) {
-    usleep(3000);
+    if (!prewarm_all()) usleep(3000);
     if (i % 8) return;
     static long floor_mb = -1; if (floor_mb < 0) { const char *e = getenv("DM_VK_PREWARM_MIN_MB"); floor_mb = e ? atol(e) : 1536; }
     for (int k = 0; k < 600; k++) { long m = mem_avail_mb(); if (m < 0 || m >= floor_mb) break; if (!k) (*waits)++; usleep(100000); }   // at most a minute per wait
@@ -4023,8 +4051,9 @@ static void *prewarm_static(void) {
     uint64_t t0 = mono_ns(); int waits = 0, n = 0, built = 0, had = 0, failed = 0, noshader = 0;
     static nvn_hmap progs = {.klen = 40};
     pso_rec_s r;
+    { long here = ftell(f); fseek(f, 0, SEEK_END); long end = ftell(f); fseek(f, here, SEEK_SET); atomic_store(&g_pw_total, (int)((end - here) / (long)sizeof r)); }
     while (fread(&r, sizeof r, 1, f) == 1) {
-        n++;
+        n++; atomic_fetch_add(&g_pw_done, 1);
         vprog *pr = nvn_hm_get(&progs, r.r.key);
         if (!pr) {
             pr = calloc(1, sizeof *pr); int ok = 1;
@@ -4046,44 +4075,81 @@ static void *prewarm_static(void) {
     pcache_save();
     return NULL;
 }
-static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm");
-    (void)arg; uint64_t t0 = mono_ns(); int waits = 0;
+// the main prewarm's shared state: the list, the next entry to take, the programs made so far (their layouts made once, under pw.mu: prog_layout is not for two threads)
+static struct { pso_rec *rs; int n, ns, cache_only; atomic_int next, unfit, built, had, failed, noshader, waits; pthread_mutex_t mu; nvn_hmap progs, seen; } g_pw = {
+    .mu = PTHREAD_MUTEX_INITIALIZER, .progs = {.klen = 40}, .seen = {.klen = sizeof(pso_rec)} };
+// a pipeline from the shipped list (recorded on another phone): its colour / depth / stencil targets and vertex formats must be ones this GPU has, or it is left
+//   out (a driver handed an unsupported format may fail or worse; this phone's own list only holds what it built)
+static int fmt_has(uint32_t f, VkFormatFeatureFlags need, int buffer) {
+    if (!f) return 1;
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, (VkFormat)f, &fp);
+    return ((buffer ? fp.bufferFeatures : fp.optimalTilingFeatures) & need) == need;
+}
+static int pso_formats_ok(const pkey *k) {
+    for (int i = 0; i < 8; i++) if (!fmt_has(k->cfmt[i], VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, 0)) return 0;
+    if (!fmt_has(k->dfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0) || !fmt_has(k->sfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0)) return 0;
+    for (int i = 0; i < 32; i++) if (k->attr[i].used && !fmt_has(k->attr[i].fmt, VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT, 1)) return 0;
+    return 1;
+}
+static void *prewarm_worker(void *arg) {
+    if (arg) DM_THREAD_NAME("dm-prewarm");   // (the threads started for it; the caller keeps its own name)
+    int waits = 0;
+    for (int i; (i = atomic_fetch_add(&g_pw.next, 1)) < g_pw.n; ) {
+        atomic_fetch_add(&g_pw_done, 1);
+        if (i < g_pw.ns && !pso_formats_ok(&g_pw.rs[i].k)) { atomic_fetch_add(&g_pw.unfit, 1); continue; }
+        pthread_mutex_lock(&g_pw.mu);
+        if (nvn_hm_get(&g_pw.seen, &g_pw.rs[i])) { pthread_mutex_unlock(&g_pw.mu); continue; }
+        nvn_hm_put(&g_pw.seen, &g_pw.rs[i], (void *)1);
+        vprog *pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key);
+        if (!pr) {
+            pr = calloc(1, sizeof *pr); int ok = 1;
+            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
+            if (!ok || !pr->sh[0]) { free(pr); pthread_mutex_unlock(&g_pw.mu); atomic_fetch_add(&g_pw.noshader, 1); continue; }
+            prog_layout(pr, 0);
+            nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, pr);
+        }
+        pthread_mutex_unlock(&g_pw.mu);
+        pkey k = g_pw.rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
+        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
+        if (have) { atomic_fetch_add(&g_pw.had, 1); continue; }
+        if (g_pw.cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); atomic_fetch_add(&g_pw.built, 1); } else atomic_fetch_add(&g_pw.failed, 1); }   // (into the driver's cache, not kept)
+        else if (pso_lookup(pr, &k, 0)) atomic_fetch_add(&g_pw.built, 1); else atomic_fetch_add(&g_pw.failed, 1);
+        prewarm_pace(atomic_load(&g_pw.built) + atomic_load(&g_pw.failed), &waits);
+    }
+    atomic_fetch_add(&g_pw.waits, waits);
+    return NULL;
+}
+// how many build at once: one in the background; before the game, the cores less one (at most 6), 2 on phones with 6 GB or less (each build takes the driver's memory)
+static int prewarm_threads(void) {
+    if (!prewarm_all()) return 1;
+    const char *e = getenv("DM_VK_PREWARM_THREADS"); if (e && atoi(e) > 0) return atoi(e) > 16 ? 16 : atoi(e);
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN), pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE);
+    int t = cpus > 1 ? (int)cpus - 1 : 1; if (t > 6) t = 6;
+    if (pages > 0 && psz > 0 && (double)pages * psz < 6.5e9 && t > 2) t = 2;
+    return t;
+}
+static void *prewarm_run(void) {
+    uint64_t t0 = mono_ns();
     if (!g_eds) return prewarm_static();   // the shared lists leave out the draw state this driver needs built in: this phone's own list instead
     pso_rec *rs = NULL; int n = 0;
     int ns = pso_rec_load(getenv("DM_VK_PSO_SEED"), &rs, &n), nr = pso_rec_load(getenv("DM_VK_PSO_RECORD"), &rs, &n);
-    if (!n) return NULL;
-    static nvn_hmap progs = {.klen = 40}; static nvn_hmap seen = {.klen = sizeof(pso_rec)};
-    int built = 0, had = 0, failed = 0, noshader = 0;
-    // Phones with little memory (6.5 GB or less, or DM_VK_PREWARM=cache): every pipeline is built once into the driver's pipeline cache (saved below) and destroyed
-    //   at once, instead of kept. Kept, the 1157 of Sword / Shield's list held about 400 MB of the driver's own memory for the whole run (Galaxy S25+ [mem-by]:
-    //   scudo:primary 398 MB of the app's 551, 2026-11-20), which a 4 GB phone does not have; from the cache a pipeline the game asks for later is made in a few ms
-    //   instead of compiled (and on Adreno in the background, DM_VK_ASYNC_PSO). DM_VK_PREWARM=keep keeps them on any phone
-    int cache_only; { const char *e = getenv("DM_VK_PREWARM");
-        FILE *mf = fopen("/proc/meminfo", "r"); long tot = 0; char ln[128]; while (mf && fgets(ln, sizeof ln, mf)) if (!strncmp(ln, "MemTotal:", 9)) { tot = atol(ln + 9) / 1024; break; } if (mf) fclose(mf);
-        cache_only = e && !strcmp(e, "cache");   // (opt-in: on the S25+ it saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
-        if (cache_only) VLOG("prewarm: into the pipeline cache only, not kept (%s): this phone has %ld MB", e ? "DM_VK_PREWARM=cache" : "6.5 GB or less", tot); }
-    for (int i = 0; i < n; i++) {
-        if (nvn_hm_get(&seen, &rs[i])) continue; nvn_hm_put(&seen, &rs[i], (void *)1);
-        vprog *pr = nvn_hm_get(&progs, rs[i].key);
-        if (!pr) {
-            pr = calloc(1, sizeof *pr); int ok = 1;
-            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
-            if (!ok || !pr->sh[0]) { free(pr); noshader++; continue; }
-            nvn_hm_put(&progs, rs[i].key, pr);
-        }
-        pkey k = rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
-        prog_layout(pr, 0);
-        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
-        if (have) { had++; continue; }
-        if (cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); built++; } else failed++; }   // (into the driver's cache, not kept)
-        else if (pso_lookup(pr, &k, 0)) built++; else failed++;
-        prewarm_pace(built + failed, &waits);
-    }
-    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %.1f s (paused %d times for low memory)", n, ns, nr, built, cache_only ? " (cache only)" : "", had, failed, noshader, (mono_ns() - t0) / 1e9, waits);
-    free(rs);
+    if (!n) { free(rs); return NULL; }
+    g_pw.rs = rs; g_pw.n = n; g_pw.ns = ns; atomic_store(&g_pw_total, n);   // (the shipped list first: pso_rec_load appends)
+    int nt = prewarm_threads(); pthread_t th[16]; int started = 0;
+    // DM_VK_PREWARM=cache: every pipeline built once into the driver's pipeline cache (saved below) and destroyed at once, instead of kept (opt-in: on the S25+ it
+    //   saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
+    { const char *e = getenv("DM_VK_PREWARM"); g_pw.cache_only = e && !strcmp(e, "cache"); if (g_pw.cache_only) VLOG("prewarm: into the pipeline cache only, not kept (DM_VK_PREWARM=cache)"); }
+    for (int i = 1; i < nt; i++) if (!pthread_create(&th[started], NULL, prewarm_worker, (void *)1)) started++;
+    prewarm_worker(NULL);
+    for (int i = 0; i < started; i++) pthread_join(th[i], NULL);
+    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %d shipped ones with formats this GPU lacks, %.1f s on %d thread(s)%s (paused %d times for low memory)",
+         n, ns, nr, atomic_load(&g_pw.built), g_pw.cache_only ? " (cache only)" : "", atomic_load(&g_pw.had), atomic_load(&g_pw.failed), atomic_load(&g_pw.noshader), atomic_load(&g_pw.unfit), (mono_ns() - t0) / 1e9, started + 1,
+         prewarm_all() ? ", before the game" : "", atomic_load(&g_pw.waits));
+    free(rs); g_pw.rs = NULL;
     pcache_save();
     return NULL;
 }
+static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm"); (void)arg; prewarm_run(); prewarm_finished(); return NULL; }
 // Builds the pipeline for key k (no lookup: pso_get and the prewarm do that); ss: the draw state built in, on a driver without extended dynamic state (else NULL)
 // A vertex attribute's format as the shader reads it. Vulkan wants the format's numeric type to match the shader input's (VUID-VkGraphicsPipelineCreateInfo-Input-08733;
 //   the driver is free to do anything otherwise); NVIDIA's hardware, which the game was made for, hands a 32-bit attribute's bits to the shader unchanged whatever its

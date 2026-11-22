@@ -361,6 +361,10 @@ public final class GameMenu {
             slider(a, t(a, "Draw distance"), "DM_DRAW_DIST", 50, 200, 100, v -> v == 100 ? t(a, "the game's own (100 %)") : v + " %");
             note(a, t(a, "How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU."));
         }
+        // the shaders this phone knows, built before the game starts (nvn_vk.c DM_VK_PREWARM): from the next start
+        choice(a, "DM_VK_PREWARM", t(a, "Shaders at start"), new String[][] {
+            { "", t(a, "All before playing"), t(a, "Every shader this phone has used is built before the game starts, on all cores: a short wait, then nothing missing or stuttering") },
+            { "background", t(a, "While playing"), t(a, "The game starts at once and builds them as it goes: objects can be missing or stutter for the first minutes") } });
         // the game's own 3D render scale, capped (android_main.c DM_RES_CAP, hle_resscale.c): Sword / Shield, at once. The HUD and text stay sharp; only the 3D is drawn smaller
         // Battery saver (android_main.c power_saver, #333): live
         if (!GameSettings.arceus(a)) choice(a, "DM_POWER", t(a, "Power"), new String[][] { { "", t(a, "Balanced"), t(a, "Balanced: the best picture this phone holds at a steady frame rate") },
