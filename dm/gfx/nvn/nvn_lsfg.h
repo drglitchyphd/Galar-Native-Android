@@ -213,7 +213,12 @@ static const char *ls_fmt_lacks(VkPhysicalDevice pd, VkFormat f) {
     const VkFormatFeatureFlags2 t = f3.optimalTilingFeatures;
     if (!(t & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT)) return "storage images";
     if (!(t & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT) || !(t & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)) return "linear filtering";
-    if (!(t & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) return "storage writes without a format";
+    // (refused only where the device feature is off too: Lossless Scaling ran on a Galaxy S25+ in v0.67 without this check, and whether real drivers fill the per-format
+    //   bit in is unknown, the simulated set cannot say. A driver with the feature but without the bit is logged once and used)
+    if (!(t & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) {
+        VkPhysicalDeviceFeatures pf; vkGetPhysicalDeviceFeatures(pd, &pf);
+        if (!pf.shaderStorageImageWriteWithoutFormat) return "storage writes without a format";
+        static int said; if (!said++) fprintf(stderr, "[nvn-vk] Lossless Scaling: the driver has storage writes without a format but does not mark format %d for them: used anyway\n", (int)f); }
     return NULL;
 }
 static int ls_fmt_ok(lsfg *g, VkFormat f) { return ls_fmt_lacks(g->pd, f) == NULL; }
