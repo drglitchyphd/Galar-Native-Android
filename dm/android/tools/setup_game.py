@@ -80,6 +80,58 @@ def watch_files(d, end, total, stop):
         done = min(done, total - 1)
         if done != shown: shown = done; print(f'PROGRESS {done}/{total}', flush=True)
 
+def distinct_shaders(found_map, pkg, fact_tables, never, out_map):
+    """The shaders that are another shader's program under a different key are left out of the map the shader build reads (out_map), so each distinct program is
+    translated once; → {left-out key: the key translated for it}. About half of Sword / Shield's 38,501 shaders are such repeats (census 2026-11-22: 18,689
+    distinct, 0 exceptions). Two shaders are the same program when everything the translation reads of them is the same: the stage, the code area (with the
+    c1 tables in it), the control section (the transform feedback layout is read from it) and their rows in the answer tables. The control sections of such
+    repeats differ only in the 8 bytes at +0x7d0, which nothing reads, so those are left out of the comparison. Shaders inside the game's main program, shaders
+    that wait for capture and shaders with a hand-written replacement (never) are always kept. The shader build itself is unchanged (any edit to it changes the
+    shader chain version): it only gets a shorter map"""
+    facts = {}
+    for t in fact_tables:
+        if not os.path.isfile(t): continue
+        for ln in open(t, encoding='utf-8'):
+            if ln.strip() and not ln.startswith('#'): k, _, v = ln.rstrip('\n').partition('\t'); facts.setdefault(k, []).append(v)
+    first, same, kept, lines = {}, {}, set(), []; pack = (None, b'', [])
+    for ln in open(found_map, encoding='utf-8'):
+        c = ln.rstrip('\n').split('\t')
+        if len(c) <= 4 or c[0] == 'package' or c[0].startswith('#'): lines.append(ln); continue
+        key = c[3]
+        if key in same: continue
+        fp = None
+        if key not in kept and key not in never and c[0].endswith('.bin') and c[1].isdigit() and os.path.isfile(os.path.join(pkg, c[0])):
+            if pack[0] != c[0]:
+                d = open(os.path.join(pkg, c[0]), 'rb').read(); pack = (c[0], d, [m.start() for m in re.finditer(b'BTCDBTCD', d)])
+            _, d, at = pack; k = int(c[1])
+            if k < len(at):
+                rec = d[at[k]:at[k + 1] if k + 1 < len(at) else len(d)]; ci = rec.find(bytes.fromhex('34127698'))
+                if ci >= 0x38 and len(rec) >= ci + 0x7d8:
+                    ctl = bytearray(rec[ci:ci + 0x880]); ctl[0x7d0:0x7d8] = bytes(8)
+                    fp = hashlib.sha256(b'\0'.join([c[0][:2].encode(), str(ci).encode(), rec[0x38:ci], bytes(ctl), '\n'.join(facts.get(key, [])).encode()])).digest()
+        if fp is not None and fp in first: same[key] = first[fp]; continue
+        if fp is not None: first[fp] = key
+        kept.add(key); lines.append(ln)
+    with open(out_map, 'w', encoding='utf-8') as f: f.writelines(lines)
+    return same
+
+def share_translated(vk, same):
+    """Each left-out shader gets the files of the one translated for it (distinct_shaders): its SPIR-V, the vertex shaders' GL depth variant and the reflection,
+    which hold nothing of the key. A link where the storage has them (no bytes written), else a copy; → how many shaders got theirs"""
+    n = 0
+    for key, rep in same.items():
+        got = False
+        for end in ('.spv', '.gl.spv', '.vkr'):
+            src = os.path.join(vk, rep + end); dst = os.path.join(vk, key + end)
+            try: os.remove(dst)
+            except FileNotFoundError: pass
+            if not os.path.isfile(src): continue
+            try: os.link(src, dst)
+            except OSError: shutil.copyfile(src, dst)
+            got = got or end == '.spv'
+        n += got
+    return n
+
 def translated_mark(work):
     return os.path.join(work, 'translated.json')
 
@@ -431,7 +483,16 @@ def main():
         if not resumed:
             for d in glob.glob(os.path.join(S, 'dmsh_*')): shutil.rmtree(d, ignore_errors=True)   # an interrupted run's scratch dir would count toward the progress
         os.makedirs(vk, exist_ok=True)
-        stop = threading.Event(); found = os.path.join(a.work, 'shader_map.found.tsv')
+        stop = threading.Event(); found = os.path.join(a.work, 'shader_map.found.tsv'); same = {}
+        # each distinct program translated once (distinct_shaders); DM_SETUP_DEDUP=0: every shader translated for itself, as before
+        if os.environ.get('DM_SETUP_DEDUP', '1') != '0':
+            uniq = os.path.join(a.work, 'shader_map.distinct.tsv')
+            try:
+                over = PROFILE.table('msl_override')
+                same = distinct_shaders(found, pkg, [str(PROFILE.table('shader_facts.tsv')), os.path.join(a.work, 'shader_facts.found.tsv')],
+                                        {f.name[:-len('_b.metal')] for f in over.glob('*_b.metal')} if over.is_dir() else set(), uniq)
+            except (OSError, ValueError) as e: log.write(f'shaders: the repeats could not be found ({e}): every shader is translated\n'); same = {}
+            if same: log.write(f'shaders: {len(same)} are repeats of another one, {len(found_keys) - len(same)} to translate\n'); log.flush(); found = uniq
         threading.Thread(target=watch_translation, args=(found, S, os.path.join(cache, 'b-' + chain), stop), daemon=True).start()
         # the translators go through dmsh_gate when the app has it: each beyond the first starts only while the phone has the memory for it (dmsh_gate.c)
         gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
@@ -439,7 +500,7 @@ def main():
         log.write(f'translators: {env.get("J", "8")} at most, ' + ('started as memory allows (dmsh_gate)\n' if gate else 'all at once (no dmsh_gate)\n'))
         try: run([py, chain_tool('dmsh_build.py'), pkg, cache], retry_killed=3,
             env=dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(S, 'cas'), WORK=S,
-                     DMSH_SOURCE_MAP=os.path.join(a.work, 'shader_map.found.tsv'),
+                     DMSH_SOURCE_MAP=found,
                      DMSH_FACTS=os.path.join(a.work, 'shader_facts.found.tsv'),
                      DMSH_PAIRS=os.path.join(a.work, 'shader_pairs.found.tsv'),
                      MAIN=os.path.join(exefs, 'main')))
@@ -453,6 +514,7 @@ def main():
 
         step(5)
         reflect(vk, built)
+        if same: log.write(f'shaders: {share_translated(vk, same)} repeats take their translated shader\'s files\n'); log.flush()
         # the pack compressed (zlib per shader, the engine inflates each as it loads it: nvn_vk.c pak_blob): about 3.4 times smaller on the phone (Violet 2.9 GB → 0.85 GB, Sword 2.3 → 0.7)
         raw = os.path.join(S, 'shaders.raw.pak')
         run([py, os.path.join(DM, 'android/tools/spv_pak.py'), vk, raw])
