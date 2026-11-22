@@ -484,8 +484,10 @@ def main():
             for d in glob.glob(os.path.join(S, 'dmsh_*')): shutil.rmtree(d, ignore_errors=True)   # an interrupted run's scratch dir would count toward the progress
         os.makedirs(vk, exist_ok=True)
         stop = threading.Event(); found = os.path.join(a.work, 'shader_map.found.tsv'); same = {}
-        # each distinct program translated once (distinct_shaders); DM_SETUP_DEDUP=0: every shader translated for itself, as before
-        if os.environ.get('DM_SETUP_DEDUP', '1') != '0':
+        # each distinct program translated once (distinct_shaders), with DM_SETUP_DEDUP=1 only: OFF by default. It gives the same pack, but a full PC setup of Shield
+        #   (22 translators, 2026-11-22) took 75 min with it against 7 min without, twice in either order; why the shader build is that much slower on the shorter
+        #   map is not known yet. Every shader is translated for itself, as before, until that is found
+        if os.environ.get('DM_SETUP_DEDUP', '0') == '1':
             uniq = os.path.join(a.work, 'shader_map.distinct.tsv')
             try:
                 over = PROFILE.table('msl_override')
