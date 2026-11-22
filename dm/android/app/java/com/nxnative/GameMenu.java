@@ -623,6 +623,7 @@ public final class GameMenu {
         TextView link = text(a, t(a, "Official downloads: %s", dl), 13, accent(a), false); link.setPadding(0, dp(a, 6), 0, 0);
         link.setOnClickListener(v -> { try { a.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(dl))); } catch (Exception e) { } });
         c.addView(link);
+        updates(a, official);
         // the credits: the copyright lines of the app's licence, then the licence itself
         String own = asset(a, "licenses/LICENSE.txt"); StringBuilder who = new StringBuilder();
         for (String l : own.split("\n")) { String s_ = l.trim();   // (not the GPL text's own copyright line, and each holder once: NOTICE and LICENSE-MIT both name them)
@@ -638,6 +639,21 @@ public final class GameMenu {
             String[] f = row.split("\t"); if (f.length < 3 || f[0].equals("LICENSE.txt")) continue;
             LinearLayout tc = card(a); titleRow(a, tc, f[1], null); tc.addView(text(a, f[2], 13, SUB, false)); reveal(a, tc, t(a, "Show the license"), asset(a, "licenses/" + f[0]));
         }
+    }
+    // Updates (AppUpdater.java): what the last check found, the release's own notes, and the buttons. An unofficial build is told why it gets none
+    private static void updates(Activity a, boolean official) {
+        heading(a, t(a, "Updates"));
+        LinearLayout c = card(a);
+        if (!official) { c.addView(text(a, t(a, "An unofficial build cannot update itself to an official release. Uninstall it and install the official app to get updates."), 13, SUB, false)); return; }
+        AppUpdater.listener = () -> { if (dlg != null && dlg.isShowing() && page.equals("about")) redraw(); };
+        String st = AppUpdater.status(a), notes = AppUpdater.notes(a);
+        if (!st.isEmpty()) c.addView(text(a, st, 14, TEXT, false));
+        if (!notes.isEmpty()) { TextView n = text(a, notes, 13, SUB, false); n.setPadding(0, dp(a, 6), 0, 0); c.addView(n); }
+        LinearLayout row = new LinearLayout(a); c.addView(row);
+        if (AppUpdater.canInstall(a)) button(a, row, t(a, "Update now"), true, () -> AppUpdater.install(a));
+        if (!AppUpdater.busy()) button(a, row, t(a, "Check for updates"), false, () -> AppUpdater.check(a, true));
+        boolean auto = AppUpdater.auto(a);
+        button(a, c, auto ? t(a, "Look for updates when the app starts: on") : t(a, "Look for updates when the app starts: off"), false, () -> { AppUpdater.setAuto(a, !auto); redraw(); });
     }
     private static void system(Activity a) {
         heading(a, t(a, "Graphics driver"));

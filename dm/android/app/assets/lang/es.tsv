@@ -492,3 +492,20 @@ How far grass and field details are drawn (from the next start). Lower: lighter 
 Dynamic	Dinámico
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinámico: 60 donde el teléfono puede, 30 donde no, con la imagen completa; la velocidad del juego se mantiene
 Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	La generación de fotogramas de Lossless Scaling no puede funcionar en este teléfono, así que se usa la de la propia app (el registro explica por qué).
+# the in-app updater (AppUpdater.java, About -> Updates)
+Updates	Actualizaciones
+An unofficial build cannot update itself to an official release. Uninstall it and install the official app to get updates.	Una versión no oficial no puede actualizarse a una versión oficial. Desinstálala e instala la app oficial para recibir actualizaciones.
+Update now	Actualizar ahora
+Check for updates	Buscar actualizaciones
+Look for updates when the app starts: on	Buscar actualizaciones al abrir la app: sí
+Look for updates when the app starts: off	Buscar actualizaciones al abrir la app: no
+Checking…	Comprobando…
+Downloading the update: %d%%	Descargando la actualización: %d%%
+The update is ready: confirm the installation on the screen that opens.	La actualización está lista: confirma la instalación en la pantalla que se abre.
+This is the latest version.	Esta es la última versión.
+Version %s is available. The game closes when the update installs, so save first.	La versión %s está disponible. El juego se cierra al instalar la actualización, así que guarda antes.
+%s %s is available. Open the menu, then About, to install it.	%s %s está disponible. Abre el menú y luego Acerca de para instalarla.
+Could not check for updates. Check the internet connection.	No se pudo buscar actualizaciones. Revisa la conexión a internet.
+The update could not be downloaded: %s	No se pudo descargar la actualización: %s
+The downloaded file is not an official %s release, so it was not installed.	El archivo descargado no es una versión oficial de %s, así que no se instaló.
+The update could not be installed: %s	No se pudo instalar la actualización: %s

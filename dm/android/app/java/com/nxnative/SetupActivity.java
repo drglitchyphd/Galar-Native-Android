@@ -140,6 +140,7 @@ public final class SetupActivity extends Activity {
         String[] signers = BuildSigner.digests(this); boolean official = BuildSigner.official(signers);
         envSet("DM_BUILD_SIGNER", BuildSigner.label(signers));
         if (!official) Toast.makeText(this, unofficial(), Toast.LENGTH_LONG).show();
+        AppUpdater.atStart(this, official);   // (an update found earlier is announced; a new look runs in the background and never holds the start)
         boolean asked = getIntent().getBooleanExtra("setup", false);
         // which game: a game's home screen shortcut names it; from the app's icon, with more than one game set up, this screen lets the player choose (the dual launcher)
         String want = getIntent().getStringExtra("game");
