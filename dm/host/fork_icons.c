@@ -143,13 +143,17 @@ static void bmp(const char *path, const uint8_t *rgba, int w, int h, int pitch) 
 }
 static void dl_path(char *b, size_t n, const char *name) { snprintf(b, n, "/storage/emulated/0/Download/%s", name); }
 static int g_dumped, g_first_dumped;
+int dm_fork_devno(int sp, int form);   // fork_dex.c (v66)
 void dm_fork_icons_work(void) {
     if (!g_dir_tried) index_dir(); if (!g_nfiles) return;
     if (!g_atlas && !(g_atlas = calloc((size_t)AW * AW, 4))) return;
     for (int k = 0; k < 8; k++) {
         int c = -1, sp = 0, form = 0; pthread_mutex_lock(&g_mu); for (int i = 0; i < g_ncell; i++) if (g_cell[i].st == 0) { c = i; sp = g_cell[i].sp; form = g_cell[i].form; break; } pthread_mutex_unlock(&g_mu);
         if (c < 0) { if (!g_dumped && g_ncell >= 8) { g_dumped = 1; char bp[256]; dl_path(bp, sizeof bp, "GalarFork-icons.bmp"); bmp(bp, g_atlas, AW, CELL * 2, AW); } return; }   // v64: the atlas, once
-        const char *f = icon_file(sp, form); if (!f && form) f = icon_file(sp, 0);
+        int dv = dm_fork_devno(sp, form), dv0 = dm_fork_devno(sp, 0);   // v66: files named by the game's own number (personal +0x4C)
+        const char *f = dv > 0 ? icon_file(dv, form) : NULL; if (!f && dv0 > 0 && form) f = icon_file(dv0, form);
+        if (!f) f = icon_file(sp, form); if (!f && form) f = icon_file(sp, 0);
+        ILOG("[FORK] icons: species %d form %d: game number %d", sp, form, dv);
         int ok = 0; if (f) { char p[1200]; snprintf(p, sizeof p, "%s/%s", g_dir, f); size_t n = 0; uint8_t *d = read_file(p, &n), *px = NULL; int w = 0, h = 0;
             if (d) px = bntx_rgba(d, n, &w, &h); free(d);
             if (px && !g_first_dumped) { g_first_dumped = 1; char bp[256]; dl_path(bp, sizeof bp, "GalarFork-icon-first.bmp"); bmp(bp, px, w, h, w); ILOG("[FORK] icons: that one is species %d form %d (%s)", sp, form, f); }   // v64

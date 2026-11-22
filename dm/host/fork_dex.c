@@ -131,12 +131,22 @@ static int load_tables(void) {
 
 // ---------- the Pokédex ----------
 static uint8_t g_dexblk[899]; static uint16_t g_dexidx[899];   // per species: block (0 Galar, 1 Armor, 2 Crown) and dex number (0: none)
+// v66: the game's own number of a species / form, personal +0x4C (PKHeX calls it Species): the icon files are named by it, not by the national dex
+//   (Steven's v64 / v65 BMPs: poke_icon_0819 holds Mimikyu, 0846 Incineroar). Forms: personal +0x1E is the index of the species' first extra form
+static uint8_t *g_pers; static size_t g_npers;
+int dm_fork_devno(int sp, int form) {
+    if (!g_pers || sp <= 0 || (size_t)(sp + 1) * 0xB0 > g_npers) return -1;
+    const uint8_t *e = g_pers + (size_t)sp * 0xB0; int fsi = rd16(e + 0x1E), fc = e[0x20];
+    if (form > 0 && fsi && form < fc && (size_t)(fsi + form) * 0xB0 <= g_npers) e = g_pers + (size_t)(fsi + form - 1) * 0xB0;
+    return rd16(e + 0x4C);
+}
 static int load_personal(void) {
     char p[1024]; romfs_path(p, sizeof p, "bin/pml/personal/personal_total.bin");
     size_t n = 0; uint8_t *d = read_file(p, &n); if (!d || n < 899 * 0xB0) { DLOG("[FORK] dex: %s not readable", p); free(d); return 0; }
     int c = 0; for (int s = 1; s < 899; s++) { const uint8_t *e = d + (size_t)s * 0xB0; uint16_t g = rd16(e + 0x5C), a = rd16(e + 0xAC), cr = rd16(e + 0xAE);
         if (g) { g_dexblk[s] = 0; g_dexidx[s] = g; } else if (a) { g_dexblk[s] = 1; g_dexidx[s] = a; } else if (cr) { g_dexblk[s] = 2; g_dexidx[s] = cr; } else continue; c++; }
-    free(d); DLOG("[FORK] dex: %d species with a dex number", c); return c > 0;
+    g_pers = d; g_npers = n;   // (v66: kept for dm_fork_devno)
+    DLOG("[FORK] dex: %d species with a dex number; game numbers (+0x4C): Skwovet 819 -> %d, Mimikyu 778 -> %d, Magikarp 129 -> %d", c, dm_fork_devno(819, 0), dm_fork_devno(778, 0), dm_fork_devno(129, 0)); return c > 0;
 }
 static const uint8_t k_pad[0x7F] = {
     0xA0, 0x92, 0xD1, 0x06, 0x07, 0xDB, 0x32, 0xA1, 0xAE, 0x01, 0xF5, 0xC5, 0x1E, 0x84, 0x4F, 0xE3, 0x53, 0xCA, 0x37, 0xF4, 0xA7, 0xB0, 0x4D, 0xA0, 0x18, 0xB7, 0xC2, 0x97,
