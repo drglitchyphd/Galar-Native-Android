@@ -714,7 +714,8 @@ public final class GameMenu {
             // the float-target routes (nvn_vk.c b10_on), Sword / Shield's white lit scene. Auto = the white-screen check's (mali_white_vk.inc: route A by default on ARM's
             //   own driver with Sword / Shield, route B when the check found A white, then the PanVK offer); On / Off are set in env.txt and win over it. Not offered for
             //   Legends: Arceus (its lit scene is not white on Arm's driver, and it draws its G-buffer and bloom in R11G11B10F, which the wider format makes twice the
-            //   size) nor Scarlet / Violet (not known to use the format)
+            //   size) nor Scarlet / Violet (not known to use the format). One alone does not tell the format from the compression (RGBA16F may get none on some GPUs):
+            //   the check tries both in turn by itself, so the note above them asks players for nothing (there are no testers)
             if (GameSettings.galar(a)) {
                 note(a, t(a, "Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself."));
                 choice(a, "DM_VK_B10_AS_RGBA16", t(a, "Bright scenes in a wider format"), new String[][] {

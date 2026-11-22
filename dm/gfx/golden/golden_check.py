@@ -12,9 +12,13 @@
   golden_check.py b10 [--out DIR] [--engine ID] [--title ID] [--players DIR] [--threshold N] [--max-diff PCT]
         The Mali float-target tests on this PC (DM_VK_B10_AS_RGBA16: R11G11B10F drawn as RGBA16F; DM_VK_B10_NOCOMPRESS: R11G11B10F targets without framebuffer
         compression): golden_synth with its R11G11B10F part (GOLDEN_SYNTH_B10=1: a lit pass into R11G11B10F with blending that reads the target's alpha, a copy
-        into the game's memory and back, a texture clear, a blit from RGBA8, CPU-filled textures, CPU reads) once with each setting, both, and neither. Each run:
-        its own round trip identical, its CPU reads exact ("b10 check" lines); each picture against the default run's within the tolerance; the test's recording
-        replayed without the test and the default's with it (the player converts the R11G11B10F images) within the tolerance. Exit 0 when everything passes.
+        into the game's memory and back, a texture clear, a blit from RGBA8, CPU-filled textures, CPU reads; draws writing negative, NaN, infinite and out-of-range
+        values, MAX and REVERSE_SUB blending, a compute shader's image stores, 2-layer and 3D copies, a block-linear upload) once with each setting, both, neither,
+        and the stand-in with its CPU copy route (DM_VK_B10_CPU_COPY=1). Each run: its own round trip identical, its CPU reads exact ("b10 check" lines); each
+        picture against the default run's within the tolerance (not the CPU route's: one of its corners is a copy that route cannot see); the test's recording
+        replayed without the test and the default's with it (the player converts the R11G11B10F images) within the tolerance. Then the pipeline lists: recorded
+        with the stand-in and without (DM_VK_PSO_RECORD) they must be the same file, and a start that prewarms one (with the stand-in, without it, and without
+        extended dynamic state: DM_VK_NO_EDS=1) must find every pipeline its draws ask for built (nothing more recorded). Exit 0 when everything passes.
   golden_check.py mali [--out DIR] [--engine ID] [--title ID] [--players DIR]
         The Mali white-screen check and its ladder (nvn_vk.c mali_white_vk.inc) on this PC: golden_synth with lit frames (GOLDEN_SYNTH_LIT: a 1280x720 R11G11B10F
         target, 240 draws a frame: white at 65504, fine, black, fine then white, a white tenth, or drawn through two corner viewports only), run as successive starts
@@ -27,6 +31,7 @@
         other white-screen tests (DM_VK_PROBE=f16target) and a route set in env.txt keep the verdict out of the file; both fixes at once and white count as both
         white; DM_MALI_WHITE_SIM=1 makes a fine scene count as white; DM_MALI_LADDER=0 turns that off. Every sample is the engine's compute pass on the real lit
         target, read back after its fence. Exit 0 when everything passes.
+
 A recording's name is its file name without .nxgold. Tolerance: a pixel differs when any channel differs by more than --threshold (default 2 of 255); a recording
 fails when more than --max-diff percent of its pixels differ (default 0.1). <folder>/<name>.tolerance ("<threshold> <max-diff>") overrides both for one recording.
 The player is <players>/pc-<engine>/golden_play (engine: the title ID the recording's build was made for; dm/pc/build.sh GAME=<engine>). The Vulkan device is
@@ -200,17 +205,22 @@ def cmd_b10(a):
     engine = a.engine; synth = os.path.join(a.players, f'pc-{engine}', 'golden_synth'); title = a.title or engine
     if not os.path.exists(synth): print(f'ERROR no {synth} (bash dm/pc/build.sh GAME={engine})'); return 2
     if os.path.isdir(a.out): shutil.rmtree(a.out)
-    cfgs = [('default', {}), ('rgba16', {'DM_VK_B10_AS_RGBA16': '1'}), ('nocompress', {'DM_VK_B10_NOCOMPRESS': '1'}), ('both', {'DM_VK_B10_AS_RGBA16': '1', 'DM_VK_B10_NOCOMPRESS': '1'})]
+    A = {'DM_VK_B10_AS_RGBA16': '1'}
+    cfgs = [('default', {}), ('rgba16', A), ('nocompress', {'DM_VK_B10_NOCOMPRESS': '1'}), ('both', {**A, 'DM_VK_B10_NOCOMPRESS': '1'}), ('rgba16-cpu', {**A, 'DM_VK_B10_CPU_COPY': '1'})]
     fails = 0; live = {}; recs = {}
-    for name, sw in cfgs:
-        out = os.path.join(a.out, name); os.makedirs(out)
+    def synth_run(out, sw):
+        os.makedirs(out, exist_ok=True)
         env = vk_env(); env.update(sw); env['GOLDEN_SYNTH_B10'] = '1'
         r = subprocess.run([synth, out, title], env=env, capture_output=True, text=True, timeout=900)
-        rec = os.path.join(out, f'{title}-synth-p2.nxgold'); lp = rec[:-7] + '.phone.png'
         open(os.path.join(out, 'golden_synth.log'), 'w').write(r.stderr)
+        return r
+    for name, sw in cfgs:
+        out = os.path.join(a.out, name); r = synth_run(out, sw)
+        rec = os.path.join(out, f'{title}-synth-p2.nxgold'); lp = rec[:-7] + '.phone.png'
         checks = [l.split('] ', 1)[-1] for l in r.stderr.splitlines() if 'b10 check' in l]
-        notes = sorted({l.split('] ', 1)[-1].split(' (first:')[0] for l in r.stderr.splitlines() if 'b10 swap:' in l or 'b10 nocompress:' in l or 'formats: R11G11B10F' in l})
-        ok = r.returncode == 0 and os.path.exists(rec) and os.path.exists(lp) and len(checks) == 4 and not [c for c in checks if 'FAIL' in c]
+        done = [l for l in r.stderr.splitlines() if 'b10 checks:' in l and ' run, ' in l]
+        notes = sorted({l.split('] ', 1)[-1].split(' (first:')[0] for l in r.stderr.splitlines() if any(k in l for k in ('b10 swap:', 'b10 nocompress:', 'b10 target:', 'formats: R11G11B10F', 'formats: the float-target'))})
+        ok = r.returncode == 0 and os.path.exists(rec) and os.path.exists(lp) and len(checks) >= 4 and done and not [c for c in checks if 'FAIL' in c]
         print(f'{"PASS " if ok else "FAIL "} {name} ({" ".join(f"{k}={v}" for k, v in sw.items()) or "no test switch"}): golden_synth exit {r.returncode}')
         for c in checks: print(f'        {c}')
         for n in notes: print(f'        log: {n}')
@@ -230,11 +240,42 @@ def cmd_b10(a):
     if 'default' in live:
         for name in ('rgba16', 'nocompress', 'both'):
             if name in live: fails += not within(f'{name}: its picture against the default one', live[name], live['default'])
-        for src, sw, label in (('rgba16', {}, 'the rgba16 recording replayed without the test'), ('default', {'DM_VK_B10_AS_RGBA16': '1'}, 'the default recording replayed with DM_VK_B10_AS_RGBA16=1')):
+        for src, sw, label in (('rgba16', {}, 'the rgba16 recording replayed without the test'), ('default', A, 'the default recording replayed with DM_VK_B10_AS_RGBA16=1')):
             if src not in recs: continue
             got = os.path.join(a.out, src, 'cross.png'); rc, log = play(recs[src], got, a.players, sw)
             if rc or not os.path.exists(got): print(f'FAIL  {label}: the player failed (exit {rc})\n{log}'); fails += 1; continue
             fails += not within(label + ', against the default picture', got, live['default'])
+    # The pipeline lists (DM_VK_PSO_RECORD): the stand-in's targets are written as R11G11B10F (b10_key_disk) and read back as the stand-in (b10_key_here), so a list is the
+    #   same file with the test or without, and a start that prewarms a list builds the very keys its draws ask for: nothing more is recorded. With and without extended
+    #   dynamic state (DM_VK_NO_EDS=1: this phone's own list with the draw state, list + '.sst', prewarm_static)
+    def size(p): return os.path.getsize(p) if os.path.exists(p) else -1
+    for eds, xs in (('', {}), (' without extended dynamic state', {'DM_VK_NO_EDS': '1'})):
+        lists = {}; tag = 'noeds' if xs else 'eds'
+        for name, sw in (('default', {}), ('rgba16', A)):
+            lst = os.path.join(a.out, f'plist-{tag}-{name}.bin'); r = synth_run(os.path.join(a.out, f'plist-{tag}-{name}'), {**sw, **xs, 'DM_VK_PSO_RECORD': lst})
+            ok = r.returncode == 0 and size(lst) > 12 and (not xs or size(lst + '.sst') > 12); fails += not ok; lists[name] = lst
+            print(f'{"PASS " if ok else "FAIL "} pipeline list{eds} recorded {"with the stand-in" if sw else "without the test"}: {size(lst)} bytes' + (f', with the draw state {size(lst + ".sst")} bytes' if xs else '') + ('' if ok else f'\n{r.stderr[-2000:]}'))
+        if len(lists) == 2:
+            same = open(lists['default'], 'rb').read() == open(lists['rgba16'], 'rb').read() and (not xs or open(lists['default'] + '.sst', 'rb').read() == open(lists['rgba16'] + '.sst', 'rb').read())
+            fails += not same; print(f'{"PASS " if same else "FAIL "} pipeline list{eds}: the same file with the stand-in and without (its targets written as R11G11B10F)')
+        # the prewarm finds shaders by key in the shader pack, as on a phone (before the game reads its shader map): golden_synth's shaders packed by spv_pak.py
+        pak = os.path.join(a.out, 'synth.pak')
+        if not os.path.exists(pak):
+            import glob
+            bdir = glob.glob(os.path.join(a.out, f'plist-{tag}-default', 'synth-shaders', 'b-*'))
+            r = subprocess.run([sys.executable, os.path.join(HERE, '..', '..', 'android', 'tools', 'spv_pak.py'), bdir[0] if bdir else '-', pak], capture_output=True, text=True)
+            if r.returncode or not os.path.exists(pak): print(f'FAIL  the shader pack for the prewarm: {r.stdout[-500:]}{r.stderr[-1500:]}'); fails += 1; continue
+        for src, name, sw in (('rgba16', 'rgba16', A), ('rgba16', 'default', {}), ('default', 'rgba16', A)):
+            if src not in lists: continue
+            lst = os.path.join(a.out, f'plist-{tag}-{src}-then-{name}.bin'); shutil.copyfile(lists[src], lst)
+            if xs: shutil.copyfile(lists[src] + '.sst', lst + '.sst')
+            before = (size(lst), size(lst + '.sst')); r = synth_run(os.path.join(a.out, f'plist-{tag}-{src}-then-{name}'), {**sw, **xs, 'DM_VK_PSO_RECORD': lst, 'GOLDEN_SYNTH_PAK': pak})
+            pw = [l.split('] ', 1)[-1] for l in r.stderr.splitlines() if 'prewarm' in l and ('pipelines' in l or 'listed' in l)]
+            built = [l for l in pw if ' 0 built' not in l and 'built' in l and ' 0 with a shader missing' in l and ' 0 failed' in l]
+            ok = r.returncode == 0 and (size(lst), size(lst + '.sst')) == before and built; fails += not ok
+            print(f'{"PASS " if ok else "FAIL "} the list recorded {"with the stand-in" if src == "rgba16" else "without the test"}, prewarmed {"with the stand-in" if sw else "without the test"}{eds}: '
+                  + (f'every pipeline the draws asked for was built (list {before[0]} bytes, unchanged)' if ok else f'list {before} -> {(size(lst), size(lst + ".sst"))} bytes, golden_synth exit {r.returncode}'))
+            for l in pw[:2]: print(f'        log: {l}')
     print('float-target tests: ' + ('PASS' if not fails else f'FAIL ({fails})'))
     return 1 if fails else 0
 

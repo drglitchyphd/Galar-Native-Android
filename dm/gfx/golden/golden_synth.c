@@ -12,7 +12,13 @@
 //   one blended by the target's alpha, which R11G11B10F reads as 1: it must stay invisible), copies L1 to the game's memory and back into L2, clears a texture L3,
 //   copies an RGBA8 checker C2 into L4, and copies a CPU-filled R11G11B10F texture U2 holding every channel code to the game's memory; frame 2 shows L1, L2, L4 and a
 //   CPU-filled gradient U in the window's corners. After the frames the CPU reads U2, L2 and L3 back and checks them bit for bit ("b10 check" lines, exit 3 on a
-//   failure). Every colour shown is one R11G11B10F holds exactly: how a driver rounds into it (lavapipe truncates, the stand-in rounds to nearest even) cannot show
+//   failure). Every colour shown is one R11G11B10F holds exactly: how a driver rounds into it (lavapipe truncates, the stand-in rounds to nearest even) cannot show.
+//   Frame 1 also: a draw of every pixel's own three values into L5 (b10v.frag: negative, -inf, NaN, +inf, past the range, any exponent), one blended by MAX into L6
+//   with a negative channel and one past the range, one blended by REVERSE_SUB into L7; a compute shader's stores into SI0 (declared r11f_g11f_b10f) and SI1 (declared
+//   without a format); a 2-layer array AR and a 2-slice 3D texture V3 copied in from the game's memory and out again; LC copied in from CPU-filled memory (the
+//   CPU route with DM_VK_B10_CPU_COPY=1); an RGBA8 2-layer array blitted into AR2; a block-linear (swizzled) CPU-filled texture BL. Their checks: L5's row 0 (values
+//   every rounding rule stores alike) on any route, all of L5 bit for bit with the stand-in (the one rounding rule it has); the rest bit for bit on any route (AR2
+//   with the stand-in, where it is made what R11G11B10F holds; elsewhere the blit into the packed format is lavapipe's to get right: VUID 02000). "b10 checks: N run"
 // GOLDEN_SYNTH_LIT=<kind> adds, after the recorded frame and its checks (both stay as they were), GOLDEN_SYNTH_FRAMES (16) frames like a game's lit scene for
 //   the Mali white-screen check (nvn_vk.c mali_white_vk.inc; golden_check.py mali): an R11G11B10F target of 1280x720, cleared, one draw over the part
 //   GOLDEN_SYNTH_LIT_SCALE (1: all) of it, then small draws in its centre (GOLDEN_SYNTH_LIT_DRAWS, 240, into the target a frame), each frame presented. Kinds:
@@ -36,6 +42,7 @@
 #include "dmsh_chain.h"
 #include "game_profile.h"
 #include "../tex/b10_conv.h"   // (GOLDEN_SYNTH_B10: the packed values the checks expect)
+#include "../tex/nvn_deswizzle.h"   // (GOLDEN_SYNTH_B10: a block-linear texture filled by the CPU)
 
 #define SLOG(...) do { fprintf(stderr, "[golden_synth] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 enum { WW = 320, WH = 240, AW = 128, CW = 64 };
@@ -47,19 +54,25 @@ static void *heap_alloc_(size_t n) { void *p = g_heap + g_heap_used; g_heap_used
 
 // ---------- Shaders: keys, map, reflection (the replay's file route) ----------
 typedef struct { const char *file, *stage, *vkr; uint8_t key[8]; } shader_def;
-static shader_def g_sh[5] = {
+enum { NSH = 9 };
+static shader_def g_sh[NSH] = {
     { "flat.vert", "vertex", "# flat.vert: no resources\n", { 'G', 'L', 'D', 'F', 'L', 'T', 'V', 1 } },
     { "flat.frag", "pixel", "# flat.frag: no resources\n", { 'G', 'L', 'D', 'F', 'L', 'T', 'F', 1 } },
     { "lit.vert", "vertex", "b vp_c1 cbuf 1 0 0 0 1\n", { 'G', 'L', 'D', 'L', 'I', 'T', 'V', 1 } },
     { "lit.frag", "pixel", "b fp_c1 cbuf 1 0 0 0 1\nb fp_t0 tex 0 0 0 0 1\n", { 'G', 'L', 'D', 'L', 'I', 'T', 'F', 1 } },
-    { "b10.frag", "pixel", "# b10.frag: no resources\n", { 'G', 'L', 'D', 'B', '1', '0', 'F', 1 } },   // (GOLDEN_SYNTH_B10 only)
+    { "b10.frag", "pixel", "# b10.frag: no resources\n", { 'G', 'L', 'D', 'B', '1', '0', 'F', 1 } },   // (GOLDEN_SYNTH_B10 only, from here)
+    { "b10v.frag", "pixel", "# b10v.frag: no resources\n", { 'G', 'L', 'D', 'B', '1', '0', 'V', 1 } },
+    { "b10m.frag", "pixel", "# b10m.frag: no resources\n", { 'G', 'L', 'D', 'B', '1', '0', 'M', 1 } },
+    { "b10img.comp", "compute", "b img0 img 0 0 0 1 1\nb img1 img 1 0 0 1 1\n", { 'G', 'L', 'D', 'B', '1', '0', 'C', 1 } },
+    { "b10probe.frag", "pixel", "b fp_t0 tex 0 0 0 0 1\n", { 'G', 'L', 'D', 'B', '1', '0', 'P', 1 } },
 };
 static int g_b10;   // GOLDEN_SYNTH_B10: the R11G11B10F part
+static int g_nchecks;   // ("b10 check" lines written)
 static int shaders_setup(const char *spv_in, const char *dir) {
     char p[1400], hex[17]; snprintf(p, sizeof p, "%s/b-%s", dir, DMSH_CHAIN); mkdir(dir, 0755); mkdir(p, 0755);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dir); FILE *map = fopen(p, "w"); if (!map) return 0;
     fprintf(map, "package\tindex\tstage\tkey\tsource\n");
-    for (int i = 0; i < (g_b10 ? 5 : 4); i++) {
+    for (int i = 0; i < (g_b10 ? NSH : 4); i++) {
         for (int k = 0; k < 8; k++) sprintf(hex + 2 * k, "%02x", g_sh[i].key[k]);
         char src[1400]; snprintf(src, sizeof src, "%s/%s.spv", spv_in, g_sh[i].file);
         FILE *f = fopen(src, "rb"); if (!f) { SLOG("no %s (built by dm/pc/Makefile)", src); fclose(map); return 0; }
@@ -69,11 +82,14 @@ static int shaders_setup(const char *spv_in, const char *dir) {
         fprintf(map, "synth\t%d\t%s\t%s\tgolden_synth/%s\n", i, g_sh[i].stage, hex, g_sh[i].file);
     }
     fclose(map);
-    snprintf(p, sizeof p, "%s/shader_map.tsv", dir); setenv("DM_NVN_SHMAP", p, 1); setenv("DM_SPV_DIR", dir, 1); unsetenv("DM_SPV_PAK");
+    snprintf(p, sizeof p, "%s/shader_map.tsv", dir); setenv("DM_NVN_SHMAP", p, 1); setenv("DM_SPV_DIR", dir, 1);
+    // GOLDEN_SYNTH_PAK: the same shaders from a pack (dm/android/tools/spv_pak.py), as a phone has them: the prewarm finds shaders by key there before the map is read
+    //   (golden_check.py b10's pipeline lists); else the folder
+    { const char *pk = getenv("GOLDEN_SYNTH_PAK"); if (pk && *pk) setenv("DM_SPV_PAK", pk, 1); else unsetenv("DM_SPV_PAK"); }
     return 1;
 }
 // The game's side of prog_key (hle_nvn.c hashes the shader code; here each program names its two shaders)
-static struct { uint64_t serial; int vs, fs; } g_progk[4]; static int g_nprogk;
+static struct { uint64_t serial; int vs, fs; } g_progk[8]; static int g_nprogk;
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i = 0; i < g_nprogk; i++) if (g_progk[i].serial == p->serial) { if (stage > 1) return 0; memcpy(key, g_sh[stage ? g_progk[i].fs : g_progk[i].vs].key, 8); return 1; }
     return 0;
@@ -82,6 +98,7 @@ static prog_t *mk_prog(int vs, int fs) {
     prog_t *p = heap_alloc_(sizeof *p); p->magic = MAGIC('P', 'R', 'O', 'G'); p->nstage = 2; p->serial = nvn_new_serial();
     g_progk[g_nprogk].serial = p->serial; g_progk[g_nprogk].vs = vs; g_progk[g_nprogk].fs = fs; g_nprogk++; return p;
 }
+static prog_t *mk_cprog(int cs) { prog_t *p = mk_prog(cs, cs); p->nstage = 1; return p; }   // (a compute program: its one stage is the map's "compute")
 // ---------- Textures, as nvnTextureInitialize makes them ----------
 static uint64_t g_tex_off = 0x400000;
 static tex_t *mk_tex(int fmt, uint32_t w, uint32_t h) {
@@ -137,14 +154,25 @@ static tex_t *mk_tex_lin(int fmt, uint32_t w, uint32_t h, uint32_t stride) {
     t->serial = nvn_new_serial(); mtl_tex_init(t);
     return t;
 }
-static void blend0(int on, int src_rgb, int dst_rgb) {   // target 0's blend (alpha: ONE / ZERO, both ADD), and the colour state's blend enable
-    p_bind_state b = { 0 }; blend_st bs = { 0, (uint64_t)src_rgb, (uint64_t)dst_rgb, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD }; memcpy(b.bytes, &bs, sizeof bs); cmd(OP_BIND_STATE, &b, sizeof b);
+static tex_t *mk_tex_t(int fmt, int target, uint32_t w, uint32_t h, uint32_t d, int flags) {   // (any target: 2D arrays and 3D take d layers / slices)
+    tex_t *t = heap_alloc_(sizeof *t);
+    t->magic = MAGIC('T', 'E', 'X', 0); t->d.target = target; t->d.format = fmt; t->d.width = w; t->d.height = h; t->d.depth = d; t->d.levels = 1; t->d.flags = flags;
+    nvn_tex_layout(&t->d, &t->L);
+    g_tex_off = (g_tex_off + 0xffff) & ~0xffffull; t->pool = g_pool; t->off = (int64_t)g_tex_off; t->mem = g_pool_mem + g_tex_off; g_tex_off += t->L.size;
+    t->serial = nvn_new_serial(); mtl_tex_init(t);
+    return t;
+}
+static void blend0e(int on, int eq, int src_rgb, int dst_rgb) {   // target 0's blend (colour: eq of the factors; alpha: ONE / ZERO, ADD), and the colour state's blend enable
+    p_bind_state b = { 0 }; blend_st bs = { 0, (uint64_t)src_rgb, (uint64_t)dst_rgb, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, (uint64_t)eq, NVN_BLEND_EQUATION_ADD }; memcpy(b.bytes, &bs, sizeof bs); cmd(OP_BIND_STATE, &b, sizeof b);
     p_bind_state c = { 1 }; color_st cs = { (uint32_t)(on ? 1 : 0), NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS }; memcpy(c.bytes, &cs, sizeof cs); cmd(OP_BIND_STATE, &c, sizeof c);
 }
-static void copy_tb(int op, const tex_t *t, uint64_t buf, int w, int h) { p_copy_b2t c; memset(&c, 0, sizeof c); c.src = buf; c.tex = t; c.r.width = w; c.r.height = h; c.r.depth = 1; cmd(op, &c, sizeof c); }
-static void copy_tt(const tex_t *s, int sw, int sh, const tex_t *d, int dw, int dh) {
-    p_copy_t2t c; memset(&c, 0, sizeof c); c.src = s; c.dst = d; c.sr.width = sw; c.sr.height = sh; c.sr.depth = 1; c.dr.width = dw; c.dr.height = dh; c.dr.depth = 1; cmd(OP_COPY_T2T, &c, sizeof c);
+static void blend0(int on, int src_rgb, int dst_rgb) { blend0e(on, NVN_BLEND_EQUATION_ADD, src_rgb, dst_rgb); }
+static void copy_tbz(int op, const tex_t *t, uint64_t buf, int w, int h, int d) { p_copy_b2t c; memset(&c, 0, sizeof c); c.src = buf; c.tex = t; c.r.width = w; c.r.height = h; c.r.depth = d; cmd(op, &c, sizeof c); }
+static void copy_tb(int op, const tex_t *t, uint64_t buf, int w, int h) { copy_tbz(op, t, buf, w, h, 1); }
+static void copy_ttz(const tex_t *s, int sw, int sh, const tex_t *d, int dw, int dh, int depth) {
+    p_copy_t2t c; memset(&c, 0, sizeof c); c.src = s; c.dst = d; c.sr.width = sw; c.sr.height = sh; c.sr.depth = depth; c.dr.width = dw; c.dr.height = dh; c.dr.depth = depth; cmd(OP_COPY_T2T, &c, sizeof c);
 }
+static void copy_tt(const tex_t *s, int sw, int sh, const tex_t *d, int dw, int dh) { copy_ttz(s, sw, sh, d, dw, dh, 1); }
 static void clear_tex(const tex_t *t, int w, int h, float r, float g, float b) {
     p_clear_tex c; memset(&c, 0, sizeof c); c.tex = t; c.r.width = w; c.r.height = h; c.r.depth = 1; c.mask = 0xf; c.c.f[0] = r; c.c.f[1] = g; c.c.f[2] = b; c.c.f[3] = 1; cmd(OP_CLEAR_TEX, &c, sizeof c);
 }
@@ -157,12 +185,44 @@ static int b10_cmp(const char *what, const uint32_t *got, const uint32_t *want, 
         if (!same) { bad++; if (first < 0) first = i; } }
     SLOG("b10 check %s: %s (%d of %d texels differ)", what, bad ? "FAIL" : "PASS", bad, n);
     if (bad) SLOG("  the first at texel %d: %#010x, expected %#010x", first, got[first], want[first]);
+    g_nchecks++;
     return bad;
 }
-// a texture's texels read back by the CPU (mtl_read_texels, as nvnTextureReadTexels) against the bits expected
-static int b10_check(const char *what, const tex_t *t, int w, int h, const uint32_t *want) {
-    uint32_t *got = calloc((size_t)w * h, 4); NVNcopyRegion r = { 0, 0, 0, w, h, 1 }; mtl_read_texels(t, 0, 0, &r, (uint8_t *)got, (size_t)w * 4, (size_t)w * h * 4);
+// a texture's texels read back by the CPU (mtl_read_texels, as nvnTextureReadTexels) against the bits expected: layer (or slice) z, w x h from the corner
+static int b10_check_z(const char *what, const tex_t *t, int z, int w, int h, const uint32_t *want) {
+    uint32_t *got = calloc((size_t)w * h, 4); NVNcopyRegion r = { 0, 0, t->d.target == NVN_TEXTURE_TARGET_3D ? z : 0, w, h, 1 };
+    mtl_read_texels(t, 0, t->d.target == NVN_TEXTURE_TARGET_3D ? 0 : (unsigned)z, &r, (uint8_t *)got, (size_t)w * 4, (size_t)w * h * 4);
     int bad = b10_cmp(what, got, want, w * h); free(got); return bad;
+}
+static int b10_check(const char *what, const tex_t *t, int w, int h, const uint32_t *want) { return b10_check_z(what, t, 0, w, h, want); }
+static void b10_skip(const char *what, const char *why) { SLOG("b10 check %s: PASS (left out: %s)", what, why); g_nchecks++; }
+// the packed texel of three float bit patterns, as R11G11B10F stores them (round to nearest even: the stand-in's rule, and every rule's for the values b10v.frag's
+//   row 0 and b10img.comp write)
+static float fbits(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+static uint32_t pack3(uint32_t r, uint32_t g, uint32_t b) { return b10_float_to_chan(fbits(r), B10_MR) | b10_float_to_chan(fbits(g), B10_MR) << 11 | b10_float_to_chan(fbits(b), B10_MB) << 22; }
+// b10v.frag's values (the same function): row 0 the special and exact ones (SP), the other rows any sign and exponent around the packed range
+static const uint32_t SP[24] = { 0xbf800000u, 0x4788b800u, 0x7fc00000u, 0x7f800000u, 0xff800000u, 0x80000000u, 0x477e0000u, 0x477c0000u, 0x477e4c00u, 0x477fff00u,
+                                 0x501502f9u, 0x3f000000u, 0x3f800000u, 0x38800000u, 0x40400000u, 0x3f400000u, 0x3fc00000u, 0x42c80000u, 0x44800000u, 0x00000000u,
+                                 0xc2c80000u, 0x7fffffffu, 0xffc00000u, 0x46000000u };
+static float qf(uint32_t bits, int mb) { return b10_chan_to_float(b10_float_to_chan(fbits(bits), mb), mb); }   // (the float R11G11B10F gives back for these bits)
+// what a later pass read from an R11G11B10F texture (b10probe.frag wrote it into an RGBA32F target as it read it) against the floats expected (alpha 1), bit for
+//   bit, a NaN against any NaN: a CPU read of the texture packs, so only a pass that samples it sees a negative or out-of-range value the stand-in kept
+static int b10_probe(const char *what, const tex_t *t, int w, int h, const float *want) {
+    float *got = calloc((size_t)w * h * 4, 4); NVNcopyRegion r = { 0, 0, 0, w, h, 1 }; mtl_read_texels(t, 0, 0, &r, (uint8_t *)got, (size_t)w * 16, (size_t)w * h * 16);
+    int bad = 0, first = -1;
+    for (int i = 0; i < w * h; i++) { int same = 1;
+        for (int c = 0; c < 4; c++) { float a = got[4 * i + c], b = want[4 * i + c]; if (isnan(a) || isnan(b) ? !(isnan(a) && isnan(b)) : memcmp(&a, &b, 4) != 0) same = 0; }
+        if (!same) { bad++; if (first < 0) first = i; } }
+    SLOG("b10 check %s: %s (%d of %d texels differ)", what, bad ? "FAIL" : "PASS", bad, w * h);
+    if (bad) SLOG("  the first at texel %d: (%g %g %g %g), expected (%g %g %g %g)", first, got[4 * first], got[4 * first + 1], got[4 * first + 2], got[4 * first + 3],
+                  want[4 * first], want[4 * first + 1], want[4 * first + 2], want[4 * first + 3]);
+    free(got); g_nchecks++; return bad;
+}
+static uint32_t b10_vbits(uint32_t i, uint32_t c) {
+    if (i < 64u) return SP[(i + c * 7u) % 24u];
+    uint32_t h = (i * 0x9E3779B1u) ^ (c * 0x85EBCA77u); h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    uint32_t e = 100u + (h >> 8) % 47u;
+    return ((h & 7u) == 0u ? 0x80000000u : 0u) | (e << 23) | ((h * 0x27d4eb2du) >> 9);
 }
 
 // ---------- Matrices (column-major, as std140 mat4; clip z in [0, 1]: depth mode near = 0) ----------
@@ -243,6 +303,30 @@ int main(int argc, char **argv) {
             q.mvp.m[0] = (float)BW / WW; q.mvp.m[5] = (float)BW / WH; q.mvp.m[12] = (k & 1 ? 1 : -1) * (1 - (float)BW / WW - 0.02f); q.mvp.m[13] = (k & 2 ? 1 : -1) * (1 - (float)BW / WH - 0.03f); q.mvp.m[14] = -0.5f;
             memcpy((void *)(uintptr_t)(UBQ + 0x100 * (uint64_t)k), &q, sizeof q); }
     }
+    // (GOLDEN_SYNTH_B10) L5 every pixel's own values drawn, L6 / L7 blended by MAX / REVERSE_SUB, SI0 / SI1 a compute shader's stores, AR / V3 a 2-layer array and a
+    //   2-slice 3D texture through the game's memory, LC copied in from CPU-filled memory, AC an RGBA8 2-layer array blitted into AR2, BL block-linear and CPU-filled
+    const uint64_t ARSRC = P + 0x240000, ARDST = P + 0x248000, V3SRC = P + 0x250000, V3DST = P + 0x252000, LCSRC = P + 0x260000, ACSRC = P + 0x270000;
+    tex_t *L5 = NULL, *L6 = NULL, *L7 = NULL, *SI0 = NULL, *SI1 = NULL, *AR = NULL, *AR2 = NULL, *AC = NULL, *V3 = NULL, *LC = NULL, *BL = NULL, *F5 = NULL, *F6 = NULL, *FS0 = NULL, *FS1 = NULL;
+    prog_t *b10vp = NULL, *b10mp = NULL, *b10cp = NULL, *probep = NULL; static uint32_t bl_bits[BW * BW];   // (F5 .. FS1: RGBA32F, what a later pass read from L5, L6, SI0, SI1)
+    #define CODE(i, s) ((((i) * 3u + (s)) & 0x7ffu) | ((((i) * 5u + 1u + (s)) & 0x7ffu) << 11) | ((((i) * 11u + 7u + (s)) & 0x3ffu) << 22))   // (codes of every kind, NaN and inf too)
+    if (g_b10) {
+        const int CMP = NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+        L5 = mk_tex(NVN_FORMAT_R11G11B10F, BW, BW); L6 = mk_tex(NVN_FORMAT_R11G11B10F, 16, 16); L7 = mk_tex(NVN_FORMAT_R11G11B10F, 16, 16); LC = mk_tex(NVN_FORMAT_R11G11B10F, BW, BW);
+        SI0 = mk_tex_t(NVN_FORMAT_R11G11B10F, NVN_TEXTURE_TARGET_2D, 16, 16, 1, CMP | NVN_TEXTURE_FLAGS_IMAGE); SI1 = mk_tex_t(NVN_FORMAT_R11G11B10F, NVN_TEXTURE_TARGET_2D, 16, 16, 1, CMP | NVN_TEXTURE_FLAGS_IMAGE);
+        AR = mk_tex_t(NVN_FORMAT_R11G11B10F, NVN_TEXTURE_TARGET_2D_ARRAY, 32, 32, 2, CMP); AR2 = mk_tex_t(NVN_FORMAT_R11G11B10F, NVN_TEXTURE_TARGET_2D_ARRAY, 32, 32, 2, CMP);
+        AC = mk_tex_t(NVN_FORMAT_RGBA8, NVN_TEXTURE_TARGET_2D_ARRAY, 32, 32, 2, CMP); V3 = mk_tex_t(NVN_FORMAT_R11G11B10F, NVN_TEXTURE_TARGET_3D, 16, 16, 2, CMP);
+        BL = mk_tex_t(NVN_FORMAT_R11G11B10F, NVN_TEXTURE_TARGET_2D, BW, BW, 1, 0);
+        for (uint32_t i = 0; i < 2 * 32 * 32; i++) { uint32_t v = CODE(i, 9u); memcpy((void *)(uintptr_t)(ARSRC + 4 * i), &v, 4); }
+        for (uint32_t i = 0; i < 2 * 16 * 16; i++) { uint32_t v = CODE(i, 21u); memcpy((void *)(uintptr_t)(V3SRC + 4 * i), &v, 4); }
+        for (uint32_t i = 0; i < BW * BW; i++) { uint32_t v = CODE(i, 33u); memcpy((void *)(uintptr_t)(LCSRC + 4 * i), &v, 4); bl_bits[i] = CODE(i, 45u); }
+        for (uint32_t i = 0; i < 2 * 32 * 32; i++) { uint8_t *p = (uint8_t *)(uintptr_t)(ACSRC + 4 * i); int on = (((i % 32) >> 2) ^ ((i / 32 % 32) >> 2) ^ (i >= 32 * 32)) & 1;   // (layer 1 the inverse)
+            p[0] = on ? 255 : 0; p[1] = on ? 0 : 255; p[2] = on ? 255 : 0; p[3] = 255; }
+        if (nvn_swizzle(&BL->d, 0, 0, bl_bits, BW * 4, BL->mem)) SLOG("b10: the block-linear texture could not be swizzled");
+        mtl_tex_cpu_written(BL);   // (as hle_nvn.c marks a texture the CPU filled: uploaded from the game's memory, deswizzled)
+        mtl_reg_tex(7, SI0, NULL); mtl_reg_tex(8, SI1, NULL); mtl_reg_tex(9, L5, NULL); mtl_reg_tex(10, L6, NULL); mtl_reg_tex(11, SI0, NULL); mtl_reg_tex(12, SI1, NULL);
+        F5 = mk_tex(NVN_FORMAT_RGBA32F, BW, BW); F6 = mk_tex(NVN_FORMAT_RGBA32F, 16, 16); FS0 = mk_tex(NVN_FORMAT_RGBA32F, 16, 16); FS1 = mk_tex(NVN_FORMAT_RGBA32F, 16, 16);
+        b10vp = mk_prog(0, 5); b10mp = mk_prog(0, 6); b10cp = mk_cprog(7); probep = mk_prog(0, 8);
+    }
 
     // ---- frame 1: the triangle into A; the lit state left bound for frame 2 ----
     cmd_begin();
@@ -260,6 +344,24 @@ int main(int argc, char **argv) {
         clear_tex(L3, 16, 16, -1.0f, 0.5f, 3.0f);   // (R11G11B10F: the negative channel 0)
         copy_tb(OP_COPY_B2T, C2, CHK2, BW, BW); copy_tt(C2, BW, BW, L4, BW, BW);   // RGBA8 into R11G11B10F: a blit (another format)
         copy_tb(OP_COPY_T2B, U2, U2BUF, BW, BW);    // every channel code into the game's memory
+        // L5: every pixel its own three values (b10v.frag), no blending: what the stand-in stores is rounded as R11G11B10F's store rounds it
+        set_rt(L5, NULL); viewport(BW, BW); program(b10vp); vlayout(2, fl_fmt, fl_off, 32); vbuf(VB + 0x1000, sizeof quad); draw_idx(6, IB);
+        // L6: (-1, 70000, 0.25) blended by MAX into (0.5, 2, 0): (0.5, 65024, 0.25). L7: (1, 0.5, 0.75) less b10.frag's (0.75, 0.375, 0.5) by REVERSE_SUB: (0.25, 0.125, 0.25)
+        set_rt(L6, NULL); viewport(16, 16); clear(0.5f, 2.0f, 0.0f); program(b10mp); blend0e(1, NVN_BLEND_EQUATION_MAX, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ONE); draw_idx(6, IB);
+        set_rt(L7, NULL); viewport(16, 16); clear(1.0f, 0.5f, 0.75f); program(b10p); blend0e(1, NVN_BLEND_EQUATION_REVERSE_SUB, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ONE); draw_idx(6, IB);
+        blend0(0, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO);
+        // the compute shader's stores (b10img.comp) into SI0 (declared r11f_g11f_b10f) and SI1 (declared without a format)
+        { p_bind_program b = { b10cp, 0x20 }; cmd(OP_BIND_PROGRAM, &b, sizeof b);
+          p_bind_handles h; memset(&h, 0, sizeof h); h.stage = 5; h.first = 0; h.n = 2; h.h[0] = 7; h.h[1] = 8; cmd(OP_BIND_IMG, &h, sizeof h);
+          p_dispatch d; memset(&d, 0, sizeof d); d.x = 2; d.y = 2; d.z = 1; cmd(OP_DISPATCH, &d, sizeof d); }
+        // what a later pass reads from L5, L6, SI0 and SI1, as it reads it (b10probe.frag into RGBA32F targets)
+        { static const struct { int tid, w; } pb[4] = { { 9, BW }, { 10, 16 }, { 11, 16 }, { 12, 16 } }; tex_t *ft[4] = { F5, F6, FS0, FS1 };
+          program(probep);
+          for (int k = 0; k < 4; k++) { set_rt(ft[k], NULL); viewport(pb[k].w, pb[k].w); tex_handle(1, 0, pb[k].tid, 2); draw_idx(6, IB); } }
+        copy_tbz(OP_COPY_B2T, AR, ARSRC, 32, 32, 2); copy_tbz(OP_COPY_T2B, AR, ARDST, 32, 32, 2);   // two layers in from the game's memory and out again
+        copy_tbz(OP_COPY_B2T, V3, V3SRC, 16, 16, 2); copy_tbz(OP_COPY_T2B, V3, V3DST, 16, 16, 2);   // two slices of a 3D texture likewise
+        copy_tb(OP_COPY_B2T, LC, LCSRC, BW, BW);                                                    // from memory only the CPU wrote (the CPU route: DM_VK_B10_CPU_COPY)
+        copy_tbz(OP_COPY_B2T, AC, ACSRC, 32, 32, 2); copy_ttz(AC, 32, 32, AR2, 32, 32, 2);          // RGBA8, two layers, blitted into R11G11B10F
         vbuf(VB, sizeof tri);
     }
     program(lit); vlayout(3, lt_fmt, lt_off, 32); ubo(0, 1, UBV, 256); ubo(1, 1, UBF, 256); tex_handle(1, 0, 1, 1); depth_state(1);
@@ -289,13 +391,50 @@ int main(int argc, char **argv) {
     present(Wt);
     mtl_finish();
     if (g_b10) {   // the CPU's reads, bit for bit: U2 as uploaded; U2 copied into the game's memory by the GPU; L2 as L1's copy left it there; L3 as cleared
+        const char *e = getenv("DM_VK_B10_AS_RGBA16"), *pr = getenv("DM_VK_PROBE"), *cc = getenv("DM_VK_B10_CPU_COPY");
+        int stand_in = (e && atoi(e) > 0) || (pr && strstr(pr, "f16target")), cpu = stand_in && cc && atoi(cc) > 0;   // (the RGBA16F stand-in; its CPU copy route)
         int bad = b10_check("CPU read of a CPU-filled texture holding every channel code", U2, BW, BW, u2_bits);
         bad += b10_cmp("that texture copied into the game's memory", (const uint32_t *)(uintptr_t)U2BUF, u2_bits, BW * BW);
-        bad += b10_check("CPU read of a texture copied in from the game's memory (a render target's copy)", L2, BW, BW, (const uint32_t *)(uintptr_t)L1BUF);
+        if (cpu) b10_skip("CPU read of a texture copied in from the game's memory (a render target's copy)", "DM_VK_B10_CPU_COPY: the CPU route reads the game's memory before the GPU wrote it (the route's known limit)");
+        else bad += b10_check("CPU read of a texture copied in from the game's memory (a render target's copy)", L2, BW, BW, (const uint32_t *)(uintptr_t)L1BUF);
         uint32_t want3[16 * 16]; uint32_t c3 = b10_float_to_chan(-1.0f, B10_MR) | b10_float_to_chan(0.5f, B10_MR) << 11 | b10_float_to_chan(3.0f, B10_MB) << 22;
         for (int i = 0; i < 16 * 16; i++) want3[i] = c3;
         bad += b10_check("CPU read of a cleared texture (-1, 0.5, 3)", L3, 16, 16, want3);
-        if (bad) { SLOG("b10 checks: %d texels differ", bad); fflush(stderr); _exit(3); }
+        // what draws, blending and a compute shader wrote; copies with layers and slices; the CPU route; a blit with layers; a block-linear upload
+        static uint32_t w5[BW * BW], w6[256], w7[256], ws0[256], ws1[256], w2[2 * 32 * 32];
+        for (uint32_t i = 0; i < BW * BW; i++) w5[i] = pack3(b10_vbits(i, 0), b10_vbits(i, 1), b10_vbits(i, 2));
+        bad += b10_check("a draw of every pixel's own values, row 0 (negative, -0, -inf, NaN, +inf, past the range, exact: every rounding rule stores them alike)", L5, BW, 1, w5);
+        if (stand_in) bad += b10_check("that draw, every pixel (the stand-in rounds what a draw writes as R11G11B10F stores it: to nearest even)", L5, BW, BW, w5);
+        else b10_skip("that draw, every pixel", "not the stand-in: the rounding is the driver's own (lavapipe truncates)");
+        for (uint32_t i = 0; i < 256; i++) { w6[i] = pack3(0x3f000000u, 0x477e0000u, 0x3e800000u); w7[i] = pack3(0x3e800000u, 0x3e000000u, 0x3e800000u);
+            ws0[i] = pack3(SP[i % 24u], SP[(i + 7u) % 24u], SP[(i + 14u) % 24u]); ws1[i] = pack3(SP[(i + 14u) % 24u], SP[i % 24u], SP[(i + 7u) % 24u]); }
+        bad += b10_check("(-1, 70000, 0.25) blended by MAX into (0.5, 2, 0): (0.5, 65024, 0.25)", L6, 16, 16, w6);
+        bad += b10_check("(1, 0.5, 0.75) less (0.75, 0.375, 0.5) by REVERSE_SUB: (0.25, 0.125, 0.25)", L7, 16, 16, w7);
+        bad += b10_check("a compute shader's stores through an image declared r11f_g11f_b10f", SI0, 16, 16, ws0);
+        bad += b10_check("a compute shader's stores through an image declared without a format", SI1, 16, 16, ws1);
+        // the same as a later pass reads them (a CPU read packs, which hides a negative or out-of-range value the stand-in kept: this does not)
+        { static float f5[BW * BW * 4], f6[256 * 4], fs0[256 * 4], fs1[256 * 4];
+          for (uint32_t i = 0; i < BW * BW; i++) { for (uint32_t c = 0; c < 3; c++) f5[4 * i + c] = qf(b10_vbits(i, c), c == 2 ? B10_MB : B10_MR); f5[4 * i + 3] = 1.0f; }
+          for (uint32_t i = 0; i < 256; i++) { f6[4 * i] = 0.5f; f6[4 * i + 1] = 65024.0f; f6[4 * i + 2] = 0.25f; f6[4 * i + 3] = 1.0f;
+              uint32_t s0[3] = { SP[i % 24u], SP[(i + 7u) % 24u], SP[(i + 14u) % 24u] }, s1[3] = { s0[2], s0[0], s0[1] };
+              for (int c = 0; c < 3; c++) { fs0[4 * i + c] = qf(s0[c], c == 2 ? B10_MB : B10_MR); fs1[4 * i + c] = qf(s1[c], c == 2 ? B10_MB : B10_MR); } fs0[4 * i + 3] = fs1[4 * i + 3] = 1.0f; }
+          bad += b10_probe("a later pass reading that draw, row 0 (negatives read 0, NaN, +inf, the range's end, exact values; alpha 1)", F5, BW, 1, f5);
+          if (stand_in) bad += b10_probe("a later pass reading that draw, every pixel", F5, BW, BW, f5);
+          else b10_skip("a later pass reading that draw, every pixel", "not the stand-in: the rounding is the driver's own (lavapipe truncates)");
+          bad += b10_probe("a later pass reading the MAX blend: (0.5, 65024, 0.25, 1)", F6, 16, 16, f6);
+          bad += b10_probe("a later pass reading the compute shader's stores (declared r11f_g11f_b10f): negatives 0, alpha 1", FS0, 16, 16, fs0);
+          bad += b10_probe("a later pass reading the compute shader's stores (declared without a format): negatives 0, alpha 1", FS1, 16, 16, fs1); }
+        bad += b10_cmp("a 2-layer array copied in from the game's memory and out again", (const uint32_t *)(uintptr_t)ARDST, (const uint32_t *)(uintptr_t)ARSRC, 2 * 32 * 32);
+        bad += b10_check_z("CPU read of that array's layer 1", AR, 1, 32, 32, (const uint32_t *)(uintptr_t)(ARSRC + 32 * 32 * 4));
+        bad += b10_cmp("a 3D texture's 2 slices copied in from the game's memory and out again", (const uint32_t *)(uintptr_t)V3DST, (const uint32_t *)(uintptr_t)V3SRC, 2 * 16 * 16);
+        bad += b10_check_z("CPU read of that 3D texture's slice 1", V3, 1, 16, 16, (const uint32_t *)(uintptr_t)(V3SRC + 16 * 16 * 4));
+        bad += b10_check(cpu ? "a copy in from memory only the CPU wrote (the CPU route, DM_VK_B10_CPU_COPY)" : "a copy in from memory only the CPU wrote", LC, BW, BW, (const uint32_t *)(uintptr_t)LCSRC);
+        for (uint32_t i = 0; i < 2 * 32 * 32; i++) { int on = (((i % 32) >> 2) ^ ((i / 32 % 32) >> 2) ^ (i >= 32 * 32)) & 1; w2[i] = pack3(on ? 0x3f800000u : 0, on ? 0 : 0x3f800000u, on ? 0x3f800000u : 0); }
+        if (stand_in) { bad += b10_check_z("an RGBA8 2-layer array blitted into the stand-in, layer 0", AR2, 0, 32, 32, w2); bad += b10_check_z("that blit's layer 1", AR2, 1, 32, 32, w2 + 32 * 32); }
+        else { b10_skip("an RGBA8 2-layer array blitted into R11G11B10F, layer 0", "not the stand-in: a blit into the packed format (lavapipe has no blit into it, VUID 02000)"); b10_skip("that blit's layer 1", "the same"); }
+        bad += b10_check("a block-linear texture the CPU filled, uploaded (deswizzled)", BL, BW, BW, bl_bits);
+        SLOG("b10 checks: %d run, %d texels differ", g_nchecks, bad);
+        if (bad) { fflush(stderr); _exit(3); }
     }
     {   // GOLDEN_SYNTH_LIT: frames with a lit pass for the white-screen check to sample (the recording above is the same with or without them)
         const char *lm = getenv("GOLDEN_SYNTH_LIT"), *fe = getenv("GOLDEN_SYNTH_FRAMES"), *se = getenv("GOLDEN_SYNTH_LIT_SCALE"), *de = getenv("GOLDEN_SYNTH_LIT_DRAWS"),
