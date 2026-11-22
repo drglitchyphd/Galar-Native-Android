@@ -352,6 +352,14 @@ Bright scenes in a wider format	Escenas iluminadas en un formato más amplio
 On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	Activado: la escena iluminada se dibuja en un formato con más margen (RGBA16F en lugar de R11G11B10F), una prueba para imágenes blancas o que parpadean; usa un poco más de memoria
 Bright scenes without compression	Escenas iluminadas sin compresión
 On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth	Activado: la escena iluminada mantiene su formato, pero se guarda sin la compresión de framebuffer de la GPU (AFBC), una prueba para imágenes blancas; usa más ancho de banda de memoria
+Auto: on with ARM's own Mali driver for Sword / Shield; the game checks the picture while you play and moves to the second fix if it stays white	Auto: activado con el controlador Mali propio de ARM en Sword / Shield; el juego revisa la imagen mientras juegas y pasa a la segunda corrección si sigue en blanco
+Off: the lit scene in its own packed format (R11G11B10F)	Desactivado: la escena iluminada en su propio formato compacto (R11G11B10F)
+Auto: used when the game finds that the first fix did not take on ARM's own Mali driver	Auto: se usa cuando el juego detecta que la primera corrección no funcionó con el controlador Mali propio de ARM
+Off: the framebuffer compression the driver chooses	Desactivado: la compresión de framebuffer que elija el controlador
+Mali: the white-screen fix did not take; trying the second fix at the next start	Mali: la corrección de la pantalla blanca no funcionó; se probará la segunda corrección en el próximo inicio
+Mali: neither white-screen fix took; the next start offers the PanVK driver	Mali: ninguna corrección de la pantalla blanca funcionó; el próximo inicio ofrecerá el controlador PanVK
+White screen on this phone's own driver	Pantalla blanca con el controlador propio del teléfono
+On this phone's own Mali driver (%s), %s drew its lit scenes white, and both of the app's fixes were tried at earlier starts without success. The PanVK driver draws the game on many Mali phones: download its .zip and choose it as the graphics driver.	Con el controlador Mali propio de este teléfono (%s), %s dibujó sus escenas iluminadas en blanco, y las dos correcciones de la app se probaron en inicios anteriores sin éxito. El controlador PanVK dibuja el juego en muchos teléfonos Mali: descarga su .zip y elígelo como controlador gráfico.
 AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1: escalado que respeta los bordes y luego nitidez (Nitidez ajusta cuánta)
 Colour	Color
 Natural	Natural

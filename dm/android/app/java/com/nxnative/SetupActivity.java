@@ -152,6 +152,8 @@ public final class SetupActivity extends Activity {
             Toast.makeText(this, T.t(this, "The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept)."), Toast.LENGTH_LONG).show();
         if (ready()) setupShortcut();
         if (ready() && !asked && !running && notices()) asked = true;   // the last run crashed starting its graphics: this screen offers a driver instead of starting the game
+        // both of the Mali white-screen fixes were white on this phone's own driver (the engine's check, MaliLadder): PanVK offered once, before the game starts
+        if (ready() && !asked && !running && MaliLadder.offer(this, this::startGame, () -> pick(PICK_DRIVER, false))) asked = true;
         if (ready() && !asked && !running) { gameIcon(); if (!pendingWork(gameDir())) { startGame(); return; } }
         setupScreen(official);
         if (getIntent().getBooleanExtra("from_app", false)) startSetupFromApp();   // am start ... --ez setup true --ez from_app true: set up (again) from the installed app, over adb

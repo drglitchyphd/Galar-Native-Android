@@ -125,6 +125,26 @@ static void *open_menu_main(void *p) {
     (*vm)->DetachCurrentThread(vm);
     return NULL;
 }
+// A one-line note over the game, by its key (nvn_vk.c's Mali white-screen check: front_note): com.nxnative.MaliLadder.note shows it, translated, as a toast. Called
+//   from the replay's thread; the Java call runs on a thread of its own (as open_menu_main) and front_note returns at once
+static void *note_main(void *p) {
+    char *key = p; JavaVM *vm = g_app->activity->vm; JNIEnv *e;
+    if ((*vm)->AttachCurrentThread(vm, &e, NULL)) { free(key); return NULL; }
+    jobject act = g_app->activity->clazz; jclass ac = (*e)->GetObjectClass(e, act);
+    jobject cl = (*e)->CallObjectMethod(e, act, (*e)->GetMethodID(e, ac, "getClassLoader", "()Ljava/lang/ClassLoader;"));
+    jclass clc = (*e)->FindClass(e, "java/lang/ClassLoader");
+    jclass ml = (jclass)(*e)->CallObjectMethod(e, cl, (*e)->GetMethodID(e, clc, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;"), (*e)->NewStringUTF(e, "com.nxnative.MaliLadder"));
+    jmethodID m = NULL;
+    if (!(*e)->ExceptionCheck(e) && ml) m = (*e)->GetStaticMethodID(e, ml, "note", "(Landroid/app/Activity;Ljava/lang/String;)V");
+    if ((*e)->ExceptionCheck(e) || !m) { (*e)->ExceptionClear(e); fprintf(stderr, "[RED] note: com.nxnative.MaliLadder.note missing\n"); }
+    else { (*e)->CallStaticVoidMethod(e, ml, m, act, (*e)->NewStringUTF(e, key)); if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionDescribe(e); (*e)->ExceptionClear(e); } }
+    (*vm)->DetachCurrentThread(vm); free(key);
+    return NULL;
+}
+void front_note(const char *key) {
+    char *k = strdup(key ? key : ""); pthread_t th;
+    if (k && !pthread_create(&th, NULL, note_main, k)) pthread_detach(th); else free(k);
+}
 void front_open_menu(int what) {
     static _Atomic long long last_ms; struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); long long t = ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
     if (t - atomic_load(&last_ms) < 500) return;   // one dialog per press
@@ -1410,6 +1430,9 @@ static void host_start(void) {
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
     snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p);
+    // the Mali white-screen check's state (nvn_vk.c mali_white_vk.inc), one file per phone: in the app's files folder itself, which Sword and Shield share
+    //   (MaliLadder.java reads it there for the PanVK offer); env.txt may name another
+    { const char *root = g_app->activity->externalDataPath; snprintf(q, sizeof q, "%s/mali_ladder.txt", root ? root : g_files); setenv("DM_MALI_LADDER_FILE", q, 0); }
     // The allocator's cache of large blocks, made big enough for the GPU driver's: on a Galaxy S25+ (Adreno 830) a third of the game thread's time went to the driver
     //   mapping and unmapping memory, calloc → mmap and free → munmap in every vkCmdBeginRendering (about 250 a frame) and in every command pool reset, because its
     //   blocks were larger than scudo's secondary cache keeps (simpleperf, 2026-11-09). Cached, they are reused; the pages go back to the system on Android's own
