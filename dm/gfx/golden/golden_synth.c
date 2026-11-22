@@ -13,6 +13,10 @@
 //   copies an RGBA8 checker C2 into L4, and copies a CPU-filled R11G11B10F texture U2 holding every channel code to the game's memory; frame 2 shows L1, L2, L4 and a
 //   CPU-filled gradient U in the window's corners. After the frames the CPU reads U2, L2 and L3 back and checks them bit for bit ("b10 check" lines, exit 3 on a
 //   failure). Every colour shown is one R11G11B10F holds exactly: how a driver rounds into it (lavapipe truncates, the stand-in rounds to nearest even) cannot show
+// GOLDEN_SYNTH_LIT=fine|white adds, after the recorded frame and its checks (both stay as they were), GOLDEN_SYNTH_FRAMES (16) frames like a game's lit scene for
+//   the Mali white-screen check (nvn_vk.c mali_white_vk.inc; golden_check.py mali): an R11G11B10F target of 1280x720, cleared, one draw over the part
+//   GOLDEN_SYNTH_LIT_SCALE (1: all) of it in a normal colour (fine) or at 65504 (white: what Arm's driver leaves in Sword / Shield's lit scene), then 239 small
+//   draws in its centre (240 draws a frame), each frame presented
 #define _GNU_SOURCE 1
 #include <errno.h>
 #include <math.h>
@@ -287,6 +291,30 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 16 * 16; i++) want3[i] = c3;
         bad += b10_check("CPU read of a cleared texture (-1, 0.5, 3)", L3, 16, 16, want3);
         if (bad) { SLOG("b10 checks: %d texels differ", bad); fflush(stderr); _exit(3); }
+    }
+    {   // GOLDEN_SYNTH_LIT: frames with a lit pass for the white-screen check to sample (the recording above is the same with or without them)
+        const char *lm = getenv("GOLDEN_SYNTH_LIT"), *fe = getenv("GOLDEN_SYNTH_FRAMES"), *se = getenv("GOLDEN_SYNTH_LIT_SCALE");
+        int white = lm && !strcmp(lm, "white"), nf = fe && atoi(fe) > 0 ? atoi(fe) : 16; float sc = se && atof(se) > 0 && atof(se) <= 1 ? (float)atof(se) : 1.0f;
+        if (lm && (white || !strcmp(lm, "fine"))) {
+            enum { LW = 1280, LH = 720 }; const uint64_t FST = VB + 0x4000, SMALL = VB + 0x4100;
+            tex_t *LIT = mk_tex(NVN_FORMAT_R11G11B10F, LW, LH);
+            float r = white ? 65504.0f : 0.25f, g = white ? 65504.0f : 0.5f, b = white ? 65504.0f : 0.75f;
+            float fst[18] = { -1, -1, 0, r, g, b,  3, -1, 0, r, g, b,  -1, 3, 0, r, g, b };   // (one triangle over the whole viewport)
+            float sm[18] = { -0.01f, -0.01f, 0, 0.5f, 0.5f, 0.5f,  0.01f, -0.01f, 0, 0.5f, 0.5f, 0.5f,  0, 0.01f, 0, 0.5f, 0.5f, 0.5f };
+            memcpy((void *)(uintptr_t)FST, fst, sizeof fst); memcpy((void *)(uintptr_t)SMALL, sm, sizeof sm);
+            SLOG("lit frames: %d, a %dx%d R11G11B10F target, its %dx%d part drawn %s, 240 draws a frame", nf, LW, LH, (int)(LW * sc), (int)(LH * sc), white ? "at 65504 (white)" : "in a normal colour (fine)");
+            for (int f = 0; f < nf; f++) {
+                cmd_begin();
+                set_rt(LIT, NULL); viewport((int)(LW * sc), (int)(LH * sc)); clear(0.1f, 0.2f, 0.3f); depth_state(0);
+                program(flat); vlayout(2, fl_fmt, fl_off, 24); vbuf(FST, sizeof fst);
+                p_draw d; memset(&d, 0, sizeof d); d.prim = NVN_DRAW_PRIMITIVE_TRIANGLES; d.count = 3; d.instances = 1; cmd(OP_DRAW, &d, sizeof d);
+                vbuf(SMALL, sizeof sm); for (int k = 0; k < 239; k++) cmd(OP_DRAW, &d, sizeof d);
+                submit(cmd_end());
+                present(Wt);
+            }
+            mtl_finish();
+            SLOG("lit frames done");
+        }
     }
     char rec[1400]; snprintf(rec, sizeof rec, "%s/%s-synth-p2.nxgold", outdir, title);
     struct stat st; if (stat(rec, &st)) { SLOG("no recording at %s", rec); _exit(1); }

@@ -15,6 +15,13 @@
         into the game's memory and back, a texture clear, a blit from RGBA8, CPU-filled textures, CPU reads) once with each setting, both, and neither. Each run:
         its own round trip identical, its CPU reads exact ("b10 check" lines); each picture against the default run's within the tolerance; the test's recording
         replayed without the test and the default's with it (the player converts the R11G11B10F images) within the tolerance. Exit 0 when everything passes.
+  golden_check.py mali [--out DIR] [--engine ID] [--title ID] [--players DIR]
+        The Mali white-screen check and its ladder (nvn_vk.c mali_white_vk.inc) on this PC: golden_synth with lit frames (GOLDEN_SYNTH_LIT: a 1280x720 R11G11B10F
+        target, 240 draws a frame) drawn white (65504) or fine, run as successive starts of the game sharing the ladder's state file. Lavapipe is not Arm's driver,
+        so with no switch nothing may happen; DM_MALI_LADDER=1 forces the ladder on: white moves it A -> B -> back to A with the PanVK offer, start by start, and
+        an app update starts it over; fine stops the check after 5 samples and later starts do not check; a white scene drawn into half of the target is still
+        white; DM_MALI_WHITE_SIM=1 makes a fine scene count as white; DM_MALI_LADDER=0 turns that off; a route set in env.txt is run, its verdict not kept.
+        Every sample is the engine's compute pass on the real lit target, read back after its fence. Exit 0 when everything passes.
 
 A recording's name is its file name without .nxgold. Tolerance: a pixel differs when any channel differs by more than --threshold (default 2 of 255); a recording
 fails when more than --max-diff percent of its pixels differ (default 0.1). <folder>/<name>.tolerance ("<threshold> <max-diff>") overrides both for one recording.
@@ -227,6 +234,87 @@ def cmd_b10(a):
     print('float-target tests: ' + ('PASS' if not fails else f'FAIL ({fails})'))
     return 1 if fails else 0
 
+def cmd_mali(a):
+    """The Mali white-screen check and its ladder over successive starts (golden_synth's lit frames): see the module's help"""
+    import re
+    engine = a.engine; synth = os.path.join(a.players, f'pc-{engine}', 'golden_synth'); title = a.title or engine
+    if not os.path.exists(synth): print(f'ERROR no {synth} (bash dm/pc/build.sh GAME={engine})'); return 2
+    if os.path.isdir(a.out): shutil.rmtree(a.out)
+    os.makedirs(a.out); fails = 0; nstart = [0]
+    def start(case, lit, sw, frames=16, app='96'):
+        """one start of the game: golden_synth in a folder of its own, the case's state file; returns ([mali-white] lines, the state file's fields, exit code)"""
+        nstart[0] += 1; d = os.path.join(a.out, case); os.makedirs(d, exist_ok=True); out = os.path.join(d, f'start{nstart[0]}')
+        env = vk_env()
+        for k in [k for k in env if k.startswith(('DM_MALI_', 'DM_VK_B10_', 'GOLDEN_SYNTH_'))]: del env[k]   # (only what the case sets)
+        env.update({'GOLDEN_SYNTH_LIT': lit, 'GOLDEN_SYNTH_FRAMES': str(frames), 'DM_MALI_WHITE_EVERY_MS': '0', 'DM_APP_VERSION': app, 'DM_MALI_LADDER_FILE': os.path.join(d, 'mali_ladder.txt')})
+        env.update(sw)
+        r = subprocess.run([synth, out, title], env=env, capture_output=True, text=True, timeout=900)
+        open(out + '.log', 'w').write(r.stderr)
+        lines = [l.split('[mali-white] ', 1)[1] for l in r.stderr.splitlines() if '[mali-white] ' in l]
+        st = {}; sp = os.path.join(d, 'mali_ladder.txt')
+        if os.path.exists(sp): st = dict(l.split('=', 1) for l in open(sp).read().splitlines() if '=' in l and not l.startswith('#'))
+        fmt = [l.split('formats: ', 1)[1].split(' (')[0] for l in r.stderr.splitlines() if 'formats: R11G11B10F' in l]
+        return lines, st, r.returncode, fmt, out + '.log'
+    def check(ok, what):
+        nonlocal fails; fails += not ok; print(f'{"PASS " if ok else "FAIL "} {what}'); return ok
+    def plan(lines):   # the start's route and whether it checks, from the "on (...)" line
+        m = [re.search(r'this start: route (\S+), (checked|not checked)', l) for l in lines]; m = [x for x in m if x]
+        return (m[0].group(1), m[0].group(2)) if m else (None, None)
+    def samples(lines): return [l for l in lines if l.startswith('sample ') and 'taken before the verdict' not in l]
+    def verdict(lines):
+        m = [re.search(r'verdict after (\d+) samples: route (\S+) is (WHITE|FINE)', l) for l in lines]; m = [x for x in m if x]
+        return (int(m[0].group(1)), m[0].group(2), m[0].group(3)) if m else None
+    def issued(lines):   # the highest sample number read (judged or not): how many samples were taken
+        n = [int(re.match(r'sample (\d+)', l).group(1)) for l in lines if re.match(r'sample \d+', l)]; return max(n) if n else 0
+    A16 = 'R11G11B10F drawn and sampled as RGBA16F'; NC = 'R11G11B10F render targets made without framebuffer compression'
+    print(f'golden_synth {synth}, title {title}; lavapipe unless VK_ICD_FILENAMES is set; logs in {a.out}/<case>/start<n>.log')
+    # 1. lavapipe with no switch: not Arm's own driver, so nothing at all
+    L, st, rc, fmt, lg = start('off', 'white', {})
+    check(rc == 0 and not L and not st and not fmt, f'off on lavapipe with no switch, a white lit scene: exit {rc}, {len(L)} [mali-white] lines, state file {"written" if st else "none"}, route formats {fmt or "none"}')
+    # 2. DM_MALI_LADDER=1 (a test switch: the ladder on lavapipe), white: A -> B -> A + PanVK offer, then an app update starts over
+    sw = {'DM_MALI_LADDER': '1'}
+    L, st, rc, fmt, lg = start('white', 'white', sw); v = verdict(L); s = samples(L)
+    check(rc == 0 and plan(L) == ('A', 'checked') and A16 in fmt and NC not in fmt, f'white, start 1: route A (the RGBA16F stand-in), checked: {plan(L)}, formats {fmt}')
+    check(v == (3, 'A', 'WHITE') and len(s) == 3 and all(': white;' in x and '576 of 576 texels saturated' in x for x in s), f'white, start 1: 3 samples, all 576 of 576 texels saturated, verdict {v}')
+    check(any('the second fix (route B' in l for l in L) and any(l.startswith('note over the game') for l in L) and st.get('A') == 'white' and st.get('B') == '-' and st.get('next') == 'B',
+          f'white, start 1: the ladder moves to B, a note over the game; state A={st.get("A")} B={st.get("B")} next={st.get("next")}')
+    L, st, rc, fmt, lg = start('white', 'white', sw); v = verdict(L)
+    check(rc == 0 and plan(L) == ('B', 'checked') and NC in fmt and A16 not in fmt, f'white, start 2: route B (no framebuffer compression), checked: {plan(L)}, formats {fmt}')
+    check(v == (3, 'B', 'WHITE') and any('neither fix took' in l for l in L) and st.get('B') == 'white' and st.get('panvk') == 'offer' and st.get('next', '').startswith('A'),
+          f'white, start 2: verdict {v}; back to A with the PanVK offer: state B={st.get("B")} panvk={st.get("panvk")} next={st.get("next")}')
+    L, st, rc, fmt, lg = start('white', 'white', sw)
+    check(rc == 0 and plan(L) == ('A', 'not checked') and not samples(L) and A16 in fmt and st.get('panvk') == 'offer' and any('PanVK offer pending' in l for l in L),
+          f'white, start 3: route A, not checked, {len(samples(L))} samples, the offer pending for the app: {plan(L)}, panvk={st.get("panvk")}')
+    L, st, rc, fmt, lg = start('white', 'white', sw, app='97'); v = verdict(L)
+    check(rc == 0 and any(l.startswith('ladder started over') for l in L) and plan(L) == ('A', 'checked') and v == (3, 'A', 'WHITE') and st.get('app') == '97' and st.get('panvk') == '-' and st.get('next') == 'B',
+          f'white, start 4 after an app update (97): started over at route A, checked, white again: {plan(L)}, {v}, app={st.get("app")} panvk={st.get("panvk")}')
+    # 3. a white scene drawn into half of the target (a lower render scale): judged on the part drawn, still white
+    L, st, rc, fmt, lg = start('half', 'white', dict(sw, GOLDEN_SYNTH_LIT_SCALE='0.5')); v = verdict(L); s = samples(L)
+    check(rc == 0 and v == (3, 'A', 'WHITE') and s and all('in the 640x360 part drawn of the 1280x720 target' in x and '576 of 576' in x for x in s),
+          f'half scale: the 640x360 part drawn sampled, all saturated, verdict {v}')
+    # 4. fine: 5 samples, kept, the check stops; the next start does not check
+    L, st, rc, fmt, lg = start('fine', 'fine', sw, frames=24); v = verdict(L); s = samples(L)
+    check(rc == 0 and plan(L) == ('A', 'checked') and v == (5, 'A', 'FINE') and len(s) == 5 and all('0 of 576 texels saturated' in x and ': fine;' in x for x in s),
+          f'fine, start 1: verdict {v} after {len(s)} samples of 0 / 576')
+    check(issued(L) <= 5 + 3 and st.get('A') == 'fine' and st.get('next', '').startswith('A'),
+          f'fine, start 1: the check stopped ({issued(L)} samples taken in 24 frames, at most 5 judged + 3 in flight); state A={st.get("A")} next={st.get("next")}')
+    L, st, rc, fmt, lg = start('fine', 'fine', sw, frames=24)
+    check(rc == 0 and plan(L) == ('A', 'not checked') and issued(L) == 0 and A16 in fmt, f'fine, start 2: route A kept, not checked, {issued(L)} samples taken')
+    # 5. DM_MALI_WHITE_SIM=1 on its own: the ladder on lavapipe, a fine scene counted as white
+    L, st, rc, fmt, lg = start('sim', 'fine', {'DM_MALI_WHITE_SIM': '1'}); v = verdict(L); s = samples(L)
+    check(rc == 0 and any('DM_MALI_WHITE_SIM=1' in l for l in L) and v == (3, 'A', 'WHITE') and s and all('0 of 576 texels saturated' in x and 'counted as all white' in x for x in s)
+          and st.get('A') == 'white' and st.get('next') == 'B', f'DM_MALI_WHITE_SIM=1, a fine scene: measured 0 / 576, counted white, verdict {v}, next={st.get("next")}')
+    # 6. DM_MALI_LADDER=0 wins over the simulation
+    L, st, rc, fmt, lg = start('ladder0', 'white', {'DM_MALI_LADDER': '0', 'DM_MALI_WHITE_SIM': '1'})
+    check(rc == 0 and not L and not st and not fmt, f'DM_MALI_LADDER=0 with DM_MALI_WHITE_SIM=1: {len(L)} [mali-white] lines, state file {"written" if st else "none"}, formats {fmt or "none"}')
+    # 7. a route set in env.txt wins; its verdict is logged, not kept for a route it is not
+    L, st, rc, fmt, lg = start('envwins', 'white', dict(sw, DM_VK_B10_AS_RGBA16='0')); v = verdict(L)
+    check(rc == 0 and any('env.txt sets DM_VK_B10_AS_RGBA16: this start runs none, not route A' in l for l in L) and not fmt and v == (3, 'none', 'WHITE')
+          and any('the verdict is not kept' in l for l in L) and st.get('A') == '-' and st.get('next') == 'A',
+          f'DM_VK_B10_AS_RGBA16=0 over the ladder: runs none (formats {fmt or "none"}), verdict {v}, not kept: A={st.get("A")}')
+    print('Mali white-screen check: ' + ('PASS' if not fails else f'FAIL ({fails})') + f' ({nstart[0]} starts)')
+    return 1 if fails else 0
+
 def main():
     import argparse
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0], formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -238,9 +326,10 @@ def main():
     y.add_argument('--players', default=PLAYERS)
     b = s.add_parser('b10'); b.add_argument('--out', default=os.path.join(PLAYERS, 'golden-b10')); b.add_argument('--engine', default='01008DB008C2C000'); b.add_argument('--title'); b.add_argument('--players', default=PLAYERS)
     b.add_argument('--threshold', type=int, default=2); b.add_argument('--max-diff', type=float, default=0.1)
+    m = s.add_parser('mali'); m.add_argument('--out', default=os.path.join(PLAYERS, 'golden-mali')); m.add_argument('--engine', default='01008DB008C2C000'); m.add_argument('--title'); m.add_argument('--players', default=PLAYERS)
     a = p.parse_args()
     if a.cmd in ('run', 'accept') and not a.out: a.out = os.path.join(a.folder, 'out')
-    sys.exit({'run': cmd_run, 'accept': cmd_accept, 'synth': cmd_synth, 'b10': cmd_b10}[a.cmd](a))
+    sys.exit({'run': cmd_run, 'accept': cmd_accept, 'synth': cmd_synth, 'b10': cmd_b10, 'mali': cmd_mali}[a.cmd](a))
 
 if __name__ == '__main__':
     main()

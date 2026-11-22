@@ -47,6 +47,7 @@ bash build.sh GAME=01008F6008C5E000 # Scarlet / Violet engine
 cd ../gfx/golden
 python3 golden_check.py synth                                  # the round trip without a phone (Shield's title)
 python3 golden_check.py b10                                    # the Mali float-target tests (R11G11B10F), below
+python3 golden_check.py mali                                   # the Mali white-screen check and its ladder over successive starts, below
 python3 golden_check.py synth --title 0100ABF008968000 --out /tmp/gsyn-sword   # the same frame as Sword's
 python3 golden_check.py run   ~/galar-golden-data/swsh         # every recording in the folder: PASS / FAIL / NEW / ERROR, exit 0 / 1 / 2
 python3 golden_check.py accept ~/galar-golden-data/swsh [name] # this run's pictures become <name>.expected.png
@@ -91,6 +92,19 @@ GPU's copy of it into the game's memory, the lit pass's copy, the clear); each p
 recording replayed without the test and the default's with it. Every colour shown is one R11G11B10F holds exactly, so the way a driver rounds into the format
 cannot show (lavapipe truncates, the stand-in rounds to nearest even). Result on lavapipe (2026-11-22): every picture identical to the default (0 of 76,800 pixels
 differ), every check exact; the engine before the stand-in's conversions (f0035ae) fails it.
+
+## The Mali white-screen check and its ladder (no phone)
+
+On Arm's own Mali driver the engine checks Sword / Shield's lit scene while playing (`nvn_vk.c` `mali_white_vk.inc`, rules in `mali_white.h`): route A (the RGBA16F
+stand-in) first; white → route B (no framebuffer compression) from the next start; white too → route A again and the app offers PanVK; a route found fine is kept
+unchecked. `golden_check.py mali` runs `golden_synth` with `GOLDEN_SYNTH_LIT=white|fine`: after the recorded frame (unchanged), `GOLDEN_SYNTH_FRAMES` (16) frames
+draw an R11G11B10F target of 1280x720 with 240 draws, its `GOLDEN_SYNTH_LIT_SCALE` part at 65504 (white) or in a normal colour, each presented. Each run is one
+start of the game; a case's runs share the ladder's state file (`DM_MALI_LADDER_FILE`), samples are taken at every eligible present (`DM_MALI_WHITE_EVERY_MS=0`).
+Lavapipe is not Arm's driver: with no switch nothing may happen (no `[mali-white]` line, no state file, no route); `DM_MALI_LADDER=1` forces the ladder on:
+white goes A → B → A with the PanVK offer pending, start by start, and `DM_APP_VERSION=97` starts it over; a white scene drawn into half of the target is judged on
+its drawn part; fine stops the check after 5 samples and the next start does not check; `DM_MALI_WHITE_SIM=1` alone counts a fine scene as white; `DM_MALI_LADDER=0`
+wins over it; `DM_VK_B10_AS_RGBA16=0` in env.txt wins over the ladder's route and its verdict is not kept. Every sample is the engine's own compute pass on the
+real target, read back after its fence. Result on lavapipe (2026-11-22): PASS, 11 starts.
 
 ## Recording on the phone (S25+)
 
