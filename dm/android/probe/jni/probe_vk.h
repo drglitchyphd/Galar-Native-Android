@@ -38,3 +38,4 @@ PV_PRE(PV_DECL) PV_INST(PV_DECL)
 //   pv_load_instance: the rest, once the instance exists. 0 = ok
 int pv_load(const char *driver, const char **how);
 void pv_load_instance(VkInstance inst);
+PFN_vkVoidFunction pv_instance_proc(VkInstance inst, const char *name);   // (one the lists above do not name: an extension's, under its own name)

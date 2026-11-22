@@ -45,3 +45,4 @@ void pv_load_instance(VkInstance inst) {
     PV_INST(PV_I)
 #undef PV_I
 }
+PFN_vkVoidFunction pv_instance_proc(VkInstance inst, const char *name) { return s_gipa ? s_gipa(inst, name) : NULL; }

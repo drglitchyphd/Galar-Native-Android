@@ -6,8 +6,9 @@
 //   shader-maths        spv_nan_minmax / spv_nan_select: NaN in min / max / saturate, pow as exp2(log2), integers carried in float variables, four ways
 //   end-of-submit-barrier  barrier_host: shader writes the CPU reads after the fence, with and without the barrier, coherent and cached memory
 //   reinterpreted-format   MUTABLE_FORMAT textures written as one format and sampled as another (compressed render targets: AFBC, DCC)
-//   3d-render-target    att_view: a 3D image's slices attached as a layered 2D array (the colour-grading tables; black 3D scenes when only slice 0 drew), and a clear
-//                       inside that pass recorded as clear_in_pass records it on this driver (Q_CLEAR_BY_PASS: on Xclipse a pass of its own per slice)
+//   3d-render-target    att_view: a 3D image's slices attached as a layered 2D array (the colour-grading tables; black 3D scenes when only slice 0 drew), recorded
+//                       as the engine records its passes on this driver (dynamic rendering, or render passes: Q_NO_DYNREN), and the clear inside that pass as
+//                       clear_in_pass records it there (its layer 0, a part of it; Q_CLEAR_BY_PASS: on Xclipse a pass of its own on that slice)
 //   dmabuf-heap         the heap route: /dev/dma_heap memory mapped at a fixed address and imported into the driver (the Mali / Xclipse memory pools)
 //   bc-textures         the BC layer (gfx/tex/bc_gpu.c, linked as is): BC1-BC7 converted on the GPU only where it matches the CPU bit for bit
 //   depth-copy          nvn_vk.c zcopy_draw: a scaled copy into a depth / stencil image drawn (gl_FragDepth, the stencil one bit a draw), read back
@@ -80,8 +81,9 @@ static void guard(int on) {
 // ---- device (as the engine makes it: first GPU, a graphics + compute queue, every core feature on) ----
 static VkInstance s_inst; static VkPhysicalDevice s_pd; static VkDevice s_dev; static VkQueue s_q; static uint32_t s_qf, s_api;
 static VkCommandPool s_cp; static VkPhysicalDeviceMemoryProperties s_mp; static VkPhysicalDeviceProperties s_props; static VkPhysicalDeviceFeatures s_feat;
-static int s_ext_fd, s_ext_dmabuf, s_ext_fctl, s_ext_drvp;
+static int s_ext_fd, s_ext_dmabuf, s_ext_fctl, s_ext_drvp, s_ext_m1, s_dynren;   // (s_ext_m1: VK_KHR_maintenance1 on Vulkan 1.0; s_dynren: dynamic rendering on)
 static PFN_vkGetMemoryFdPropertiesKHR p_fdprops;
+static PFN_vkCmdBeginRendering p_begin_rend; static PFN_vkCmdEndRendering p_end_rend;
 
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 static int mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) {
@@ -104,7 +106,14 @@ static int st_device(void) {
     uint32_t iv = VK_API_VERSION_1_0; if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&iv);   // (a Vulkan 1.0 loader has no vkEnumerateInstanceVersion)
     if (getenv("DM_PROBE_API10")) iv = VK_API_VERSION_1_0;   // (testing: the Vulkan 1.0 route on any driver: no 1.1 functions, shaders through spv_to_10)
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative self-test", .apiVersion = iv < VK_API_VERSION_1_3 ? iv : VK_API_VERSION_1_3 };
-    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai };
+    // the instance's extensions as the engine enables them (nvn_vk.c mtl_init): the 1.1 queries of properties and features, and external memory's capabilities, which
+    //   a Vulkan 1.0 device's own extensions rest on (float controls, the driver's identity, dynamic rendering; external memory)
+    uint32_t nie = 0; vkEnumerateInstanceExtensionProperties(NULL, &nie, NULL); VkExtensionProperties *ie = calloc(nie ? nie : 1, sizeof *ie); vkEnumerateInstanceExtensionProperties(NULL, &nie, ie);
+    const char *iext[2]; uint32_t niext = 0; int inst_p2 = 0, inst_xmc = 0;
+    if (has_ext(ie, nie, "VK_KHR_get_physical_device_properties2")) { iext[niext++] = "VK_KHR_get_physical_device_properties2"; inst_p2 = 1; }
+    if (has_ext(ie, nie, "VK_KHR_external_memory_capabilities")) { iext[niext++] = "VK_KHR_external_memory_capabilities"; inst_xmc = 1; }
+    free(ie);
+    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = niext, .ppEnabledExtensionNames = iext };
     VkResult vr = vkCreateInstance(&ici, NULL, &s_inst);
     if (vr) { R(FAIL, "device", "vkCreateInstance %d", vr); return -1; }
     pv_load_instance(s_inst);
@@ -113,28 +122,54 @@ static int st_device(void) {
     if (!n) { R(FAIL, "device", "no Vulkan GPU"); return -1; }
     vkGetPhysicalDeviceProperties(s_pd, &s_props); vkGetPhysicalDeviceMemoryProperties(s_pd, &s_mp); vkGetPhysicalDeviceFeatures(s_pd, &s_feat);
     s_api = s_props.apiVersion < ai.apiVersion ? s_props.apiVersion : ai.apiVersion;
-    if (s_api < VK_API_VERSION_1_1) { vkGetPhysicalDeviceProperties2 = NULL; pv_vkGetPhysicalDeviceExternalBufferProperties = NULL;   // (1.1 functions: not there to call)
+    int dev10 = s_api < VK_API_VERSION_1_1;
+    PFN_vkGetPhysicalDeviceFeatures2 gf2 = (PFN_vkGetPhysicalDeviceFeatures2)pv_instance_proc(s_inst, "vkGetPhysicalDeviceFeatures2");
+    if (dev10) {   // (Vulkan 1.0: the 1.1 functions are not there to call; the property and feature queries under the extension's names where the instance has it)
+        vkGetPhysicalDeviceProperties2 = inst_p2 ? (PFN_vkGetPhysicalDeviceProperties2)pv_instance_proc(s_inst, "vkGetPhysicalDeviceProperties2KHR") : NULL;
+        gf2 = inst_p2 ? (PFN_vkGetPhysicalDeviceFeatures2)pv_instance_proc(s_inst, "vkGetPhysicalDeviceFeatures2KHR") : NULL;
+        pv_vkGetPhysicalDeviceExternalBufferProperties = NULL;
         if (!s_csm_real) { s_csm_real = pv_vkCreateShaderModule; pv_vkCreateShaderModule = csm_10; } }
     uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(s_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(s_pd, &nq, qp);
     for (s_qf = 0; s_qf < nq && (qp[s_qf].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT); s_qf++) { }
     if (s_qf == nq) { R(FAIL, "device", "no queue family with graphics and compute"); return -1; }
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(s_pd, NULL, &ne, NULL); VkExtensionProperties *ex = calloc(ne ? ne : 1, sizeof *ex); vkEnumerateDeviceExtensionProperties(s_pd, NULL, &ne, ex);
-    const char *on[8]; uint32_t non = 0;
-    if (has_ext(ex, ne, "VK_KHR_external_memory_fd")) { on[non++] = "VK_KHR_external_memory_fd"; s_ext_fd = 1;
+    const char *on[16]; uint32_t non = 0;
+    // external memory: on Vulkan 1.0 VK_KHR_external_memory beside it (core from 1.1), which needs the instance's capabilities extension (nvn_vk.c xmem_ok)
+    if (has_ext(ex, ne, "VK_KHR_external_memory_fd") && (!dev10 || (has_ext(ex, ne, "VK_KHR_external_memory") && inst_xmc))) {
+        on[non++] = "VK_KHR_external_memory_fd"; if (dev10) on[non++] = "VK_KHR_external_memory"; s_ext_fd = 1;
         if (has_ext(ex, ne, "VK_EXT_external_memory_dma_buf")) { on[non++] = "VK_EXT_external_memory_dma_buf"; s_ext_dmabuf = 1; } }
-    if (s_api < VK_API_VERSION_1_2) {   // Vulkan 1.1: float controls and the driver's identity are extensions (nvn_vk.c, older Mali-G52 / G72 / G76)
+    if (s_api < VK_API_VERSION_1_2 && (!dev10 || inst_p2)) {   // Vulkan 1.1: float controls and the driver's identity are extensions (nvn_vk.c, older Mali-G52 / G72 / G76);
+                                                             //   on 1.0 they extend the property query the instance's extension gives, so only with it
         if (has_ext(ex, ne, "VK_KHR_shader_float_controls")) { on[non++] = "VK_KHR_shader_float_controls"; s_ext_fctl = 1; }
         if (has_ext(ex, ne, "VK_KHR_driver_properties")) { on[non++] = "VK_KHR_driver_properties"; s_ext_drvp = 1; }
     }
+    // Vulkan 1.0: what 1.1 has built in, as the engine enables it there (nvn_vk.c x10): maintenance1, which a 3D image drawn through 2D-array views needs (the 3D
+    //   tests are skipped without it), and storage_buffer_storage_class, which the test shaders' storage buffers declare
+    if (dev10 && has_ext(ex, ne, "VK_KHR_maintenance1")) { on[non++] = "VK_KHR_maintenance1"; s_ext_m1 = 1; }
+    if (dev10 && has_ext(ex, ne, "VK_KHR_storage_buffer_storage_class")) on[non++] = "VK_KHR_storage_buffer_storage_class";
+    // dynamic rendering, as the engine enables it (its passes on every GPU but Adreno: Q_NO_DYNREN; the 3D tests record them so where it does): core in 1.3; before,
+    //   VK_KHR_dynamic_rendering with what it rests on before 1.2 (depth_stencil_resolve and create_renderpass2; on 1.0 multiview and maintenance2 too)
+    VkPhysicalDeviceDynamicRenderingFeatures fdr = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
+    static const char *const dr_deps[4] = { "VK_KHR_depth_stencil_resolve", "VK_KHR_create_renderpass2", "VK_KHR_multiview", "VK_KHR_maintenance2" };
+    int dr_ext = s_api < VK_API_VERSION_1_3 && has_ext(ex, ne, "VK_KHR_dynamic_rendering");
+    for (int k = 0; k < 4 && dr_ext; k++) if (s_api < VK_API_VERSION_1_2 && (k < 2 || dev10) && !has_ext(ex, ne, dr_deps[k])) dr_ext = 0;
+    if ((s_api >= VK_API_VERSION_1_3 || dr_ext) && gf2) { VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &fdr }; gf2(s_pd, &f2); }
+    if (fdr.dynamicRendering && dr_ext) { on[non++] = "VK_KHR_dynamic_rendering"; if (s_api < VK_API_VERSION_1_2) for (int k = 0; k < 4; k++) if (k < 2 || dev10) on[non++] = dr_deps[k]; }
     free(ex);
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = s_qf, .queueCount = 1, .pQueuePriorities = &prio };
-    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = non, .ppEnabledExtensionNames = on, .pEnabledFeatures = &s_feat };
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = fdr.dynamicRendering ? &fdr : NULL, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+                               .enabledExtensionCount = non, .ppEnabledExtensionNames = on, .pEnabledFeatures = &s_feat };
+    fdr.pNext = NULL;
     if ((vr = vkCreateDevice(s_pd, &dci, NULL, &s_dev))) { R(FAIL, "device", "vkCreateDevice %d with every core feature on (as the engine asks)", vr); return -1; }
     vkGetDeviceQueue(s_dev, s_qf, 0, &s_q);
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = s_qf };
     vkCreateCommandPool(s_dev, &pci, NULL, &s_cp);
     if (s_ext_fd) p_fdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(s_dev, "vkGetMemoryFdPropertiesKHR");
+    if (fdr.dynamicRendering) { int core = s_api >= VK_API_VERSION_1_3;
+        p_begin_rend = (PFN_vkCmdBeginRendering)vkGetDeviceProcAddr(s_dev, core ? "vkCmdBeginRendering" : "vkCmdBeginRenderingKHR");
+        p_end_rend = (PFN_vkCmdEndRendering)vkGetDeviceProcAddr(s_dev, core ? "vkCmdEndRendering" : "vkCmdEndRenderingKHR");
+        s_dynren = p_begin_rend && p_end_rend; }
     return 0;
 }
 
@@ -244,8 +279,8 @@ static int fc_wrong(const uint32_t out[8], char *list, size_t n) {
 // The GPU as nvn_vk.c mtl_init describes it to the engine's own per-GPU rules (vk_quirks.h gpu_id), from the same queries: the driver ID only where mtl_init reads
 //   the driver properties (Vulkan 1.2, or 1.1 with the float-controls and driver-properties extensions), Arm's release from driverVersion on Arm's own driver.
 //   dp / fc: the driver and float-controls properties (left zero where they cannot be read: *drvp / *fcp 0). The game's profile (gpu_id.port / eng) and dynamic
-//   rendering are not known here: no rule the probe asks reads them (t_quirks.c checks that the ones it asks, Q_FLOAT_CONTROLS and Q_CLEAR_BY_PASS, read the
-//   vendor and the driver ID only)
+//   rendering are not known here: no rule the probe asks reads them (t_quirks.c checks that the ones it asks, Q_FLOAT_CONTROLS, Q_CLEAR_BY_PASS and Q_NO_DYNREN,
+//   read the vendor and the driver ID only)
 static void st_gpu(gpu_id *gid, VkPhysicalDeviceDriverProperties *dp, VkPhysicalDeviceFloatControlsProperties *fc, int *drvp, int *fcp) {
     *drvp = s_api >= VK_API_VERSION_1_2 || s_ext_drvp; *fcp = s_api >= VK_API_VERSION_1_2 || s_ext_fctl;
     memset(dp, 0, sizeof *dp); dp->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
@@ -443,15 +478,20 @@ out:
 }
 
 // ---- 3D render target: the game's 32x32x32 colour-grading tables are drawn into a 3D image through 2D-array views of its slices ----
-// layered (the engine's att_view): one view of all 32 slices, a 32-layer framebuffer, one pass; slices: a 1-slice view, framebuffer and pass per slice (a candidate
-//   workaround where the layered way fails). Each step is named before it runs, so a driver crash (Xclipse 540) says where. Pass 1 clears every slice in the render
-//   pass (submitted on its own), pass 2 loads and clears slices 16-31; then all 32 are read back. Pass 2's clear, layered, is recorded as the engine records a clear
-//   inside a layered pass on this driver (nvn_vk.c clear_in_pass): vkCmdClearAttachments in the pass, or where the engine clears by pass (clear_by_pass:
-//   DM_VK_CLEAR_BY_PASS, else Q_CLEAR_BY_PASS: Samsung's Xclipse, whose driver crashed recording that call, Xclipse 940 driver 24.0.534 and Xclipse 540 24.0.560)
-//   the layered pass ended, each slice cleared by a pass of its own (its load op, clear_slice_by_pass) and the layered pass begun again (the game's next draw).
-//   The slices way clears with vkCmdClearAttachments in its 1-slice passes (this drew right on both Xclipse).
-//   A crash asks for DM_VK_NO_LAYERED_3D=1 (T below: slice 0 only, the engine before att_view drew every slice), but a crash in the layered pass's
-//   vkCmdClearAttachments asks for the engine's own way around it, DM_VK_CLEAR_BY_PASS=1, which keeps every slice (unless env.txt sets that switch: it wins)
+// The image as the engine makes a 3D render target (tex_make: MUTABLE_FORMAT | 2D_ARRAY_COMPATIBLE, transfer source and destination, sampled, colour attachment).
+// layered (the engine's att_view): one view of all 32 slices, its passes 32 layers deep, each step a submission of its own so a driver crash, or a lost device,
+//   names the step: 0 the pass clearing every slice (its load op); 1 that pass begun again, loading (the engine reopens it at the game's next draw); 2 the clear the
+//   engine records inside that pass, exactly as clear_in_pass records it on this driver: vkCmdClearAttachments of the pass's layer 0 over a part of it (the
+//   scissor), or where the engine clears by pass (clear_by_pass: DM_VK_CLEAR_BY_PASS, else Q_CLEAR_BY_PASS: Samsung's Xclipse, whose driver crashed recording a
+//   layered vkCmdClearAttachments, Xclipse 940 driver 24.0.534 and Xclipse 540 24.0.560) the layered pass ended, the slice cleared by a pass of its own over that
+//   part (its load op, clear_slice_by_pass) and the layered pass begun again; 3 all 32 slices read back. Recorded as the engine records its passes on this driver:
+//   dynamic rendering (vkCmdBeginRendering, no framebuffer) where the engine uses it (st_dynren), else render passes and framebuffers.
+// slices: a 1-slice view, framebuffer and pass per slice (a candidate workaround where the layered way fails), slices 16-31 cleared again inside their passes.
+// What a crash asks for (the journal's "begin" lines, crash_fix): the layered steps DM_VK_NO_LAYERED_3D=1 (T below: slice 0 only, the engine before att_view drew
+//   every slice), except the clear inside the pass (recording it, or the submission that runs it, after step 1 ran the same pass without it): DM_VK_CLEAR_BY_PASS=1,
+//   the engine's own way around it, which keeps every slice (unless env.txt sets that switch: it wins; then slice 0 only); and nothing for the read-back (the
+//   probe's own copy). A lost device at a step's submission asks for what a crash there would. Without a crash: the clear's part wrong and the rest right asks for
+//   DM_VK_CLEAR_BY_PASS=1 too (where the engine does not clear by pass already); slices wrong elsewhere ask for nothing (slice 0 only would not draw them either)
 static int st_clear_by_pass(int *from_env) {
     const char *e = getenv("DM_VK_CLEAR_BY_PASS"); *from_env = e != NULL;   // (the game's env.txt: dprobe_jni.c sets it here as the game does)
     if (e) return atoi(e) != 0;
@@ -459,39 +499,78 @@ static int st_clear_by_pass(int *from_env) {
     st_gpu(&gid, &dp, &fc, &drvp, &fcp);
     return quirk_default(Q_CLEAR_BY_PASS, &gid);
 }
-static int check_3d(const uint32_t *p, uint32_t D, char *why, size_t n) {
-    int bad = 0, first = -1; uint32_t got = 0;
-    for (uint32_t z = 0; z < D; z++) { uint32_t want = z < D / 2 ? 0xFF0000FFu : 0xFFFF0000u; int sb = 0;
-        for (uint32_t i = 0; i < D * D; i++) if (p[z * D * D + i] != want) { if (!sb) got = p[z * D * D + i]; sb = 1; }
+// whether the engine records its passes with dynamic rendering on this driver (nvn_vk.c mtl_init g_dynren): the driver has it (st_device), and neither DM_VK_BASELINE
+//   nor DM_VK_NO_DYNREN (env.txt) nor its default (vk_quirks.h Q_NO_DYNREN: Adreno) asks for render passes
+static int st_dynren(void) {
+    if (!s_dynren) return 0;
+    const char *b = getenv("DM_VK_BASELINE"), *e = getenv("DM_VK_NO_DYNREN");
+    if (b && atoi(b) > 0) return 0;
+    if (e) return atoi(e) == 0;
+    VkPhysicalDeviceDriverProperties dp; VkPhysicalDeviceFloatControlsProperties fc; int drvp, fcp; gpu_id gid;
+    st_gpu(&gid, &dp, &fc, &drvp, &fcp);
+    return !quirk_default(Q_NO_DYNREN, &gid);
+}
+enum { D3 = 32 };
+static const VkRect2D CLEAR_RC = { { 5, 9 }, { 19, 14 } };   // the part the clear inside the layered pass covers (a scissored clear: clear_in_pass's rectangle)
+static int in_clear_rc(uint32_t x, uint32_t y) { return x >= 5 && x < 5 + 19 && y >= 9 && y < 9 + 14; }
+// the slices read back: *bad_part, texels of the layered clear's part (slice 0) wrong; returns the slices wrong anywhere else
+static int check_3d(const uint32_t *p, int layered, int *bad_part, char *why, size_t n) {
+    int bad = 0, first = -1; uint32_t got = 0, gotp = 0; *bad_part = 0;
+    for (uint32_t z = 0; z < D3; z++) { int sb = 0;
+        for (uint32_t y = 0; y < D3; y++) for (uint32_t x = 0; x < D3; x++) {
+            int part = layered && z == 0 && in_clear_rc(x, y);
+            uint32_t want = (layered ? part : z >= D3 / 2) ? 0xFFFF0000u : 0xFF0000FFu, v = p[(z * D3 + y) * D3 + x];   // (cleared again: blue; else red)
+            if (v == want) continue;
+            if (part) { if (!*bad_part) gotp = v; (*bad_part)++; } else { if (!sb && first < 0) got = v; sb = 1; } }
         if (sb) { bad++; if (first < 0) first = (int)z; } }
     if (bad) snprintf(why, n, "%d of 32 slices wrong (first slice %d holds %#x)", bad, first, got);
+    else if (*bad_part) snprintf(why, n, "%d of the %u texels the clear inside the pass covers wrong (holding %#x)", *bad_part, CLEAR_RC.extent.width * CLEAR_RC.extent.height, gotp);
     return bad;
 }
+// a pass over the 3D image: a render pass (rp with framebuffer fb) or dynamic rendering (view v, layers deep), over area; cv: cleared to it (load op CLEAR), else LOAD
+static void pass3d(VkCommandBuffer cb, int dyn, VkRenderPass rp, VkFramebuffer fb, VkImageView v, uint32_t layers, VkRect2D area, const VkClearValue *cv) {
+    if (dyn) {
+        VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                         .loadOp = cv ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+        if (cv) ca.clearValue = *cv;
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = area, .layerCount = layers, .colorAttachmentCount = 1, .pColorAttachments = &ca };
+        p_begin_rend(cb, &ri);
+    } else {
+        VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = area, .clearValueCount = cv ? 1 : 0, .pClearValues = cv };
+        vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    }
+}
+static void pass3d_end(VkCommandBuffer cb, int dyn) { if (dyn) p_end_rend(cb); else vkCmdEndRenderPass(cb); }
+static void full_barrier(VkCommandBuffer cb) { barrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT); }
 static void t_3d_mode(int layered) {
-    const char *N = layered ? "3d-layered" : "3d-slices"; const uint32_t D = 32;
-    int cbp_env = 0, cbp = layered && st_clear_by_pass(&cbp_env);   // pass 2's clear as passes of their own (layered, where the engine clears so)
+    const char *N = layered ? "3d-layered" : "3d-slices"; const uint32_t D = D3;
+    if (s_api < VK_API_VERSION_1_1 && !s_ext_m1) { R(SKIP, N, "Vulkan 1.0 without VK_KHR_maintenance1: a 3D image cannot be drawn through 2D-array views on this driver"); return; }
+    int cbp_env = 0, cbp = layered && st_clear_by_pass(&cbp_env), dyn = layered && st_dynren();   // (the clear by passes of their own; dynamic rendering, as the engine here)
+    const char *clear_fix = cbp_env ? "DM_VK_NO_LAYERED_3D=1" : "DM_VK_CLEAR_BY_PASS=1";   // (what a crash in the clear inside the pass asks for: env.txt's switch wins)
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     g_step = "image format query";
-    VkImageFormatProperties ifp; VkResult r = vkGetPhysicalDeviceImageFormatProperties(s_pd, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_3D, VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT, &ifp);
+    VkImageFormatProperties ifp; VkResult r = vkGetPhysicalDeviceImageFormatProperties(s_pd, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_3D, VK_IMAGE_TILING_OPTIMAL, usage,
+        VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT, &ifp);
     if (r) { R(FAIL, N, "3D colour targets drawn through 2D-array views are not supported (%d): the game's 3D colour-grading tables cannot be filled", r); return; }
+    O("  %s: %s%s\n", N, layered ? (dyn ? "dynamic rendering (as the engine records its passes here)" : "render passes (as the engine records its passes here)") : "render passes",
+      layered ? (cbp ? "; the clear inside the pass as a pass of its own (as the engine here)" : "; the clear inside the pass with vkCmdClearAttachments (as the engine here)") : "");
     VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT, .imageType = VK_IMAGE_TYPE_3D,
         .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { D, D, D }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        .usage = usage, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
     VkImage img = VK_NULL_HANDLE; VkDeviceMemory im = VK_NULL_HANDLE; VkImageView v[32] = { 0 }; VkFramebuffer fb[32] = { 0 }; VkRenderPass rp[3] = { 0 }; hbuf h = { 0 };
     char why[160] = "";
     g_step = "3D image creation";
     if (vkCreateImage(s_dev, &ii, NULL, &img) || !(im = image_mem(img))) { R(FAIL, N, "a 32x32x32 3D target could not be made"); goto out; }
-    // the views (and below their framebuffers): slices, v[i] slice i; layered, v[0] all 32 slices, and with clears by pass v[i] slice i for slices 16-31 (their passes)
-    for (uint32_t i = 0; i < D; i++) {
-        int all = layered && i == 0; if (layered && !all && !(cbp && i >= D / 2)) continue;
+    // the views (and, with render passes, their framebuffers): slices, v[i] slice i; layered, v[0] all 32 slices, and with clears by pass v[1] slice 0 (its pass)
+    for (uint32_t i = 0; i < (layered ? (cbp ? 2u : 1u) : D); i++) {
+        int all = layered && i == 0;
         g_step = all ? "the 32-slice 2D-array view" : "a 1-slice 2D-array view";
         VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, .format = VK_FORMAT_R8G8B8A8_UNORM,
-            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, all ? 0 : i, all ? D : 1 } };
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layered ? 0 : i, all ? D : 1 } };
         if ((r = vkCreateImageView(s_dev, &vi, NULL, &v[i]))) { R(FAIL, N, "%s was refused (%d)", g_step, r); goto out; }
     }
-    // pass 0: clear everything (load op CLEAR), pass 1: keep (LOAD) and clear part with vkCmdClearAttachments, 2 (clears by pass): a slice cleared by its load op,
-    //   the image already in use; all GENERAL as the engine's passes
-    for (int k = 0; k < (cbp ? 3 : 2); k++) {
+    // render passes: 0 clear everything (load op CLEAR), 1 keep (LOAD), 2 a clear by its load op, the image already in use; all GENERAL as the engine's passes
+    for (int k = 0; !dyn && k < 3; k++) {
         g_step = "render pass creation";
         VkAttachmentDescription a = { .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = k == 1 ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -504,7 +583,7 @@ static void t_3d_mode(int layered) {
         VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &a, .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = 2, .pDependencies = dep };
         if ((r = vkCreateRenderPass(s_dev, &rci, NULL, &rp[k]))) { R(FAIL, N, "render pass refused (%d)", r); goto out; }
     }
-    for (uint32_t i = 0; i < D; i++) {
+    for (uint32_t i = 0; !dyn && i < D; i++) {
         if (!v[i]) continue;
         int all = layered && i == 0;
         g_step = all ? "the 32-layer framebuffer" : "a 1-layer framebuffer";
@@ -513,42 +592,65 @@ static void t_3d_mode(int layered) {
     }
     if (hbuf_make(&h, D * D * D * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0) { R(FAIL, N, "no host-visible readback buffer"); goto out; }
     memset(h.p, 0, D * D * D * 4); hbuf_sync(&h, 1);
-    for (int k = 0; k < 2; k++) {   // two submissions, so a crash names the clear that caused it
-        // (a crash in the layered pass's vkCmdClearAttachments: the engine's way around it, unless env.txt decides that switch, then slice 0 only)
-        if (k && layered && !cbp) crash_fix(N, cbp_env ? "DM_VK_NO_LAYERED_3D=1" : "DM_VK_CLEAR_BY_PASS=1");
-        g_step = !k ? "recording the render-pass clear of every slice" : cbp ? "recording the clears of slices 16-31 as passes of their own (clear by pass, the engine's way here)"
-                                                                            : "recording the per-layer vkCmdClearAttachments";
+    const VkClearValue red = { .color = { .float32 = { 1, 0, 0, 1 } } }, blue = { .color = { .float32 = { 0, 0, 1, 1 } } };   // 0xFF0000FF, 0xFFFF0000
+    const VkRect2D all = { { 0, 0 }, { D, D } };
+    const int steps = layered ? 4 : 2;   // (slices: 0 every slice cleared by its pass, 1 slices 16-31 cleared again in their passes and the read-back)
+    for (int k = 0; k < steps; k++) {
+        int readback = k == steps - 1;
+        if (layered && k == 3) crash_fix(N, NULL);   // (the read-back is the probe's own: nothing in the game to turn off)
+        g_step = !layered ? (!k ? "recording the render-pass clear of every slice" : "recording the per-slice vkCmdClearAttachments")
+               : k == 0 ? "recording the layered pass's clear of every slice (its load op)" : k == 1 ? "recording the layered pass begun again (loading)"
+               : k == 2 ? (cbp ? "recording the clear inside the layered pass as a pass of its own (clear by pass, the engine's way here)" : "recording the layered pass's vkCmdClearAttachments")
+               : "recording the read-back";
         VkCommandBuffer cb = cb_begin();
-        VkClearValue cv = { .color = { .float32 = { 1, 0, 0, 1 } } }, cv2 = { .color = { .float32 = { 0, 0, 1, 1 } } };   // every slice 0xFF0000FF; slices 16-31 0xFFFF0000
-        VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderArea = { { 0, 0 }, { D, D } } };
-        if (k && cbp) {   // clear_in_pass → clear_slice_by_pass: the game's layered pass (open when the clear comes) ended, a pass of its own on each slice (load op
-                          //   CLEAR), and the layered pass begun again at the game's next draw, loading what is there
-            rbi.renderPass = rp[1]; rbi.framebuffer = fb[0]; vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE); vkCmdEndRenderPass(cb);
-            for (uint32_t i = D / 2; i < D; i++) { rbi.renderPass = rp[2]; rbi.framebuffer = fb[i]; rbi.clearValueCount = 1; rbi.pClearValues = &cv2;
-                vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE); vkCmdEndRenderPass(cb); }
-            rbi.renderPass = rp[1]; rbi.framebuffer = fb[0]; rbi.clearValueCount = 0; rbi.pClearValues = NULL; vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE); vkCmdEndRenderPass(cb);
-        } else for (uint32_t i = 0; i < (layered ? 1u : D); i++) {
-            if (k && !layered && i < D / 2) continue;   // (slices: only 16-31 get the second pass)
-            rbi.renderPass = rp[k]; rbi.framebuffer = fb[i]; rbi.clearValueCount = k ? 0 : 1; rbi.pClearValues = k ? NULL : &cv;
-            vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-            if (k) { VkClearAttachment ca = { VK_IMAGE_ASPECT_COLOR_BIT, 0, cv2 };
-                     VkClearRect cr = { { { 0, 0 }, { D, D } }, layered ? D / 2 : 0, layered ? D / 2 : 1 }; vkCmdClearAttachments(cb, 1, &ca, 1, &cr); }
-            vkCmdEndRenderPass(cb);
+        if (k == 0 && dyn) {   // (render passes start from UNDEFINED; dynamic rendering takes the image in the layout it is in: GENERAL, as the engine keeps its images)
+            VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = img,
+                .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+        } else full_barrier(cb);
+        if (!layered) {
+            for (uint32_t i = k ? D / 2 : 0; i < D; i++) {
+                pass3d(cb, 0, rp[k], fb[i], v[i], 1, all, k ? NULL : &red);
+                if (k) { VkClearAttachment ca = { VK_IMAGE_ASPECT_COLOR_BIT, 0, blue }; VkClearRect cr = { all, 0, 1 }; vkCmdClearAttachments(cb, 1, &ca, 1, &cr); }
+                pass3d_end(cb, 0);
+            }
+        } else if (k == 0) { pass3d(cb, dyn, rp[0], fb[0], v[0], D, all, &red); pass3d_end(cb, dyn); }
+        else if (k == 1) { pass3d(cb, dyn, rp[1], fb[0], v[0], D, all, NULL); pass3d_end(cb, dyn); }
+        else if (k == 2 && cbp) {   // clear_in_pass → clear_slice_by_pass: the layered pass (open when the clear comes) ended, a pass of its own on the pass's first slice over
+                                    //   the clear's part (load op CLEAR), and the layered pass begun again at the game's next draw, loading what is there
+            pass3d(cb, dyn, rp[1], fb[0], v[0], D, all, NULL); pass3d_end(cb, dyn); full_barrier(cb);
+            pass3d(cb, dyn, rp[2], fb[1], v[1], 1, CLEAR_RC, &blue); pass3d_end(cb, dyn); full_barrier(cb);
+            pass3d(cb, dyn, rp[1], fb[0], v[0], D, all, NULL); pass3d_end(cb, dyn);
+        } else if (k == 2) {   // clear_in_pass: vkCmdClearAttachments of the pass's layer 0, over the clear's part
+            pass3d(cb, dyn, rp[1], fb[0], v[0], D, all, NULL);
+            crash_fix(N, clear_fix);   // (from here, this step's submission included: the clear; the pass begun alone ran in step 1)
+            VkClearAttachment ca = { VK_IMAGE_ASPECT_COLOR_BIT, 0, blue }; VkClearRect cr = { CLEAR_RC, 0, 1 }; vkCmdClearAttachments(cb, 1, &ca, 1, &cr);
+            pass3d_end(cb, dyn);
         }
-        if (k) { VkBufferImageCopy bc = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { D, D, D } };
-                 vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, h.b, 1, &bc);
-                 barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT); }
-        g_step = !k ? "running the render-pass clear of every slice" : cbp ? "running the clears by pass and the read-back" : "running the per-layer clear and the read-back";
-        if ((r = cb_submit(cb))) { R(FAIL, N, "%s failed (%d)", g_step, r); goto out; }
+        if (readback) { if (layered) full_barrier(cb);
+                        VkBufferImageCopy bc = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { D, D, D } };
+                        vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, h.b, 1, &bc);
+                        barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT); }
+        g_step = !layered ? (!k ? "running the render-pass clear of every slice" : "running the per-slice clear and the read-back")
+               : k == 0 ? "running the layered pass's clear of every slice" : k == 1 ? "running the layered pass begun again" : k == 2 ? (cbp ? "running the clear by a pass of its own" : "running the layered pass's vkCmdClearAttachments")
+               : "running the read-back";
+        if ((r = cb_submit(cb))) { R(FAIL, N, "%s failed (%d)", g_step, r);
+            if (r == VK_ERROR_DEVICE_LOST && g_fix) FIX(N, g_fix);   // (the GPU crashed there: as a crash of that step)
+            goto out; }
     }
     g_step = "checking the slices"; hbuf_sync(&h, 0);
-    if (!check_3d(h.p, D, why, sizeof why)) {
+    int bad_part; int bad = check_3d(h.p, layered, &bad_part, why, sizeof why);
+    if (!bad && !bad_part) {
         if (!layered) R(PASS, N, "all 32 slices drew one pass per slice (1-slice views): a way to fill 3D colour-grading tables where the layered way fails");
-        else if (!cbp) R(PASS, N, "all 32 slices of a 3D target drew as a layered 2D array (the engine's way): render-pass clear and per-layer clear");
-        else R(PASS, N, "all 32 slices of a 3D target drew as a layered 2D array (the engine's way): render-pass clear, and a clear inside that pass as a pass of its own on "
-                        "each slice, as the engine records it on this driver (%s)", cbp_env ? "DM_VK_CLEAR_BY_PASS in env.txt" : "Q_CLEAR_BY_PASS: Samsung's Xclipse");
+        else R(PASS, N, "all 32 slices of a 3D target drew as a layered 2D array (the engine's way, with %s), and the engine's clear inside that pass (%s) drew right",
+               dyn ? "dynamic rendering" : "render passes", cbp ? (cbp_env ? "a pass of its own: DM_VK_CLEAR_BY_PASS in env.txt" : "a pass of its own: Q_CLEAR_BY_PASS, Samsung's Xclipse") : "vkCmdClearAttachments");
     }
-    else R(FAIL, N, "%s%s: 3D scenes that use colour-grading tables can come out black or wrong this way", why, cbp ? " (the clears inside the pass as passes of their own)" : "");
+    else if (layered && !bad) {   // (the layered pass right, the clear inside it wrong)
+        R(FAIL, N, "%s%s: 3D scenes that clear their colour-grading tables can come out wrong this way", why, cbp ? " (the clear as a pass of its own)" : " (vkCmdClearAttachments inside the layered pass)");
+        if (!cbp && !cbp_env) FIX(N, "DM_VK_CLEAR_BY_PASS=1");   // (the engine's way around that call; env.txt's switch, when set, wins anyway)
+    }
+    else R(FAIL, N, "%s: 3D scenes that use colour-grading tables can come out black or wrong this way", why);
 out:
     g_step = NULL; hbuf_free(&h);
     for (uint32_t i = 0; i < 32; i++) { if (fb[i]) vkDestroyFramebuffer(s_dev, fb[i], NULL); if (v[i]) vkDestroyImageView(s_dev, v[i], NULL); }
@@ -1059,7 +1161,8 @@ static const struct { test_fn f; const char *n, *crash; } T[] = {
     { t_reinterp, "reinterpreted-format", NULL }, { t_fallback, "fallback-draw", NULL }, { t_dmabuf, "dmabuf-heap", "DM_VK_DMAHEAP=0" }, { t_bc, "bc-textures", "DM_VK_BC_GPU=0" },
     { t_depth_copy, "depth-copy", "DM_VK_ZCOPY=0" }, { t_int_view, "int-view", "DM_VK_INT_TEX=keep" }, { t_int_view_own, "int-view-own", NULL },
     { t_3d_slices, "3d-slices", NULL }, { t_3d_layered, "3d-layered", "DM_VK_NO_LAYERED_3D=1" } };   // (3D last: it crashed Xclipse 540's driver; 3d-layered's clear
-                                                                                                    //   inside its pass asks for DM_VK_CLEAR_BY_PASS=1 instead: crash_fix)
+                                                                                                    //   inside its pass asks for DM_VK_CLEAR_BY_PASS=1 instead, its
+                                                                                                    //   read-back for nothing: crash_fix)
 static int skipped(const char *skip, const char *name) {   // skip: names separated by commas
     size_t n = strlen(name);
     for (const char *p = skip; p && (p = strstr(p, name)); p += n) if ((p == skip || p[-1] == ',') && (p[n] == ',' || !p[n])) return 1;

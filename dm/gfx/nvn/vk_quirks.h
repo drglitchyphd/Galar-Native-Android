@@ -24,7 +24,8 @@
 //     the safe-start ladder (safe_start.h: this phone's own failed starts, any GPU), the heat guard's kgsl clock limit (a sysfs file Adreno phones have), and
 //     mali_env_migrate (env.txt's float-target "1"s an older Mali tests menu left, taken out on phones whose gpu.txt says Mali: a file only that menu wrote);
 //   - the driver check's self-tests (probe/jni/selftest.c) run on every GPU; what the engine asks of a driver by default comes from this table there too
-//     (Q_FLOAT_CONTROLS: whether float-controls asks for them; Q_CLEAR_BY_PASS: how 3d-layered records its clear inside the layered pass, as clear_in_pass does);
+//     (Q_FLOAT_CONTROLS: whether float-controls asks for them; Q_CLEAR_BY_PASS: how 3d-layered records its clear inside the layered pass, as clear_in_pass does;
+//     Q_NO_DYNREN: whether 3d-layered records its passes with dynamic rendering or render passes, as the engine does there);
 //   - the Java app: which test sections the menu shows (DriverPackages.gpu: Mali tests, Adreno tests), which driver packages fit the GPU (Turnip on Adreno only,
 //     the white-screen ladder's PanVK offer: MaliLadder.java), and texts that describe these rules;
 //   - the white-screen ladder's own state (mali_white_vk.inc: mali_ladder.txt is kept per driver ID and driver version, so another driver starts it over): whether

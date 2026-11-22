@@ -34,8 +34,10 @@ import java.util.Map;
 final class DriverCheck {
     // raise when the tests or what they set change: every phone checks again (2: int-view on 32-bit textures, int-view-own; no setting after a hang. 3: 3d-layered clears
     //   inside its pass as the engine does on this driver, a pass of its own per slice on Xclipse, and a crash in its vkCmdClearAttachments asks for DM_VK_CLEAR_BY_PASS=1,
-    //   not slice 0 only, which version 2 could write on Xclipse; int-view-own also reads a 16-bit integer under a float sampler)
-    static final int VERSION = 3;
+    //   not slice 0 only, which version 2 could write on Xclipse; int-view-own also reads a 16-bit integer under a float sampler. 4: 3d-layered records what the
+    //   engine records on the driver: dynamic rendering where the engine uses it, the engine's own clear (layer 0, a part), each step a submission of its own, so
+    //   DM_VK_CLEAR_BY_PASS=1 comes only from the clear (or a clear drawn wrong); the Vulkan 1.0 device as the engine makes it)
+    static final int VERSION = 4;
     private static final int ATTEMPTS = 4, MAX_STARTS = 2;   // (MAX_STARTS: checks of one driver that may end unfinished; the next one gives up)
     private static final long TEST_TIMEOUT_MS = 20000, TOTAL_TIMEOUT_MS = 90000;
     private static final java.util.concurrent.atomic.AtomicBoolean RUNNING = new java.util.concurrent.atomic.AtomicBoolean();

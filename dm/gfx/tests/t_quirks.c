@@ -159,15 +159,16 @@ static void cmp_eng(const gpu_id *g, void *u) {   // part 2: this port with thes
 // part 5: what a rule can answer before gpu_id is complete. Before the device is made (nvn_vk.c mtl_init) gpu_id has no driver ID (-1) and no Arm release: every rule
 //   that quirk_late does not name must answer the same there (nvn_vk_quirk_default answers -1 for the late ones until then), and every late one must read one of
 //   them somewhere (the list is not wider than it needs). And the driver check's questions (probe selftest.c st_gpu, which knows no game profile and no dynamic
-//   rendering) are answered from the vendor and the driver ID: Q_FLOAT_CONTROLS (float-controls) and Q_CLEAR_BY_PASS (3d-layered) must read nothing else
+//   rendering) are answered from the vendor and the driver ID: Q_FLOAT_CONTROLS (float-controls), Q_CLEAR_BY_PASS and Q_NO_DYNREN (3d-layered: how the engine
+//   clears inside the pass, and whether it records its passes with dynamic rendering) must read nothing else
 static int g_late_reads[Q_N];
 static void cmp_late(const gpu_id *g, void *u) {
     (void)u; gpu_id e = *g; e.driver_id = -1; e.arm_rel = e.arm_p = e.arm_beta = 0;
     gpu_id f; memset(&f, 0, sizeof f); f.vendor = g->vendor; f.driver_id = g->driver_id;
     for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), b = quirk_default(q, &e); checks++;
         if (t != b) { g_late_reads[q] = 1; if (!quirk_late(q) && fails++ < 25) fail_line(g, q, t, b, "a rule quirk_late does not name reads the driver ID or Arm's release (before the device: the second value)"); } }
-    static const int PROBE_Q[2] = { Q_FLOAT_CONTROLS, Q_CLEAR_BY_PASS };
-    for (int i = 0; i < 2; i++) { int q = PROBE_Q[i]; checks++; if (quirk_default(q, g) != quirk_default(q, &f) && fails++ < 25)
+    static const int PROBE_Q[3] = { Q_FLOAT_CONTROLS, Q_CLEAR_BY_PASS, Q_NO_DYNREN };
+    for (int i = 0; i < 3; i++) { int q = PROBE_Q[i]; checks++; if (quirk_default(q, g) != quirk_default(q, &f) && fails++ < 25)
         fail_line(g, q, quirk_default(q, g), quirk_default(q, &f), "a rule the driver check asks reads more than the vendor and the driver ID (the vendor and driver ID alone: the second value)"); }
 }
 static void cmp_both(const gpu_id *g, void *u) { cmp_all(g, u); cmp_late(g, NULL); }
