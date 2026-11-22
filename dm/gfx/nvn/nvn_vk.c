@@ -1101,20 +1101,32 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         for (int tries = 0;; tries++) {
             VKCHECK(vkAllocateMemory(g_dev, &mai, NULL, &e.mem));
             VKCHECK(vkMapMemory(g_dev, e.mem, 0, VK_WHOLE_SIZE, 0, &p));
-            int rw = 0; vs = ve = 0; FILE *mf = fopen("/proc/self/maps", "r"); char ln[512];
+            int rw = 0; vs = ve = 0; FILE *mf = fopen("/proc/self/maps", "r"); char ln[512], mline[160] = "";
             while (mf && fgets(ln, sizeof ln, mf)) { unsigned long s0, e0; char pr[8] = "";
-                if (sscanf(ln, "%lx-%lx %7s", &s0, &e0, pr) == 3 && (uintptr_t)p >= s0 && (uintptr_t)p < e0) { vs = s0; ve = e0; rw = pr[0] == 'r' && pr[1] == 'w'; break; } }
+                if (sscanf(ln, "%lx-%lx %7s", &s0, &e0, pr) == 3 && (uintptr_t)p >= s0 && (uintptr_t)p < e0) { vs = s0; ve = e0; rw = pr[0] == 'r' && pr[1] == 'w';
+                    snprintf(mline, sizeof mline, "%s", ln); mline[strcspn(mline, "\n")] = 0; break; } }
             if (mf) fclose(mf);
             if (rw && ve >= (uintptr_t)p + n) break;
-            // Not in /proc/self/maps at all: the Android emulator's GPU (gfxstream, the app under arm64 translation) hands out mappings the listing does not show;
+            // The Android emulator's GPU (gfxstream, the app under arm64 translation) hands out mappings that /proc/self/maps lists without rw (or not at all);
             //   keeping each aside (313 MB) used up its memory window and the third allocation crashed inside gfxstream. Tried directly instead: the first and last
-            //   byte read and written back unchanged (process_vm_*: a fault is an error, not a signal). Usable then, mirrored (vs != p takes the shadow route below)
-            if (!vs) { unsigned char b0, b1; struct iovec l0 = { &b0, 1 }, l1 = { &b1, 1 }, r0 = { p, 1 }, r1 = { (uint8_t *)p + n - 1, 1 };
-                int ok = process_vm_readv(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_readv(getpid(), &l1, 1, &r1, 1, 0) == 1
-                      && process_vm_writev(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_writev(getpid(), &l1, 1, &r1, 1, 0) == 1;
-                static int said; if (!said++) VLOG("memory pools: the driver's mapping %p is not in /proc/self/maps; read / write test %s", p, ok ? "passed: used, mirrored" : "failed");
-                if (ok) break; }
-            else VLOG("memory pools: the driver's mapping %p lies in %lx-%lx (%s)", p, (unsigned long)vs, (unsigned long)ve, rw ? "rw, too short" : "not rw");
+            //   byte read and written back unchanged (process_vm_*: a fault is an error, not a signal). Usable then, always mirrored (vs = 0: the shadow route below,
+            //   never mremap, which would carry the listed protection along)
+            {   unsigned char b0, b1; struct iovec l0 = { &b0, 1 }, l1 = { &b1, 1 }, r0 = { p, 1 }, r1 = { (uint8_t *)p + n - 1, 1 };
+                int rd_ok = process_vm_readv(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_readv(getpid(), &l1, 1, &r1, 1, 0) == 1;
+                int wr_ok = rd_ok && process_vm_writev(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_writev(getpid(), &l1, 1, &r1, 1, 0) == 1;
+                static int said; if (said++ < 3) VLOG("memory pools: the driver's mapping %p: %s; read test %s, write test %s (errno %d)", p, vs ? mline : "not in /proc/self/maps",
+                                                     rd_ok ? "passed" : "failed", wr_ok ? "passed: used, mirrored" : "failed", errno);
+                if (wr_ok) { vs = ve = 0; break; }
+                // The emulator's gfxstream maps its host-visible memory write-only ("-w-s /dev/goldfish_address_space"), a device mapping that the process_vm calls
+                //   cannot reach (EFAULT either way). The CPU underneath is x86, where a writable page is readable too, so the game's code can use it: taken, mirrored.
+                //   (Only that device: phones never have it.)
+                char pr[8] = ""; if (vs && sscanf(mline, "%*lx-%*lx %7s", pr) == 1 && pr[1] == 'w' && strstr(mline, "/dev/goldfish_address_space") && ve >= (uintptr_t)p + n) {
+                    // moved onto the pool when it starts at p (mremap moves the pool's part and leaves the mapping's last page behind): no copies, no page tracking,
+                    //   which the translation cannot do (it cannot deliver the write faults); else mirrored
+                    int whole = vs == (uintptr_t)p && !((uintptr_t)p & (getpagesize() - 1));
+                    static int said2; if (!said2++) VLOG("memory pools: the emulator's write-only GPU mappings (/dev/goldfish_address_space, %s) used, %s", pr, whole ? "moved onto the pools" : "mirrored");
+                    if (whole) ve = (uintptr_t)p + n; else vs = ve = 0;
+                    break; } }
             VLOG("[RED] memory pool %p+%#llx: the driver's mapping %p is not usable (%s): kept aside, allocating again", mem, (unsigned long long)size, p, rw ? "too short" : vs ? "not writable" : "not in the memory map, failed the read / write test");
             if (tries >= 16) VDIE("memory pool %p+%#llx: no usable GPU memory mapping after %d tries", mem, (unsigned long long)size, tries + 1);
         }
