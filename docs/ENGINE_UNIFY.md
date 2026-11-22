@@ -271,11 +271,15 @@ Found while copying 6e0e1dd's rules into t_quirks.c; 6e0e1dd already had them, t
     as float on every kind of image (information only, no setting).
 - The driver check before Play (`DriverCheck.java`, `DriverCheckService` in its own `:drvcheck` process, `libdmprobe.so`: built by the `lib` target and
   `win_build_lib.py`, optional in the APK): the probe app's GPU self-tests on the game's own driver, once per driver / system build / app version (and
-  `DriverCheck.VERSION`, 3), crash- and hang-safe (a journal, up to 4 attempts, 90 s; Play always follows). What it finds goes to `driver-check.env`, read after
+  `DriverCheck.VERSION`, 4), crash- and hang-safe (a journal, up to 4 attempts, 90 s; Play always follows; one check at a time; a check the app itself closed
+  during is resumed from its journal at the next Play, and given up after 2 such starts: `driver-check.run`). What it finds goes to `driver-check.env`, read after
   env.txt and the safe-start ladder and before the phone profile (`DM_DRIVER_CHECK=0`: not read; "Per-GPU rules" above): `DM_VK_DMAHEAP=0`, `DM_VK_BC_GPU=0`,
-  `DM_VK_ZCOPY=0`, `DM_VK_INT_TEX=keep` or `DM_VK_NO_LAYERED_3D=1` after a test that crashed or failed, `DM_VK_CLEAR_BY_PASS=1` after a crash in `3d-layered`'s
-  clear inside its layered pass, `DM_VK_FLOAT_CONTROLS=1` where a driver is right only with float controls. `3d-layered` records that clear as the engine
-  records it on the driver (`Q_CLEAR_BY_PASS`, or env.txt's `DM_VK_CLEAR_BY_PASS`): on Xclipse a pass of its own per slice, not the `vkCmdClearAttachments`
+  `DM_VK_ZCOPY=0` or `DM_VK_INT_TEX=keep` after a test that crashed or failed, `DM_VK_NO_LAYERED_3D=1` after a crash (or a lost device) in `3d-layered`'s
+  layered pass, `DM_VK_CLEAR_BY_PASS=1` after a crash or a lost device in its clear inside that pass, or that clear drawn wrong with the rest right,
+  `DM_VK_FLOAT_CONTROLS=1` where a driver is right only with float controls. `3d-layered` records what the engine records on the driver: its passes with
+  dynamic rendering where the engine uses it (`Q_NO_DYNREN`, `DM_VK_NO_DYNREN`, `DM_VK_BASELINE`), the image with the engine's usage, and the engine's own
+  clear (`clear_in_pass`: the pass's layer 0, a part of it) as it records it there (`Q_CLEAR_BY_PASS`, or env.txt's `DM_VK_CLEAR_BY_PASS`): on Xclipse a pass of
+  its own on that slice, not the `vkCmdClearAttachments`
   that crashed the Xclipse 940 (driver 24.0.534) and 540 (24.0.560), which as first written made the check write `DM_VK_NO_LAYERED_3D=1` there and draw every
   3D target into slice 0 alone (the fix round below). A test can name another setting for a later step (selftest.c `crash_fix`: a second "begin" line in the
   journal; the app applies the last one a lost process named). Those are this driver's defaults: the player's env.txt and the ladder win over them, the
@@ -450,6 +454,38 @@ Verification (WSL, NDK r27c, on a copy of the tree outside the worktree):
 - `chain_tree.py --verify`: bc2f6b2e5f0d / ba40200b20b8 / b72f9b70ebb2 as before. javac + d8 of the app: built. lang_check: no line missing or unused that is
   not so on one of the two heads (164 missing, as on ef46af1).
 
+### Fix round on beta-exit-qm (review findings, 2026-11-22)
+
+The reviewers' findings on ab568f9, each checked against the code and, where it could be, a run on the PC first; all eleven held except the last one's ask (real
+captures), which has nothing on this PC to run on (open, below).
+
+- Driver check, app side: two checks could run at once (a second Play during the check, or the setup screen made again): both started the service, the
+  second `dprobe_run` shared the probe's globals in the same process, and the first one's `System.exit` ended it mid-test, so a healthy phone could get that
+  test's crash setting. Now `DriverCheck.claim` / `release` run one check and only the latest Play's start after it, and `DriverCheckService` ignores a second
+  start. A check that never wrote `driver-check.key` (the app itself closed during it, or the service could not start) began again from nothing at every Play;
+  now `driver-check.run` counts such starts, the next check resumes from the journal (the tests lost keep their settings, the one running when the app closed is
+  left out without a setting) and gives up after 2. `DriverCheckTest.java` (`t_driver_check_java.sh`, desktop JVM) tests both.
+- Driver check, `3d-layered`: `DM_VK_CLEAR_BY_PASS=1` covered all of the clear's submission (the layered pass begun again, the read-back copy, the GPU's work),
+  so a crash anywhere there asked for a setting that does not keep the game off the call that crashed. Each step is now a submission of its own: the pass
+  clearing every slice, the pass begun again (loading), the clear, the read-back; `DM_VK_CLEAR_BY_PASS=1` belongs to the clear alone (recording it and its
+  submission), the read-back asks for nothing, a lost device asks what a crash there would. The clear is the engine's own (`{rect, 0, 1}`, a part of the pass's
+  layer 0; by pass: one pass on that slice over that part), not 16 layers over the whole image. Where the engine uses dynamic rendering (every GPU but Adreno),
+  the test records `vkCmdBeginRendering` with 32 layers, no framebuffer; the image has the engine's usage (transfer source and destination, sampled). A clear
+  drawn wrong with the rest right now writes `DM_VK_CLEAR_BY_PASS=1` as a crash there does. On Vulkan 1.0 the probe's device is made as the engine makes it:
+  `VK_KHR_maintenance1` (the 3D tests are skipped without it) and `VK_KHR_storage_buffer_storage_class`, `VK_KHR_external_memory` beside `_fd` with the
+  instance's capabilities extension, the property extensions only with `VK_KHR_get_physical_device_properties2` (enabled on the instance, as the engine does).
+  t_quirks part 5 asks `Q_NO_DYNREN` too (the vendor alone). `DriverCheck.VERSION` 4.
+- Mali ladder: the start marker's 20 s ran from the start's first present, so they passed on the logos and the title screen and a route that crashed where the
+  field first draws was never blamed; they now run from the first frame with `DM_MALI_WHITE_LIT_DRAWS` draws into a lit target (stage playing from there; the
+  marker goes after 10 minutes without one). A start whose lit frames were never sampled (under the draw floors) was never counted; after `DM_MALI_NOSAMPLE_MS`
+  (10 minutes) of them it logs a summary (skips by reason, the most draws seen) and counts as a start without a verdict. An app update started the ladder over;
+  now only the driver or the fixes' own code (`MW_ROUTE_CODE`, the file's `code=`) does, and `app=` follows the app. A crash in the game's own code counted
+  as an early end (two in a row closed the route); now it counts for nothing (`MW_MK_GAME`).
+- Tests: t_mali_white (217 checks), golden_check.py mali (new cases: two game-code crashes in a row, a crash after 24 frames without a lit target
+  (`GOLDEN_SYNTH_PLAIN_FRAMES`), the marker's window on lit frames never sampled, three starts without a sample, an app update keeping the ladder and the code
+  starting it over), the probe on lavapipe with the validation layer (dynamic rendering, render passes, clears by pass, Vulkan 1.0: no `01387`, maintenance1 or
+  `08742` messages any more) and through a fault shim (a crash, a lost process or a lost device at each step; a clear drawn wrong; Samsung and Qualcomm IDs).
+
 ## Not merged yet / open
 
 - READMEs: the root README is Galar's. Arceus's and Paldea's READMEs are not merged (per-game READMEs to do); `docs/HANDOFF.md` took Arceus's edits as git merged them.
@@ -469,7 +505,20 @@ Verification (WSL, NDK r27c, on a copy of the tree outside the worktree):
   driver returns those bits for this binding (lavapipe does).
 - The driver check's `3d-layered` on Xclipse now tests the engine's clear by pass, not the `vkCmdClearAttachments` in a layered pass that crashed Samsung's
   24.0.534 / 24.0.560 drivers, so whether a newer Samsung driver still crashes there is not probed any more. env.txt's `DM_VK_CLEAR_BY_PASS=0` makes the check
-  record that call (a crash then writes `DM_VK_NO_LAYERED_3D=1`, since env.txt's 0 wins over the check's settings).
+  record that call (a crash then writes `DM_VK_NO_LAYERED_3D=1`, since env.txt's 0 wins over the check's settings). The Xclipse crash was seen with a clear of
+  16 layers over the whole image; whether the engine's own clear (layer 0, a part) crashes there is not known.
+- What NVN's clear does to a layered 3D target is not checked: a clear through the pass's load op clears every slice of the pass, a clear inside the pass
+  (`clear_in_pass`, either route) its first slice only. If the game clears a whole colour-grading table inside a pass, the two routes differ from the Switch.
+- The Mali verdict's thresholds (empty, shown white, bright) are checked on synthetic frames only. No Sword / Shield capture of night, caves, snow, white menus
+  over the field or fades is on this PC (only frame 31 / 32 recordings of Sword); with such captures, `mw_obs_kind` over the lit target and the picture shown
+  of each is the test to run. "In a row" counts sampled frames only (empty and unsampled ones do not break a run).
+- The Mali check's own compute pass is guarded while it is made (`mali_white_crashed`), not while its samples run: a driver that crashed running the first
+  sample would be blamed on the route (the marker is up then), a later one not at all.
+- The no-sample count (10 minutes of frames with a lit target, none sampled) also runs in menus that draw into a lit target; three such starts on a route make
+  it broken.
+- The probe's self-tests do not run behind the Vulkan profiles layer on this PC (`vkCreateDevice` -8 with every core feature on, on every profile, as on ab568f9):
+  the Xclipse / Mali / Adreno routes are checked through the fault shim's vendor IDs on lavapipe instead.
+
 - `arceus_pass_default` (uniform updates deferred inside a pass, `DM_VK_UB_DEFER`, Arceus only) still picks the game by `DM_GAME_PROGRAM_ID`, as 6e0e1dd: no GPU
   rule, a candidate for an `engine_quirks` word (`ub_defer`).
 - beta-exit moves on: beta-exit-qm holds it up to bcf1d76. At the next merge, a per-GPU default beta-exit adds or changes goes into `vk_quirks.h` and t_quirks.c
