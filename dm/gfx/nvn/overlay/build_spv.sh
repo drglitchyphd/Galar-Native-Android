@@ -59,17 +59,4 @@ for n in ("fsr_easu", "fsr_rcas"):
 open(sys.argv[2], "w").write(s); print("fsr_spv.h")
 PY
 rm -rf "$W"
-# HUD-free Lossless Scaling (ours): ls_hud.comp → ls_hud_spv.h, one module per output format (-DOFMT) plus one without a format (nvn_lsfg.h ls_hud_pipe picks)
-W=$(mktemp -d)
-$GC -O --target-env=vulkan1.0 -fshader-stage=compute "$O/ls_hud.comp" -o "$W/none.spv"
-for f in rgba8 rgb10_a2 rgba16f; do $GC -O --target-env=vulkan1.0 -fshader-stage=compute -DOFMT=$f "$O/ls_hud.comp" -o "$W/$f.spv"; done
-python3 - "$W" "$O/ls_hud_spv.h" <<'PY'
-import struct, sys
-def arr(n, f):
-    b = open(f, "rb").read(); w = struct.unpack("<%dI" % (len(b) // 4), b); return "static const uint32_t %s[] = {%s};\n" % (n, ",".join(hex(x) for x in w))
-s = "// Generated from ls_hud.comp (glslc --target-env=vulkan1.0 -O; build_spv.sh): HUD-free Lossless Scaling (nvn_lsfg.h). One per output format (-DOFMT=...), one without\n"
-s += arr("ls_hud_comp_spv", sys.argv[1] + "/none.spv")
-for f in ("rgba8", "rgb10_a2", "rgba16f"): s += arr("ls_hud_%s_comp_spv" % f, sys.argv[1] + "/" + f + ".spv")
-open(sys.argv[2], "w").write(s); print("ls_hud_spv.h")
-PY
-rm -rf "$W"
+# (ls_hud_spv.h: build_comp_spv.sh, with the other compute shaders of frame generation)
