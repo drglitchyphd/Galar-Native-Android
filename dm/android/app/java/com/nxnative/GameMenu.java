@@ -369,11 +369,13 @@ public final class GameMenu {
         // Battery saver (android_main.c power_saver, #333): live
         if (!GameSettings.arceus(a)) choice(a, "DM_POWER", t(a, "Power"), new String[][] { { "", t(a, "Balanced"), t(a, "Balanced: the best picture this phone holds at a steady frame rate") },
             { "saver", t(a, "Battery saver"), t(a, "Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up") } });
-        // a slider (the user, 2026-11-19): positions 9..20 = Auto, then 50 % to 100 % in steps of 5; stored as before ("" Auto, "0.85"), so env.txt and the engine are unchanged
+        // a slider (the user, 2026-11-19): the leftmost position Auto, then 35 % (Sword / Shield: budget GPUs such as the Adreno 610 / 613 or Mali-G52; Legends: Arceus
+        //   from 50 %, as low as its own setting goes) to 100 % in steps of 5; stored as before ("" Auto, "0.85"), so env.txt and the engine are unchanged
         if (!GameSettings.paldea(a)) {
-            slider(a, t(a, "3D render scale"), "DM_RES_CAP", 9, 20, 9, v -> v == 9 ? t(a, "Auto") : (v * 5) + " %",
-                   v -> v == 9 ? "" : String.format(java.util.Locale.ROOT, "%.2f", v * 5 / 100.0),
-                   st -> { try { double d = Double.parseDouble(st); return Math.max(10, Math.min(20, (int) Math.round(d * 20))); } catch (RuntimeException e) { return 9; } });
+            final int lo = GameSettings.arceus(a) ? 10 : 7, auto = lo - 1;   // (position v = v * 5 %)
+            slider(a, t(a, "3D render scale"), "DM_RES_CAP", auto, 20, auto, v -> v == auto ? t(a, "Auto") : (v * 5) + " %",
+                   v -> v == auto ? "" : String.format(java.util.Locale.ROOT, "%.2f", v * 5 / 100.0),
+                   st -> { try { double d = Double.parseDouble(st); return Math.max(lo, Math.min(20, (int) Math.round(d * 20))); } catch (RuntimeException e) { return auto; } });
             note(a, GameSettings.arceus(a) ? t(a, "Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.")
                                            : t(a, "Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp."));
         }
