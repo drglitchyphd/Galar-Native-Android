@@ -557,8 +557,12 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # comments; set o
 #include "mali_white.h"   // (mw_env_migrate: tested in dm/gfx/tests/t_mali_white.c)
 // env.txt's float-target switches as an older version's Mali tests menu left them ("1", its only choice; no line was its Off), taken out once per env.txt before it is
 //   read: the menu is Auto / On / Off now, and with the white-screen check (nvn_vk.c mali_white_vk.inc) such a leftover would hold the check's route for good. The
-//   marker line DM_MALI_ENV=2 (written here, and by the menu when it sets either) says it was done: a "1" after it is the player's On
+//   marker line DM_MALI_ENV=2 (written here, and by the menu when it sets either) says it was done: a "1" after it is the player's On. Mali phones only (gpu.txt, the
+//   engine's name of this phone's GPU, says Mali): the older menu offered these there alone, and env.txt stays untouched everywhere else
 static void mali_env_migrate(const char *path) {
+    { char gp[1200], gpu[256] = ""; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "r"); if (g) { if (!fgets(gpu, sizeof gpu, g)) gpu[0] = 0; fclose(g); }
+      for (char *c = gpu; *c; c++) *c = (char)tolower((unsigned char)*c);
+      if (!strstr(gpu, "mali")) return; }
     static char in[16384], out[16640]; size_t k = 0; FILE *f = fopen(path, "r");
     if (f) { k = fread(in, 1, sizeof in - 1, f); fclose(f); if (k == sizeof in - 1) return; }   // (a file this long is not one the app wrote: left alone)
     in[k] = 0; int rm = 0;
