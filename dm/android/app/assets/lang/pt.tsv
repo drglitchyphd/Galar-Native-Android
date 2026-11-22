@@ -348,6 +348,7 @@ FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0: o escalon
 Faster rendering	Renderização mais rápida
 Auto: on for Adreno GPUs, off for others	Auto: ligado em GPUs Adreno, desligado nas outras
 Off: the graphics work runs on the game's own thread	Desligado: o trabalho gráfico roda na própria thread do jogo
+Bright scenes tests: try each of the two alone and tell us both results; one alone cannot show whether the format or the compression causes the white.	Testes de cenas iluminadas: experimente cada um dos dois separadamente e conte-nos os dois resultados; um só não mostra se o branco vem do formato ou da compressão.
 Bright scenes in a wider format	Cenas iluminadas em um formato mais amplo
 On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	Ligado: a cena iluminada é desenhada em um formato com mais margem (RGBA16F em vez de R11G11B10F), um teste para imagens brancas ou piscando; usa um pouco mais de memória
 Bright scenes without compression	Cenas iluminadas sem compressão

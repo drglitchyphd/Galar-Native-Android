@@ -708,11 +708,17 @@ public final class GameMenu {
                 { "f16target", t(a, "Float target"), t(a, "Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us") } });
             choice(a, "DM_VK_DEPTH_DISCARD", t(a, "Keep unused depth in tile memory"), new String[][] { { "", t(a, "Off"), "" },
                 { "1", t(a, "On"), t(a, "On: depth that nothing reads afterwards is not written back to memory (faster on Mali; a test: tell us if anything flickers)") } });
-            choice(a, "DM_VK_B10_AS_RGBA16", t(a, "Bright scenes in a wider format"), new String[][] { { "", t(a, "Off"), "" },
-                { "1", t(a, "On"), t(a, "On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory") } });
-            // the other float-target route (nvn_vk.c tex_new, DM_VK_B10_NOCOMPRESS): R11G11B10F kept, its render targets without framebuffer compression (Arm's AFBC)
-            choice(a, "DM_VK_B10_NOCOMPRESS", t(a, "Bright scenes without compression"), new String[][] { { "", t(a, "Off"), "" },
-                { "1", t(a, "On"), t(a, "On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth") } });
+            // the two float-target tests (nvn_vk.c b10_on): Sword / Shield's white lit scene. Not offered for Legends: Arceus (its lit scene is not white on Arm's driver,
+            //   and it draws its G-buffer and bloom in R11G11B10F, which the wider format makes twice the size) nor Scarlet / Violet (not known to use the format).
+            //   One alone does not tell the format from the compression (RGBA16F may get none on some GPUs): players are asked for both results
+            if (GameSettings.galar(a)) {
+                note(a, t(a, "Bright scenes tests: try each of the two alone and tell us both results; one alone cannot show whether the format or the compression causes the white."));
+                choice(a, "DM_VK_B10_AS_RGBA16", t(a, "Bright scenes in a wider format"), new String[][] { { "", t(a, "Off"), "" },
+                    { "1", t(a, "On"), t(a, "On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory") } });
+                // the other float-target route (nvn_vk.c tex_new, DM_VK_B10_NOCOMPRESS): R11G11B10F kept, its render targets without framebuffer compression (Arm's AFBC)
+                choice(a, "DM_VK_B10_NOCOMPRESS", t(a, "Bright scenes without compression"), new String[][] { { "", t(a, "Off"), "" },
+                    { "1", t(a, "On"), t(a, "On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth") } });
+            }
             choice(a, "DM_VK_NO_PASS_MERGE", t(a, "Merge render passes"), new String[][] { { "", t(a, "On"), "" },
                 { "1", t(a, "Off"), t(a, "Off: every render target change starts a new pass") } });
         }
