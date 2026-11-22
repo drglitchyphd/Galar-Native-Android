@@ -64,11 +64,13 @@ static void cr_pass_end(VkCommandBuffer cb) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, &mb, 0, NULL, 0, NULL);   // (the mark only once the pass is done)
     vkCmdFillBuffer(cb, g_cr_buf, (VkDeviceSize)cr_slot(g_sub) * 4, 4, idx);
 }
+// (on every pipeline bind of the replay, on every GPU: the shaders' keys copied as they are, at most 23 characters, no formatting)
+static void cr_key(char d[24], const char *s) { if (!s) s = "-"; size_t n = strnlen(s, 23); memcpy(d, s, n); d[n] = 0; }
 static void cr_pipe(const char *vs, const char *fs) {
     if (!g_sub || !on_sub_thread()) return;
     cr_sub *c = &g_cr[cr_slot(g_sub)]; cr_bind *p = &c->pipe[c->nbind++ % CR_PIPE];
     p->pass = c->open ? c->open : c->npass;
-    snprintf(p->vs, sizeof p->vs, "%s", vs ? vs : "-"); snprintf(p->fs, sizeof p->fs, "%s", fs ? fs : "-");
+    cr_key(p->vs, vs); cr_key(p->fs, fs);
 }
 static int cr_ours(const sub_t *s) { return s >= g_subs && s < g_subs + NSUB; }   // (the present thread's own submissions are not slots)
 static void cr_submitted(sub_t *s) { if (!cr_ours(s)) return; cr_sub *c = &g_cr[cr_slot(s)]; c->fence = s->fence; c->t_submit = mono_ns(); }

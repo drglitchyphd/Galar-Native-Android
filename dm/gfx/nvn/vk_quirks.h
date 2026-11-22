@@ -25,12 +25,21 @@
 //   - the Java app: which test sections the menu shows (DriverPackages.gpu: Mali tests, Adreno tests), which driver packages fit the GPU (Turnip on Adreno only),
 //     and texts that describe these rules;
 //   - test switches that make a GPU act as another (DM_VK_AS_MALI) or pick a device by name (DM_VK_DEVICE), log and capture texts;
-//   - the frame hold's default (nvn_vk.c hold_on) follows the replay thread's decision (Q_NVN_ASYNC, or the player's setting), not a GPU test of its own.
-// Values the driver check (DriverCheck.java, libdmprobe) found for this driver come in as environment settings (driver-check.env, read under env.txt and over the
-//   phone profile): they win at each site as env.txt does, and their [quirk] line says "env.txt" (the debug report holds driver-check.env itself).
+//   - the frame hold's default (nvn_vk.c hold_on) follows the replay thread's decision (Q_NVN_ASYNC, or the player's setting), not a GPU test of its own;
+//   - what follows from how an image was made rather than from a GPU test: tex_view_for's view of another numeric class for an integer texture is made only
+//     where the image allows it (tex_new: not mutable on Mali by Q_ARM_FORMATS, or a format list where the driver has them), else its own format as before.
+// Values the driver check (DriverCheck.java, libdmprobe) found for this driver come in as environment settings: driver-check.env, read after env.txt and the
+//   safe-start ladder and before the phone profile (android_main.c host_start), so the player's own settings and the ladder's levels win over it (a ladder level's
+//   DM_VK_FLOAT_CONTROLS=0 over the check's 1). android_main.c names the keys it took from that file in DM_DRIVER_CHECK_KEYS, and a site takes such a value as this
+//   driver's default, not as the player's choice: vkq_env_player() is NULL for it, so a crash marker that only the player's own setting skips (float_controls_crashed,
+//   bc_gpu_crashed, heap_import_crashed) still applies; its [quirk] line says "driver check" (vkq_env_src() 2). The keys the check writes: DM_VK_FLOAT_CONTROLS,
+//   DM_VK_DMAHEAP, DM_VK_BC_GPU (table rules) and DM_VK_ZCOPY, DM_VK_INT_TEX, DM_VK_NO_LAYERED_3D (switches of their own code paths); the debug report holds the file.
+// gpu_id is filled in two steps (nvn_vk.c mtl_init): the name, version, vendor, memory and the game's profile before the device is made, the driver ID and Arm's
+//   release after (quirk_late: the rules that read those). nvn_vk_quirk_default (hle_nvn.c) answers -1 for a late rule until both are in.
 #ifndef VK_QUIRKS_H
 #define VK_QUIRKS_H
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #define VKQ_UNUSED __attribute__((unused))   // (included where only part of it is used: hle_nvn.c, the probe)
@@ -93,12 +102,13 @@ enum {
                          //   nvn_async_never (Arceus #3: crashed at loading screens with it)
     Q_N
 };
+// (env: the switches that decide the rule at its site, named in its [quirk] line when one of them is set)
 static const struct { const char *env, *what; } Q_INFO[Q_N] VKQ_UNUSED = {
     [Q_NO_DYNREN] = { "DM_VK_NO_DYNREN", "render passes, not dynamic rendering" },
-    [Q_HOST_IMPORT_OFF] = { "DM_VK_HOST_IMPORT", "pools not imported as host memory" },
+    [Q_HOST_IMPORT_OFF] = { "DM_VK_HOST_IMPORT, DM_VK_NO_HOST_IMPORT", "pools not imported as host memory" },
     [Q_DMAHEAP] = { "DM_VK_DMAHEAP", "pools in dma-buf heap memory" },
-    [Q_DMABUF_TRY] = { "DM_VK_DMAHEAP", "dma-buf route tried without a listed export" },
-    [Q_G615_SAFE] = { "DM_VK_UBO_SNAPSHOT", "Mali-G615 start-up set (uniform snapshots, BC decoded)" },
+    [Q_DMABUF_TRY] = { "DM_VK_NO_DMABUF", "dma-buf route tried without a listed export" },
+    [Q_G615_SAFE] = { "DM_VK_UBO_SNAPSHOT, DM_VK_BC_TRANSCODE", "Mali-G615 start-up set (uniform snapshots, BC decoded)" },
     [Q_FLOAT_CONTROLS] = { "DM_VK_FLOAT_CONTROLS", "shaders keep infinities and NaN" },
     [Q_CLAMP_ZERO] = { "DM_VK_CLAMP_ZERO", "clamp-to-zero erratum workaround" },
     [Q_NAN_MINMAX] = { "DM_VK_NAN_MINMAX", "min / max drop NaN as on the Switch" },
@@ -117,7 +127,7 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] VKQ_UNUSED = {
     [Q_NO_EDS] = { "DM_VK_NO_EDS", "draw state built into each pipeline" },
     [Q_BC_GPU_OFF] = { "DM_VK_BC_GPU", "BC textures converted on the CPU" },
     [Q_QUERY_LOD] = { "DM_VK_QUERY_LOD", "texture LOD queries give the level clamped" },
-    [Q_IMPORT_MARK_OFF] = { "DM_VK_HOST_IMPORT", "a failed submission does not turn host import off" },
+    [Q_IMPORT_MARK_OFF] = { "DM_VK_HOST_IMPORT, DM_VK_NO_HOST_IMPORT", "a failed submission does not turn host import off" },
     [Q_BC_DECODE] = { "DM_VK_BC_TRANSCODE", "BC textures decoded, not transcoded" },
     [Q_GPU_TIME_OFF] = { "DM_VK_GPU_TIME", "no GPU timestamps" },
     [Q_TF_CHECK] = { "DM_VK_TF_CHECK", "transform feedback captures checked" },
@@ -164,11 +174,38 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     }
     return 0;
 }
-// What was decided, for the start's summary: value and whether env.txt set it. A site calls this once, when it decides (some decide lazily, at first use)
+// The rules that read what mtl_init learns only after the device is made (gpu_id.driver_id, arm_rel / arm_p / arm_beta): before that, their answer would be another
+//   GPU's (t_quirks.c checks that every other rule reads neither)
+VKQ_UNUSED static int quirk_late(int q) {
+    switch (q) {
+    case Q_FLOAT_CONTROLS: case Q_CLAMP_ZERO: case Q_NAN_MINMAX: case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST:
+    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: return 1;
+    }
+    return 0;
+}
+// Where a setting came from (the header above): 0 unset, 1 the player (env.txt, or anything else that set it before the game started), 2 the driver check
+//   (android_main.c: the keys it took from driver-check.env, in DM_DRIVER_CHECK_KEYS, separated by commas)
+VKQ_UNUSED static int vkq_env_src(const char *name) {
+    if (!name || !*name || !getenv(name)) return 0;
+    size_t n = strlen(name);
+    for (const char *p = getenv("DM_DRIVER_CHECK_KEYS"); p && *p; ) {
+        const char *e = strchr(p, ','); size_t l = e ? (size_t)(e - p) : strlen(p);
+        if (l == n && !strncmp(p, name, n)) return 2;
+        p = e ? e + 1 : "";
+    }
+    return 1;
+}
+// The player's own value of a setting: NULL when it is unset or came from the driver check (a default for this driver: the crash markers still apply to it)
+VKQ_UNUSED static const char *vkq_env_player(const char *name) { return vkq_env_src(name) == 1 ? getenv(name) : NULL; }
+// What was decided, for the start's summary: value and where it came from (from_env: 0 the default, 1 env.txt, 2 the driver check, vkq_env_src). A site calls this
+//   once, when it decides (some decide lazily, at first use, on the replay's or the game's thread: the first call for a rule wins, atomically)
 static int g_qval[Q_N] VKQ_UNUSED, g_qenv[Q_N] VKQ_UNUSED, g_qset[Q_N] VKQ_UNUSED;
 VKQ_UNUSED static int quirk_note(int q, int value, int from_env) {
-    if (q >= 0 && q < Q_N && !g_qset[q]) { g_qset[q] = 1; g_qval[q] = value; g_qenv[q] = from_env;
-        if (value || from_env) fprintf(stderr, "[dm] [quirk] %s: %d (%s%s)\n", Q_INFO[q].what, value, from_env ? "env.txt " : "default for this GPU", from_env ? Q_INFO[q].env : ""); }
+    if (q >= 0 && q < Q_N && !__atomic_exchange_n(&g_qset[q], 1, __ATOMIC_ACQ_REL)) { g_qval[q] = value; g_qenv[q] = from_env;
+        // (the rules that read the game's profile, gpu_id.eng: their default is this GPU's in this game)
+        int prof = q == Q_NO_EDS || q == Q_ASYNC_PSO || q == Q_DRIVER_SELFTESTS || q == Q_NVN_ASYNC;
+        if (value || from_env) fprintf(stderr, "[dm] [quirk] %s: %d (%s%s)\n", Q_INFO[q].what, value,
+                                       from_env == 2 ? "driver check " : from_env ? "env.txt " : prof ? "default for this GPU in this game's profile" : "default for this GPU", from_env ? Q_INFO[q].env : ""); }
     return value;
 }
 VKQ_UNUSED static const char *gpu_port_app(int port) { return port == PORT_ARCEUS ? "Arceus Native" : port == PORT_PALDEA ? "Paldea Native" : port == PORT_GALAR ? "Galar Native" : "?"; }

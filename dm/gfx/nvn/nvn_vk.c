@@ -84,8 +84,10 @@ static int g_dynren = 1, g_eds = 1;
 static int g_bar_clean, g_after_pass, g_game_bar;   // the barrier state of the submission's command buffer (barrier_all)
 static int32_t g_game_bits;   // the game's barrier bits since the last draw pass began (NVN_BARRIER_*: pass_begin narrows by them)
 static int g_store_none;   // VK_ATTACHMENT_STORE_OP_NONE usable (Vulkan 1.3, VK_KHR / VK_EXT_load_store_op_none): skip stores' read-only depth / stencil
-// The Arceus engine's three passes (androidswithy 84fb5df: relaxed barriers between passes, uniform updates deferred inside a pass, learnt attachment stores) are on by
-//   default for Legends: Arceus, where they were measured; off for Sword / Shield until measured there. Each has its switch (DM_VK_BARRIER, DM_VK_UB_DEFER, DM_VK_SKIP_STORES)
+// Uniform updates deferred inside a pass (ubd_on, DM_VK_UB_DEFER=0 / 1), from the Arceus engine (androidswithy 84fb5df): on by default for Legends: Arceus, where it was
+//   measured; off for Sword / Shield and Scarlet / Violet. The only switch that reads this now: that engine's relaxed barriers are vk_quirks.h's Q_BARRIER_RELAXED for
+//   every game (DM_VK_BARRIER), and its learnt attachment stores (DM_VK_SKIP_STORES) are off for every game. A per-game choice that is no GPU rule, by the program ID
+//   as before (docs/ENGINE_UNIFY.md: candidate for an engine_quirks word)
 static int arceus_pass_default(const char *name, const char *off_value, const char *on_value) {
     const char *e = getenv(name);
     if (e && !strcmp(e, off_value)) return 0;
@@ -269,8 +271,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL vk_shader_module_10(VkDevice d, const VkSh
 }
 const char *nvn_vk_gpu_name(void) { return g_dev ? g_props.deviceName : NULL; }   // android_main.c boot_guard
 // The quirk table for code outside this file (hle_nvn.c rq_on: Faster rendering's Auto): this GPU's default, -1 before the device exists (as nvn_vk_gpu_name; gpu_id's
-//   name, API, vendor and the profile's port / eng are set before the device is made, the driver ID and Arm's release just after), and the start's [quirk] note
-int nvn_vk_quirk_default(int q) { return g_dev ? quirk_default(q, &g_gpuid) : -1; }
+//   name, API, vendor and the profile's port / eng are set before the device is made), and -1 for a rule that reads the driver ID or Arm's release (vk_quirks.h
+//   quirk_late) until mtl_init has read them, just after (g_gpuid_done); and the start's [quirk] note
+static _Atomic int g_gpuid_done;
+int nvn_vk_quirk_default(int q) { return !g_dev || (quirk_late(q) && !atomic_load(&g_gpuid_done)) ? -1 : quirk_default(q, &g_gpuid); }
 int nvn_vk_quirk_note(int q, int value, int from_env) { return quirk_note(q, value, from_env); }
 void mtl_init(void) {
     if (g_dev) return;
@@ -444,8 +448,10 @@ void mtl_init(void) {
     // fd_export_mark sets around that first allocation: this start moves the driver's mappings instead (DM_VK_FDMAP=1 tries the fd route again)
     int fd_crashed = fd_export_mark(0) && !(getenv("DM_VK_FDMAP") && atoi(getenv("DM_VK_FDMAP")));
     if (fd_crashed) VLOG("[RED] memory pools: the driver crashed exporting its memory last time: no export this start");
-    // the heap route's own marker (heap_import_mark): set by a crash importing the first dma-buf or a failed submission with them; DM_VK_DMAHEAP=1 tries it again
-    int heap_crashed = heap_import_mark(0) && !(getenv("DM_VK_DMAHEAP") && atoi(getenv("DM_VK_DMAHEAP")));
+    // the heap route's own marker (heap_import_mark): set by a crash importing the first dma-buf or a failed submission with them; DM_VK_DMAHEAP=1 in env.txt tries it
+    //   again (a value from the driver check is this driver's default: the marker still applies, vk_quirks.h vkq_env_player)
+    const char *hep = vkq_env_player("DM_VK_DMAHEAP");
+    int heap_crashed = heap_import_mark(0) && !(hep && atoi(hep));
     // The marker only proves something while the route without it does better: a start that skipped the heap route and crashed anyway (after the device came up) sends
     //   the next start back to it. Without this a marker left by a run closed as stuck kept every later start on the mirrored route, which crashed an Xclipse 530 at
     //   every start (#76); a phone whose heap route really crashes (#63) stays off it as long as the other route holds
@@ -478,8 +484,8 @@ void mtl_init(void) {
         //   export (#47: the forced export failed, errno 2), or any GPU with DM_VK_DMAHEAP=1
         // Samsung Xclipse without export (its export crashed the driver: Xclipse 530 / 540, #45 / #57 / #59) took the mremap route, where its driver handed out
         //   mappings the pools had taken and the game crashed on scene changes: it takes the heap route too
-        {   const char *he = getenv("DM_VK_DMAHEAP"), *sh = getenv("DM_VK_POOL_SHADOW");
-            int want = he ? atoi(he) : (!g_fdmap && !heap_crashed && quirk_default(Q_DMAHEAP, &g_gpuid)); quirk_note(Q_DMAHEAP, want, he != NULL);
+        {   const char *he = getenv("DM_VK_DMAHEAP"), *sh = getenv("DM_VK_POOL_SHADOW");   // (he from the driver check, not hep: the default, under the fd route and the marker)
+            int want = hep ? atoi(hep) : (!g_fdmap && !heap_crashed && (he ? atoi(he) != 0 : quirk_default(Q_DMAHEAP, &g_gpuid))); quirk_note(Q_DMAHEAP, want, vkq_env_src("DM_VK_DMAHEAP"));
             if (sh && atoi(sh)) want = 0;   // (a forced mirror leaves it out too)
             VkPhysicalDeviceExternalBufferInfo xi = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO, .usage = BUF_ALL, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
             VkExternalBufferProperties xp = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES };
@@ -557,6 +563,7 @@ void mtl_init(void) {
     { const char *e = getenv("DM_VK_BASELINE"); if (e && atoi(e) > 0) { baseline = 1; g_dynren = 0; g_eds = 0; g_tlsem = 0;
         VLOG("[quirk] Vulkan 1.1 baseline (DM_VK_BASELINE): render passes, draw state in each pipeline, a fence per submission, whatever this driver offers"); } }
     g_gpuid.dynren = g_dynren;   // (Q_VIEW_QUARANTINE reads it)
+    quirk_note(Q_PCACHE_GAPS_OFF, quirk_default(Q_PCACHE_GAPS_OFF, &g_gpuid) && !g_dynren, 0);   // (pso_make applies it with render passes only; noted here, once)
     VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : !dynren ? "render passes (the driver has no dynamic rendering)" : baseline ? "render passes (DM_VK_BASELINE)"
          : quirk_default(Q_NO_DYNREN, &g_gpuid) && !getenv("DM_VK_NO_DYNREN") ? "render passes (Adreno's default: DM_VK_NO_DYNREN=0 for dynamic rendering)" : "render passes (DM_VK_NO_DYNREN)",
          g_eds ? "set per draw (extended dynamic state)" : !eds ? "built into each pipeline (the driver has no extended dynamic state)" : baseline ? "built into each pipeline (DM_VK_BASELINE)"
@@ -568,7 +575,7 @@ void mtl_init(void) {
     //   uniform buffers were copied at record time (DM_VK_UBO_SNAPSHOT) and its BC textures decoded, not transcoded to ETC2 (DM_VK_BC_TRANSCODE=off): the two logs that play
     //   on v0.5x (#77, #110) have both, and every crash lacks one of them. Both from the first start there (the safe-start ladder took four crashes to reach them);
     //   env.txt still wins
-    if (quirk_note(Q_G615_SAFE, quirk_default(Q_G615_SAFE, &g_gpuid), 0)) {
+    if (quirk_note(Q_G615_SAFE, quirk_default(Q_G615_SAFE, &g_gpuid), vkq_env_src("DM_VK_UBO_SNAPSHOT") > vkq_env_src("DM_VK_BC_TRANSCODE") ? vkq_env_src("DM_VK_UBO_SNAPSHOT") : vkq_env_src("DM_VK_BC_TRANSCODE"))) {
         int u = !getenv("DM_VK_UBO_SNAPSHOT"), b = !getenv("DM_VK_BC_TRANSCODE");
         setenv("DM_VK_UBO_SNAPSHOT", "1", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
         VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110)",
@@ -628,12 +635,13 @@ void mtl_init(void) {
         arm_known = 1; if (arm) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); g_arm_beta = drvp && strstr(dp.driverInfo, "bet") != NULL; }
         g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : quirk_default(Q_FLOAT_CONTROLS, &g_gpuid));
         // The test shader below crashed a driver (#89: Mali-G57, the start ended right after this line): a start that dies there leaves the marker, and later starts on
-        //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 tries again)
-        int fc_crashed = g_fctl && mark_file(drv_mark("float_controls_crashed"), "", 0) && !e;
+        //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 in env.txt tries again). A DM_VK_FLOAT_CONTROLS=1 from the driver check (driver-check.env:
+        //   a driver right only with them) is this driver's default, not the player's: the marker still applies to it (vk_quirks.h vkq_env_player)
+        int fc_crashed = g_fctl && mark_file(drv_mark("float_controls_crashed"), "", 0) && !vkq_env_player("DM_VK_FLOAT_CONTROLS");
         if (fc_crashed) g_fctl = 0;
         char rel[24] = ""; if (arm && g_arm_rel) snprintf(rel, sizeof rel, " r%dp%d", g_arm_rel, g_arm_p);
         VLOG("driver %s (id %d)%s%s; shaders keep infinities and NaN (float controls): %s", dp.driverName, (int)dp.driverID, arm ? ", ARM's own" : sec ? ", Samsung's own" : "", rel,
-             fc_crashed ? "not asked for: the driver crashed on their test shader at an earlier start (DM_VK_FLOAT_CONTROLS=1 tries again)"
+             fc_crashed ? "not asked for: the driver crashed on their test shader at an earlier start (DM_VK_FLOAT_CONTROLS=1 in env.txt tries again)"
              : g_fctl ? "asked for" : !fc.shaderSignedZeroInfNanPreserveFloat32 ? "not supported" : "not asked for");
         if (g_fctl) mark_file(drv_mark("float_controls_crashed"), "building the float-controls test shader; if this file is still here the driver crashed doing so, and later starts go without float controls\n", 1);
         if (g_fctl) {   // a self-test: an empty compute shader patched the same way must make a pipeline, else this start goes without (the game's shaders would fail one by one)
@@ -655,7 +663,8 @@ void mtl_init(void) {
     // A driver without Vulkan 1.2 or the float-controls extension: Arm's own when it is ARM's vendor ID and not a driver package (PanVK reports ARM's ID too)
     if (!arm_known && g_props.vendorID == 0x13B5 && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); }
     g_gpuid.arm_rel = g_arm_rel; g_gpuid.arm_p = g_arm_p; g_gpuid.arm_beta = g_arm_beta;   // (the quirk table's description complete from here)
-    gpu_id_log(&g_gpuid); quirk_note(Q_FLOAT_CONTROLS, g_fctl, getenv("DM_VK_FLOAT_CONTROLS") != NULL);
+    atomic_store(&g_gpuid_done, 1);
+    gpu_id_log(&g_gpuid); quirk_note(Q_FLOAT_CONTROLS, g_fctl, vkq_env_src("DM_VK_FLOAT_CONTROLS"));
     // Arm erratum 3779215 (r38p1 to r49p0 and r50p0 to r51p0, fixed in r49p1 and r52p0; a beta r49p1, the G925's, is not known to have the fix): a clamp to zero of a value
     //   selected between constants compiled as a plain min or max. Shaders on those drivers get spv_clamp_zero; DM_VK_CLAMP_ZERO=0 / 1 decides on any driver
     { const char *e = getenv("DM_VK_CLAMP_ZERO");
@@ -749,11 +758,13 @@ void mtl_init(void) {
     //   (DM_VK_BC_GPU=1 tries again). Not on Vulkan 1.0: its shader is SPIR-V 1.3 and bc_gpu.c makes its module itself, past vk_shader_module_10 (simdev t_vkdev,
     //   Mali-G72 r14p0 profile: VUID-VkShaderModuleCreateInfo-pCode-08737); BC textures are converted on the CPU there
     if (!f2.features.textureCompressionBC && g_api >= VK_API_VERSION_1_1) {
-        const char *be = getenv("DM_VK_BC_GPU");
-        if (mark_file(drv_mark("bc_gpu_crashed"), "", 0) && !be) VLOG("[RED] BC layer: the driver crashed setting it up at an earlier start: BC textures converted on the CPU (DM_VK_BC_GPU=1 tries again)");
+        // (a DM_VK_BC_GPU from the driver check, its bc-textures test having crashed or failed, is this driver's default: the marker still applies, vkq_env_player)
         // PowerVR: its compute results already differ from the CPU's for some kinds at the start-up check, and objects came out purple on a Tensor G5 (#32, with
         //   reflections on and off): every BC texture converted on the CPU there unless DM_VK_BC_GPU=1
-        else if (quirk_note(Q_BC_GPU_OFF, quirk_default(Q_BC_GPU_OFF, &g_gpuid) && !(be && atoi(be) > 0), be != NULL)) VLOG("BC layer: off on PowerVR (BC textures converted on the CPU; DM_VK_BC_GPU=1 turns it on)");
+        const char *be = getenv("DM_VK_BC_GPU");
+        int pvr_off = quirk_note(Q_BC_GPU_OFF, quirk_default(Q_BC_GPU_OFF, &g_gpuid) && !(be && atoi(be) > 0), vkq_env_src("DM_VK_BC_GPU"));
+        if (mark_file(drv_mark("bc_gpu_crashed"), "", 0) && !vkq_env_player("DM_VK_BC_GPU")) VLOG("[RED] BC layer: the driver crashed setting it up at an earlier start: BC textures converted on the CPU (DM_VK_BC_GPU=1 in env.txt tries again)");
+        else if (pvr_off) VLOG("BC layer: off on PowerVR (BC textures converted on the CPU; DM_VK_BC_GPU=1 turns it on)");
         else {
             mark_file(drv_mark("bc_gpu_crashed"), "setting up the BC layer (its shaders built and checked on this GPU); if this file is still here the driver crashed doing so, and later starts convert on the CPU\n", 1);
             bc_gpu_info bi = { g_dev, g_q, g_qf, vkGetDeviceProcAddr, &g_memp, vk_logf }; g_bcgpu = bc_gpu_init(&bi) ? 7 : 0;
@@ -1804,9 +1815,11 @@ static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const u
     vkCmdBeginRenderPass(cb, &bi, secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
 }
 static void rend_end(VkCommandBuffer cb) {
-    if (g_sub && g_sub->dec && g_seg_in && cb == g_sub->cb) { VKCHECK(vkEndCommandBuffer(cb)); seg_push(g_sub, g_sub->cur); g_seg_in = 0; seg_gap_begin(g_sub); return; }   // (the pass's secondary ends; a new gap)
+    // (a held frame: the pass's secondary ends and a new gap begins; the breadcrumbs' pass closes there, its GPU mark with DM_VK_BREADCRUMBS in the gap, after the pass:
+    //   a fill is not allowed inside a pass. That mark is work in the gap, so with breadcrumbs on the passes around it are not run as one, seg_record_prim)
+    if (g_sub && g_sub->dec && g_seg_in && cb == g_sub->cb) { VKCHECK(vkEndCommandBuffer(cb)); seg_push(g_sub, g_sub->cur); g_seg_in = 0; seg_gap_begin(g_sub); cr_pass_end(g_sub->cb); return; }
     if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb);
-    cr_pass_end(cb);   // (breadcrumbs: with DM_VK_BREADCRUMBS the GPU marks the pass done; not in a recorded segment above: a fill is not allowed inside a pass)
+    cr_pass_end(cb);   // (breadcrumbs: with DM_VK_BREADCRUMBS the GPU marks the pass done)
 }
 // the render pass a secondary's contents are recorded against: the one rend_begin_ex would begin for ri (compatibility leaves the load / store ops out)
 static VkRenderPass rp_compat(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples) {
@@ -2253,7 +2266,8 @@ static int fmt_int_class(VkFormat f) {   // 0 float / normalized, 1 uint, 2 sint
     }
 }
 // The same bits in a format of another numeric class (want: 0 float, 1 uint, 2 sint), the channel layout kept: 32-bit channels in all three, the narrower integer ones
-//   in the other signedness only (a float format of their size would convert, not reinterpret); 0: none
+//   in the other signedness only (a float format of their size would convert, not reinterpret); 0: none. (tex_view_for takes the 32-bit ones only: a narrower one's
+//   other signedness extends its sign the other way)
 static VkFormat fmt_as_class(VkFormat f, int want) {
     static const VkFormat T[][3] = {
         { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT }, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT },
@@ -2294,7 +2308,9 @@ static uint64_t g_drop_n, g_drop_saved;   // textures stored without their large
 static int tex_quality_half(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_TEX_QUALITY"); v = e && !strcmp(e, "half");
-        if (v && quirk_default(Q_TEX_HALF_UNSAFE, &g_gpuid) && getenv("DM_VK_TEX_QUALITY_AUTO")) { v = 0; quirk_note(Q_TEX_HALF_UNSAFE, 1, 0);
+        int unsafe = quirk_default(Q_TEX_HALF_UNSAFE, &g_gpuid), mine = v && !getenv("DM_VK_TEX_QUALITY_AUTO");   // (mine: the player's own half, not the profile's)
+        quirk_note(Q_TEX_HALF_UNSAFE, unsafe && !mine, unsafe && mine);
+        if (v && unsafe && !mine) { v = 0;
             VLOG("texture quality full, not the phone profile's half: Arm's driver r%dp%d closed the game with half textures (Mali-G615 MC2, #82); DM_VK_TEX_QUALITY=half in env.txt uses it anyway", g_arm_rel, g_arm_p); }
         else if (v) VLOG("texture quality half: the game's large textures without their largest mip level"); }
     return v;
@@ -2900,20 +2916,33 @@ static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
         if (s >= NVN_SWZ_R && !nofmt) s = fsw[s - NVN_SWZ_R];
         vk[c] = (uint8_t)(s + 1);   // NVN_SWZ_ZERO 0 → VK_COMPONENT_SWIZZLE_ZERO 1, ONE → 2, R → 3 …
     }
-    // A shader that reads the texture as another numeric class than its format (Shield: an R16G16B16A16_UINT texture under a float sampler, binding fp_t_tcb_8;
-    //   VUID-vkCmdDrawIndexed-format-07753, the Khronos layer 2026-11-20; undefined in Vulkan). The Switch's texture unit returns the channels' integer bits and the shader
-    //   takes them as floats: 32-bit channels, or the other signedness, are the same bits in a view of the shader's class; 8 / 16-bit integers are denormals there, which
-    //   flush to 0, so a float read of them reads the empty texture of its class. DM_VK_INT_TEX=keep: the texture's own format, as before
+    // A shader that reads an integer texture as another numeric class than its format (Shield: an R16G16B16A16_UINT texture under a float sampler, binding
+    //   fp_t_tcb_8; VUID-vkCmdDrawIndexed-format-07753, the Khronos layer 2026-11-20; undefined in Vulkan). The Switch's texture unit returns each channel as 32 bits
+    //   by the texture's own format (an integer zero- or sign-extended as its format says) and the shader takes them as its class:
+    //   - 32-bit channels (R32 / R32G32 / R32G32B32A32 UINT or SINT) read as float or as the other signedness: exactly the same bits in a view of the shader's class
+    //     (fmt_as_class), where the image allows that view: mutable without a format list (fixed_fmt 0: 3D images, DM_VK_NO_FMT_LIST, and outside Mali a format that
+    //     cannot be a render target or a driver without format lists, Vulkan 1.1 without VK_KHR_image_format_list), or the view's format is the image's own. Where
+    //     the image's formats are fixed (tex_new: not mutable, fixed_fmt 1, every plain colour image on Mali, Q_ARM_FORMATS; a list of its own format and sRGB twin,
+    //     fixed_fmt 2, a render-target format wherever format lists exist: Adreno, Xclipse, Vulkan 1.2 drivers) the texture's own format is read as before
+    //     (6e0e1dd): a view of another class would be invalid there, and the empty texture is no answer for 32-bit data;
+    //   - 8 / 16-bit (and 10-bit) integers read as float are denormals there, which flush to 0: such a read gets the empty texture of its class, on every GPU;
+    //   - 8 / 16-bit integers read as the other signedness keep their own format, as before: a view of the other signedness would extend them the other way
+    //     (R16_UINT 0xffff as R16_SINT: -1, where the Switch gives 65535);
+    //   - a float / UNORM / SNORM / sRGB texture (or a BC one decoded here) read as uint / sint keeps its own format, as before: not seen in Sword / Shield yet.
+    //   docs/ENGINE_UNIFY.md lists where each applies. DM_VK_INT_TEX=keep: the texture's own format always, as before
     if (!storage && !(x->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && r->sclass < 3) {
         static int keep = -1; if (keep < 0) { const char *e = getenv("DM_VK_INT_TEX"); keep = e && !strcmp(e, "keep"); }
         int have = fmt_int_class(f);
-        if (have != r->sclass && !keep) {
-            VkFormat nf = fmt_as_class(f, r->sclass);
-            int ok = nf && (!x->fixed_fmt || nf == x->fmt || nf == x->twin);   // (fmt_as_class keeps the channel layout: the same size, a compatible view format)
+        if (have && have != r->sclass && !keep) {
+            int wide = fmt_as_class(f, 0) != 0;   // (32-bit channels: fmt_as_class has a float format for them only)
+            VkFormat nf = wide ? fmt_as_class(f, r->sclass) : (VkFormat)0;
+            int ok = nf && (!x->fixed_fmt || nf == x->fmt || nf == x->twin);   // (a view in the image's own format or twin is always allowed)
             static int said; if (said++ < 8) VLOG("texture ID %d (vk format %d) read as %s by a shader: %s", tid, f, r->sclass == 0 ? "float" : r->sclass == 1 ? "uint" : "sint",
-                                                  ok ? "the same bits in a view of that class" : "reads the empty texture of that class (0, as the Switch's flushed denormals)");
-            if (!ok) return VK_NULL_HANDLE;
-            f = nf;
+                                                  ok ? "the same bits in a view of that class" : wide ? "its own format, as before (the image's formats are fixed: no view of that class here)"
+                                                  : r->sclass ? "its own format, as before (a narrower integer: the Switch extends it by the texture's own format)"
+                                                  : "reads the empty texture of that class (0, as the Switch's flushed denormals)");
+            if (!wide && !r->sclass) return VK_NULL_HANDLE;
+            if (ok) f = nf;
         }
     }
     VkImageAspectFlags asp = x->aspect;
@@ -4554,6 +4583,10 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
 static void push_stage(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineLayout pl) { push_stage_h(s, st, bp, pl, 0); }
 
 // ================= Draws =================
+// draw_ binds a pipeline only when it is not the one it bound last in this command buffer (Vulkan keeps the binding across passes). Anything else that binds a
+//   graphics pipeline in the submission's command buffer (zcopy_draw) counts this up, so the game's next draw binds its own again. Its descriptors, push constants,
+//   vertex streams and dynamic state are not affected: draw_ sets them for every draw, after the bind
+static uint64_t g_gfx_bind_gen;
 // DM_VK_PROF: where the replay's CPU time goes per draw (pass + pipeline, dynamic state + vertex streams, descriptors, flush + draw), logged every 300 presents
 static int g_vprof = -1; static uint64_t g_vp_t[4], g_vp_n, g_vp_o[5], g_vp_pass, g_vp_pso;
 #define VPROF_ON (g_vprof < 0 ? (g_vprof = getenv("DM_VK_PROF") != NULL) : g_vprof)
@@ -4706,9 +4739,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     if (mark) { g_vp_pass += pp1 - pp0; g_vp_pso += mono_ns() - pp1; }   // (DM_VK_PROF: the "pass + pipeline" stage split)
     if (TD_TRACE) VLOG("[trace] draw vs %s fs %s blend_en %#x", pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-", (unsigned)S.color.blend_en);
     VkCommandBuffer cb = CB(); if (mark) mark[1] = mono_ns();
-    { static VkCommandBuffer bcb; static VkPipeline bp; static uint64_t bfence;   // the same pipeline already bound in this command buffer: no rebind (Vulkan keeps it across passes)
-      static int off = -1; if (off < 0) off = getenv("DM_VK_BIND_ALWAYS") != NULL;
-      if (off || cb != bcb || bp != p || bfence != g_sub->fence) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; if (pso_cap()) pso_used(p);
+    { static VkCommandBuffer bcb; static VkPipeline bp; static uint64_t bfence, bgen;   // the same pipeline already bound in this command buffer: no rebind (Vulkan keeps it across passes)
+      static int off = -1; if (off < 0) off = getenv("DM_VK_BIND_ALWAYS") != NULL;   // (bgen: g_gfx_bind_gen, another graphics pipeline bound there since)
+      if (off || cb != bcb || bp != p || bfence != g_sub->fence || bgen != g_gfx_bind_gen) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; bgen = g_gfx_bind_gen; if (pso_cap()) pso_used(p);
           cr_pipe(pr->sh[0] ? pr->sh[0]->key : NULL, pr->sh[1] ? pr->sh[1]->key : NULL); } }   // (breadcrumbs: the shaders bound, in this pass)
     // dynamic state
     float vx = 0, vy = 0, vw = (float)P.tw, vh = (float)P.th;
@@ -4967,8 +5000,8 @@ static int zcopy_draw(vtex *s, vtex *d, const VkImageSubresourceLayers *ss, cons
     if (x1 <= x0 || y1 <= y0) return 1;   // (nothing of it inside the image)
     zcopy_pc pc; pc.m[0] = (float)(s1.x - s0.x) / (float)de.width; pc.m[1] = (float)(s1.y - s0.y) / (float)de.height;
     pc.m[2] = (float)s0.x - (float)d0.x * pc.m[0]; pc.m[3] = (float)s0.y - (float)d0.y * pc.m[1]; pc.lim[0] = (int32_t)sw - 1; pc.lim[1] = (int32_t)sh - 1; pc.lim[2] = pc.lim[3] = 0;
-    VkCommandBuffer cb = CB();
     VkViewport vpt = { (float)d0.x, (float)d0.y, (float)de.width, (float)de.height, 0, 1 }; VkRect2D sc = { { x0, y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
+    g_gfx_bind_gen++;   // (draw_ binds the game's pipeline again at its next draw: this command buffer's is the copy's now)
     for (uint32_t z = 0; z < ss->layerCount; z++) {
         VkImageView sv = view_get(s, VK_IMAGE_VIEW_TYPE_2D, s->fmt, ss->mipLevel, 1, ss->baseArrayLayer + z, 1, SW_ID, VK_IMAGE_ASPECT_DEPTH_BIT),
                     stv = stencil ? view_get(s, VK_IMAGE_VIEW_TYPE_2D, s->fmt, ss->mipLevel, 1, ss->baseArrayLayer + z, 1, SW_ID, VK_IMAGE_ASPECT_STENCIL_BIT) : VK_NULL_HANDLE,
@@ -4981,7 +5014,12 @@ static int zcopy_draw(vtex *s, vtex *d, const VkImageSubresourceLayers *ss, cons
         vkUpdateDescriptorSets(g_dev, stencil ? 2 : 1, wr, 0, NULL);
         VkRenderingAttachmentInfo za = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dv, .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
         VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = sc, .layerCount = 1, .pDepthAttachment = &za, .pStencilAttachment = fmt_has_stencil(d->fmt) ? &za : NULL };
-        rend_begin_ex(cb, &ri, NULL, (uint32_t)d->fmt, 1, 0, 0);
+        // Begun through rend_begin, as the game's own passes: in a held frame (DM_VK_FRAME_HOLD=2: Faster rendering's Auto on Adreno) the submission's command
+        //   buffer outside a pass is a secondary (a gap, seg_gap_begin), where a render pass cannot begin (VUID-vkCmdBeginRenderPass-bufferlevel: Adreno's render
+        //   passes, Q_NO_DYNREN). rend_begin makes the copy a pass of its own there: recorded into a secondary that inherits it, the pass begun around it in the primary
+        //   at the flush (seg_record_prim). CB () is that secondary until rend_end; elsewhere it is the submission's command buffer, as before
+        rend_begin(CB(), &ri, NULL, (uint32_t)d->fmt, 1, 0);
+        VkCommandBuffer cb = CB();
         vkCmdSetViewport(cb, 0, 1, &vpt); vkCmdSetScissor(cb, 0, 1, &sc);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ZC.pl, 0, 1, &set, 0, NULL);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pd);
@@ -4994,8 +5032,8 @@ static int zcopy_draw(vtex *s, vtex *d, const VkImageSubresourceLayers *ss, cons
                 vkCmdPushConstants(cb, ZC.pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc); vkCmdDraw(cb, 3, 1, 0, 0); }
             pc.lim[2] = 0;
         }
-        if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb);
-        if (z + 1 < ss->layerCount) barrier_all(cb);
+        rend_end(cb);
+        if (z + 1 < ss->layerCount) barrier_all(CB());   // (a held frame: in the gap after the copy's pass)
     }
     static int said; if (!said++) VLOG("a texture copy into a depth / stencil image (format %d, no blit destination on this GPU) drawn instead (%s)", d->fmt, stencil ? "depth and stencil" : "depth");
     return 1;

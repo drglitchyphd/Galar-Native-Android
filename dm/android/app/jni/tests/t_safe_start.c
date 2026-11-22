@@ -1,8 +1,10 @@
 // Safe start unit test (safe_start.h): which starts move a level up (a crash in the graphics driver before 30 s of play, the device up) and which do not (the game's own
 // code, before the device, after play, with mods on), the level kept across good starts, started over for another driver or app version, the settings each level sets
-// under the player's own, and the top level. A scratch folder stands in for the app's files. Expected values are hand-written.
+// under the player's own, and the top level; then the order host_start reads its settings in (env_file.h: env.txt, the ladder, driver-check.env) and the keys the
+// driver check set. A scratch folder stands in for the app's files. Expected values are hand-written.
 // Linux / WSL / macOS: cc -o /tmp/t_safe_start t_safe_start.c && /tmp/t_safe_start
 #include "../safe_start.h"
+#include "../env_file.h"
 #include <sys/stat.h>
 
 static int checks, fails;
@@ -73,6 +75,23 @@ int main(void) {
 
     fresh_env("56", NULL); put("safe_start", "9\nstock|56\n"); put("boot_state", NULL);
     CHECK(safe_start(D) == 0 && is("DM_VK_TEX_QUALITY", NULL), "a level out of range in the file: taken as none");
+
+    // the order host_start reads its settings in (env_file.h): env.txt, the ladder, driver-check.env, each set only when not set, and the keys the driver check set
+    //   named for nvn_vk.c (DM_DRIVER_CHECK_KEYS: its values are this driver's defaults, the crash markers apply to them)
+    {   char p[400], keys[512], m[700]; unsetenv("DM_VK_DMAHEAP"); unsetenv("DM_VK_ZCOPY");
+        put("driver-check.env", "# The driver check's settings\nDM_VK_FLOAT_CONTROLS=1\nDM_VK_DMAHEAP=0\nDM_VK_ZCOPY=0\n# tests that took the driver down: depth-copy\n");
+        snprintf(p, sizeof p, "%s/driver-check.env", D);
+        fresh_env("56", NULL); put("safe_start", "5\nstock|56\n"); put("boot_state", NULL); setenv("DM_VK_ZCOPY", "1", 1);   // (env.txt: the player's own)
+        safe_start(D); keys[0] = 0; env_file(p, "driver check", keys, sizeof keys);
+        CHECK(is("DM_VK_FLOAT_CONTROLS", "0") && is("DM_VK_DMAHEAP", "0") && is("DM_VK_ZCOPY", "1"), "driver-check.env after the ladder: level 5's no float controls (#89) wins over the check's, env.txt over both");
+        snprintf(m, sizeof m, "the keys the driver check set: %s (not the ladder's, not the player's)", keys); CHECK(!strcmp(keys, "DM_VK_DMAHEAP"), m);
+        fresh_env("56", NULL); put("safe_start", NULL); unsetenv("DM_VK_DMAHEAP"); unsetenv("DM_VK_ZCOPY");
+        safe_start(D); keys[0] = 0; env_file(p, "driver check", keys, sizeof keys);
+        snprintf(m, sizeof m, "no ladder level: the check's three settings, named (%s)", keys);
+        CHECK(is("DM_VK_FLOAT_CONTROLS", "1") && !strcmp(keys, "DM_VK_FLOAT_CONTROLS,DM_VK_DMAHEAP,DM_VK_ZCOPY"), m);
+        char small[24] = ""; unsetenv("DM_VK_FLOAT_CONTROLS"); unsetenv("DM_VK_DMAHEAP"); unsetenv("DM_VK_ZCOPY"); env_file(p, "driver check", small, sizeof small);
+        snprintf(m, sizeof m, "a key list that does not fit stops at whole keys (%s)", small); CHECK(!strcmp(small, "DM_VK_FLOAT_CONTROLS"), m);
+        unsetenv("DM_VK_DMAHEAP"); unsetenv("DM_VK_ZCOPY"); put("driver-check.env", NULL); }
 
     put("boot_state", NULL); put("safe_start", NULL); put("gpu.txt", NULL); rmdir(D);
     printf("%d checks, %d failed\n", checks, fails);

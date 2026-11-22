@@ -5,7 +5,9 @@
 //      rendering): what 6e0e1dd's site decided, so moving the decisions into one table changed no phone's behaviour in any game. Q_QUERY_LOD is the one new rule;
 //   2. no rule reads the port: each port with each combination of the engine_quirks bits gets the rules of a game whose profile says those quirks;
 //   3. the three profiles as dm/games/<id>/game.tsv has them (port, engine_quirks; Sword and Scarlet through tables_from), so a profile change shows up here;
-//   4. the phones from players' logs, by name, in each game.
+//   4. the phones from players' logs, by name, in each game;
+//   5. the rules answered before gpu_id is complete (quirk_late: nvn_vk_quirk_default's -1 window), and Q_FLOAT_CONTROLS from the vendor and driver ID alone (the probe);
+//   6. where a setting came from: the player's env.txt or the driver check (DM_DRIVER_CHECK_KEYS), and quirk_note keeping a rule's first decision.
 // cc -O2 -Wall -I../nvn -o /tmp/t_quirks t_quirks.c && /tmp/t_quirks [games folder, default ../../games]        (or: make t_quirks GAME=<any id> && ./t_quirks)
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,6 +121,41 @@ static void cmp_eng(const gpu_id *g, void *u) {   // part 2: this port with thes
                            .nvn_async_never = !!(g->eng & ENG_NVN_ASYNC_NEVER), .driver_selftests = !!(g->eng & ENG_DRIVER_SELFTESTS) };
     for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), w = ref(q, g, &P); checks++; if (t != w && fails++ < 25) fail_line(g, q, t, w, "port and engine_quirks bits"); }
 }
+// part 5: what a rule can answer before gpu_id is complete. Before the device is made (nvn_vk.c mtl_init) gpu_id has no driver ID (-1) and no Arm release: every rule
+//   that quirk_late does not name must answer the same there (nvn_vk_quirk_default answers -1 for the late ones until then), and every late one must read one of
+//   them somewhere (the list is not wider than it needs). And the driver check's float-controls question (probe selftest.c) is answered from the vendor and the
+//   driver ID: Q_FLOAT_CONTROLS must read nothing else
+static int g_late_reads[Q_N];
+static void cmp_late(const gpu_id *g, void *u) {
+    (void)u; gpu_id e = *g; e.driver_id = -1; e.arm_rel = e.arm_p = e.arm_beta = 0;
+    gpu_id f; memset(&f, 0, sizeof f); f.vendor = g->vendor; f.driver_id = g->driver_id;
+    for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), b = quirk_default(q, &e); checks++;
+        if (t != b) { g_late_reads[q] = 1; if (!quirk_late(q) && fails++ < 25) fail_line(g, q, t, b, "a rule quirk_late does not name reads the driver ID or Arm's release (before the device: the second value)"); } }
+    checks++; if (quirk_default(Q_FLOAT_CONTROLS, g) != quirk_default(Q_FLOAT_CONTROLS, &f) && fails++ < 25)
+        fail_line(g, Q_FLOAT_CONTROLS, quirk_default(Q_FLOAT_CONTROLS, g), quirk_default(Q_FLOAT_CONTROLS, &f), "Q_FLOAT_CONTROLS reads more than the vendor and the driver ID (the vendor and driver ID alone: the second value)");
+}
+static void cmp_both(const gpu_id *g, void *u) { cmp_all(g, u); cmp_late(g, NULL); }
+// part 6: where a setting came from (vk_quirks.h vkq_env_src / vkq_env_player): unset, the player's (env.txt), or the driver check's (the keys android_main.c names in
+//   DM_DRIVER_CHECK_KEYS), each key matched whole
+static void env_sources(void) {
+    const char *K = "DM_VK_FLOAT_CONTROLS";
+    unsetenv("DM_DRIVER_CHECK_KEYS"); unsetenv(K);
+    CHECK(vkq_env_src(K) == 0 && !vkq_env_player(K), "unset: no source, no player's value");
+    setenv(K, "1", 1);
+    CHECK(vkq_env_src(K) == 1 && vkq_env_player(K) && !strcmp(vkq_env_player(K), "1"), "set, no driver check keys: the player's (env.txt)");
+    static const struct { const char *keys; int want; } C[] = {
+        { "DM_VK_FLOAT_CONTROLS", 2 }, { "DM_VK_DMAHEAP,DM_VK_FLOAT_CONTROLS", 2 }, { "DM_VK_FLOAT_CONTROLS,DM_VK_ZCOPY", 2 }, { "DM_VK_DMAHEAP,DM_VK_FLOAT_CONTROLS,DM_VK_ZCOPY", 2 },
+        { "", 1 }, { "DM_VK_DMAHEAP", 1 }, { "DM_VK_FLOAT_CONTROLS_X", 1 }, { "XDM_VK_FLOAT_CONTROLS", 1 }, { "DM_VK_FLOAT", 1 }, { ",", 1 }, { "DM_VK_DMAHEAP,,DM_VK_FLOAT_CONTROLS", 2 } };
+    for (unsigned i = 0; i < sizeof C / sizeof *C; i++) { setenv("DM_DRIVER_CHECK_KEYS", C[i].keys, 1);
+        CHECK(vkq_env_src(K) == C[i].want && !vkq_env_player(K) == (C[i].want == 2), "DM_DRIVER_CHECK_KEYS=\"%s\": source %d, want %d", C[i].keys, vkq_env_src(K), C[i].want); }
+    setenv("DM_DRIVER_CHECK_KEYS", "DM_VK_FLOAT_CONTROLS", 1); unsetenv(K);
+    CHECK(vkq_env_src(K) == 0 && !vkq_env_player(K), "named by the driver check but unset (env.txt cannot unset it): no source");
+    CHECK(vkq_env_src(NULL) == 0 && vkq_env_src("") == 0, "no name: no source");
+    unsetenv("DM_DRIVER_CHECK_KEYS");
+    // quirk_note: the first decision of a rule is kept (two threads may decide one lazily: the game's and the replay's)
+    int a = quirk_note(Q_PASS_DEFER, 1, 2), b = quirk_note(Q_PASS_DEFER, 0, 0);
+    CHECK(a == 1 && b == 0 && g_qset[Q_PASS_DEFER] && g_qval[Q_PASS_DEFER] == 1 && g_qenv[Q_PASS_DEFER] == 2, "quirk_note keeps the first decision of a rule, and its source");
+}
 
 // ---- part 3: the profiles as game.tsv has them (rows "key<TAB>value", # comments; game.py takes port / engine_quirks from tables_from when a profile has none) ----
 static int tsv_get(const char *dir, const char *id, const char *key, char *out, size_t n) {
@@ -222,9 +259,12 @@ int main(int argc, char **argv) {
     const grid_t G = { vens, 7, dids, 9, apis, 5, names, 9, rams, 5, dvs, 6, 1 };
     for (int i = 0; i < NPROF; i++) {
         long c0 = checks; cmp_ctx c = { &PROFILES[i], PROFILES[i].app };
-        long n = grid_run(&G, PROFILES[i].port, eng_of(&PROFILES[i]), cmp_all, &c);
-        printf("%s (port %d, engine_quirks bits %#x): %ld GPU descriptions x %d quirks = %ld comparisons with 6e0e1dd's sites\n", PROFILES[i].app, PROFILES[i].port, eng_of(&PROFILES[i]), n, Q_N, checks - c0);
+        long n = grid_run(&G, PROFILES[i].port, eng_of(&PROFILES[i]), cmp_both, &c);
+        printf("%s (port %d, engine_quirks bits %#x): %ld GPU descriptions x %d quirks = %ld comparisons with 6e0e1dd's sites (and part 5's, before the device)\n", PROFILES[i].app,
+               PROFILES[i].port, eng_of(&PROFILES[i]), n, Q_N, checks - c0);
     }
+    // 5. (the rest) every late rule reads what comes after the device somewhere in the grid
+    for (int q = 0; q < Q_N; q++) CHECK(!quirk_late(q) || g_late_reads[q], "quirk %d (%s) is in quirk_late but reads neither the driver ID nor Arm's release anywhere in the grid", q, Q_INFO[q].what);
     // 2. every port with every combination of the bits (a smaller grid: the bits act with the vendor, the version and the name)
     {   static const char *const nm2[] = { "Mali-G615 MC2", "Adreno (TM) 710", "Turnip Adreno (TM) 650", "" }; static const long ram2[] = { 0, 3800000 };
         static const uint32_t dv2[] = { 0, 38u << 22 | 1u << 12, 44u << 22 | 1u << 12, 49u << 22, 49u << 22 | 1u << 12, 52u << 22 };
@@ -238,6 +278,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < NPROF; i++) phones(&PROFILES[i]);
     {   gpu_id z; memset(&z, 0, sizeof z); z.arm_rel = 44; z.arm_p = 1;
         printf("new rule, not in 6e0e1dd: %s (Arm's own driver r44p1: %d; every game)\n", Q_INFO[Q_QUERY_LOD].what, quirk_default(Q_QUERY_LOD, &z)); }
+    // 6. where a setting came from
+    env_sources();
     printf(fails ? "%ld of %ld FAILED\n" : "all %ld passed\n", fails ? fails : checks, checks);
     return fails != 0;
 }

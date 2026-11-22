@@ -19,12 +19,15 @@ import java.util.Map;
 
 // The driver check before Play: a few seconds of GPU self-tests (the probe app's, libdmprobe.so) on the driver the game will use, once per driver: again when the
 //   phone's system (and with it the stock driver), the chosen driver package or the app changes. Crash-safe: the tests run in DriverCheckService's own process and note
-//   each test in a journal before it starts; a test that takes that process down (or hangs) is left out of the next attempt and its setting applied. What the tests ask
-//   for goes to driver-check.env, which the game reads after env.txt and before the phone profile (android_main.c): the player's own settings always win.
+//   each test in a journal before it starts; a test that takes that process down is left out of the next attempt and its setting applied. A test that says nothing
+//   for TEST_TIMEOUT_MS (hung, or only slow: building the BC layer's pipelines on an old Mali) is left out too, but its setting is not applied: it is named in
+//   driver-check.txt and driver-check.env's comment (the game's own crash markers, bc_gpu_crashed and heap_import_crashed, still cover a hang the player ends).
+//   What the tests ask for goes to driver-check.env, which the game reads after env.txt and the safe-start ladder and before the phone profile (android_main.c): the
+//   player's own settings and the ladder's levels always win, and the game takes the check's values as this driver's defaults (its crash markers still apply to them).
 //   Files in the game's folder: driver-check.log (the journal), driver-check.txt (the readable report), driver-check.env, driver-check.key. DM_DRIVER_CHECK=0 in
 //   env.txt: no check (and no driver-check.env read: android_main.c)
 final class DriverCheck {
-    static final int VERSION = 1;   // raise when the tests or what they set change: every phone checks again
+    static final int VERSION = 2;   // raise when the tests or what they set change: every phone checks again (2: int-view on 32-bit textures, int-view-own; no setting after a hang)
     private static final int ATTEMPTS = 4;
     private static final long TEST_TIMEOUT_MS = 20000, TOTAL_TIMEOUT_MS = 90000;
 
@@ -82,14 +85,18 @@ final class DriverCheck {
                 if (gone || hung) {
                     if (hung) android.os.Process.killProcess(pid);
                     result = open;
-                    if (open != null) { skip.add(open); crashed.add(open + (hung ? " (hung)" : "")); if (openFix != null) { int eq = openFix.indexOf('='); if (eq > 0) fixes.put(openFix.substring(0, eq), openFix.substring(eq + 1)); } }
+                    if (open != null) { skip.add(open); crashed.add(open + (hung ? " (hung: no setting)" : ""));
+                        // (a crash: its setting; a hang may be a slow phone, so it only goes into the report)
+                        if (openFix != null && !hung) { int eq = openFix.indexOf('='); if (eq > 0) fixes.put(openFix.substring(0, eq), openFix.substring(eq + 1)); }
+                        if (hung) append(report, "[HUNG] " + open + ": no answer for " + TEST_TIMEOUT_MS / 1000 + " s: left out of the next attempt, nothing changed for it"
+                                                 + (openFix != null ? " (" + openFix + " only after a crash)" : "") + "\n"); }
                     append(journal, "lost " + (open == null ? "-" : open) + (hung ? " hung" : " crashed") + "\n");
                     break;
                 }
             }
             if (!done && result == null) break;   // (the process ended outside any test: another attempt would do the same)
         }
-        StringBuilder env = new StringBuilder("# The driver check's settings for this driver (DriverCheck.java; driver-check.txt says why). env.txt wins over these\n");
+        StringBuilder env = new StringBuilder("# The driver check's settings for this driver (DriverCheck.java; driver-check.txt says why). env.txt and the safe-start ladder win over these\n");
         for (Map.Entry<String, String> e : fixes.entrySet()) env.append(e.getKey()).append('=').append(e.getValue()).append('\n');
         if (!crashed.isEmpty()) env.append("# tests that took the driver down: ").append(String.join(", ", crashed)).append('\n');
         write(new File(d, "driver-check.env"), env.toString());

@@ -1,7 +1,8 @@
 // Safe starts (android_main.c host_start; tests: dm/android/app/jni/tests/t_safe_start.c): a start that crashed in the graphics driver before 30 s of play (boot_state:
 // the device up, "crashed" outside the game's own code, no "playing", no mods to blame) makes the next start one level safer. The level is kept in <files>/safe_start for
 // this driver and app version (a driver package or an update starts over at the normal settings); a start that plays keeps its level. Each level turns off one more
-// feature a driver crashed on, set without overwriting after env.txt is read, so the player's own settings win and the phone profile's defaults (set after) do not:
+// feature a driver crashed on, set without overwriting after env.txt is read, so the player's own settings win and the driver check's (driver-check.env) and the phone
+// profile's defaults (both set after) do not:
 //   1 full textures (Arm's r44 closed the game with half ones: #82)
 //   2 uniform buffers copied when each draw is recorded (DM_VK_UBO_SNAPSHOT), not bound in the game's pools: a Mali-G615 MC2 on Arm's r44p1 still closed three frames in
 //     with full textures and every later level (#105, v0.55), and the one such phone that plays (#77) has this on

@@ -1,4 +1,5 @@
-// Galar Native GPU self-tests: what the engine (dm/gfx/nvn/nvn_vk.c) asks of the phone's own Vulkan driver, recreated with synthetic data.
+// GPU self-tests (the probe app, and the driver check of Galar / Arceus / Paldea Native): what the engine (dm/gfx/nvn/nvn_vk.c) asks of the phone's own Vulkan
+// driver, recreated with synthetic data.
 // No game files, no keys: safe to run on any phone, including shared ones (Samsung Remote Test Lab, Firebase Test Lab, AWS Device Farm).
 // Each test mirrors one engine path and prints one line: [PASS] / [WARN] / [FAIL] / [SKIP] / [INFO] name: what it means for the game.
 //   float-controls      nvn_vk.c mtl_init: shaders patched by spv_float_controls (SignedZeroInfNanPreserve); NaN / infinity checks with and without it
@@ -9,7 +10,9 @@
 //   dmabuf-heap         the heap route: /dev/dma_heap memory mapped at a fixed address and imported into the driver (the Mali / Xclipse memory pools)
 //   bc-textures         the BC layer (gfx/tex/bc_gpu.c, linked as is): BC1-BC7 converted on the GPU only where it matches the CPU bit for bit
 //   depth-copy          nvn_vk.c zcopy_draw: a scaled copy into a depth / stencil image drawn (gl_FragDepth, the stencil one bit a draw), read back
-//   int-view            nvn_vk.c tex_view_for / fmt_as_class: integer textures read through a view of the shader's class (the same bits)
+//   int-view            nvn_vk.c tex_view_for / fmt_as_class: 32-bit integer textures read through a view of the shader's class (the same bits)
+//   int-view-own        tex_view_for where it keeps the texture's own format (an image whose formats are fixed, a 16-bit integer of the other signedness): what
+//                       this driver returns for that old binding, undefined in Vulkan (information only)
 // A crash inside the driver (SIGSEGV / SIGBUS / SIGABRT) is caught: that test reports it and the remaining GPU tests are skipped.
 // The same tests run inside the games (dprobe_jni.c, the app's driver check before Play): there in a process of their own, on the driver the game will use
 //   (probe_vk.h), each one noted in a journal before it starts, so one that takes the process down is known; a test names the setting that avoids what it found
@@ -94,7 +97,7 @@ static int st_device(void) {
     O("  driver: %s%s%s\n", how, s_driver && *s_driver ? " " : "", s_driver && *s_driver ? s_driver : "");
     uint32_t iv = VK_API_VERSION_1_0; if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&iv);   // (a Vulkan 1.0 loader has no vkEnumerateInstanceVersion)
     if (getenv("DM_PROBE_API10")) iv = VK_API_VERSION_1_0;   // (testing: the Vulkan 1.0 route on any driver: no 1.1 functions, shaders through spv_to_10)
-    VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "Galar Native self-test", .apiVersion = iv < VK_API_VERSION_1_3 ? iv : VK_API_VERSION_1_3 };
+    VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative self-test", .apiVersion = iv < VK_API_VERSION_1_3 ? iv : VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai };
     VkResult vr = vkCreateInstance(&ici, NULL, &s_inst);
     if (vr) { R(FAIL, "device", "vkCreateInstance %d", vr); return -1; }
@@ -239,8 +242,16 @@ static void t_floatctl(void) {
     VkPhysicalDeviceFloatControlsProperties fc = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES, .pNext = drvp ? &dp : NULL };
     VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = fcp ? (void *)&fc : drvp ? (void *)&dp : NULL };
     if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(s_pd, &pp); else drvp = fcp = 0;   // (Vulkan 1.0: neither can be read)
-    // whether the engine asks for them here: its own rule (vk_quirks.h Q_FLOAT_CONTROLS: Arm's and Samsung's own drivers, by driver ID, else by vendor), not a copy of it
-    gpu_id gid; memset(&gid, 0, sizeof gid); gid.vendor = s_props.vendorID; gid.driver_id = drvp ? (int)dp.driverID : -1;
+    // whether the engine asks for them here: its own rule (vk_quirks.h Q_FLOAT_CONTROLS: Arm's and Samsung's own drivers, by driver ID, else by vendor), not a copy of it,
+    //   on the GPU described as nvn_vk.c mtl_init describes it: the driver ID only where it reads the driver properties (Vulkan 1.2, or 1.1 with the float-controls
+    //   and driver-properties extensions), Arm's release from driverVersion on Arm's own driver. (The game's profile, gpu_id.port / eng, is not known here: no rule the
+    //   probe asks reads it; t_quirks.c checks that Q_FLOAT_CONTROLS reads the vendor and the driver ID only)
+    gpu_id gid; memset(&gid, 0, sizeof gid); gid.vendor = s_props.vendorID; gid.driver_version = s_props.driverVersion; gid.api = s_props.apiVersion;
+    snprintf(gid.name, sizeof gid.name, "%s", s_props.deviceName); gid.custom = s_driver && *s_driver;
+    gid.driver_id = fcp && drvp ? (int)dp.driverID : -1;
+    if (gpu_is_arm_driver(&gid) && (gid.driver_id >= 0 || fcp || !gid.custom)) { gid.arm_rel = (int)(s_props.driverVersion >> 22); gid.arm_p = (int)(s_props.driverVersion >> 12 & 0x3ff);
+        gid.arm_beta = gid.driver_id >= 0 && strstr(dp.driverInfo, "bet") != NULL; }
+    { FILE *mf = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (mf && fgets(ln, sizeof ln, mf)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (mf) fclose(mf); gid.ram_kb = kb; }
     int arm = quirk_default(Q_FLOAT_CONTROLS, &gid);
     int support = fcp && fc.shaderSignedZeroInfNanPreserveFloat32;
     O("  driver %s (id %d)%s; SignedZeroInfNanPreserve float32: %s; the engine asks for it by default: %s\n", drvp ? dp.driverName : "(no driver properties)", (int)dp.driverID,
@@ -727,7 +738,7 @@ static void meminfo(void) {
     for (size_t i = 0; i < sizeof sold / sizeof *sold && !gb; i++) if (total <= sold[i] * 1024 * 1024) gb = sold[i];
     if (!gb) gb = (total + 1024 * 1024 - 1) / (1024 * 1024);
     R(INFO, "memory", "%ld GB phone (%ld MB seen by Android), %ld MB available now: %s", gb, total / 1024, avail / 1024,
-      gb >= 8 ? "enough for Galar Native" : gb >= 6 ? "tight for Galar Native (Low graphics and Half textures help)" : "below Galar Native's needs: Android may close the game");
+      gb >= 8 ? "enough for the games" : gb >= 6 ? "tight for the games (Low graphics and Half textures help)" : "below the games' needs: Android may close the game");
 }
 
 // The engine's hard requirements (nvn_vk.c mtl_init): a driver older than Vulkan 1.3 needs these extensions, or the game stops at start (VDIE)
@@ -743,7 +754,7 @@ static void t_requirements(void) {
                        dynren ? "" : " without dynamic rendering", eds ? "" : ", extended dynamic state"); return; }
     if (dynren && eds) { R(PASS, N, "Vulkan %u.%u driver with every extension the engine needs", ma, mi); return; }
     // Since the stock-driver fallbacks (render passes; draw state built into pipelines) the engine runs without these two; v0.53 and older stopped at start
-    R(WARN, N, "Vulkan %u.%u driver without%s%s%s: the engine uses its fallback%s (%s%s%s); Galar Native v0.53 and older stop at start here", ma, mi,
+    R(WARN, N, "Vulkan %u.%u driver without%s%s%s: the engine uses its fallback%s (%s%s%s); releases older than those fallbacks (Galar Native v0.53) stop at start here", ma, mi,
       dynren ? "" : " KHR_dynamic_rendering", !dynren && !eds ? " and" : "", eds ? "" : " EXT_extended_dynamic_state", !dynren && !eds ? "s" : "",
       dynren ? "" : "render passes", !dynren && !eds ? ", " : "", eds ? "" : "draw state built into each pipeline: no pipeline prewarm, more pipelines");
 }
@@ -888,54 +899,99 @@ out:
     hbuf_free(&up); hbuf_free(&rb);
 }
 
-// ---- integer textures through a view of another class (nvn_vk.c fmt_as_class): R32_UINT as R32_SFLOAT, R16G16B16A16_UINT as _SINT ----
-static void t_int_view(void) {
-    const char *N = "int-view"; enum { W = 4 };
-    if (!fmt_has(VK_FORMAT_R32_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !fmt_has(VK_FORMAT_R32_SFLOAT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ||
-        !fmt_has(VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !fmt_has(VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { R(SKIP, N, "the formats cannot be sampled here"); return; }
-    VkImage im[2] = { 0 }; VkDeviceMemory mem[2] = { 0 }; VkImageView vw[2] = { 0 }; VkSampler smp = VK_NULL_HANDLE; comp c = { 0 }; hbuf up = { 0 }, out = { 0 }; VkResult r;
-    static const VkFormat own[2] = { VK_FORMAT_R32_UINT, VK_FORMAT_R16G16B16A16_UINT }, as[2] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R16G16B16A16_SINT };
-    for (int k = 0; k < 2; k++) {
-        VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, .imageType = VK_IMAGE_TYPE_2D, .format = own[k], .extent = { W, 1, 1 },
-            .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
-        if (vkCreateImage(s_dev, &ii, NULL, &im[k]) || !(mem[k] = image_mem(im[k]))) { R(FAIL, N, "a MUTABLE_FORMAT integer texture could not be made"); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
-        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = im[k], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = as[k], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
-        if ((r = vkCreateImageView(s_dev, &vi, NULL, &vw[k]))) { R(FAIL, N, "a view in another class was refused (%d)", r); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
-    }
+// ---- integer textures read as another numeric class (nvn_vk.c tex_view_for / fmt_as_class), two tests over one shader (shaders/intview.comp: binding 0 read as
+//   float, its .r bits; binding 1 read as int, four channels) ----
+enum { IV_W = 4 };
+static const uint32_t IV_F32[IV_W] = { 0x3f800000u, 0xc2c80000u, 0x12345678u, 0x40490fdbu };   // 1, -100, a small normal, pi: plain floats, so the texture unit has nothing to flush
+static const uint32_t IV_I32[IV_W][4] = { { 1, 0x7fffffffu, 0x80000000u, 0xffffffffu }, { 0, 2, 0xfffffffeu, 0x12345678u }, { 0x80000001u, 0x7ffffffeu, 3, 0xabcdef01u }, { 0xffff8000u, 0, 0x8000u, 0xc0000000u } };
+static const uint16_t IV_I16[IV_W][4] = { { 1, 0x7fff, 0x8000, 0xffff }, { 0, 2, 0xfffe, 0x1234 }, { 0x8001, 0x7ffe, 3, 0xabcd }, { 0xffff, 0, 0x4000, 0xc000 } };
+// an integer texture as tex_new makes it for the engine, 4 x 1: kind 0 mutable without a format list (fixed_fmt 0: no render-target use, so a view of another class
+//   needs no render-target support), 1 not mutable (Mali's plain images, fixed_fmt 1), 2 mutable with a list of its own format (a render-target format where format
+//   lists exist, fixed_fmt 2: Vulkan 1.2 here, the probe's device enables no VK_KHR_image_format_list); 1 and 2 with the render-target use the format has, as tex_new
+static VkResult iv_image(VkFormat f, int kind, VkImage *im, VkDeviceMemory *mem) {
+    VkImageFormatListCreateInfo fl = { .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, .viewFormatCount = 1, .pViewFormats = &f };
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = kind == 2 ? &fl : NULL, .flags = kind == 1 ? 0 : VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, .imageType = VK_IMAGE_TYPE_2D,
+        .format = f, .extent = { IV_W, 1, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (kind && fmt_has(f, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0) };
+    VkResult r = vkCreateImage(s_dev, &ii, NULL, im); if (r) { *im = VK_NULL_HANDLE; return r; }
+    return (*mem = image_mem(*im)) ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+// The shader over images im[0] (viewed as vf[0]) and im[1] (as vf[1]), filled from d0 / d1 (n0 / n1 bytes): o[0..3] the first's bits, o[4..19] the second's channels
+static VkResult iv_run(const VkImage im[2], const VkFormat vf[2], const void *d0, size_t n0, const void *d1, size_t n1, uint32_t o[20], const char **what) {
+    VkImageView vw[2] = { 0 }; VkSampler smp = VK_NULL_HANDLE; comp c = { 0 }; hbuf up = { 0 }, out = { 0 }; VkResult r = VK_SUCCESS;
+    for (int k = 0; k < 2 && !r; k++) { VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = im[k], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = vf[k],
+                                                                      .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if ((r = vkCreateImageView(s_dev, &vi, NULL, &vw[k]))) *what = "a view was refused"; }
     VkSamplerCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
-    if (vkCreateSampler(s_dev, &si, NULL, &smp)) { R(FAIL, N, "sampler"); goto out; }
+    if (!r && (r = vkCreateSampler(s_dev, &si, NULL, &smp))) *what = "sampler";
     VkDescriptorType ts[3] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER };
-    if ((r = comp_make(&c, spv_intview, sizeof spv_intview / 4, ts, 3, 0))) { R(FAIL, N, "the test shader did not build (%d)", r); goto out; }
-    static const uint32_t f32[W] = { 0x3f800000u, 0xc2c80000u, 0x12345678u, 0x40490fdbu };   // 1, -100, a small normal, pi: plain floats, so the texture unit has nothing to flush
-    static const uint16_t i16[W][4] = { { 1, 0x7fff, 0x8000, 0xffff }, { 0, 2, 0xfffe, 0x1234 }, { 0x8001, 0x7ffe, 3, 0xabcd }, { 0xffff, 0, 0x4000, 0xc000 } };
-    if (hbuf_make(&up, 256, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0 ||
-        hbuf_make(&out, 20 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0) { R(FAIL, N, "buffers"); goto out; }
-    memcpy(up.p, f32, sizeof f32); memcpy((uint8_t *)up.p + 64, i16, sizeof i16); hbuf_sync(&up, 1); memset(out.p, 0xcd, 80); hbuf_sync(&out, 1);
-    VkDescriptorImageInfo dii[2] = { { smp, vw[0], VK_IMAGE_LAYOUT_GENERAL }, { smp, vw[1], VK_IMAGE_LAYOUT_GENERAL } };
-    VkWriteDescriptorSet w[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c.ds, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0] },
-                                  { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c.ds, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1] } };
-    vkUpdateDescriptorSets(s_dev, 2, w, 0, NULL); ds_buffer(&c, 2, out.b);
-    g_step = "reading the views";
-    VkCommandBuffer cb = cb_begin();
-    for (int k = 0; k < 2; k++) img_barrier(cb, im[k], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
-    VkBufferImageCopy bc0 = { .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { W, 1, 1 } }, bc1 = bc0; bc1.bufferOffset = 64;
-    vkCmdCopyBufferToImage(cb, up.b, im[0], VK_IMAGE_LAYOUT_GENERAL, 1, &bc0); vkCmdCopyBufferToImage(cb, up.b, im[1], VK_IMAGE_LAYOUT_GENERAL, 1, &bc1);
-    all_barrier(cb);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c.pipe); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.ds, 0, NULL);
-    vkCmdDispatch(cb, 1, 1, 1); barrier_host(cb);
-    if ((r = cb_submit(cb))) { R(FAIL, N, "submission failed (%d)", r); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
-    hbuf_sync(&out, 0);
-    {   const uint32_t *o = out.p; int bad32 = 0, bad16 = 0; char why[160] = "";
-        for (int i = 0; i < W; i++) if (o[i] != f32[i] && !bad32++) snprintf(why, sizeof why, "R32_UINT as float: %#x read %#x", f32[i], o[i]);
-        for (int i = 0; i < W; i++) for (int ch = 0; ch < 4; ch++) { uint32_t want = (uint32_t)(int32_t)(int16_t)i16[i][ch], got = o[4 + i * 4 + ch];
-            if (got != want && !bad16++ && !why[0]) snprintf(why, sizeof why, "R16G16B16A16_UINT as SINT: %#x read %#x", want, got); }
-        if (!bad32 && !bad16) R(PASS, N, "integer textures read through float / other-signedness views give their own bits: the engine's fix for shaders that read them so is right here");
-        else { R(FAIL, N, "%d of %d 32-bit and %d of %d 16-bit reads wrong (%s): such textures are read in their own format as before", bad32, W, bad16, W * 4, why); FIX(N, "DM_VK_INT_TEX=keep"); }
+    if (!r && (r = comp_make(&c, spv_intview, sizeof spv_intview / 4, ts, 3, 0))) *what = "the test shader did not build";
+    if (!r && (hbuf_make(&up, 256, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0 ||
+               hbuf_make(&out, 20 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0)) { r = VK_ERROR_OUT_OF_DEVICE_MEMORY; *what = "buffers"; }
+    if (!r) {
+        memcpy(up.p, d0, n0); memcpy((uint8_t *)up.p + 128, d1, n1); hbuf_sync(&up, 1); memset(out.p, 0xcd, 80); hbuf_sync(&out, 1);
+        VkDescriptorImageInfo dii[2] = { { smp, vw[0], VK_IMAGE_LAYOUT_GENERAL }, { smp, vw[1], VK_IMAGE_LAYOUT_GENERAL } };
+        VkWriteDescriptorSet w[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c.ds, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0] },
+                                      { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c.ds, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1] } };
+        vkUpdateDescriptorSets(s_dev, 2, w, 0, NULL); ds_buffer(&c, 2, out.b);
+        g_step = "reading the views";
+        VkCommandBuffer cb = cb_begin();
+        for (int k = 0; k < 2; k++) img_barrier(cb, im[k], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+        VkBufferImageCopy bc0 = { .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { IV_W, 1, 1 } }, bc1 = bc0; bc1.bufferOffset = 128;
+        vkCmdCopyBufferToImage(cb, up.b, im[0], VK_IMAGE_LAYOUT_GENERAL, 1, &bc0); vkCmdCopyBufferToImage(cb, up.b, im[1], VK_IMAGE_LAYOUT_GENERAL, 1, &bc1);
+        all_barrier(cb);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c.pipe); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.ds, 0, NULL);
+        vkCmdDispatch(cb, 1, 1, 1); barrier_host(cb);
+        if ((r = cb_submit(cb))) *what = "submission failed";
+        else { hbuf_sync(&out, 0); memcpy(o, out.p, 80); }
+    }
+    comp_free(&c); hbuf_free(&up); hbuf_free(&out); if (smp) vkDestroySampler(s_dev, smp, NULL);
+    for (int k = 0; k < 2; k++) if (vw[k]) vkDestroyImageView(s_dev, vw[k], NULL);
+    return r;
+}
+static int iv_bad(const uint32_t *o, const uint32_t *want, int n, char *why, size_t nw, const char *what) {
+    int bad = 0; for (int i = 0; i < n; i++) if (o[i] != want[i] && !bad++ && !why[0]) snprintf(why, nw, "%s: %#x read %#x", what, want[i], o[i]);
+    return bad;
+}
+// int-view: the views the engine makes, on a mutable image without a format list (where it makes them): R32_UINT texels through an R32_SFLOAT view (read as floats),
+//   R32G32B32A32_UINT through R32G32B32A32_SINT (the other signedness): their own bits, 32-bit channels being the same in every class
+static void t_int_view(void) {
+    const char *N = "int-view";
+    static const VkFormat own[2] = { VK_FORMAT_R32_UINT, VK_FORMAT_R32G32B32A32_UINT }, as[2] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32B32A32_SINT };
+    for (int k = 0; k < 2; k++) if (!fmt_has(own[k], VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !fmt_has(as[k], VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { R(SKIP, N, "the formats cannot be sampled here"); return; }
+    VkImage im[2] = { 0 }; VkDeviceMemory mem[2] = { 0 }; VkResult r; const char *what = ""; uint32_t o[20];
+    for (int k = 0; k < 2; k++) if ((r = iv_image(own[k], 0, &im[k], &mem[k]))) { R(FAIL, N, "a MUTABLE_FORMAT integer texture could not be made (%d)", r); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
+    if ((r = iv_run(im, as, IV_F32, sizeof IV_F32, IV_I32, sizeof IV_I32, o, &what))) { R(FAIL, N, "%s (%d)", what, r); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
+    {   char why[160] = ""; int bad32 = iv_bad(o, IV_F32, IV_W, why, sizeof why, "R32_UINT as float"), badi = iv_bad(o + 4, &IV_I32[0][0], IV_W * 4, why, sizeof why, "R32G32B32A32_UINT as SINT");
+        if (!bad32 && !badi) R(PASS, N, "32-bit integer textures read through float / other-signedness views give their own bits: the engine's fix for shaders that read them so is right here");
+        else { R(FAIL, N, "%d of %d float and %d of %d other-signedness reads wrong (%s): such textures are read in their own format as before", bad32, IV_W, badi, IV_W * 4, why); FIX(N, "DM_VK_INT_TEX=keep"); }
     }
 out:
-    comp_free(&c); hbuf_free(&up); hbuf_free(&out); if (smp) vkDestroySampler(s_dev, smp, NULL);
-    for (int k = 0; k < 2; k++) { if (vw[k]) vkDestroyImageView(s_dev, vw[k], NULL); if (im[k]) vkDestroyImage(s_dev, im[k], NULL); if (mem[k]) vkFreeMemory(s_dev, mem[k], NULL); }
+    for (int k = 0; k < 2; k++) { if (im[k]) vkDestroyImage(s_dev, im[k], NULL); if (mem[k]) vkFreeMemory(s_dev, mem[k], NULL); }
+}
+// int-view-own: where the engine keeps the texture's own format, as 6e0e1dd did for all of them (tex_view_for): R32_UINT read as float on an image whose formats are
+//   fixed (not mutable: Mali; a format list of its own format: render-target formats where lists exist), and R16G16B16A16_UINT read as int (a 16-bit integer of the
+//   other signedness). A format and a shader of different classes is undefined in Vulkan: what this driver returns is reported against the Switch's answer (the
+//   texel's own bits; the 16-bit channels zero-extended, as their format says). Information only, and no setting after a crash: nothing turns that old binding off
+static void t_int_view_own(void) {
+    const char *N = "int-view-own";
+    if (!fmt_has(VK_FORMAT_R32_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !fmt_has(VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { R(SKIP, N, "the formats cannot be sampled here"); return; }
+    static const VkFormat own[2] = { VK_FORMAT_R32_UINT, VK_FORMAT_R16G16B16A16_UINT };
+    uint32_t z16[IV_W * 4]; for (int i = 0; i < IV_W; i++) for (int ch = 0; ch < 4; ch++) z16[i * 4 + ch] = IV_I16[i][ch];
+    char line[400] = ""; size_t ln = 0; int nk = s_api >= VK_API_VERSION_1_2 ? 3 : 2;
+    for (int kind = 1; kind < nk; kind++) {
+        VkImage im[2] = { 0 }; VkDeviceMemory mem[2] = { 0 }; VkResult r = VK_SUCCESS; const char *what = ""; uint32_t o[20]; const char *kn = kind == 1 ? "not mutable" : "format-listed";
+        for (int k = 0; k < 2 && !r; k++) if ((r = iv_image(own[k], kind, &im[k], &mem[k]))) what = "an image could not be made";
+        if (!r) r = iv_run(im, own, IV_F32, sizeof IV_F32, IV_I16, sizeof IV_I16, o, &what);
+        char why[160] = ""; int bad32 = r ? -1 : iv_bad(o, IV_F32, IV_W, why, sizeof why, "R32_UINT as float"), bad16 = r ? -1 : iv_bad(o + 4, z16, IV_W * 4, why, sizeof why, "R16G16B16A16_UINT as int");
+        if (r) ln += (size_t)snprintf(line + ln, sizeof line - ln, "%s%s: %s (%d)", ln ? "; " : "", kn, what, (int)r);
+        else ln += (size_t)snprintf(line + ln, sizeof line - ln, "%s%s: R32_UINT as float %d of %d its own bits, R16G16B16A16_UINT as int %d of %d zero-extended%s%s", ln ? "; " : "", kn,
+                                    IV_W - bad32, IV_W, IV_W * 4 - bad16, IV_W * 4, why[0] ? ", first: " : "", why);
+        if (ln >= sizeof line) ln = sizeof line - 1;
+        for (int k = 0; k < 2; k++) { if (im[k]) vkDestroyImage(s_dev, im[k], NULL); if (mem[k]) vkFreeMemory(s_dev, mem[k], NULL); }
+    }
+    R(INFO, N, "the old binding the engine keeps there (undefined in Vulkan), against the Switch's answer: %s%s", line, nk < 3 ? "; format-listed: not tried (Vulkan 1.1)" : "");
 }
 
 // ---- the test list. crash: the setting that keeps the game off the path a test crashed the driver on (the games' driver check applies it) ----
@@ -943,7 +999,7 @@ typedef void (*test_fn)(void);
 static const struct { test_fn f; const char *n, *crash; } T[] = {
     { t_requirements, "engine-requirements", NULL }, { t_floatctl, "float-controls", NULL }, { t_shmath, "shader-maths", NULL }, { t_barrier, "end-of-submit-barrier", NULL },
     { t_reinterp, "reinterpreted-format", NULL }, { t_fallback, "fallback-draw", NULL }, { t_dmabuf, "dmabuf-heap", "DM_VK_DMAHEAP=0" }, { t_bc, "bc-textures", "DM_VK_BC_GPU=0" },
-    { t_depth_copy, "depth-copy", "DM_VK_ZCOPY=0" }, { t_int_view, "int-view", "DM_VK_INT_TEX=keep" },
+    { t_depth_copy, "depth-copy", "DM_VK_ZCOPY=0" }, { t_int_view, "int-view", "DM_VK_INT_TEX=keep" }, { t_int_view_own, "int-view-own", NULL },
     { t_3d_slices, "3d-slices", NULL }, { t_3d_layered, "3d-layered", "DM_VK_NO_LAYERED_3D=1" } };   // (3D last: it crashed Xclipse 540's driver)
 static int skipped(const char *skip, const char *name) {   // skip: names separated by commas
     size_t n = strlen(name);
@@ -968,7 +1024,7 @@ static void run_tests(const char *skip) {
     O("Self-tests: %d pass, %d warn, %d fail, %d skip\n", g_count[PASS], g_count[WARN], g_count[FAIL], g_count[SKIP]);
 }
 void probe_selftests(void) {   // the probe app: the system's driver, every test
-    O("\n== Galar Native GPU self-tests (synthetic data: no game files)\n");
+    O("\n== GPU self-tests (synthetic data: no game files)\n");
     memset(g_count, 0, sizeof g_count);
     meminfo();
     if (s_dev_ok < 0) s_dev_ok = !st_device();

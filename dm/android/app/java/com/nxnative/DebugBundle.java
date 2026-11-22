@@ -69,7 +69,7 @@ final class DebugBundle {
             exits(c, z);
             text(z, "shaders_at_crash.txt", shaders(c, dir));
             text(z, "memory.txt", memory(dir));
-            text(z, "quirks.txt", grep(dir, "[quirk]", "The driver workarounds each run used (vk_quirks.h: the GPU described once, every workaround's value and whether env.txt set it).\n"));
+            text(z, "quirks.txt", grep(dir, "[quirk]", "The driver workarounds each run used (vk_quirks.h: the GPU described once, every workaround's value and whether env.txt or the driver check set it).\n"));
             text(z, "warnings.txt", warnings(dir));
             // the newest frame capture (☰ → Capture a frame), when one was made in the last two days: a picture problem's evidence, beside the logs
             File fc = new File(dir, "frame-capture.zip");

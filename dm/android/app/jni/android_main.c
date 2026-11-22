@@ -521,12 +521,7 @@ static void mods_romfs(const char *mods) {
     free(ents);
     if (g_roots_n) { setenv("DM_ROMFS_OVERLAY", g_roots, 1); fprintf(stderr, "boot: %d RomFS mod folder(s)\n", g_roots_n); }
 }
-static void env_file(const char *path) {   // KEY=VALUE lines, # comments; set only when not already set
-    FILE *f = fopen(path, "r"); char ln[512]; if (!f) return;
-    while (fgets(ln, sizeof ln, f)) { char *p = ln; while (*p == ' ' || *p == '\t') p++; if (*p == '#' || !*p) continue; char *eq = strchr(p, '='); if (!eq || eq == p) continue;
-        *eq = 0; char *v = eq + 1; char *e = strpbrk(v, "\r\n"); if (e) *e = 0; if (!getenv(p)) { setenv(p, v, 0); fprintf(stderr, "boot: env %s=%s\n", p, v); } }
-    fclose(f);
-}
+#include "env_file.h"   // env_file(): KEY=VALUE files, each key set only when not set (env.txt, driver-check.env; tests/t_safe_start.c)
 // Device profiles: defaults by chip, from its model (ro.soc.manufacturer / ro.soc.model, Android 12+: SM8750, MT6989, s5e9945 ...). Set without overwriting, after env.txt,
 // so the player's own settings (the settings screen writes env.txt) always win; DM_PROFILE=<name> below picks one by hand, DM_PROFILE=none none.
 // Mali GPUs (MediaTek, Tensor, Exynos before the 2000 series) have no BC texture support: the game's textures are decoded on upload to 4 to 8 times their size, and the
@@ -1403,9 +1398,7 @@ static void host_start(void) {
     if (g_dl_note[0]) fprintf(stderr, "%s\n", g_dl_note);
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
-    snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p);
-    // the driver check's settings for this driver (DriverCheck.java, the app's self-tests before Play): under env.txt, over the phone profile; DM_DRIVER_CHECK=0: not read
-    if (!(getenv("DM_DRIVER_CHECK") && !atoi(getenv("DM_DRIVER_CHECK")))) { snprintf(p, sizeof p, "%s/driver-check.env", g_files); env_file(p); }
+    snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p, "env", NULL, 0);
     // The allocator's cache of large blocks, made big enough for the GPU driver's: on a Galaxy S25+ (Adreno 830) a third of the game thread's time went to the driver
     //   mapping and unmapping memory, calloc → mmap and free → munmap in every vkCmdBeginRendering (about 250 a frame) and in every command pool reset, because its
     //   blocks were larger than scudo's secondary cache keeps (simpleperf, 2026-11-09). Cached, they are reused; the pages go back to the system on Android's own
@@ -1419,6 +1412,12 @@ static void host_start(void) {
       if (s && !strcmp(s, "official")) fprintf(stderr, "boot: build: official (signed with the release key)\n");
       else fprintf(stderr, "boot: build: UNOFFICIAL (%s): not a release from %s, it may have been changed\n", s && *s ? s : "signer unknown", app_repo); }
     g_safe_advanced = safe_start(g_files);   // (after env.txt: the player's settings win; before the phone profile: its defaults do not)
+    // The driver check's settings for this driver (DriverCheck.java, the app's self-tests before Play): after env.txt and the safe-start ladder, so the player's own
+    //   settings and the ladder's levels win over them (level 5's DM_VK_FLOAT_CONTROLS=0 over the check's 1: a driver that crashed on float controls, #89), and before
+    //   the phone profile. The keys taken from it go to DM_DRIVER_CHECK_KEYS: nvn_vk.c takes those values as this driver's defaults, not as the player's (vk_quirks.h
+    //   vkq_env_src: the crash markers still apply to them; their [quirk] line says "driver check"). DM_DRIVER_CHECK=0: not read
+    if (!(getenv("DM_DRIVER_CHECK") && !atoi(getenv("DM_DRIVER_CHECK")))) { char keys[512] = ""; snprintf(p, sizeof p, "%s/driver-check.env", g_files);
+        env_file(p, "driver check", keys, sizeof keys); if (*keys) setenv("DM_DRIVER_CHECK_KEYS", keys, 1); }
     // why Android ended the previous run (GameActivity, ApplicationExitInfo): reason 2 a signal, 3 low memory, 4 / 5 a crash, 6 not responding, 10 / 11 the player /
     //   the app, 13 other (Samsung's game manager, heat), 14 frozen
     { const char *le = getenv("DM_LAST_EXIT"); if (le && *le) fprintf(stderr, "boot: Android says the previous run ended: %s\n", le); }

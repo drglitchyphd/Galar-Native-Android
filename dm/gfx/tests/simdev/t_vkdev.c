@@ -2,14 +2,25 @@
 //   device the loader gives it: on a PC, Mesa's lavapipe, alone or behind the Khronos profiles layer pretending to be a phone's GPU (simdev/run_simdev.sh). It checks
 //   what the engine decided against what that device reports (read again independently, through the same instance), and against what is known for the GPU named
 //   by SIMDEV_PROFILE (Arm's release from driverVersion, no dual-source blending on r44p1, the Vulkan 1.0 routes, ...). Then a little real work through the engine:
-//   samplers with every optional feature asked for, a memory pool mapped for the GPU, a fill submitted and waited for.
+//   samplers with every optional feature asked for, a memory pool mapped for the GPU, a fill submitted and waited for, a depth / stencil copy drawn (zcopy_draw).
 //   Build: simdev/build_vkdev.sh. Run: SIMDEV_PROFILE=<name> ./t_vkdev (exit 1 on a failed check; "FAIL" lines name it).
+//   DM_VK_FRAME_HOLD=2 (run_simdev.sh's second t_vkdev run): every submission held and decided, as with Faster rendering on Adreno: its passes in secondaries.
+//   SIMDEV_DC_FC=1 / 2: a float_controls_crashed marker from an earlier start, and DM_VK_FLOAT_CONTROLS=1 from the driver check (1: named in DM_DRIVER_CHECK_KEYS, as
+//   android_main.c names driver-check.env's keys) or from env.txt (2): the check's value is this driver's default and the marker applies; the player's skips it.
 // Nothing here changes the engine: the few symbols it takes from the rest of the host (page tracking, the game's clock, the overlay) are stubbed below, unused by the set-up.
 #include "../../nvn/nvn_vk.c"
 #include <execinfo.h>
 #include <signal.h>
 
 static int fails, checks;
+static int g_dcfc;   // SIMDEV_DC_FC (above)
+// The table while the device is being made: nvn_vk.c calls this right after vkCreateDevice (android_main.c's boot_state hook). The rules that read the GPU's name,
+//   version, vendor and the game's profile answer already; those that read the driver ID or Arm's release (vk_quirks.h quirk_late) answer -1 until mtl_init has them
+static int g_up_early = -1, g_up_late = -1;
+void dm_boot_device_up(void) {
+    g_up_early = g_up_late = 1;
+    for (int q = 0; q < Q_N; q++) { int v = nvn_vk_quirk_default(q); if (quirk_late(q)) g_up_late &= v == -1; else g_up_early &= v == quirk_default(q, &g_gpuid); }
+}
 static const char *volatile g_step = "start";   // (the step a crash happened in)
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 #define DEC(k, fmt, ...) printf("DECISION %-22s " fmt "\n", k, __VA_ARGS__)
@@ -333,7 +344,10 @@ static void decisions_and_checks(const char *profile) {
       CHECK(g_arm_rel == (arm_drv ? (int)(DV.p.driverVersion >> 22) : 0) && g_arm_p == (arm_drv ? (int)(DV.p.driverVersion >> 12 & 0x3ff) : 0), "Arm release r%dp%d from driverVersion %#x", g_arm_rel, g_arm_p, DV.p.driverVersion);
       CHECK(g_clampzero == (g_arm_rel && ((v >= 3801 && v < 4901) || (g_arm_beta && v >= 4901 && v < 4902) || (v >= 5000 && v < 5101))), "clamp-zero erratum %d for r%dp%d%s", g_clampzero, g_arm_rel, g_arm_p, g_arm_beta ? " beta" : "");
       CHECK(g_nanmm == (g_arm_rel ? 2 : 0) && (g_exact == (g_arm_rel ? EXACT_ALL : 0u)) && g_initloc == (g_arm_rel != 0), "Arm shader rules (nan %d exact %u init %d)", g_nanmm, g_exact, g_initloc);
-      if (DV.fc_ok) CHECK(g_fctl == (DV.fc.shaderSignedZeroInfNanPreserveFloat32 && (arm_drv || sec_drv)), "float controls %d (Arm %d, Samsung %d, supported %d)", g_fctl, arm_drv, sec_drv, DV.fc.shaderSignedZeroInfNanPreserveFloat32);
+      const char *fce = getenv("DM_VK_FLOAT_CONTROLS");   // (SIMDEV_DC_FC: set, with the marker; from the driver check the marker applies)
+      int want_fc = DV.fc_ok && DV.fc.shaderSignedZeroInfNanPreserveFloat32 && (fce ? atoi(fce) != 0 : (arm_drv || sec_drv)) && g_dcfc != 1;
+      if (DV.fc_ok) CHECK(g_fctl == want_fc, "float controls %d (Arm %d, Samsung %d, supported %d, DM_VK_FLOAT_CONTROLS %s%s)", g_fctl, arm_drv, sec_drv, DV.fc.shaderSignedZeroInfNanPreserveFloat32,
+                          fce ? fce : "unset", g_dcfc == 1 ? " from the driver check, marker" : g_dcfc == 2 ? " from env.txt, marker" : "");
       else CHECK(!g_fctl, "float controls asked for where the driver cannot say it has them"); }
     CHECK(g_dynren == 0 || DV.p.vendorID != 0x5143, "Adreno: render passes by default");
     // (background pipelines: Adreno unless the game's profile says async_pso_off, Legends: Arceus #34)
@@ -402,6 +416,31 @@ static void quirk_checks(void) {
     CHECK(quirk_default(Q_NVN_ASYNC, g) == (strstr(g->name, "Adreno") && !DM_GAME_ENG_NVN_ASYNC_NEVER) && quirk_default(Q_DRIVER_SELFTESTS, g) == !!DM_GAME_ENG_DRIVER_SELFTESTS,
           "the replay thread's Auto and the start-up self-tests for this game");
     if (!getenv("DM_VK_BARRIER")) CHECK(g_qset[Q_BARRIER_RELAXED] && g_qval[Q_BARRIER_RELAXED] == quirk_default(Q_BARRIER_RELAXED, g), "barriers decided as the table says");
+    // the table for code outside nvn_vk.c (hle_nvn.c rq_on): while the device was being made, after; every rule's decision at its site so far, where no setting decided
+    CHECK(g_up_early == 1 && g_up_late == 1, "while the device was being made: the early rules answered as the table (%d), the late ones -1 (%d)", g_up_early, g_up_late);
+    { int same = 1; for (int q = 0; q < Q_N; q++) same &= nvn_vk_quirk_default(q) == quirk_default(q, g); CHECK(same, "nvn_vk_quirk_default answers every rule once the device is made"); }
+    for (int q = 0; q < Q_N; q++) {
+        if (!g_qset[q] || g_qenv[q]) continue;
+        int d = quirk_default(q, g), want = d;
+        if (q == Q_DMAHEAP || q == Q_FLOAT_CONTROLS) continue;   // (they note what the route or the driver allowed: checked above)
+        if (q == Q_PCACHE_GAPS_OFF) want = d && !g_dynren;      // (applied with render passes only)
+        if (q == Q_EXACT_MATH) want = d ? (int)EXACT_ALL : 0;   // (the mask of every edge case)
+        CHECK(g_qval[q] == want, "%s: %d decided at its site, the table's default %d", Q_INFO[q].what, g_qval[q], want);
+    }
+    if (!getenv("DM_VK_PIPE_KEEP")) CHECK(pso_cap() == quirk_default(Q_PIPE_KEEP, g), "pipelines kept %d, the table %d", pso_cap(), quirk_default(Q_PIPE_KEEP, g));
+    // GPU timestamps (completion_start): Q_GPU_TIME_OFF inverted at its site; Legends: Arceus (gpu_time_auto_only) only with Graphics Auto
+    { const char *gt = getenv("DM_VK_GPU_TIME"), *gg = getenv("DM_GRAPHICS");
+      int want = g_tsq_ok() && !quirk_default(Q_GPU_TIME_OFF, g) && (!DM_GAME_ENG_GPU_TIME_AUTO_ONLY || (gg && !strcmp(gg, "auto")));
+      if (!gt) CHECK((g_tsq != VK_NULL_HANDLE) == want, "GPU timestamps %d, the table and the profile say %d", g_tsq != VK_NULL_HANDLE, want);
+      if (!gt) CHECK(g_qset[Q_GPU_TIME_OFF] && g_qval[Q_GPU_TIME_OFF] == quirk_default(Q_GPU_TIME_OFF, g), "GPU timestamps off noted as the table says"); }
+    // a driver-check value with a crash marker (SIMDEV_DC_FC): the check's DM_VK_FLOAT_CONTROLS=1 is this driver's default (the marker applies, its [quirk] line says
+    //   "driver check"); the player's env.txt skips the marker
+    if (g_dcfc) {
+        int sup = DV.fc_ok && DV.fc.shaderSignedZeroInfNanPreserveFloat32 && (g_api >= VK_API_VERSION_1_2 || g_fctl_ext);
+        CHECK(g_qset[Q_FLOAT_CONTROLS] && g_qenv[Q_FLOAT_CONTROLS] == (g_dcfc == 1 ? 2 : 1), "float controls noted from %d, want %s", g_qenv[Q_FLOAT_CONTROLS], g_dcfc == 1 ? "the driver check (2)" : "env.txt (1)");
+        if (g_dcfc == 1) CHECK(!g_fctl, "DM_VK_FLOAT_CONTROLS=1 from the driver check with a float_controls_crashed marker: no float controls (the marker applies to a default)");
+        else CHECK(g_fctl == sup, "DM_VK_FLOAT_CONTROLS=1 in env.txt with the marker: float controls %d (the player's setting tries again), supported %d", g_fctl, sup);
+    }
 }
 #else
 static void quirk_checks(void) { printf("QUIRKS: this engine has no vk_quirks.h (the per-GPU choices are checked one by one above)\n"); }
@@ -449,6 +488,72 @@ static void work(void) {
     printf("WORK pool route: %s\n", g_host_import ? "host import" : g_heapmap ? "dma-buf heap" : g_fdmap ? "fd export" : "driver memory moved onto the pool");
 }
 
+// A depth / stencil copy drawn (zcopy_draw: the copy_t2t route for a depth format that is no blit destination, D24S8 on Qualcomm's driver), 16x16 scaled to 8x8, in
+//   a submission of the game's kind: with DM_VK_FRAME_HOLD=2 a held one, whose command buffer outside passes is a secondary (the copy's pass must become a segment of
+//   its own, rend_begin; on Adreno's render passes a vkCmdBeginRenderPass there is invalid, which the validation layer reports). Then read back: each destination
+//   texel the source's at (2x + 1, 2y + 1), depth and stencil; and draw_'s pipeline-bind cache told (g_gfx_bind_gen). Only on Vulkan 1.1 and newer (view_get chains
+//   VkImageViewUsageCreateInfo, Vulkan 1.1's)
+static vtex *zt_image(VkFormat f, uint32_t w, uint32_t h, VkImageUsageFlags usage) {
+    vtex *x = calloc(1, sizeof *x); x->refs = 1; x->fmt = f; pthread_mutex_init(&x->vmu, NULL);
+    VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f, .extent = { w, h, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage };
+    if (vkCreateImage(g_dev, &ci, NULL, &x->img)) { free(x); return NULL; }
+    VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, x->img, &rq); x->a = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    VKCHECK(vkBindImageMemory(g_dev, x->img, x->a.b->mem, x->a.off));
+    x->w = w; x->h = h; x->d = 1; x->levels = 1; x->layers = 1; x->samples = 1; x->usage = usage; x->aspect = fmt_aspect(f); x->fixed_fmt = 1;   // (depth: not mutable, as tex_new)
+    return x;
+}
+static void zcopy_work(void) {
+    enum { S = 16, D = 8 };
+    if (g_api < VK_API_VERSION_1_1) { printf("SIMGAP zcopy: not on Vulkan 1.0 (view_get's view usage structure is Vulkan 1.1's)\n"); return; }
+    VkFormat f = VK_FORMAT_UNDEFINED; static const VkFormat cand[4] = { VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM };
+    for (int i = 0; i < 4 && !f; i++) if (fmt_feat(cand[i], VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) f = cand[i];
+    if (!f) { printf("SIMGAP zcopy: no depth format to sample, draw into and copy\n"); return; }
+    vtex *s = zt_image(f, S, S, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT),
+         *d = zt_image(f, D, D, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    if (!s || !d) { printf("SIMGAP zcopy: the images could not be made (format %d: the simulated GPU's formats are not all lavapipe's)\n", f); return; }
+    int st = fmt_has_stencil(f), d24 = f == VK_FORMAT_D24_UNORM_S8_UINT, d16 = f == VK_FORMAT_D16_UNORM, dsz = d16 ? 2 : 4;
+    // the source: depth (x + y * 16 + 1) / 300, stencil (x * 13 + y * 7 + 5) & 255, through a host buffer
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = S * S * 5, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    VkBuffer hb; VKCHECK(vkCreateBuffer(g_dev, &bci, NULL, &hb)); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, hb, &rq);
+    vmalloc_t hm = vk_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1); VKCHECK(vkBindBufferMemory(g_dev, hb, hm.b->mem, hm.off));
+    uint8_t *hp = (uint8_t *)hm.b->map + hm.off; uint32_t want_d[S * S];
+    for (int y = 0; y < S; y++) for (int x = 0; x < S; x++) { double v = (x + y * S + 1) / 300.0; uint32_t w;
+        if (d24) w = (uint32_t)(v * 16777215.0 + 0.5); else if (d16) w = (uint32_t)(v * 65535.0 + 0.5); else { float fv = (float)v; memcpy(&w, &fv, 4); }
+        want_d[y * S + x] = w; memcpy(hp + (y * S + x) * dsz, &w, (size_t)dsz); hp[S * S * dsz + y * S + x] = (uint8_t)((x * 13 + y * 7 + 5) & 255); }
+    g_step = "zcopy: the source";
+    img_init(s, 0); img_init(d, 0);   // (to GENERAL, where every image stays)
+    { VkCommandBuffer cb = once_begin();
+      VkBufferImageCopy bc[2] = { { .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, .imageExtent = { S, S, 1 } },
+                                  { .bufferOffset = (VkDeviceSize)S * S * dsz, .imageSubresource = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 }, .imageExtent = { S, S, 1 } } };
+      vkCmdCopyBufferToImage(cb, hb, s->img, VK_IMAGE_LAYOUT_GENERAL, st ? 2 : 1, bc); once_end(cb); }
+    // the copy, in a submission as copy_t2t makes it (outside any pass, ordered after: the barrier)
+    g_step = "zcopy: the copy";
+    uint64_t gen0 = g_gfx_bind_gen;
+    mtl_sub_begin(); int held = g_sub->dec;
+    VkImageSubresourceLayers ss = { s->aspect, 0, 0, 1 }, ds = { d->aspect, 0, 0, 1 };
+    int took = zcopy_draw(s, d, &ss, &ds, (VkOffset2D){ 0, 0 }, (VkOffset2D){ S, S }, (VkOffset2D){ 0, 0 }, (VkExtent2D){ D, D });
+    barrier_all(CB());
+    uint64_t fence = mtl_sub_commit(); mtl_wait(fence, UINT64_MAX); mtl_finish();
+    CHECK(took, "zcopy_draw took the copy (format %d)", f);
+    CHECK(g_gfx_bind_gen == gen0 + 1, "zcopy_draw told draw_'s pipeline-bind cache (generation %llu, was %llu)", (unsigned long long)g_gfx_bind_gen, (unsigned long long)gen0);
+    // read back
+    g_step = "zcopy: read back";
+    memset(hp, 0xcd, S * S * 5);
+    { VkCommandBuffer cb = once_begin();
+      VkBufferImageCopy rc[2] = { { .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, .imageExtent = { D, D, 1 } },
+                                  { .bufferOffset = (VkDeviceSize)D * D * dsz, .imageSubresource = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 }, .imageExtent = { D, D, 1 } } };
+      vkCmdCopyImageToBuffer(cb, d->img, VK_IMAGE_LAYOUT_GENERAL, hb, st ? 2 : 1, rc); once_end(cb); }
+    int bad_d = 0, bad_s = 0; uint32_t got_d = 0, exp_d = 0; unsigned got_s = 0, exp_s = 0;
+    for (int y = 0; y < D; y++) for (int x = 0; x < D; x++) {
+        int sx = 2 * x + 1, sy = 2 * y + 1; uint32_t w = want_d[sy * S + sx], g = 0; memcpy(&g, hp + (y * D + x) * dsz, (size_t)dsz);
+        int ok = d24 ? (int)((g & 0xffffff) - w) >= -2 && (int)((g & 0xffffff) - w) <= 2 : d16 ? (int)(g & 0xffff) - (int)w >= -2 && (int)(g & 0xffff) - (int)w <= 2 : g == w;
+        if (!ok && !bad_d++) { got_d = g; exp_d = w; }
+        if (st) { unsigned ws = (unsigned)((sx * 13 + sy * 7 + 5) & 255), gs = hp[D * D * dsz + y * D + x]; if (gs != ws && !bad_s++) { got_s = gs; exp_s = ws; } } }
+    CHECK(!bad_d && !bad_s, "the copy drawn into format %d (%s, %s): depth %d of %d texels wrong (first %#x, want %#x), stencil %d (first %u, want %u)", f, held ? "a held submission" : "a submission as recorded",
+          g_dynren ? "dynamic rendering" : "render passes", bad_d, D * D, got_d, exp_d, bad_s, got_s, exp_s);
+    printf("WORK zcopy: format %d, %s, %s: %s\n", f, held ? "held (its pass a segment of its own)" : "as recorded", g_dynren ? "dynamic rendering" : "render passes", bad_d || bad_s ? "WRONG" : "right");
+}
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -460,15 +565,22 @@ int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGSEGV, on_crash); signal(SIGBUS, on_crash); signal(SIGABRT, on_crash);
     unsetenv("DM_VK_PCACHE");   // (no marker files from this test)
+    { const char *e = getenv("SIMDEV_DC_FC"); g_dcfc = e ? atoi(e) : 0;   // (a marker file of its own then, in a scratch folder: header)
+      if (g_dcfc) { char dir[64], p[128]; snprintf(dir, sizeof dir, "/tmp/t_vkdev_dc.%d", (int)getpid()); mkdir(dir, 0700);
+          snprintf(p, sizeof p, "%s/pipeline_cache.bin", dir); setenv("DM_VK_PCACHE", p, 1);
+          snprintf(p, sizeof p, "%s/float_controls_crashed", dir); FILE *f = fopen(p, "w"); if (f) { fputs("t_vkdev: a crash on the float-controls test shader at an earlier start\n", f); fclose(f); }
+          setenv("DM_VK_FLOAT_CONTROLS", "1", 1); if (g_dcfc == 1) setenv("DM_DRIVER_CHECK_KEYS", "DM_VK_FLOAT_CONTROLS", 1); else unsetenv("DM_DRIVER_CHECK_KEYS");
+          printf("SIMDEV_DC_FC=%d: float_controls_crashed in %s, DM_VK_FLOAT_CONTROLS=1 from %s\n", g_dcfc, dir, g_dcfc == 1 ? "the driver check" : "env.txt"); } }
     void *lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL); if (!lib) { printf("FAIL no libvulkan.so.1\n"); return 1; }
     real_gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
     vkGetInstanceProcAddr = w_gipa; VK_GLOBAL(VK_LOAD_G)   // (what mtl_init does when it opens the loader itself, through the watching wrapper)
+    CHECK(nvn_vk_quirk_default(Q_NVN_ASYNC) == -1 && nvn_vk_quirk_default(Q_FLOAT_CONTROLS) == -1, "the table answers -1 before the device exists (hle_nvn.c rq_on: Auto off then)");
     g_step = "mtl_init"; mtl_init();
     device_read();
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) work();
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
