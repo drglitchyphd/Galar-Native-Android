@@ -189,6 +189,12 @@ static int g_tfst_a = -1, g_tfst_b = -1, g_tfst_c = -1;   // the transform feedb
 static void vtx_canary(void);   // vtx_canary.h: per-draw vertex sizes checked on this driver at start
 static int g_arm_rel, g_arm_p;   // Arm's own Mali driver: its release, r<rel>p<p> (driverVersion is VK_MAKE_VERSION(rel, p, 0): 0xb001000 = r44p1); 0 for any other driver
 static int g_arm_beta;           // ... a beta build of it (driverInfo "v1.r49p1-03bet0": the G925's)
+static int g_drv_id = -1;        // the driver's ID (VkDriverId) where it reports driver properties, else -1 (mtl_init; the white-screen ladder's key)
+// The Mali white-screen ladder and its detector (mali_white_vk.inc, included after the draw counters; its rules: mali_white.h): the route at mtl_init, the lit target
+//   and the part drawn of it from pass_begin / draw_ / pass_end, the samples at mtl_present, the state in the frame capture's notes
+struct vtex; static struct vtex *g_mw_px;   // the open pass's lit-target candidate (mw_pass_target), NULL: none
+static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b); static void mw_pass_target(struct vtex *x, uint32_t lv); static void mw_pass_end(void);
+static void mw_draw_rect(float vx, float vy, float vw, float vh, const VkRect2D *sc); static void mw_present(uint64_t n); static void mw_capture_note(void);
 static int g_clampzero; static _Atomic int g_clampzero_n;   // shaders get spv_clamp_zero (Arm erratum 3779215: mtl_init decides); how many it changed
 static int g_fmz; static _Atomic int g_fmz_n;   // shaders get spv_fmz (every multiply by 0 gives 0, as Maxwell's FMZ: DM_VK_FMZ=1, a test); how many it changed
 static unsigned g_exact; static _Atomic int g_exact_n;
@@ -605,6 +611,7 @@ void mtl_init(void) {
         const char *e = getenv("DM_VK_FLOAT_CONTROLS"); int arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : g_props.vendorID == 0x13B5;
         int sec = drvp ? dp.driverID == VK_DRIVER_ID_SAMSUNG_PROPRIETARY : g_props.vendorID == 0x144D;
         arm_known = 1; if (arm) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); g_arm_beta = drvp && strstr(dp.driverInfo, "bet") != NULL; }
+        if (drvp) g_drv_id = (int)dp.driverID;
         g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : arm || sec);
         // The test shader below crashed a driver (#89: Mali-G57, the start ended right after this line): a start that dies there leaves the marker, and later starts on
         //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 tries again)
@@ -651,12 +658,16 @@ void mtl_init(void) {
     //   DM_VK_FMZ=0 / 1 (the in-game menu's Mali tests) decides on any GPU
     //   Since v0.76 on by default for PanVK only: on Arm's own driver it did not help (#172, Mali-G720 r49p1, still white on v0.75) and made it worse on Bifrost (#215,
     //   Mali-G52 r26p0: 86 % white instead of 81 %, the dark outlines gone, about 10 % slower)
-    // R11G11B10F render targets as RGBA16F (nvn_fmt_vk.c nvn_fmt_vk_b10_as_rgba16): a test for Mali's white lit scene, off unless DM_VK_B10_AS_RGBA16=1 (the menu's Mali tests)
-    { const char *e = getenv("DM_VK_B10_AS_RGBA16"); if (e && atoi(e) > 0) { nvn_fmt_vk_b10_as_rgba16(1); VLOG("formats: R11G11B10F drawn and sampled as RGBA16F (DM_VK_B10_AS_RGBA16, a Mali test): texels converted where the game's memory meets the image, its alpha read as 1 ('b10 swap:' lines name each kind once)"); } }
-    // The other route (DM_VK_B10_NOCOMPRESS, tex_new): R11G11B10F kept, its render targets made without framebuffer compression, for the case that Arm's driver
-    //   mishandles the packed float format in AFBC. Off by default; the log names how it was done and what the driver then reports for each target (b10 nocompress)
-    { const char *e = getenv("DM_VK_B10_NOCOMPRESS"); g_b10nc = e && atoi(e) > 0;
-      if (g_b10nc) VLOG("formats: R11G11B10F render targets made without framebuffer compression (DM_VK_B10_NOCOMPRESS, a Mali test): %s", g_compctl
+    // R11G11B10F render targets as RGBA16F (nvn_fmt_vk.c nvn_fmt_vk_b10_as_rgba16, route A), and the other route (DM_VK_B10_NOCOMPRESS, tex_new, route B: R11G11B10F
+    //   kept, its render targets made without framebuffer compression, for the case that Arm's driver mishandles the packed float format in AFBC; the log names how it
+    //   was done and what the driver then reports for each target, "b10 nocompress"): Mali's white lit scene. Route A is the default on Arm's own driver with Sword /
+    //   Shield, where the white-screen ladder (mali_white_vk.inc) checks the lit scene while playing and moves on to route B, then to offering PanVK, start by start;
+    //   both are off on every other driver and game. DM_VK_B10_AS_RGBA16 / DM_VK_B10_NOCOMPRESS in env.txt (the menu's Mali tests) always win
+    { int a = 0, b = 0; const char *wa = "", *wb = "";
+      mw_init(&a, &b, &wa, &wb);
+      if (a) { nvn_fmt_vk_b10_as_rgba16(1); VLOG("formats: R11G11B10F drawn and sampled as RGBA16F (%s): texels converted where the game's memory meets the image, its alpha read as 1 ('b10 swap:' lines name each kind once)", wa); }
+      g_b10nc = b;
+      if (g_b10nc) VLOG("formats: R11G11B10F render targets made without framebuffer compression (%s): %s", wb, g_compctl
             ? "VK_EXT_image_compression_control, compression disabled image by image"
             : "the driver has no VK_EXT_image_compression_control: made mutable with no list of view formats, which keeps Mali's AFBC (and Adreno's UBWC) off"); }
     //   Since chain 91294b095153 the translator writes FMZ into the multiplies the game marked (as yuzu / Eden do), on every GPU: PanVK keeps its fix and the multiplies
@@ -3407,7 +3418,9 @@ static int cap_start(void) {
     cap_printf("Frame capture, present %llu. GPU %s (vendor %#x, driver %#x, Vulkan %u.%u). BC textures %s; BC layer %s; float controls %s.\n", (unsigned long long)g_cap_frame, g_props.deviceName, g_props.vendorID,
                g_props.driverVersion, VK_API_VERSION_MAJOR(g_props.apiVersion), VK_API_VERSION_MINOR(g_props.apiVersion),
                nvn_fmt_vk_transcode(0x46) ? "transcoded on upload" : nvn_fmt_vk_decode(0x46) ? "decoded on upload" : "sampled by the GPU", g_bcgpu ? "on" : "off", g_fctl ? "on" : "off");
-    cap_printf("Formats are Vulkan VkFormat numbers (vk) and NVN format numbers (nvn). Pictures: NNN.png, %ux%u, values above 1.0 shown as white.\n\n", CAPW, CAPH);
+    cap_printf("Formats are Vulkan VkFormat numbers (vk) and NVN format numbers (nvn). Pictures: NNN.png, %ux%u, values above 1.0 shown as white.\n", CAPW, CAPH);
+    mw_capture_note();   // (the Mali white-screen check's state, when its ladder is on)
+    cap_printf("\n");
     return 1;
 }
 static void cap_pass(void) {
@@ -3548,7 +3561,7 @@ static int P_tf;   // the open pass is transform feedback captures' (tf_pass_beg
 static struct { uint64_t lo, hi; } g_tfw[64]; static int g_ntfw;   // what the captures in the open capture pass wrote
 static void ubd_flush(void);
 static int g_nubd;
-static void pass_end(void) { g_rt_stale = 0; if (P.open) { rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0;
+static void pass_end(void) { g_rt_stale = 0; if (P.open) { rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0; if (g_mw_px) mw_pass_end();
     if (!P_tf && P.hd) sk_ro_note(P.dkey, P.dwrote, 0);
     if (!P_tf && P.hs) sk_ro_note(P.skey, P.swrote, 0);
     g_after_pass = !P_tf; g_bar_clean = 0;
@@ -3758,6 +3771,7 @@ static int pass_begin(void) {
         VkFormat f = x->fmt; if (R.rt.has_cview[i] && R.rt.cview[i].set_format) { uint32_t vf = 0; uint8_t s[4]; if (nvn_fmt_to_vk(R.rt.cview[i].format, &vf, s) && vf) f = (VkFormat)vf; }
         f = b10_view_fmt(x, f); if (b10_swapped_tex(x) && f == x->fmt) P.b10 |= 1u << i;   // (DM_VK_B10_AS_RGBA16: the format att_view made the view in; the target has no alpha)
         P.cfmt[i] = (uint32_t)f; P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1; ncol = i + 1;
+        if (f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || (P.b10 >> i & 1)) mw_pass_target(x, R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0);   // (the white-screen check's lit target)
         x->hp_stamp = g_hp_seq + 1; if (!hp_c0) hp_c0 = x;
         if (atomic_load(&g_fgr.on) && fgn < 10) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)f, (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0),
             (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_layers ? R.rt.cview[i].min_layer : 0), (uint8_t)i, (uint8_t)(ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(ca[i].storeOp) };
@@ -4841,6 +4855,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     if (R.has_sc && !tfcap) { long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h; if (x1 > (long)P.tw) x1 = P.tw; if (y1 > (long)P.th) y1 = P.th;
         if (x1 <= x0 || y1 <= y0) return; sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
     vkCmdSetScissor(cb, 0, 1, &sc);
+    if (g_mw_px) mw_draw_rect(vx, vy, vw, vh, &sc);   // (the white-screen check: the part of the lit target this draw covers)
     if (g_eds) {   // (without extended dynamic state these are built into the pipeline: pso_get's sst, the same values)
     // (points and lines never cull, so none is sent for them: Arm's driver culled them with a dynamic cull mode and those draws vanished, erratum 3786517, r41-r51)
     vkCmdSetCullMode(cb, topo_class(topo) < 2 ? VK_CULL_MODE_NONE : S.poly.cull == NVN_FACE_FRONT ? VK_CULL_MODE_FRONT_BIT : S.poly.cull == NVN_FACE_BACK ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
@@ -5314,6 +5329,7 @@ static int state_op(uint32_t op, const void *a) {
     return 1;
 }
 static uint64_t g_stat_draws, g_stat_passes, g_stat_rt_same;
+#include "mali_white_vk.inc"   // the Mali white-screen ladder and its detector (counts draws by g_stat_draws)
 // The same render targets set again while their pass is open: the pass goes on (on a tiler every pass end stores the attachments and every begin loads them back;
 // Legends: Arceus sets render targets about 120 times a frame). Views compared field by field where set
 static int rt_same(const p_set_rt *a, const p_set_rt *b) {
@@ -6892,6 +6908,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (sk_on()) { vtex *px = tex_res(t); if (px) { pthread_mutex_lock(&g_skmu); px->presented = 1; pthread_mutex_unlock(&g_skmu); sk_read(px); } }   // shown: never skips its stores
     uint64_t n = atomic_fetch_add(&g_present_n, 1) + 1;
     cap_present(n);
+    mw_present(n);   // the Mali white-screen check: finished samples read, this frame's lit target sampled when due (nothing unless its ladder is on)
     { vtex *px = tex_res(t); fgr_present(n, px, px ? px->w : 0, px ? px->h : 0, px ? (uint32_t)px->fmt : 0); }   // (the frame recorder: frame boundary, the shown image)
     // the heap route's crash marker goes after 20 s of play on it: 600 presents, or 20 s of wall time and 60 presents (a hot Xclipse 530 building 2,000 pipelines on the
     //   way into Motostoke drew about 300 frames in a minute; the player closed it as stuck, the marker stayed, and the next start took the mirrored route and crashed, #74)
