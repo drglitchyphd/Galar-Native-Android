@@ -1921,8 +1921,26 @@ static void post(post_op o) {
 }
 // One-off command buffer for work outside a submission (uploads requested off the submit thread, readbacks): recorded, submitted and waited for at once
 static VkCommandPool g_once_pool; static pthread_mutex_t g_once_mu = PTHREAD_MUTEX_INITIALIZER;
+// One-off uploads (a texture or a new image's first clear, recorded off the submit thread) are not waited for (DM_VK_ONCE_WAIT=1: waited, as before): a one-off is
+//   ordered after everything submitted before it, so waiting for it meant waiting for all the GPU work queued so far. On a slow GPU that was a frame or two each time:
+//   a 16x16 texture took 30-70 ms on a Mali-G68 with PanVK (Violet, 2026-11-21), a game thread that made seven new textures stood 3 s. Its full barriers at the end
+//   order it before every later submission; its command buffer and staging buffer go once its fence has signalled (once_reap, at the next one-off, at most 64 waiting)
+typedef struct { VkCommandBuffer cb; VkFence f; VkBuffer sb; vmalloc_t tmp; } once_pend;
+static once_pend g_once_p[64]; static int g_once_np;
+static int once_wait(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ONCE_WAIT"); v = e && atoi(e) == 1; } return v; }
+static void once_free(once_pend *o) {
+    vkDestroyFence(g_dev, o->f, NULL); vkFreeCommandBuffers(g_dev, g_once_pool, 1, &o->cb);
+    if (o->sb) { vkDestroyBuffer(g_dev, o->sb, NULL); vk_free(o->tmp); }
+}
+static void once_reap(int all) {   // (g_once_mu held) the finished ones freed; all: waited for first
+    for (int i = 0; i < g_once_np;) {
+        if (all) vk_wait(NULL, g_once_p[i].f, UINT64_MAX);
+        else if (vkGetFenceStatus(g_dev, g_once_p[i].f) != VK_SUCCESS) { i++; continue; }
+        once_free(&g_once_p[i]); g_once_p[i] = g_once_p[--g_once_np]; }
+}
 static VkCommandBuffer once_begin(void) {
     pthread_mutex_lock(&g_once_mu);
+    if (g_once_np) once_reap(0);
     if (!g_once_pool) { VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_qf }; VKCHECK(vkCreateCommandPool(g_dev, &pci, NULL, &g_once_pool)); }
     VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_once_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
     VkCommandBuffer cb; VKCHECK(vkAllocateCommandBuffers(g_dev, &cai, &cb));
@@ -1940,6 +1958,21 @@ static void once_end(VkCommandBuffer cb) {   // ordered after everything submitt
     if (r) VDIE("one-off submit failed: %d", r);
     vk_wait(NULL, f, UINT64_MAX); vkDestroyFence(g_dev, f, NULL);
     vkFreeCommandBuffers(g_dev, g_once_pool, 1, &cb);
+    pthread_mutex_unlock(&g_once_mu);
+}
+// once_end without the wait (see once_begin): sb / tmp, a staging buffer of its own, go with it (VK_NULL_HANDLE: none)
+static void once_end_async(VkCommandBuffer cb, VkBuffer sb, vmalloc_t tmp) {
+    if (once_wait()) { once_end(cb); if (sb) { vkDestroyBuffer(g_dev, sb, NULL); vk_free(tmp); } return; }
+    barrier_all(cb); barrier_host(cb); VKCHECK(vkEndCommandBuffer(cb));
+    VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence f; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &f));
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+    hold_flush(1);   // (held work first: this one is ordered after everything recorded so far)
+    shadow_sync();
+    pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, f); pthread_mutex_unlock(&g_qmu);
+    if (r) VDIE("one-off submit failed: %d", r);
+    if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { once_reap(0); if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { vk_wait(NULL, g_once_p[0].f, UINT64_MAX); once_reap(0); } }
+    g_once_p[g_once_np++] = (once_pend){ cb, f, sb, tmp };
+    static int said; if (!said++) VLOG("one-off uploads: not waited for (each would have waited for all the GPU work queued before it; DM_VK_ONCE_WAIT=1 waits)");
     pthread_mutex_unlock(&g_once_mu);
 }
 static VkCommandBuffer ucb(void) {
@@ -2223,7 +2256,7 @@ static void img_init(vtex *t, int zero) {
         if (t->aspect & VK_IMAGE_ASPECT_COLOR_BIT) { VkClearColorValue c = {{0}}; vkCmdClearColorImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
         else { VkClearDepthStencilValue c = {0, 0}; vkCmdClearDepthStencilImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
     }
-    if (once) once_end(cb);
+    if (once) once_end_async(cb, VK_NULL_HANDLE, (vmalloc_t){0});
 }
 // Texture quality (DM_VK_TEX_QUALITY=half, the device profile's choice for weaker GPUs): the game's own block-compressed textures of 512x512 and up with mip levels are kept
 // without their largest level, a quarter of the memory and bandwidth (and of the decode work on GPUs without BC). Only textures from the game's files: they are never drawn
@@ -2432,7 +2465,7 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     free(scratch);
     if (nrg) vkCmdCopyBufferToImage(cb, sb, x->img, VK_IMAGE_LAYOUT_GENERAL, nrg, rg);
     free(rg); g_up_bytes += total;
-    if (once) { once_end(cb); vkDestroyBuffer(g_dev, sb, NULL); vk_free(tmp); }
+    if (once) once_end_async(cb, sb, tmp);
     else if (batch) { t_upb->sb[t_upb->n] = sb; t_upb->tmp[t_upb->n] = tmp; t_upb->n++; }
     if (vfy) {   // texel by texel (8 bytes: RGBA16F), level by level, layer by layer, in the staging layout
         const uint8_t *got = (const uint8_t *)vm.b->map + vm.off; VkDeviceSize o = 0; int said = 0; unsigned long long bad = 0, all = 0;
