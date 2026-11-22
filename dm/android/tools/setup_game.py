@@ -168,7 +168,7 @@ def main():
         e = kw.pop('env', env)
         for attempt in range(retry_killed + 1):
             log.write('$ ' + ' '.join(map(str, cmd)) + '\n')
-            r = subprocess.run(list(map(str, cmd)), stdout=log, stderr=subprocess.STDOUT, env=e, **kw)
+            r = subprocess.run(list(map(str, cmd)), cwd=a.bin, stdout=log, stderr=subprocess.STDOUT, env=e, **kw)
             if r.returncode >= 0 or attempt == retry_killed: break
             slots = max(1, int(e.get('DM_GATE_SLOTS', e.get('J', '8'))) // 2); e = dict(e, J=str(slots), DM_GATE_SLOTS=str(slots))
             log.write(f'{os.path.basename(str(cmd[1]))} was stopped ({r.returncode}): again with {slots} at a time\n')
@@ -445,6 +445,10 @@ def main():
                      MAIN=os.path.join(exefs, 'main')))
         finally: stop.set()
         built = os.path.join(cache, 'b-' + chain)
+        # No shader came out (every one failed in the shader build, e.g. spirv-cross could not be started): the setup stops here. It used to go on, write a pack
+        #   of 0 shaders over the player's working one and mark the game ready (seen on the Android emulator, 2026-11-21)
+        if not any(f.endswith('.spv') and not f.endswith('.gl.spv') for f in os.listdir(vk)):
+            raise RuntimeError(f'the shader translation produced no shaders (its last lines are in {log.name}); the shader pack was left as it was')
         write_translated(a.work, chain)
 
         step(5)
@@ -595,7 +599,7 @@ def mod_shaders(a):
     tool = lambda n: os.path.join(a.bin, n)
     def run(cmd, **kw):
         log.write('$ ' + ' '.join(map(str, cmd)) + '\n')
-        r = subprocess.run(list(map(str, cmd)), stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
+        r = subprocess.run(list(map(str, cmd)), cwd=a.bin, stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
         if r.returncode: raise RuntimeError(f'{os.path.basename(str(cmd[1]))} failed ({r.returncode}): see {log.name}')
     roots = [r for r in a.mod_shaders.split(':') if r and os.path.isdir(r)]
     log.write(f'== {time.strftime("%H:%M:%S")} mod shaders: {", ".join(roots) or "no mod folders"}\n')
@@ -682,7 +686,7 @@ def captures(a):
     env = dict(os.environ, PYTHONUNBUFFERED='1', PATH=a.bin + os.pathsep + os.environ.get('PATH', ''))
     def run(cmd, **kw):
         log.write('$ ' + ' '.join(map(str, cmd)) + '\n')
-        r = subprocess.run(list(map(str, cmd)), stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
+        r = subprocess.run(list(map(str, cmd)), cwd=a.bin, stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
         if r.returncode: raise RuntimeError(f'{os.path.basename(str(cmd[1]))} failed ({r.returncode}): see {log.name}')
     chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     pak = os.path.join(a.out, 'shaders.pak'); have, pchain = pak_keys(pak)
