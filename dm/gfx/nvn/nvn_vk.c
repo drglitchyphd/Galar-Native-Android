@@ -2964,23 +2964,30 @@ static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
     //     the image's formats are fixed (tex_new: not mutable, fixed_fmt 1, every plain colour image on Mali, Q_ARM_FORMATS; a list of its own format and sRGB twin,
     //     fixed_fmt 2, a render-target format wherever format lists exist: Adreno, Xclipse, Vulkan 1.2 drivers) the texture's own format is read as before
     //     (6e0e1dd): a view of another class would be invalid there, and the empty texture is no answer for 32-bit data;
-    //   - 8 / 16-bit (and 10-bit) integers read as float are denormals there, which flush to 0: such a read gets the empty texture of its class, on every GPU;
+    //   - 8 / 16-bit (and 10-bit) integers read as float keep their own format, as before (6e0e1dd). "Read as float" says little here: the translator declares every
+    //     sampled texture float (Ryujinx's SPIR-V backend; QuerySamplerType carries no component type, so r->sclass is 0 for an integer texture too) and takes the
+    //     result's bits with a bitcast where the Maxwell code does integer work on it. Such a shader needs the texel's own bits, which most drivers return through
+    //     this binding; only a shader that does float work on the value gets 0 on the Switch (denormals, flushed). Which one a game's shaders are is not known yet
+    //     (Shield's fp_t_tcb_8 is the one seen): DM_VK_INT_TEX_EMPTY=1 gives these reads the empty texture of their class (0) instead, on every GPU, to compare;
     //   - 8 / 16-bit integers read as the other signedness keep their own format, as before: a view of the other signedness would extend them the other way
     //     (R16_UINT 0xffff as R16_SINT: -1, where the Switch gives 65535);
     //   - a float / UNORM / SNORM / sRGB texture (or a BC one decoded here) read as uint / sint keeps its own format, as before: not seen in Sword / Shield yet.
-    //   docs/ENGINE_UNIFY.md lists where each applies. DM_VK_INT_TEX=keep: the texture's own format always, as before
+    //   docs/ENGINE_UNIFY.md lists where each applies. DM_VK_INT_TEX=keep: the texture's own format always, as before (no views of another class)
     if (!storage && !(x->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && r->sclass < 3) {
-        static int keep = -1; if (keep < 0) { const char *e = getenv("DM_VK_INT_TEX"); keep = e && !strcmp(e, "keep"); }
-        int have = fmt_int_class(f);
+        static int mode = -1;   // (bit 0: DM_VK_INT_TEX=keep, bit 1: DM_VK_INT_TEX_EMPTY; one value, so a thread never sees one switch decided and the other not)
+        if (mode < 0) { const char *e = getenv("DM_VK_INT_TEX"), *z = getenv("DM_VK_INT_TEX_EMPTY"); mode = (e && !strcmp(e, "keep") ? 1 : 0) | (z && atoi(z) > 0 ? 2 : 0); }
+        int keep = mode & 1, empty = mode & 2, have = fmt_int_class(f);
         if (have && have != r->sclass && !keep) {
             int wide = fmt_as_class(f, 0) != 0;   // (32-bit channels: fmt_as_class has a float format for them only)
             VkFormat nf = wide ? fmt_as_class(f, r->sclass) : (VkFormat)0;
             int ok = nf && (!x->fixed_fmt || nf == x->fmt || nf == x->twin);   // (a view in the image's own format or twin is always allowed)
+            int zero = !wide && !r->sclass && empty;
             static int said; if (said++ < 8) VLOG("texture ID %d (vk format %d) read as %s by a shader: %s", tid, f, r->sclass == 0 ? "float" : r->sclass == 1 ? "uint" : "sint",
                                                   ok ? "the same bits in a view of that class" : wide ? "its own format, as before (the image's formats are fixed: no view of that class here)"
+                                                  : zero ? "reads the empty texture of that class (0, as the Switch's flushed denormals: DM_VK_INT_TEX_EMPTY)"
                                                   : r->sclass ? "its own format, as before (a narrower integer: the Switch extends it by the texture's own format)"
-                                                  : "reads the empty texture of that class (0, as the Switch's flushed denormals)");
-            if (!wide && !r->sclass) return VK_NULL_HANDLE;
+                                                  : "its own format, as before (a narrower integer: its own bits on most drivers, as a shader that takes them as an integer gets them on the Switch)");
+            if (zero) return VK_NULL_HANDLE;
             if (ok) f = nf;
         }
     }
@@ -5333,9 +5340,10 @@ static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
 // Samsung's Xclipse driver crashes recording vkCmdClearAttachments in a layered pass over a 3D image (probe self-test 3d-layered: Xclipse 940 driver 24.0.534 and
 //   Xclipse 540 24.0.560, SIGSEGV "while recording the per-layer vkCmdClearAttachments"; a pass per slice drew right on both: 3d-slices). There the same clear (the
 //   pass's layer 0, that rectangle) is a pass of its own on that slice, cleared by its load op; the game's pass then opens again on its next draw (loading what is there).
-//   DM_VK_CLEAR_BY_PASS=1 / 0 decides on any driver
+//   DM_VK_CLEAR_BY_PASS=1 / 0 decides on any driver (the driver check's 3d-layered test records the clear the same way here, and asks for =1 on a driver that crashes
+//   recording the vkCmdClearAttachments: probe selftest.c t_3d_mode)
 static int clear_by_pass(void) {
-    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = quirk_note(Q_CLEAR_BY_PASS, e ? atoi(e) != 0 : quirk_default(Q_CLEAR_BY_PASS, &g_gpuid), e != NULL);
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = quirk_note(Q_CLEAR_BY_PASS, e ? atoi(e) != 0 : quirk_default(Q_CLEAR_BY_PASS, &g_gpuid), vkq_env_src("DM_VK_CLEAR_BY_PASS"));
                                     if (v) VLOG("clears inside a layered pass over a 3D target: a pass of their own on the slice (Samsung Xclipse driver, or DM_VK_CLEAR_BY_PASS)"); }
     return v;
 }

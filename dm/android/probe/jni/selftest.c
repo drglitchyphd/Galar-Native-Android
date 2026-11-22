@@ -6,13 +6,14 @@
 //   shader-maths        spv_nan_minmax / spv_nan_select: NaN in min / max / saturate, pow as exp2(log2), integers carried in float variables, four ways
 //   end-of-submit-barrier  barrier_host: shader writes the CPU reads after the fence, with and without the barrier, coherent and cached memory
 //   reinterpreted-format   MUTABLE_FORMAT textures written as one format and sampled as another (compressed render targets: AFBC, DCC)
-//   3d-render-target    att_view: a 3D image's slices attached as a layered 2D array (the colour-grading tables; black 3D scenes when only slice 0 drew)
+//   3d-render-target    att_view: a 3D image's slices attached as a layered 2D array (the colour-grading tables; black 3D scenes when only slice 0 drew), and a clear
+//                       inside that pass recorded as clear_in_pass records it on this driver (Q_CLEAR_BY_PASS: on Xclipse a pass of its own per slice)
 //   dmabuf-heap         the heap route: /dev/dma_heap memory mapped at a fixed address and imported into the driver (the Mali / Xclipse memory pools)
 //   bc-textures         the BC layer (gfx/tex/bc_gpu.c, linked as is): BC1-BC7 converted on the GPU only where it matches the CPU bit for bit
 //   depth-copy          nvn_vk.c zcopy_draw: a scaled copy into a depth / stencil image drawn (gl_FragDepth, the stencil one bit a draw), read back
 //   int-view            nvn_vk.c tex_view_for / fmt_as_class: 32-bit integer textures read through a view of the shader's class (the same bits)
-//   int-view-own        tex_view_for where it keeps the texture's own format (an image whose formats are fixed, a 16-bit integer of the other signedness): what
-//                       this driver returns for that old binding, undefined in Vulkan (information only)
+//   int-view-own        tex_view_for where it keeps the texture's own format (an image whose formats are fixed, a 16-bit integer read as float or as the other
+//                       signedness): what this driver returns for that old binding, undefined in Vulkan (information only)
 // A crash inside the driver (SIGSEGV / SIGBUS / SIGABRT) is caught: that test reports it and the remaining GPU tests are skipped.
 // The same tests run inside the games (dprobe_jni.c, the app's driver check before Play): there in a process of their own, on the driver the game will use
 //   (probe_vk.h), each one noted in a journal before it starts, so one that takes the process down is known; a test names the setting that avoids what it found
@@ -38,8 +39,9 @@
 void probe_vout(const char *fmt, va_list ap);   // probe.c (the probe app) / dprobe_jni.c (the games)
 static void O(const char *fmt, ...) { va_list ap; va_start(ap, fmt); probe_vout(fmt, ap); va_end(ap); }
 
-// The journal (the games' driver check): "begin <test> [crash fix]" before a test, "result <test> <TAG> <text>" after, "fix <test> KEY=VALUE" for a setting it asks
-//   for, "done" at the end; written straight to the file (no buffering) so whatever the process managed to say survives it. -1: none (the probe app)
+// The journal (the games' driver check): "begin <test> [crash fix]" before a test (and again before a later step of it whose crash asks for another setting:
+//   crash_fix; the app applies the last one a lost process named), "result <test> <TAG> <text>" after, "fix <test> KEY=VALUE" for a setting it asks for, "done" at
+//   the end; written straight to the file (no buffering) so whatever the process managed to say survives it. -1: none (the probe app)
 static int g_jfd = -1;
 static void J(const char *fmt, ...) {
     if (g_jfd < 0) return;
@@ -62,7 +64,11 @@ static void R(int st, const char *name, const char *fmt, ...) {
 // ---- crash guard ----
 static sigjmp_buf g_jb; static volatile sig_atomic_t g_sig;
 static const char *volatile g_step;   // what a test was doing (named in the report when the driver crashes there)
+static const char *volatile g_fix;    // the setting that keeps the game off the path the running test is on (its T[].crash; crash_fix for a later step)
 static void on_crash(int s) { g_sig = s; siglongjmp(g_jb, 1); }
+// From here on a crash in test <name> asks for kv (NULL: nothing), not for its T[].crash: named in the journal ("begin" again: the app applies the last setting a lost
+//   process named) and applied by run_tests when the guard catches the crash
+static void crash_fix(const char *name, const char *kv) { g_fix = kv; J("begin %s%s%s\n", name, kv ? " " : "", kv ? kv : ""); }
 static void guard(int on) {
     static struct sigaction old[3]; static const int sigs[3] = { SIGSEGV, SIGBUS, SIGABRT };
     for (int i = 0; i < 3; i++) {
@@ -235,23 +241,30 @@ static int fc_wrong(const uint32_t out[8], char *list, size_t n) {
     for (int i = 0; i < 8; i++) if (out[i] != FC_WANT[i]) { size_t l = strlen(list); snprintf(list + l, n - l, "%s%s (got %#x)", bad++ ? ", " : "", FC_NAME[i], out[i]); }
     return bad;
 }
+// The GPU as nvn_vk.c mtl_init describes it to the engine's own per-GPU rules (vk_quirks.h gpu_id), from the same queries: the driver ID only where mtl_init reads
+//   the driver properties (Vulkan 1.2, or 1.1 with the float-controls and driver-properties extensions), Arm's release from driverVersion on Arm's own driver.
+//   dp / fc: the driver and float-controls properties (left zero where they cannot be read: *drvp / *fcp 0). The game's profile (gpu_id.port / eng) and dynamic
+//   rendering are not known here: no rule the probe asks reads them (t_quirks.c checks that the ones it asks, Q_FLOAT_CONTROLS and Q_CLEAR_BY_PASS, read the
+//   vendor and the driver ID only)
+static void st_gpu(gpu_id *gid, VkPhysicalDeviceDriverProperties *dp, VkPhysicalDeviceFloatControlsProperties *fc, int *drvp, int *fcp) {
+    *drvp = s_api >= VK_API_VERSION_1_2 || s_ext_drvp; *fcp = s_api >= VK_API_VERSION_1_2 || s_ext_fctl;
+    memset(dp, 0, sizeof *dp); dp->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+    memset(fc, 0, sizeof *fc); fc->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES; fc->pNext = *drvp ? dp : NULL;
+    VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = *fcp ? (void *)fc : *drvp ? (void *)dp : NULL };
+    if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(s_pd, &pp); else *drvp = *fcp = 0;   // (Vulkan 1.0: neither can be read)
+    memset(gid, 0, sizeof *gid); gid->vendor = s_props.vendorID; gid->driver_version = s_props.driverVersion; gid->api = s_props.apiVersion;
+    snprintf(gid->name, sizeof gid->name, "%s", s_props.deviceName); gid->custom = s_driver && *s_driver;
+    gid->driver_id = *fcp && *drvp ? (int)dp->driverID : -1;
+    if (gpu_is_arm_driver(gid) && (gid->driver_id >= 0 || *fcp || !gid->custom)) { gid->arm_rel = (int)(s_props.driverVersion >> 22); gid->arm_p = (int)(s_props.driverVersion >> 12 & 0x3ff);
+        gid->arm_beta = gid->driver_id >= 0 && strstr(dp->driverInfo, "bet") != NULL; }
+    { FILE *mf = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (mf && fgets(ln, sizeof ln, mf)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (mf) fclose(mf); gid->ram_kb = kb; }
+}
 static void t_floatctl(void) {
     const char *N = "float-controls";
-    int drvp = s_api >= VK_API_VERSION_1_2 || s_ext_drvp, fcp = s_api >= VK_API_VERSION_1_2 || s_ext_fctl;
-    VkPhysicalDeviceDriverProperties dp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
-    VkPhysicalDeviceFloatControlsProperties fc = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES, .pNext = drvp ? &dp : NULL };
-    VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = fcp ? (void *)&fc : drvp ? (void *)&dp : NULL };
-    if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(s_pd, &pp); else drvp = fcp = 0;   // (Vulkan 1.0: neither can be read)
     // whether the engine asks for them here: its own rule (vk_quirks.h Q_FLOAT_CONTROLS: Arm's and Samsung's own drivers, by driver ID, else by vendor), not a copy of it,
-    //   on the GPU described as nvn_vk.c mtl_init describes it: the driver ID only where it reads the driver properties (Vulkan 1.2, or 1.1 with the float-controls
-    //   and driver-properties extensions), Arm's release from driverVersion on Arm's own driver. (The game's profile, gpu_id.port / eng, is not known here: no rule the
-    //   probe asks reads it; t_quirks.c checks that Q_FLOAT_CONTROLS reads the vendor and the driver ID only)
-    gpu_id gid; memset(&gid, 0, sizeof gid); gid.vendor = s_props.vendorID; gid.driver_version = s_props.driverVersion; gid.api = s_props.apiVersion;
-    snprintf(gid.name, sizeof gid.name, "%s", s_props.deviceName); gid.custom = s_driver && *s_driver;
-    gid.driver_id = fcp && drvp ? (int)dp.driverID : -1;
-    if (gpu_is_arm_driver(&gid) && (gid.driver_id >= 0 || fcp || !gid.custom)) { gid.arm_rel = (int)(s_props.driverVersion >> 22); gid.arm_p = (int)(s_props.driverVersion >> 12 & 0x3ff);
-        gid.arm_beta = gid.driver_id >= 0 && strstr(dp.driverInfo, "bet") != NULL; }
-    { FILE *mf = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (mf && fgets(ln, sizeof ln, mf)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (mf) fclose(mf); gid.ram_kb = kb; }
+    //   on the GPU described as nvn_vk.c mtl_init describes it (st_gpu)
+    VkPhysicalDeviceDriverProperties dp; VkPhysicalDeviceFloatControlsProperties fc; int drvp, fcp; gpu_id gid;
+    st_gpu(&gid, &dp, &fc, &drvp, &fcp);
     int arm = quirk_default(Q_FLOAT_CONTROLS, &gid);
     int support = fcp && fc.shaderSignedZeroInfNanPreserveFloat32;
     O("  driver %s (id %d)%s; SignedZeroInfNanPreserve float32: %s; the engine asks for it by default: %s\n", drvp ? dp.driverName : "(no driver properties)", (int)dp.driverID,
@@ -432,7 +445,20 @@ out:
 // ---- 3D render target: the game's 32x32x32 colour-grading tables are drawn into a 3D image through 2D-array views of its slices ----
 // layered (the engine's att_view): one view of all 32 slices, a 32-layer framebuffer, one pass; slices: a 1-slice view, framebuffer and pass per slice (a candidate
 //   workaround where the layered way fails). Each step is named before it runs, so a driver crash (Xclipse 540) says where. Pass 1 clears every slice in the render
-//   pass (submitted on its own), pass 2 loads and clears slices 16-31 with vkCmdClearAttachments; then all 32 are read back
+//   pass (submitted on its own), pass 2 loads and clears slices 16-31; then all 32 are read back. Pass 2's clear, layered, is recorded as the engine records a clear
+//   inside a layered pass on this driver (nvn_vk.c clear_in_pass): vkCmdClearAttachments in the pass, or where the engine clears by pass (clear_by_pass:
+//   DM_VK_CLEAR_BY_PASS, else Q_CLEAR_BY_PASS: Samsung's Xclipse, whose driver crashed recording that call, Xclipse 940 driver 24.0.534 and Xclipse 540 24.0.560)
+//   the layered pass ended, each slice cleared by a pass of its own (its load op, clear_slice_by_pass) and the layered pass begun again (the game's next draw).
+//   The slices way clears with vkCmdClearAttachments in its 1-slice passes (this drew right on both Xclipse).
+//   A crash asks for DM_VK_NO_LAYERED_3D=1 (T below: slice 0 only, the engine before att_view drew every slice), but a crash in the layered pass's
+//   vkCmdClearAttachments asks for the engine's own way around it, DM_VK_CLEAR_BY_PASS=1, which keeps every slice (unless env.txt sets that switch: it wins)
+static int st_clear_by_pass(int *from_env) {
+    const char *e = getenv("DM_VK_CLEAR_BY_PASS"); *from_env = e != NULL;   // (the game's env.txt: dprobe_jni.c sets it here as the game does)
+    if (e) return atoi(e) != 0;
+    VkPhysicalDeviceDriverProperties dp; VkPhysicalDeviceFloatControlsProperties fc; int drvp, fcp; gpu_id gid;
+    st_gpu(&gid, &dp, &fc, &drvp, &fcp);
+    return quirk_default(Q_CLEAR_BY_PASS, &gid);
+}
 static int check_3d(const uint32_t *p, uint32_t D, char *why, size_t n) {
     int bad = 0, first = -1; uint32_t got = 0;
     for (uint32_t z = 0; z < D; z++) { uint32_t want = z < D / 2 ? 0xFF0000FFu : 0xFFFF0000u; int sb = 0;
@@ -443,6 +469,7 @@ static int check_3d(const uint32_t *p, uint32_t D, char *why, size_t n) {
 }
 static void t_3d_mode(int layered) {
     const char *N = layered ? "3d-layered" : "3d-slices"; const uint32_t D = 32;
+    int cbp_env = 0, cbp = layered && st_clear_by_pass(&cbp_env);   // pass 2's clear as passes of their own (layered, where the engine clears so)
     g_step = "image format query";
     VkImageFormatProperties ifp; VkResult r = vkGetPhysicalDeviceImageFormatProperties(s_pd, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_3D, VK_IMAGE_TILING_OPTIMAL,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT, &ifp);
@@ -450,20 +477,23 @@ static void t_3d_mode(int layered) {
     VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT, .imageType = VK_IMAGE_TYPE_3D,
         .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { D, D, D }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
-    VkImage img = VK_NULL_HANDLE; VkDeviceMemory im = VK_NULL_HANDLE; VkImageView v[32] = { 0 }; VkFramebuffer fb[32] = { 0 }; VkRenderPass rp[2] = { 0 }; hbuf h = { 0 };
-    uint32_t nv = layered ? 1 : D; char why[160] = "";
+    VkImage img = VK_NULL_HANDLE; VkDeviceMemory im = VK_NULL_HANDLE; VkImageView v[32] = { 0 }; VkFramebuffer fb[32] = { 0 }; VkRenderPass rp[3] = { 0 }; hbuf h = { 0 };
+    char why[160] = "";
     g_step = "3D image creation";
     if (vkCreateImage(s_dev, &ii, NULL, &img) || !(im = image_mem(img))) { R(FAIL, N, "a 32x32x32 3D target could not be made"); goto out; }
-    for (uint32_t i = 0; i < nv; i++) {
-        g_step = layered ? "the 32-slice 2D-array view" : "a 1-slice 2D-array view";
+    // the views (and below their framebuffers): slices, v[i] slice i; layered, v[0] all 32 slices, and with clears by pass v[i] slice i for slices 16-31 (their passes)
+    for (uint32_t i = 0; i < D; i++) {
+        int all = layered && i == 0; if (layered && !all && !(cbp && i >= D / 2)) continue;
+        g_step = all ? "the 32-slice 2D-array view" : "a 1-slice 2D-array view";
         VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, .format = VK_FORMAT_R8G8B8A8_UNORM,
-            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layered ? 0 : i, layered ? D : 1 } };
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, all ? 0 : i, all ? D : 1 } };
         if ((r = vkCreateImageView(s_dev, &vi, NULL, &v[i]))) { R(FAIL, N, "%s was refused (%d)", g_step, r); goto out; }
     }
-    // pass 0: clear everything (load op CLEAR), pass 1: keep (LOAD) and clear part with vkCmdClearAttachments; both GENERAL as the engine's passes
-    for (int k = 0; k < 2; k++) {
+    // pass 0: clear everything (load op CLEAR), pass 1: keep (LOAD) and clear part with vkCmdClearAttachments, 2 (clears by pass): a slice cleared by its load op,
+    //   the image already in use; all GENERAL as the engine's passes
+    for (int k = 0; k < (cbp ? 3 : 2); k++) {
         g_step = "render pass creation";
-        VkAttachmentDescription a = { .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = k ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VkAttachmentDescription a = { .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = k == 1 ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = k ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
         VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_GENERAL };
@@ -474,41 +504,55 @@ static void t_3d_mode(int layered) {
         VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &a, .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = 2, .pDependencies = dep };
         if ((r = vkCreateRenderPass(s_dev, &rci, NULL, &rp[k]))) { R(FAIL, N, "render pass refused (%d)", r); goto out; }
     }
-    for (uint32_t i = 0; i < nv; i++) {
-        g_step = layered ? "the 32-layer framebuffer" : "a 1-layer framebuffer";
-        VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp[0], .attachmentCount = 1, .pAttachments = &v[i], .width = D, .height = D, .layers = layered ? D : 1 };
+    for (uint32_t i = 0; i < D; i++) {
+        if (!v[i]) continue;
+        int all = layered && i == 0;
+        g_step = all ? "the 32-layer framebuffer" : "a 1-layer framebuffer";
+        VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp[0], .attachmentCount = 1, .pAttachments = &v[i], .width = D, .height = D, .layers = all ? D : 1 };
         if ((r = vkCreateFramebuffer(s_dev, &fi, NULL, &fb[i]))) { R(FAIL, N, "%s was refused (%d)", g_step, r); goto out; }
     }
     if (hbuf_make(&h, D * D * D * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0) { R(FAIL, N, "no host-visible readback buffer"); goto out; }
     memset(h.p, 0, D * D * D * 4); hbuf_sync(&h, 1);
     for (int k = 0; k < 2; k++) {   // two submissions, so a crash names the clear that caused it
-        g_step = k ? "recording the per-layer vkCmdClearAttachments" : "recording the render-pass clear of every slice";
+        // (a crash in the layered pass's vkCmdClearAttachments: the engine's way around it, unless env.txt decides that switch, then slice 0 only)
+        if (k && layered && !cbp) crash_fix(N, cbp_env ? "DM_VK_NO_LAYERED_3D=1" : "DM_VK_CLEAR_BY_PASS=1");
+        g_step = !k ? "recording the render-pass clear of every slice" : cbp ? "recording the clears of slices 16-31 as passes of their own (clear by pass, the engine's way here)"
+                                                                            : "recording the per-layer vkCmdClearAttachments";
         VkCommandBuffer cb = cb_begin();
-        VkClearValue cv = { .color = { .float32 = { 1, 0, 0, 1 } } };   // every slice 0xFF0000FF
-        for (uint32_t i = 0; i < nv; i++) {
+        VkClearValue cv = { .color = { .float32 = { 1, 0, 0, 1 } } }, cv2 = { .color = { .float32 = { 0, 0, 1, 1 } } };   // every slice 0xFF0000FF; slices 16-31 0xFFFF0000
+        VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderArea = { { 0, 0 }, { D, D } } };
+        if (k && cbp) {   // clear_in_pass → clear_slice_by_pass: the game's layered pass (open when the clear comes) ended, a pass of its own on each slice (load op
+                          //   CLEAR), and the layered pass begun again at the game's next draw, loading what is there
+            rbi.renderPass = rp[1]; rbi.framebuffer = fb[0]; vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE); vkCmdEndRenderPass(cb);
+            for (uint32_t i = D / 2; i < D; i++) { rbi.renderPass = rp[2]; rbi.framebuffer = fb[i]; rbi.clearValueCount = 1; rbi.pClearValues = &cv2;
+                vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE); vkCmdEndRenderPass(cb); }
+            rbi.renderPass = rp[1]; rbi.framebuffer = fb[0]; rbi.clearValueCount = 0; rbi.pClearValues = NULL; vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE); vkCmdEndRenderPass(cb);
+        } else for (uint32_t i = 0; i < (layered ? 1u : D); i++) {
             if (k && !layered && i < D / 2) continue;   // (slices: only 16-31 get the second pass)
-            VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp[k], .framebuffer = fb[i], .renderArea = { { 0, 0 }, { D, D } },
-                                          .clearValueCount = k ? 0 : 1, .pClearValues = k ? NULL : &cv };
+            rbi.renderPass = rp[k]; rbi.framebuffer = fb[i]; rbi.clearValueCount = k ? 0 : 1; rbi.pClearValues = k ? NULL : &cv;
             vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-            if (k) { VkClearAttachment ca = { VK_IMAGE_ASPECT_COLOR_BIT, 0, { .color = { .float32 = { 0, 0, 1, 1 } } } };   // slices 16-31 0xFFFF0000
+            if (k) { VkClearAttachment ca = { VK_IMAGE_ASPECT_COLOR_BIT, 0, cv2 };
                      VkClearRect cr = { { { 0, 0 }, { D, D } }, layered ? D / 2 : 0, layered ? D / 2 : 1 }; vkCmdClearAttachments(cb, 1, &ca, 1, &cr); }
             vkCmdEndRenderPass(cb);
         }
         if (k) { VkBufferImageCopy bc = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { D, D, D } };
                  vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, h.b, 1, &bc);
                  barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT); }
-        g_step = k ? "running the per-layer clear and the read-back" : "running the render-pass clear of every slice";
+        g_step = !k ? "running the render-pass clear of every slice" : cbp ? "running the clears by pass and the read-back" : "running the per-layer clear and the read-back";
         if ((r = cb_submit(cb))) { R(FAIL, N, "%s failed (%d)", g_step, r); goto out; }
     }
     g_step = "checking the slices"; hbuf_sync(&h, 0);
-    if (!check_3d(h.p, D, why, sizeof why))
-        R(PASS, N, layered ? "all 32 slices of a 3D target drew as a layered 2D array (the engine's way): render-pass clear and per-layer clear"
-                           : "all 32 slices drew one pass per slice (1-slice views): a way to fill 3D colour-grading tables where the layered way fails");
-    else R(FAIL, N, "%s: 3D scenes that use colour-grading tables can come out black or wrong this way", why);
+    if (!check_3d(h.p, D, why, sizeof why)) {
+        if (!layered) R(PASS, N, "all 32 slices drew one pass per slice (1-slice views): a way to fill 3D colour-grading tables where the layered way fails");
+        else if (!cbp) R(PASS, N, "all 32 slices of a 3D target drew as a layered 2D array (the engine's way): render-pass clear and per-layer clear");
+        else R(PASS, N, "all 32 slices of a 3D target drew as a layered 2D array (the engine's way): render-pass clear, and a clear inside that pass as a pass of its own on "
+                        "each slice, as the engine records it on this driver (%s)", cbp_env ? "DM_VK_CLEAR_BY_PASS in env.txt" : "Q_CLEAR_BY_PASS: Samsung's Xclipse");
+    }
+    else R(FAIL, N, "%s%s: 3D scenes that use colour-grading tables can come out black or wrong this way", why, cbp ? " (the clears inside the pass as passes of their own)" : "");
 out:
     g_step = NULL; hbuf_free(&h);
     for (uint32_t i = 0; i < 32; i++) { if (fb[i]) vkDestroyFramebuffer(s_dev, fb[i], NULL); if (v[i]) vkDestroyImageView(s_dev, v[i], NULL); }
-    for (int k = 0; k < 2; k++) if (rp[k]) vkDestroyRenderPass(s_dev, rp[k], NULL);
+    for (int k = 0; k < 3; k++) if (rp[k]) vkDestroyRenderPass(s_dev, rp[k], NULL);
     if (img) vkDestroyImage(s_dev, img, NULL); if (im) vkFreeMemory(s_dev, im, NULL);
 }
 static void t_3d_slices(void) { t_3d_mode(0); }
@@ -971,25 +1015,39 @@ out:
     for (int k = 0; k < 2; k++) { if (im[k]) vkDestroyImage(s_dev, im[k], NULL); if (mem[k]) vkFreeMemory(s_dev, mem[k], NULL); }
 }
 // int-view-own: where the engine keeps the texture's own format, as 6e0e1dd did for all of them (tex_view_for): R32_UINT read as float on an image whose formats are
-//   fixed (not mutable: Mali; a format list of its own format: render-target formats where lists exist), and R16G16B16A16_UINT read as int (a 16-bit integer of the
-//   other signedness). A format and a shader of different classes is undefined in Vulkan: what this driver returns is reported against the Switch's answer (the
-//   texel's own bits; the 16-bit channels zero-extended, as their format says). Information only, and no setting after a crash: nothing turns that old binding off
+//   fixed (not mutable: Mali; a format list of its own format: render-target formats where lists exist), and on every kind of image R16G16B16A16_UINT read as int
+//   (a 16-bit integer of the other signedness) and read as float (an 8 / 16-bit integer under a float sampler: the translator declares every sampled texture float,
+//   and a shader that does integer work on the value takes its bits; Shield's fp_t_tcb_8). A format and a shader of different classes is undefined in Vulkan: what
+//   this driver returns is reported against the Switch's answer (the texel's own bits; the 16-bit channels zero-extended, as their format says). Information only,
+//   and no setting after a crash: nothing turns that old binding off (DM_VK_INT_TEX_EMPTY=1 reads the 16-bit one under a float sampler as 0 instead, to compare)
+static void catf(char *b, size_t n, const char *fmt, ...) {   // appends to the string in b (n bytes), cut at its end
+    size_t l = strlen(b); if (l + 1 >= n) return;
+    va_list ap; va_start(ap, fmt); vsnprintf(b + l, n - l, fmt, ap); va_end(ap);
+}
 static void t_int_view_own(void) {
     const char *N = "int-view-own";
     if (!fmt_has(VK_FORMAT_R32_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !fmt_has(VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { R(SKIP, N, "the formats cannot be sampled here"); return; }
-    static const VkFormat own[2] = { VK_FORMAT_R32_UINT, VK_FORMAT_R16G16B16A16_UINT };
-    uint32_t z16[IV_W * 4]; for (int i = 0; i < IV_W; i++) for (int ch = 0; ch < 4; ch++) z16[i * 4 + ch] = IV_I16[i][ch];
-    char line[400] = ""; size_t ln = 0; int nk = s_api >= VK_API_VERSION_1_2 ? 3 : 2;
-    for (int kind = 1; kind < nk; kind++) {
-        VkImage im[2] = { 0 }; VkDeviceMemory mem[2] = { 0 }; VkResult r = VK_SUCCESS; const char *what = ""; uint32_t o[20]; const char *kn = kind == 1 ? "not mutable" : "format-listed";
-        for (int k = 0; k < 2 && !r; k++) if ((r = iv_image(own[k], kind, &im[k], &mem[k]))) what = "an image could not be made";
-        if (!r) r = iv_run(im, own, IV_F32, sizeof IV_F32, IV_I16, sizeof IV_I16, o, &what);
-        char why[160] = ""; int bad32 = r ? -1 : iv_bad(o, IV_F32, IV_W, why, sizeof why, "R32_UINT as float"), bad16 = r ? -1 : iv_bad(o + 4, z16, IV_W * 4, why, sizeof why, "R16G16B16A16_UINT as int");
-        if (r) ln += (size_t)snprintf(line + ln, sizeof line - ln, "%s%s: %s (%d)", ln ? "; " : "", kn, what, (int)r);
-        else ln += (size_t)snprintf(line + ln, sizeof line - ln, "%s%s: R32_UINT as float %d of %d its own bits, R16G16B16A16_UINT as int %d of %d zero-extended%s%s", ln ? "; " : "", kn,
-                                    IV_W - bad32, IV_W, IV_W * 4 - bad16, IV_W * 4, why[0] ? ", first: " : "", why);
-        if (ln >= sizeof line) ln = sizeof line - 1;
-        for (int k = 0; k < 2; k++) { if (im[k]) vkDestroyImage(s_dev, im[k], NULL); if (mem[k]) vkFreeMemory(s_dev, mem[k], NULL); }
+    static const VkFormat fm[3] = { VK_FORMAT_R32_UINT, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_UINT }, own16[2] = { VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_UINT };
+    uint32_t z16[IV_W * 4], r16[IV_W];   // the Switch's answers: the 16-bit channels zero-extended; each texel's .r under a float sampler, its bits (the same value)
+    for (int i = 0; i < IV_W; i++) { r16[i] = IV_I16[i][0]; for (int ch = 0; ch < 4; ch++) z16[i * 4 + ch] = IV_I16[i][ch]; }
+    char line[760] = ""; int nk = s_api >= VK_API_VERSION_1_2 ? 3 : 2;
+    for (int kind = 0; kind < nk; kind++) {   // (kind 0, mutable without a list: the 32-bit reads get a view of their class there, int-view; the 16-bit ones keep theirs)
+        VkImage im[3] = { 0 }; VkDeviceMemory mem[3] = { 0 }; VkResult r = VK_SUCCESS; const char *what = ""; uint32_t o[20], o2[20];
+        const char *kn = kind == 0 ? "mutable" : kind == 1 ? "not mutable" : "format-listed";
+        for (int k = kind ? 0 : 1; k < 3 && !r; k++) if ((r = iv_image(fm[k], kind, &im[k], &mem[k]))) what = "an image could not be made";
+        if (!r && kind) r = iv_run(im, fm, IV_F32, sizeof IV_F32, IV_I16, sizeof IV_I16, o, &what);   // R32_UINT as float (binding 0)
+        if (!r) { VkImage i16[2] = { im[2], im[1] }; r = iv_run(i16, own16, IV_I16, sizeof IV_I16, IV_I16, sizeof IV_I16, o2, &what); }   // R16G16B16A16_UINT as float, as int
+        char why[160] = "";
+        int bad32 = r || !kind ? 0 : iv_bad(o, IV_F32, IV_W, why, sizeof why, "R32_UINT as float"), bad16 = r ? 0 : iv_bad(o2 + 4, z16, IV_W * 4, why, sizeof why, "R16G16B16A16_UINT as int"),
+            badf = r ? 0 : iv_bad(o2, r16, IV_W, why, sizeof why, "R16G16B16A16_UINT as float");
+        catf(line, sizeof line, "%s%s: ", line[0] ? "; " : "", kn);
+        if (r) catf(line, sizeof line, "%s (%d)", what, (int)r);
+        else {
+            if (kind) catf(line, sizeof line, "R32_UINT as float %d of %d its own bits, ", IV_W - bad32, IV_W);
+            catf(line, sizeof line, "R16G16B16A16_UINT as int %d of %d zero-extended, as float %d of %d its own bits%s%s", IV_W * 4 - bad16, IV_W * 4, IV_W - badf, IV_W,
+                 why[0] ? ", first: " : "", why);
+        }
+        for (int k = 0; k < 3; k++) { if (im[k]) vkDestroyImage(s_dev, im[k], NULL); if (mem[k]) vkFreeMemory(s_dev, mem[k], NULL); }
     }
     R(INFO, N, "the old binding the engine keeps there (undefined in Vulkan), against the Switch's answer: %s%s", line, nk < 3 ? "; format-listed: not tried (Vulkan 1.1)" : "");
 }
@@ -1000,7 +1058,8 @@ static const struct { test_fn f; const char *n, *crash; } T[] = {
     { t_requirements, "engine-requirements", NULL }, { t_floatctl, "float-controls", NULL }, { t_shmath, "shader-maths", NULL }, { t_barrier, "end-of-submit-barrier", NULL },
     { t_reinterp, "reinterpreted-format", NULL }, { t_fallback, "fallback-draw", NULL }, { t_dmabuf, "dmabuf-heap", "DM_VK_DMAHEAP=0" }, { t_bc, "bc-textures", "DM_VK_BC_GPU=0" },
     { t_depth_copy, "depth-copy", "DM_VK_ZCOPY=0" }, { t_int_view, "int-view", "DM_VK_INT_TEX=keep" }, { t_int_view_own, "int-view-own", NULL },
-    { t_3d_slices, "3d-slices", NULL }, { t_3d_layered, "3d-layered", "DM_VK_NO_LAYERED_3D=1" } };   // (3D last: it crashed Xclipse 540's driver)
+    { t_3d_slices, "3d-slices", NULL }, { t_3d_layered, "3d-layered", "DM_VK_NO_LAYERED_3D=1" } };   // (3D last: it crashed Xclipse 540's driver; 3d-layered's clear
+                                                                                                    //   inside its pass asks for DM_VK_CLEAR_BY_PASS=1 instead: crash_fix)
 static int skipped(const char *skip, const char *name) {   // skip: names separated by commas
     size_t n = strlen(name);
     for (const char *p = skip; p && (p = strstr(p, name)); p += n) if ((p == skip || p[-1] == ',') && (p[n] == ',' || !p[n])) return 1;
@@ -1012,10 +1071,10 @@ static void run_tests(const char *skip) {
     guard(1);
     for (i = 0; i < nt; i++) {
         if (skipped(skip, T[i].n)) { R(SKIP, T[i].n, "left out: it took the driver down in an earlier attempt"); continue; }
-        if (sigsetjmp(g_jb, 1)) { const char *st = g_step; R(FAIL, T[i].n, "the driver crashed during this test (signal %d%s%s): the game would close at the same point", (int)g_sig, st ? ", while " : "", st ? st : "");
-            if (T[i].crash) FIX(T[i].n, T[i].crash);
+        if (sigsetjmp(g_jb, 1)) { const char *st = g_step, *fx = g_fix; R(FAIL, T[i].n, "the driver crashed during this test (signal %d%s%s): the game would close at the same point", (int)g_sig, st ? ", while " : "", st ? st : "");
+            if (fx) FIX(T[i].n, fx);
             break; }
-        g_step = NULL;
+        g_step = NULL; g_fix = T[i].crash;
         J("begin %s%s%s\n", T[i].n, T[i].crash ? " " : "", T[i].crash ? T[i].crash : "");
         T[i].f();
     }

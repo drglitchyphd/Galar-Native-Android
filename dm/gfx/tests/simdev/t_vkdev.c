@@ -2,7 +2,8 @@
 //   device the loader gives it: on a PC, Mesa's lavapipe, alone or behind the Khronos profiles layer pretending to be a phone's GPU (simdev/run_simdev.sh). It checks
 //   what the engine decided against what that device reports (read again independently, through the same instance), and against what is known for the GPU named
 //   by SIMDEV_PROFILE (Arm's release from driverVersion, no dual-source blending on r44p1, the Vulkan 1.0 routes, ...). Then a little real work through the engine:
-//   samplers with every optional feature asked for, a memory pool mapped for the GPU, a fill submitted and waited for, a depth / stencil copy drawn (zcopy_draw).
+//   samplers with every optional feature asked for, a memory pool mapped for the GPU, a fill submitted and waited for, a depth / stencil copy drawn (zcopy_draw),
+//   integer textures bound under a float sampler (tex_view_for).
 //   Build: simdev/build_vkdev.sh. Run: SIMDEV_PROFILE=<name> ./t_vkdev (exit 1 on a failed check; "FAIL" lines name it).
 //   DM_VK_FRAME_HOLD=2 (run_simdev.sh's second t_vkdev run): every submission held and decided, as with Faster rendering on Adreno: its passes in secondaries.
 //   SIMDEV_DC_FC=1 / 2: a float_controls_crashed marker from an earlier start, and DM_VK_FLOAT_CONTROLS=1 from the driver check (1: named in DM_DRIVER_CHECK_KEYS, as
@@ -555,6 +556,35 @@ static void zcopy_work(void) {
           g_dynren ? "dynamic rendering" : "render passes", bad_d, D * D, got_d, exp_d, bad_s, got_s, exp_s);
     printf("WORK zcopy: format %d, %s, %s: %s\n", f, held ? "held (its pass a segment of its own)" : "as recorded", g_dynren ? "dynamic rendering" : "render passes", bad_d || bad_s ? "WRONG" : "right");
 }
+// An integer texture under a float sampler, as the translator declares every sampled texture (tex_view_for): an 8 / 16-bit one keeps its own format (6e0e1dd's
+//   binding; DM_VK_INT_TEX_EMPTY=1: the empty texture, no view), a 32-bit one is viewed as float (the same bits) where its image allows another format, else in its
+//   own (DM_VK_INT_TEX=keep: its own always). R32_UINT can be a render target, so its 2D images have fixed formats wherever format lists exist (and on Mali): a 3D
+//   one (mutable without a list everywhere) shows the float view. The textures made and registered as the game's are (tex_res → tex_new, mtl_reg_tex); the view's
+//   format read back from the image's view cache. Only on Vulkan 1.1 and newer (view_get, as zcopy_work)
+static void inttex_work(void) {
+    if (g_api < VK_API_VERSION_1_1) { printf("SIMGAP inttex: not on Vulkan 1.0 (view_get's view usage structure is Vulkan 1.1's)\n"); return; }
+    const char *ie = getenv("DM_VK_INT_TEX"), *ze = getenv("DM_VK_INT_TEX_EMPTY"); int keep = ie && !strcmp(ie, "keep"), empty = ze && atoi(ze) > 0;
+    static const struct { int nvn, target; VkFormat own, as_float; const char *name; } F[3] = {   // (NVN formats 0x2C RGBA16UI, 0x0B R32UI: tex/nvn_fmt_vk.c; target 1 2D, 2 3D)
+        { 0x2C, 1, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_UNDEFINED, "R16G16B16A16_UINT" }, { 0x0B, 1, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SFLOAT, "R32_UINT" },
+        { 0x0B, 2, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SFLOAT, "R32_UINT 3D" } };
+    for (int i = 0; i < 3; i++) {
+        if (!fmt_feat(F[i].own, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { printf("SIMGAP inttex: %s cannot be sampled on this device\n", F[i].name); continue; }
+        g_step = "inttex";
+        spv_res r; memset(&r, 0, sizeof r); r.kind = SPV_RES_TEX; r.dim = F[i].target == 2 ? SPV_DIM_3D : SPV_DIM_2D; r.sclass = 0;   // a combined sampler, its class float
+        tex_t t; memset(&t, 0, sizeof t); t.magic = MAGIC('T', 'E', 'X', 0); t.serial = nvn_new_serial(); t.d.format = F[i].nvn; t.d.target = F[i].target;
+        t.d.width = t.d.height = 4; t.d.depth = F[i].target == 2 ? 4 : 1; t.d.levels = 1;
+        int tid = 3900 + i; mtl_reg_tex(tid, &t, NULL);
+        pthread_mutex_lock(&g_rmu); VkImageView v = tex_view_for(tid, &r, 0); pthread_mutex_unlock(&g_rmu);   // (its caller holds g_rmu: push_stage)
+        vtex *x = tex_res(&t); VkFormat got = VK_FORMAT_UNDEFINED;
+        if (x && v) { pthread_mutex_lock(&x->vmu); for (int k = 0; k < x->nviews; k++) if (x->views[k].v == v) got = (VkFormat)x->views[k].k.fmt; pthread_mutex_unlock(&x->vmu); }
+        VkFormat want = !F[i].as_float ? (empty && !keep ? VK_FORMAT_UNDEFINED : F[i].own)
+                      : !keep && x && (!x->fixed_fmt || F[i].as_float == x->fmt || F[i].as_float == x->twin) ? F[i].as_float : F[i].own;
+        CHECK(x && got == want, "%s under a float sampler: view format %d, want %d (its image: %s; DM_VK_INT_TEX %s, DM_VK_INT_TEX_EMPTY %d)", F[i].name, got, want,
+              !x ? "not made" : x->fixed_fmt == 1 ? "formats fixed, not mutable" : x->fixed_fmt == 2 ? "formats fixed, a format list" : "mutable", keep ? "keep" : "unset", empty);
+        printf("WORK inttex: %s under a float sampler: %s\n", F[i].name, !v ? "the empty texture" : got == F[i].own ? "its own format" : got == F[i].as_float ? "a float view (the same bits)" : "another view");
+        mtl_reg_tex(tid, NULL, NULL);
+    }
+}
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -581,7 +611,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); }
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)

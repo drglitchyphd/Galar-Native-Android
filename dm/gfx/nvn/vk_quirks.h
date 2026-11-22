@@ -22,7 +22,7 @@
 //     tier, not a driver workaround), panvk_defaults and the driver check's copy of it (probe/jni/dprobe_jni.c: PanVK's own chip table, for that driver package),
 //     the safe-start ladder (safe_start.h: this phone's own failed starts, any GPU), the heat guard's kgsl clock limit (a sysfs file Adreno phones have);
 //   - the driver check's self-tests (probe/jni/selftest.c) run on every GPU; what the engine asks of a driver by default comes from this table there too
-//     (Q_FLOAT_CONTROLS);
+//     (Q_FLOAT_CONTROLS: whether float-controls asks for them; Q_CLEAR_BY_PASS: how 3d-layered records its clear inside the layered pass, as clear_in_pass does);
 //   - the Java app: which test sections the menu shows (DriverPackages.gpu: Mali tests, Adreno tests), which driver packages fit the GPU (Turnip on Adreno only),
 //     and texts that describe these rules;
 //   - test switches that make a GPU act as another (DM_VK_AS_MALI) or pick a device by name (DM_VK_DEVICE), log and capture texts;
@@ -34,7 +34,8 @@
 //   DM_VK_FLOAT_CONTROLS=0 over the check's 1). android_main.c names the keys it took from that file in DM_DRIVER_CHECK_KEYS, and a site takes such a value as this
 //   driver's default, not as the player's choice: vkq_env_player() is NULL for it, so a crash marker that only the player's own setting skips (float_controls_crashed,
 //   bc_gpu_crashed, heap_import_crashed) still applies; its [quirk] line says "driver check" (vkq_env_src() 2). The keys the check writes: DM_VK_FLOAT_CONTROLS,
-//   DM_VK_DMAHEAP, DM_VK_BC_GPU (table rules) and DM_VK_ZCOPY, DM_VK_INT_TEX, DM_VK_NO_LAYERED_3D (switches of their own code paths); the debug report holds the file.
+//   DM_VK_DMAHEAP, DM_VK_BC_GPU, DM_VK_CLEAR_BY_PASS (table rules) and DM_VK_ZCOPY, DM_VK_INT_TEX, DM_VK_NO_LAYERED_3D (switches of their own code paths); the debug
+//   report holds the file.
 // gpu_id is filled in two steps (nvn_vk.c mtl_init): the name, version, vendor, memory and the game's profile before the device is made, the driver ID and Arm's
 //   release after (quirk_late: the rules that read those). nvn_vk_quirk_default (hle_nvn.c) answers -1 for a late rule until both are in.
 #ifndef VK_QUIRKS_H

@@ -19,7 +19,8 @@ import java.util.Map;
 
 // The driver check before Play: a few seconds of GPU self-tests (the probe app's, libdmprobe.so) on the driver the game will use, once per driver: again when the
 //   phone's system (and with it the stock driver), the chosen driver package or the app changes. Crash-safe: the tests run in DriverCheckService's own process and note
-//   each test in a journal before it starts; a test that takes that process down is left out of the next attempt and its setting applied. A test that says nothing
+//   each test in a journal before it starts; a test that takes that process down is left out of the next attempt and its setting applied (the one its last "begin"
+//   line named: a later step of a test can name another, selftest.c crash_fix). A test that says nothing
 //   for TEST_TIMEOUT_MS (hung, or only slow: building the BC layer's pipelines on an old Mali) is left out too, but its setting is not applied: it is named in
 //   driver-check.txt and driver-check.env's comment (the game's own crash markers, bc_gpu_crashed and heap_import_crashed, still cover a hang the player ends).
 //   What the tests ask for goes to driver-check.env, which the game reads after env.txt and the safe-start ladder and before the phone profile (android_main.c): the
@@ -27,7 +28,10 @@ import java.util.Map;
 //   Files in the game's folder: driver-check.log (the journal), driver-check.txt (the readable report), driver-check.env, driver-check.key. DM_DRIVER_CHECK=0 in
 //   env.txt: no check (and no driver-check.env read: android_main.c)
 final class DriverCheck {
-    static final int VERSION = 2;   // raise when the tests or what they set change: every phone checks again (2: int-view on 32-bit textures, int-view-own; no setting after a hang)
+    // raise when the tests or what they set change: every phone checks again (2: int-view on 32-bit textures, int-view-own; no setting after a hang. 3: 3d-layered clears
+    //   inside its pass as the engine does on this driver, a pass of its own per slice on Xclipse, and a crash in its vkCmdClearAttachments asks for DM_VK_CLEAR_BY_PASS=1,
+    //   not slice 0 only, which version 2 could write on Xclipse; int-view-own also reads a 16-bit integer under a float sampler)
+    static final int VERSION = 3;
     private static final int ATTEMPTS = 4;
     private static final long TEST_TIMEOUT_MS = 20000, TOTAL_TIMEOUT_MS = 90000;
 

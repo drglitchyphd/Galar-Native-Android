@@ -9,7 +9,8 @@
 //   2. no rule reads the port: each port with each combination of the engine_quirks bits gets the rules of a game whose profile says those quirks;
 //   3. the three profiles as dm/games/<id>/game.tsv has them (port, engine_quirks; Sword and Scarlet through tables_from), so a profile change shows up here;
 //   4. the phones from players' logs, by name, in each game;
-//   5. the rules answered before gpu_id is complete (quirk_late: nvn_vk_quirk_default's -1 window), and Q_FLOAT_CONTROLS from the vendor and driver ID alone (the probe);
+//   5. the rules answered before gpu_id is complete (quirk_late: nvn_vk_quirk_default's -1 window), and the ones the probe asks (Q_FLOAT_CONTROLS, Q_CLEAR_BY_PASS)
+//      from the vendor and driver ID alone;
 //   6. where a setting came from: the player's env.txt or the driver check (DM_DRIVER_CHECK_KEYS), and quirk_note keeping a rule's first decision.
 // cc -O2 -Wall -I../nvn -o /tmp/t_quirks t_quirks.c && /tmp/t_quirks [games folder, default ../../games]        (or: make t_quirks GAME=<any id> && ./t_quirks)
 #include <stdio.h>
@@ -134,16 +135,17 @@ static void cmp_eng(const gpu_id *g, void *u) {   // part 2: this port with thes
 }
 // part 5: what a rule can answer before gpu_id is complete. Before the device is made (nvn_vk.c mtl_init) gpu_id has no driver ID (-1) and no Arm release: every rule
 //   that quirk_late does not name must answer the same there (nvn_vk_quirk_default answers -1 for the late ones until then), and every late one must read one of
-//   them somewhere (the list is not wider than it needs). And the driver check's float-controls question (probe selftest.c) is answered from the vendor and the
-//   driver ID: Q_FLOAT_CONTROLS must read nothing else
+//   them somewhere (the list is not wider than it needs). And the driver check's questions (probe selftest.c st_gpu, which knows no game profile and no dynamic
+//   rendering) are answered from the vendor and the driver ID: Q_FLOAT_CONTROLS (float-controls) and Q_CLEAR_BY_PASS (3d-layered) must read nothing else
 static int g_late_reads[Q_N];
 static void cmp_late(const gpu_id *g, void *u) {
     (void)u; gpu_id e = *g; e.driver_id = -1; e.arm_rel = e.arm_p = e.arm_beta = 0;
     gpu_id f; memset(&f, 0, sizeof f); f.vendor = g->vendor; f.driver_id = g->driver_id;
     for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), b = quirk_default(q, &e); checks++;
         if (t != b) { g_late_reads[q] = 1; if (!quirk_late(q) && fails++ < 25) fail_line(g, q, t, b, "a rule quirk_late does not name reads the driver ID or Arm's release (before the device: the second value)"); } }
-    checks++; if (quirk_default(Q_FLOAT_CONTROLS, g) != quirk_default(Q_FLOAT_CONTROLS, &f) && fails++ < 25)
-        fail_line(g, Q_FLOAT_CONTROLS, quirk_default(Q_FLOAT_CONTROLS, g), quirk_default(Q_FLOAT_CONTROLS, &f), "Q_FLOAT_CONTROLS reads more than the vendor and the driver ID (the vendor and driver ID alone: the second value)");
+    static const int PROBE_Q[2] = { Q_FLOAT_CONTROLS, Q_CLEAR_BY_PASS };
+    for (int i = 0; i < 2; i++) { int q = PROBE_Q[i]; checks++; if (quirk_default(q, g) != quirk_default(q, &f) && fails++ < 25)
+        fail_line(g, q, quirk_default(q, g), quirk_default(q, &f), "a rule the driver check asks reads more than the vendor and the driver ID (the vendor and driver ID alone: the second value)"); }
 }
 static void cmp_both(const gpu_id *g, void *u) { cmp_all(g, u); cmp_late(g, NULL); }
 // part 6: where a setting came from (vk_quirks.h vkq_env_src / vkq_env_player): unset, the player's (env.txt), or the driver check's (the keys android_main.c names in
