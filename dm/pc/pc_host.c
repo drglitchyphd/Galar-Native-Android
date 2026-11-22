@@ -39,3 +39,5 @@ W void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc)) {
 static void (*g_prep)(void *addr, size_t len);
 W void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len)) { g_prep = fn; }
 W void dm_guest_write_prepare(void *addr, size_t len) { if (g_prep) g_prep(addr, len); }
+// (hle_nvn.c is not part of the PC replay: DM_GPU_TS=614, the Switch GPU's tick rate for counter reports, off here)
+W int dm_gpu_ts614(void) { return 0; }

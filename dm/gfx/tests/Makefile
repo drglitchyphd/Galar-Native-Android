@@ -36,8 +36,8 @@ t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
-# The unified driver layer's table (vk_quirks.h) against beta-exit 6e0e1dd's per-site rules for each port (it reads ../../games/*/game.tsv), and the GPU breadcrumbs
-#   (vk_crumbs.h): plain C, any OS (gcc or clang)
+# The unified driver layer's table (vk_quirks.h) against beta-exit's per-site rules for each port (6e0e1dd's; background pipelines as since f09e58f; it
+#   reads ../../games/*/game.tsv), and the GPU breadcrumbs (vk_crumbs.h): plain C, any OS (gcc or clang)
 t_quirks: t_quirks.c ../nvn/vk_quirks.h
 	$(CC) -O2 -Wall -I../nvn -o $@ t_quirks.c
 t_crumbs: t_crumbs.c ../nvn/vk_crumbs.h

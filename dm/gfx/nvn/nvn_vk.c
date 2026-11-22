@@ -145,6 +145,7 @@ static int fd_export_mark(int op);   // (mtl_init, mtl_pool_add)
 static int mark_file(const char *name, const char *what, int op);
 static int heap_import_mark(int op);   // the same for the dma-buf heap route (its own file: a crash of one route does not close the other)
 static void pcache_open(void); static void *prewarm_main(void *arg);   // pipeline list and cache (below)
+static atomic_int g_pw_hold; static int prewarm_all(void); static void prewarm_wait(void);   // the game waiting for the prewarm (below)
 // The Vulkan driver: DM_VK_DRIVER=<folder>/<library> (a driver package chosen on the setup screen: Mesa Turnip for Adreno, Mesa PanVK for Mali) is opened through
 // libadrenotools (BSD-2-Clause, shipped in the app with its hook libraries); when that is missing or fails, the library itself (PanVK talks to the Mali kernel driver,
 // kbase, on its own and needs none of the Adreno hooks); when that fails too, the system's libvulkan
@@ -795,7 +796,10 @@ void mtl_init(void) {
     }
     tfp_decide();    // (and whether they go as points: tf_points.h)
     pcache_open();
-    if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) { pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); }
+    if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) {
+        if (prewarm_all()) atomic_store(&g_pw_hold, 1);   // (the game's first submission waits for it: prewarm_wait)
+        pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); else atomic_store(&g_pw_hold, 0);
+    }
 }
 
 // ================= Device memory (images, internal buffers) =================
@@ -1575,13 +1579,15 @@ static uint64_t g_frame_no;
 uint64_t g_tfchk_at, g_tfchk_frame; uint32_t g_tfchk_n;   // the transform feedback check (draw_, the first capture on Arm's driver)
 static uint64_t g_dsc_gen = 1;   // descriptor pools reset (desc_flush's reuse: a set from an older generation is gone)
 static uint64_t g_wait_ring_ns;   // DM_VK_PROF: waits for a free submission slot (the GPU 6 submissions behind)
+_Atomic uint64_t g_st_slot_ns, g_st_submit_ns;   // the same, and the queue submissions, never reset (hle_nvn.c's long-frame log takes per-frame differences)
 static int hold_dec(void); static void seg_gap_begin(sub_t *s);   // (the held frame's pieces: below)
 void mtl_sub_begin(void) {
     mtl_init();
+    prewarm_wait();   // the first one: every listed pipeline is built before the game draws (DM_VK_PREWARM)
     if (g_sub) VDIE("submit re-entered");
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     sub_t *s = &g_subs[g_sub_next]; g_sub_next = (g_sub_next + 1) % NSUB;
-    if (s->fence) { uint64_t t0 = mono_ns(); mtl_wait(s->fence, UINT64_MAX); g_wait_ring_ns += mono_ns() - t0; }
+    if (s->fence) { uint64_t t0 = mono_ns(); mtl_wait(s->fence, UINT64_MAX); uint64_t d = mono_ns() - t0; g_wait_ring_ns += d; atomic_fetch_add(&g_st_slot_ns, d); }
     defer_drain();
     VKCHECK(vkResetCommandPool(g_dev, s->pool, 0)); arena_reset(s);
     for (int i = 0; i < s->ndp; i++) vkResetDescriptorPool(g_dev, s->dp[i], 0); s->cdp = 0; g_dsc_gen++;   // (desc_flush's reused sets were in these pools)
@@ -1969,7 +1975,7 @@ uint64_t mtl_sub_commit(void) {
     if (s->ucb_open) { barrier_all(s->ucb); VKCHECK(vkEndCommandBuffer(s->ucb)); cbs[n++] = s->ucb; s->ucb_open = 0; }
     cbs[n++] = s->cb;
     g_sub = NULL;
-    uint64_t vt0 = mono_ns(); uint64_t r = submit_tracked(s, cbs, n); g_vp_c += mono_ns() - vt0;   // (DM_VK_PROF: the queue submission)
+    uint64_t vt0 = mono_ns(); uint64_t r = submit_tracked(s, cbs, n); uint64_t vd = mono_ns() - vt0; g_vp_c += vd; atomic_fetch_add(&g_st_submit_ns, vd);   // (DM_VK_PROF: the queue submission)
     return r;
 }
 void mtl_drain(void) { mtl_finish(); }
@@ -1980,8 +1986,26 @@ static void post(post_op o) {
 }
 // One-off command buffer for work outside a submission (uploads requested off the submit thread, readbacks): recorded, submitted and waited for at once
 static VkCommandPool g_once_pool; static pthread_mutex_t g_once_mu = PTHREAD_MUTEX_INITIALIZER;
+// One-off uploads (a texture or a new image's first clear, recorded off the submit thread) are not waited for (DM_VK_ONCE_WAIT=1: waited, as before): a one-off is
+//   ordered after everything submitted before it, so waiting for it meant waiting for all the GPU work queued so far. On a slow GPU that was a frame or two each time:
+//   a 16x16 texture took 30-70 ms on a Mali-G68 with PanVK (Violet, 2026-11-21), a game thread that made seven new textures stood 3 s. Its full barriers at the end
+//   order it before every later submission; its command buffer and staging buffer go once its fence has signalled (once_reap, at the next one-off, at most 64 waiting)
+typedef struct { VkCommandBuffer cb; VkFence f; VkBuffer sb; vmalloc_t tmp; } once_pend;
+static once_pend g_once_p[64]; static int g_once_np;
+static int once_wait(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ONCE_WAIT"); v = e && atoi(e) == 1; } return v; }
+static void once_free(once_pend *o) {
+    vkDestroyFence(g_dev, o->f, NULL); vkFreeCommandBuffers(g_dev, g_once_pool, 1, &o->cb);
+    if (o->sb) { vkDestroyBuffer(g_dev, o->sb, NULL); vk_free(o->tmp); }
+}
+static void once_reap(int all) {   // (g_once_mu held) the finished ones freed; all: waited for first
+    for (int i = 0; i < g_once_np;) {
+        if (all) vk_wait(NULL, g_once_p[i].f, UINT64_MAX);
+        else if (vkGetFenceStatus(g_dev, g_once_p[i].f) != VK_SUCCESS) { i++; continue; }
+        once_free(&g_once_p[i]); g_once_p[i] = g_once_p[--g_once_np]; }
+}
 static VkCommandBuffer once_begin(void) {
     pthread_mutex_lock(&g_once_mu);
+    if (g_once_np) once_reap(0);
     if (!g_once_pool) { VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_qf }; VKCHECK(vkCreateCommandPool(g_dev, &pci, NULL, &g_once_pool)); }
     VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_once_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
     VkCommandBuffer cb; VKCHECK(vkAllocateCommandBuffers(g_dev, &cai, &cb));
@@ -1999,6 +2023,21 @@ static void once_end(VkCommandBuffer cb) {   // ordered after everything submitt
     if (r) VDIE("one-off submit failed: %d", r);
     vk_wait(NULL, f, UINT64_MAX); vkDestroyFence(g_dev, f, NULL);
     vkFreeCommandBuffers(g_dev, g_once_pool, 1, &cb);
+    pthread_mutex_unlock(&g_once_mu);
+}
+// once_end without the wait (see once_begin): sb / tmp, a staging buffer of its own, go with it (VK_NULL_HANDLE: none)
+static void once_end_async(VkCommandBuffer cb, VkBuffer sb, vmalloc_t tmp) {
+    if (once_wait()) { once_end(cb); if (sb) { vkDestroyBuffer(g_dev, sb, NULL); vk_free(tmp); } return; }
+    barrier_all(cb); barrier_host(cb); VKCHECK(vkEndCommandBuffer(cb));
+    VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence f; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &f));
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+    hold_flush(1);   // (held work first: this one is ordered after everything recorded so far)
+    shadow_sync();
+    pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, f); pthread_mutex_unlock(&g_qmu);
+    if (r) VDIE("one-off submit failed: %d", r);
+    if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { once_reap(0); if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { vk_wait(NULL, g_once_p[0].f, UINT64_MAX); once_reap(0); } }
+    g_once_p[g_once_np++] = (once_pend){ cb, f, sb, tmp };
+    static int said; if (!said++) VLOG("one-off uploads: not waited for (each would have waited for all the GPU work queued before it; DM_VK_ONCE_WAIT=1 waits)");
     pthread_mutex_unlock(&g_once_mu);
 }
 static VkCommandBuffer ucb(void) {
@@ -2296,7 +2335,7 @@ static void img_init(vtex *t, int zero) {
         if (t->aspect & VK_IMAGE_ASPECT_COLOR_BIT) { VkClearColorValue c = {{0}}; vkCmdClearColorImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
         else { VkClearDepthStencilValue c = {0, 0}; vkCmdClearDepthStencilImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
     }
-    if (once) once_end(cb);
+    if (once) once_end_async(cb, VK_NULL_HANDLE, (vmalloc_t){0});
 }
 // Texture quality (DM_VK_TEX_QUALITY=half, the device profile's choice for weaker GPUs): the game's own block-compressed textures of 512x512 and up with mip levels are kept
 // without their largest level, a quarter of the memory and bandwidth (and of the decode work on GPUs without BC). Only textures from the game's files: they are never drawn
@@ -2507,7 +2546,7 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     free(scratch);
     if (nrg) vkCmdCopyBufferToImage(cb, sb, x->img, VK_IMAGE_LAYOUT_GENERAL, nrg, rg);
     free(rg); g_up_bytes += total;
-    if (once) { once_end(cb); vkDestroyBuffer(g_dev, sb, NULL); vk_free(tmp); }
+    if (once) once_end_async(cb, sb, tmp);
     else if (batch) { t_upb->sb[t_upb->n] = sb; t_upb->tmp[t_upb->n] = tmp; t_upb->n++; }
     if (vfy) {   // texel by texel (8 bytes: RGBA16F), level by level, layer by layer, in the staging layout
         const uint8_t *got = (const uint8_t *)vm.b->map + vm.off; VkDeviceSize o = 0; int said = 0; unsigned long long bad = 0, all = 0;
@@ -4010,7 +4049,7 @@ static VkPipeline pso_lookup_s(vprog *pr, const pkey *k, const sst *ss, int reco
     pthread_mutex_unlock(&g_psomu);
     return p;
 }
-// Pipelines built in the background (DM_VK_ASYNC_PSO, on by default on Adreno; =0 / =1 decides on any GPU): one the game needs that neither the prewarm list nor the cache had is
+// Pipelines built in the background (DM_VK_ASYNC_PSO, on by default on every GPU since 2026-11-22, Adreno only before; =0 / =1 decides): one the game needs that neither the prewarm list nor the cache had is
 //   compiled by a worker, and the draws that need it are skipped until it is done (an object missing for a frame or two instead of a hitch, as emulators' asynchronous
 //   shaders do). The queue holds 256; a full queue compiles on the spot as before
 // Balance: three workers, and each frame may wait up to 8 ms in all (DM_VK_ASYNC_WAIT_MS) for pipelines being built before it skips their draws, so most come in on
@@ -4034,9 +4073,10 @@ static void *apso_main(void *a) { DM_THREAD_NAME("dm-pipelines");
 }
 static int apso_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = quirk_note(Q_ASYNC_PSO, e ? atoi(e) != 0 : quirk_default(Q_ASYNC_PSO, &g_gpuid), e != NULL);   // (vk_quirks.h: on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before. Profile
-        //   engine_quirks async_pso_off through gpu_id.eng (Legends: Arceus): off unless DM_VK_ASYNC_PSO=1, on a slower Adreno (710, #34) its skipped draws were objects missing for frames)
-   
+    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = quirk_note(Q_ASYNC_PSO, e ? atoi(e) != 0 : quirk_default(Q_ASYNC_PSO, &g_gpuid), e != NULL);   // (vk_quirks.h: on by default on every GPU: a hitch waiting for a
+        //   pipeline was the stutter left on Mali / Xclipse / PowerVR (the owner's call, 2026-11-22); Adreno only before. Profile engine_quirks async_pso_off through
+        //   gpu_id.eng (Legends: Arceus): off unless DM_VK_ASYNC_PSO=1, on a slower Adreno (710, #34) its skipped draws were objects missing for frames)
+
         if (v) { int nw = 0; for (int i = 0; i < APSO_WORKERS; i++) { pthread_t t; if (!pthread_create(&t, NULL, apso_main, NULL)) { pthread_detach(t); nw++; } }
             const char *w = getenv("DM_VK_ASYNC_WAIT_MS"); if (w && *w) { int ms = atoi(w); if (ms < 0) ms = 0; if (ms > 33) ms = 33; g_apso_frame_ns = ms * 1000000LL; g_apso_budget_ns = g_apso_frame_ns; }
             if (!nw) v = 0; else VLOG("pipelines the lists did not have: built in the background by %d workers; a frame waits up to %lld ms for them, then their draws are skipped until done (DM_VK_ASYNC_PSO)", nw, (long long)(g_apso_frame_ns / 1000000)); } }
@@ -4119,8 +4159,45 @@ static long mem_avail_mb(void) {
     return -1;
 #endif
 }
+// DM_VK_PREWARM: "all" (the default) builds every listed pipeline before the game draws its first frame, on several threads (the game waits at its first submission
+//   and the app shows the count, nvn_vk_prewarm_progress), so nothing is built while playing: on Adreno a pipeline still being built skips its draw (objects missing
+//   or popping in for the first minutes), elsewhere it is a hitch. An S25+ built its 1,400-1,600 recorded pipelines in 7-21 s one at a time. "background": as before,
+//   one at a time with a pause after each while the game plays
+static int prewarm_all(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREWARM"); v = !(e && !strcmp(e, "background")); } return v; }
+static atomic_int g_pw_done, g_pw_total, g_pw_hold;   // pipelines handled / listed, and 1 while the game waits for them
+static pthread_mutex_t g_pw_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pw_cv = PTHREAD_COND_INITIALIZER;
+// for the app's progress line (android_main.c nativePrewarm): 1 while the game waits for the pipelines
+int nvn_vk_prewarm_progress(int *done, int *total) { *done = atomic_load(&g_pw_done); *total = atomic_load(&g_pw_total); return atomic_load(&g_pw_hold); }
+static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
+// the game's first submission: waits until the prewarm is done (at most DM_VK_PREWARM_WAIT seconds, 300 by default; then the rest is built while it plays)
+// the game is playing (its first submission past prewarm_wait): from then on the prewarm builds on one thread, one pipeline after each present (prewarm_pace)
+static atomic_int g_pw_playing;
+static void prewarm_wait(void) {
+    if (!atomic_load(&g_pw_hold)) { atomic_store(&g_pw_playing, 1); return; }
+    const char *e = getenv("DM_VK_PREWARM_WAIT"); double lim = e ? atof(e) : 300; uint64_t t0 = mono_ns();
+    pthread_mutex_lock(&g_pw_mu);
+    while (atomic_load(&g_pw_hold) && (mono_ns() - t0) / 1e9 < lim) {
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_pw_cv, &g_pw_mu, &ts);
+    }
+    int late = atomic_load(&g_pw_hold); atomic_store(&g_pw_hold, 0); atomic_store(&g_pw_playing, 1); pthread_mutex_unlock(&g_pw_mu);
+    VLOG("prewarm: the game waited %.1f s for its pipelines (%d of %d)%s", (mono_ns() - t0) / 1e9, atomic_load(&g_pw_done), atomic_load(&g_pw_total),
+         late ? ": the wait ran out, the rest are built while it plays" : "");
+}
+// During play (S25+ Arceus, Xclipse 530 Violet: hitches of 60-580 ms with the render thread stuck in its submit while background pipelines were being built, the driver
+//   and the cores shared with it): one pipeline right after each present, so a build overlaps the start of the next frame's work, not its submission; at most
+//   one per frame, at a lower priority. DM_VK_PREWARM_PLAY=free: as before (3 ms apart)
+__attribute__((weak)) uint64_t dm_guest_frame(void) { return 0; }   // (presents so far: host hle_os.c's; this one only for the graphics tests, which run no prewarm)
+static int prewarm_play_free(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREWARM_PLAY"); v = e && !strcmp(e, "free"); } return v; }
+static void prewarm_pace_play(void) {
+    if (!atomic_load(&g_pw_playing) || prewarm_play_free()) return;
+    static __thread int lowered; if (!lowered) { lowered = 1; setpriority(PRIO_PROCESS, (id_t)gettid(), 10); }
+    static _Atomic uint64_t last; uint64_t f0 = atomic_load(&last);
+    for (int k = 0; k < 2000 && dm_guest_frame() <= f0; k++) usleep(2000);   // (the next present, at most 4 s: a paused game still gets its pipelines)
+    atomic_store(&last, dm_guest_frame());
+}
 static void prewarm_pace(int i, int *waits) {
-    usleep(3000);
+    if (!prewarm_all() && prewarm_play_free()) usleep(3000);
     if (i % 8) return;
     static long floor_mb = -1; if (floor_mb < 0) { const char *e = getenv("DM_VK_PREWARM_MIN_MB"); floor_mb = e ? atol(e) : 1536; }
     for (int k = 0; k < 600; k++) { long m = mem_avail_mb(); if (m < 0 || m >= floor_mb) break; if (!k) (*waits)++; usleep(100000); }   // at most a minute per wait
@@ -4135,8 +4212,9 @@ static void *prewarm_static(void) {
     uint64_t t0 = mono_ns(); int waits = 0, n = 0, built = 0, had = 0, failed = 0, noshader = 0;
     static nvn_hmap progs = {.klen = 40};
     pso_rec_s r;
+    { long here = ftell(f); fseek(f, 0, SEEK_END); long end = ftell(f); fseek(f, here, SEEK_SET); atomic_store(&g_pw_total, (int)((end - here) / (long)sizeof r)); }
     while (fread(&r, sizeof r, 1, f) == 1) {
-        n++;
+        n++; atomic_fetch_add(&g_pw_done, 1);
         vprog *pr = nvn_hm_get(&progs, r.r.key);
         if (!pr) {
             pr = calloc(1, sizeof *pr); int ok = 1;
@@ -4149,6 +4227,7 @@ static void *prewarm_static(void) {
         pkey_s ks; memset(&ks, 0, sizeof ks); ks.k = k; ks.s = r.s;
         pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso_s, &ks) != NULL; pthread_mutex_unlock(&g_psomu);
         if (have) { had++; continue; }
+        prewarm_pace_play();
         if (pso_lookup_s(pr, &k, &r.s, 0)) built++; else failed++;
         prewarm_pace(built + failed, &waits);
     }
@@ -4158,44 +4237,126 @@ static void *prewarm_static(void) {
     pcache_save();
     return NULL;
 }
-static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm");
-    (void)arg; uint64_t t0 = mono_ns(); int waits = 0;
+// the main prewarm's shared state: the list, the next entry to take, the programs made so far (their layouts made once, under pw.mu: prog_layout is not for two threads)
+static struct { pso_rec *rs; int n, ns, cache_only; atomic_int next, unfit, built, had, failed, noshader, waits; pthread_mutex_t mu; nvn_hmap progs, seen; } g_pw = {
+    .mu = PTHREAD_MUTEX_INITIALIZER, .progs = {.klen = 40}, .seen = {.klen = sizeof(pso_rec)} };
+// a pipeline from the shipped list (recorded on another phone): its colour / depth / stencil targets and vertex formats must be ones this GPU has, or it is left
+//   out (a driver handed an unsupported format may fail or worse; this phone's own list only holds what it built)
+static int fmt_has(uint32_t f, VkFormatFeatureFlags need, int buffer) {
+    if (!f) return 1;
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, (VkFormat)f, &fp);
+    return ((buffer ? fp.bufferFeatures : fp.optimalTilingFeatures) & need) == need;
+}
+static int pso_formats_ok(const pkey *k) {
+    for (int i = 0; i < 8; i++) if (!fmt_has(k->cfmt[i], VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, 0)) return 0;
+    if (!fmt_has(k->dfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0) || !fmt_has(k->sfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0)) return 0;
+    for (int i = 0; i < 32; i++) if (k->attr[i].used && !fmt_has(k->attr[i].fmt, VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT, 1)) return 0;
+    return 1;
+}
+static void *prewarm_worker(void *arg) {
+    if (arg) DM_THREAD_NAME("dm-prewarm");   // (the threads started for it; the caller keeps its own name)
+    int waits = 0;
+    for (int i; (i = atomic_fetch_add(&g_pw.next, 1)) < g_pw.n; ) {
+        atomic_fetch_add(&g_pw_done, 1);
+        if (i < g_pw.ns && !pso_formats_ok(&g_pw.rs[i].k)) { atomic_fetch_add(&g_pw.unfit, 1); continue; }
+        pthread_mutex_lock(&g_pw.mu);
+        if (nvn_hm_get(&g_pw.seen, &g_pw.rs[i])) { pthread_mutex_unlock(&g_pw.mu); continue; }
+        nvn_hm_put(&g_pw.seen, &g_pw.rs[i], (void *)1);
+        vprog *pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key);
+        if (!pr) {
+            pr = calloc(1, sizeof *pr); int ok = 1;
+            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
+            if (!ok || !pr->sh[0]) { free(pr); pthread_mutex_unlock(&g_pw.mu); atomic_fetch_add(&g_pw.noshader, 1); continue; }
+            prog_layout(pr, 0);
+            nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, pr);
+        }
+        pthread_mutex_unlock(&g_pw.mu);
+        pkey k = g_pw.rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
+        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
+        if (have) { atomic_fetch_add(&g_pw.had, 1); continue; }
+        int last_one = arg && atomic_load(&g_pw_playing) && !prewarm_play_free();   // (the game started: this extra thread builds the one it took, then one thread builds the rest)
+        prewarm_pace_play();
+        if (g_pw.cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); atomic_fetch_add(&g_pw.built, 1); } else atomic_fetch_add(&g_pw.failed, 1); }   // (into the driver's cache, not kept)
+        else if (pso_lookup(pr, &k, 0)) atomic_fetch_add(&g_pw.built, 1); else atomic_fetch_add(&g_pw.failed, 1);
+        prewarm_pace(atomic_load(&g_pw.built) + atomic_load(&g_pw.failed), &waits);
+        if (last_one) break;
+    }
+    atomic_fetch_add(&g_pw.waits, waits);
+    return NULL;
+}
+// how many build at once: one in the background; before the game, the cores less one (at most 6), 2 on phones with 6 GB or less (each build takes the driver's memory)
+static int prewarm_threads(void) {
+    if (!prewarm_all()) return 1;
+    const char *e = getenv("DM_VK_PREWARM_THREADS"); if (e && atoi(e) > 0) return atoi(e) > 16 ? 16 : atoi(e);
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN), pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE);
+    int t = cpus > 1 ? (int)cpus - 1 : 1; if (t > 6) t = 6;
+    if (pages > 0 && psz > 0 && (double)pages * psz < 6.5e9 && t > 2) t = 2;
+    return t;
+}
+// Compute pipelines in the prewarm. A compute pipeline was only ever built at its first dispatch, on the replay thread (dispatch below): the driver's compile sat
+//   in the middle of a frame the first time the game ran that shader (Scarlet / Violet's GPU culling and instancing as the open world loads; Sword / Shield have
+//   72 compute shaders, 41 distinct). The list of graphics pipelines (pso_rec) has no room for them (five stage keys), so the compute shaders the game has
+//   dispatched on this phone are kept beside it, <DM_VK_PSO_RECORD>.cs ("NXPC" + 8-byte shader keys; a shipped <DM_VK_PSO_SEED>.cs is read too when there is
+//   one). At the prewarm each is built once into the driver's pipeline cache and let go: the dispatch's own build then comes from the cache, with the game's own
+//   program and layout as before (nothing else changes there). DM_VK_PREWARM_COMPUTE=0: off
+#define PSO_MAGIC_C "NXPC"
+static void cs_record(const vshader *cs) {   // the replay thread only (dispatch): a compute shader's first pipeline on this run
+    static nvn_hmap known = {.klen = 8}; static FILE *f; static int tried;
+    uint8_t k[8]; if (hexkey(cs->key, k)) return;
+    if (!tried++) { const char *e = getenv("DM_VK_PSO_RECORD"); char p[1100];
+        if (e && *e && snprintf(p, sizeof p, "%s.cs", e) < (int)sizeof p) {
+            FILE *r = fopen(p, "rb"); char mg[4]; uint8_t o[8]; int have = 0;   // (what earlier runs wrote: not written twice)
+            if (r) { if (fread(mg, 1, 4, r) == 4 && !memcmp(mg, PSO_MAGIC_C, 4)) { have = 1; while (fread(o, 8, 1, r) == 1) nvn_hm_put(&known, o, (void *)1); } fclose(r); }
+            f = fopen(p, have ? "ab" : "wb"); if (f && !have) fwrite(PSO_MAGIC_C, 1, 4, f); } }
+    if (nvn_hm_get(&known, k)) return;
+    nvn_hm_put(&known, k, (void *)1);
+    if (f) { fwrite(k, 8, 1, f); fflush(f); }
+}
+static void prewarm_compute(void) {
+    { const char *e = getenv("DM_VK_PREWARM_COMPUTE"); if (e && !strcmp(e, "0")) return; }
+    const char *lists[2] = { getenv("DM_VK_PSO_SEED"), getenv("DM_VK_PSO_RECORD") }; static nvn_hmap seen = {.klen = 8};
+    int n = 0, built = 0, missing = 0, failed = 0; uint64_t t0 = mono_ns();
+    for (int l = 0; l < 2; l++) { char p[1100]; if (!lists[l] || !*lists[l] || snprintf(p, sizeof p, "%s.cs", lists[l]) >= (int)sizeof p) continue;
+        FILE *f = fopen(p, "rb"); if (!f) continue;
+        char mg[4]; uint8_t k[8];
+        if (fread(mg, 1, 4, f) == 4 && !memcmp(mg, PSO_MAGIC_C, 4)) while (fread(k, 8, 1, f) == 1) {
+            if (nvn_hm_get(&seen, k)) continue;
+            nvn_hm_put(&seen, k, (void *)1); n++;
+            prewarm_pace_play();   // (once the game plays: one build after each present, like the graphics pipelines)
+            pthread_mutex_lock(&g_pw.mu);   // (prog_layout is not for two threads: the graphics prewarm's lock)
+            vshader *cs = shader_get(k, 5); vprog *pr = cs ? calloc(1, sizeof *pr) : NULL; VkPipelineLayout pl = VK_NULL_HANDLE;
+            if (pr) { pr->sh[5] = cs; pl = prog_layout(pr, 1); }   // (a program of its own, kept: its layout lives as long as the cache entry is useful)
+            pthread_mutex_unlock(&g_pw.mu);
+            if (!cs || !pl) { missing++; continue; }
+            VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
+            VkPipeline pp = VK_NULL_HANDLE;
+            if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &pp)) failed++; else { vkDestroyPipeline(g_dev, pp, NULL); built++; } }
+        fclose(f); }
+    if (n) VLOG("prewarm: %d compute pipelines listed: %d built into the pipeline cache, %d failed, %d with a shader missing, %.1f s", n, built, failed, missing, (mono_ns() - t0) / 1e9);
+}
+static void *prewarm_run(void) {
+    uint64_t t0 = mono_ns();
+    prewarm_compute();   // (first: few, and the open world's first frames need them before most graphics pipelines)
     if (!g_eds) return prewarm_static();   // the shared lists leave out the draw state this driver needs built in: this phone's own list instead
     pso_rec *rs = NULL; int n = 0;
     int ns = pso_rec_load(getenv("DM_VK_PSO_SEED"), &rs, &n), nr = pso_rec_load(getenv("DM_VK_PSO_RECORD"), &rs, &n);
-    if (!n) return NULL;
-    static nvn_hmap progs = {.klen = 40}; static nvn_hmap seen = {.klen = sizeof(pso_rec)};
-    int built = 0, had = 0, failed = 0, noshader = 0;
-    // Phones with little memory (6.5 GB or less, or DM_VK_PREWARM=cache): every pipeline is built once into the driver's pipeline cache (saved below) and destroyed
-    //   at once, instead of kept. Kept, the 1157 of Sword / Shield's list held about 400 MB of the driver's own memory for the whole run (Galaxy S25+ [mem-by]:
-    //   scudo:primary 398 MB of the app's 551, 2026-11-20), which a 4 GB phone does not have; from the cache a pipeline the game asks for later is made in a few ms
-    //   instead of compiled (and on Adreno in the background, DM_VK_ASYNC_PSO). DM_VK_PREWARM=keep keeps them on any phone
-    int cache_only; { const char *e = getenv("DM_VK_PREWARM");
-        FILE *mf = fopen("/proc/meminfo", "r"); long tot = 0; char ln[128]; while (mf && fgets(ln, sizeof ln, mf)) if (!strncmp(ln, "MemTotal:", 9)) { tot = atol(ln + 9) / 1024; break; } if (mf) fclose(mf);
-        cache_only = e && !strcmp(e, "cache");   // (opt-in: on the S25+ it saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
-        if (cache_only) VLOG("prewarm: into the pipeline cache only, not kept (%s): this phone has %ld MB", e ? "DM_VK_PREWARM=cache" : "6.5 GB or less", tot); }
-    for (int i = 0; i < n; i++) {
-        if (nvn_hm_get(&seen, &rs[i])) continue; nvn_hm_put(&seen, &rs[i], (void *)1);
-        vprog *pr = nvn_hm_get(&progs, rs[i].key);
-        if (!pr) {
-            pr = calloc(1, sizeof *pr); int ok = 1;
-            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
-            if (!ok || !pr->sh[0]) { free(pr); noshader++; continue; }
-            nvn_hm_put(&progs, rs[i].key, pr);
-        }
-        pkey k = rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
-        prog_layout(pr, 0);
-        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
-        if (have) { had++; continue; }
-        if (cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); built++; } else failed++; }   // (into the driver's cache, not kept)
-        else if (pso_lookup(pr, &k, 0)) built++; else failed++;
-        prewarm_pace(built + failed, &waits);
-    }
-    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %.1f s (paused %d times for low memory)", n, ns, nr, built, cache_only ? " (cache only)" : "", had, failed, noshader, (mono_ns() - t0) / 1e9, waits);
-    free(rs);
+    if (!n) { free(rs); return NULL; }
+    g_pw.rs = rs; g_pw.n = n; g_pw.ns = ns; atomic_store(&g_pw_total, n);   // (the shipped list first: pso_rec_load appends)
+    int nt = prewarm_threads(); pthread_t th[16]; int started = 0;
+    // DM_VK_PREWARM=cache: every pipeline built once into the driver's pipeline cache (saved below) and destroyed at once, instead of kept (opt-in: on the S25+ it
+    //   saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
+    { const char *e = getenv("DM_VK_PREWARM"); g_pw.cache_only = e && !strcmp(e, "cache"); if (g_pw.cache_only) VLOG("prewarm: into the pipeline cache only, not kept (DM_VK_PREWARM=cache)"); }
+    for (int i = 1; i < nt; i++) if (!pthread_create(&th[started], NULL, prewarm_worker, (void *)1)) started++;
+    prewarm_worker(NULL);
+    for (int i = 0; i < started; i++) pthread_join(th[i], NULL);
+    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %d shipped ones with formats this GPU lacks, %.1f s on %d thread(s)%s (paused %d times for low memory)",
+         n, ns, nr, atomic_load(&g_pw.built), g_pw.cache_only ? " (cache only)" : "", atomic_load(&g_pw.had), atomic_load(&g_pw.failed), atomic_load(&g_pw.noshader), atomic_load(&g_pw.unfit), (mono_ns() - t0) / 1e9, started + 1,
+         prewarm_all() ? ", before the game" : "", atomic_load(&g_pw.waits));
+    free(rs); g_pw.rs = NULL;
     pcache_save();
     return NULL;
 }
+static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm"); (void)arg; prewarm_run(); prewarm_finished(); return NULL; }
 // Builds the pipeline for key k (no lookup: pso_get and the prewarm do that); ss: the draw state built in, on a driver without extended dynamic state (else NULL)
 // A vertex attribute's format as the shader reads it. Vulkan wants the format's numeric type to match the shader input's (VUID-VkGraphicsPipelineCreateInfo-Input-08733;
 //   the driver is free to do anything otherwise); NVIDIA's hardware, which the game was made for, hands a 32-bit attribute's bits to the shader unchanged whatever its
@@ -4876,7 +5037,7 @@ static void dispatch(const p_dispatch *dp) {
     void *key = pr; VkPipeline p = nvn_hm_get(&g_cps, &key);
     if (!p) { VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
         if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &p)) { VLOG("[RED] compute pipeline %s failed", cs->key); return; }
-        nvn_hm_put(&g_cps, &key, p); }
+        nvn_hm_put(&g_cps, &key, p); cs_record(cs); }   // (listed for the next start's prewarm: prewarm_compute)
     outside_pass();
     VkCommandBuffer cb = CB();
     if (atomic_load(&g_cap) == 2) { cap_printf("compute dispatch %ux%ux%u%s: shader %s\n", (unsigned)dp->x, (unsigned)dp->y, (unsigned)dp->z, dp->ind ? " (indirect)" : "", cs->key); g_cap_ntex = 0; }

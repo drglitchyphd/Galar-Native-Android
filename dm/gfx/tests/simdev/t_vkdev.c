@@ -350,8 +350,8 @@ static void decisions_and_checks(const char *profile) {
                           fce ? fce : "unset", g_dcfc == 1 ? " from the driver check, marker" : g_dcfc == 2 ? " from env.txt, marker" : "");
       else CHECK(!g_fctl, "float controls asked for where the driver cannot say it has them"); }
     CHECK(g_dynren == 0 || DV.p.vendorID != 0x5143, "Adreno: render passes by default");
-    // (background pipelines: Adreno unless the game's profile says async_pso_off, Legends: Arceus #34)
-    CHECK(pdef == (DV.p.vendorID == 0x5143) && apso == (!DM_GAME_ENG_ASYNC_PSO_OFF && DV.p.vendorID == 0x5143) && cbp == (DV.p.vendorID == 0x144D), "per-vendor pass / pipeline / clear defaults");
+    // (background pipelines: every GPU since beta-exit f09e58f, unless the game's profile says async_pso_off, Legends: Arceus #34)
+    CHECK(pdef == (DV.p.vendorID == 0x5143) && apso == !DM_GAME_ENG_ASYNC_PSO_OFF && cbp == (DV.p.vendorID == 0x144D), "per-vendor pass / pipeline / clear defaults");
     // barriers before passes, every game: relaxed on Adreno but Qualcomm's own drivers before Vulkan 1.3 (a name starting "Adreno": Turnip is not one), full elsewhere
     { int oldqc = DV.p.vendorID == 0x5143 && VK_API_VERSION_MINOR(DV.p.apiVersion) < 3 && !strncmp(DV.p.deviceName, "Adreno", 6);
       CHECK(brel == (DV.p.vendorID == 0x5143 && !oldqc), "barriers relaxed %d (Adreno %d, Qualcomm's driver before 1.3 %d)", brel, DV.p.vendorID == 0x5143, oldqc); }
@@ -408,11 +408,12 @@ static void quirk_checks(void) {
     CHECK(quirk_default(Q_BC_GPU_OFF, g) == img && quirk_default(Q_BC_DECODE, g) == img && quirk_default(Q_GPU_TIME_OFF, g) == (arm || img),
           "PowerVR: BC converted on the CPU and decoded; no GPU timestamps on Mali and PowerVR (every game)");
     // the game, from its profile (game.tsv port / engine_quirks → DM_PORT_* / DM_GAME_ENG_*), and the rules that read it, as 6e0e1dd's sites had them for this game
+    //   (background pipelines as beta-exit's since f09e58f: every GPU unless async_pso_off)
     CHECK(g->port == (DM_PORT_ARCEUS ? PORT_ARCEUS : DM_PORT_PALDEA ? PORT_PALDEA : PORT_GALAR), "gpu_id: port %d, the profile's %s", g->port, DM_PORT_ARCEUS ? "arceus" : DM_PORT_PALDEA ? "paldea" : "galar");
     CHECK(!!(g->eng & ENG_QC11_NO_EDS) == !!DM_GAME_ENG_QC11_NO_EDS && !!(g->eng & ENG_ASYNC_PSO_OFF) == !!DM_GAME_ENG_ASYNC_PSO_OFF
           && !!(g->eng & ENG_DRIVER_SELFTESTS) == !!DM_GAME_ENG_DRIVER_SELFTESTS && !!(g->eng & ENG_NVN_ASYNC_NEVER) == !!DM_GAME_ENG_NVN_ASYNC_NEVER, "gpu_id: engine_quirks bits %#x, not the profile's", g->eng);
-    CHECK(quirk_default(Q_NO_DYNREN, g) == qc && quirk_default(Q_ASYNC_PSO, g) == (qc && !DM_GAME_ENG_ASYNC_PSO_OFF) && quirk_default(Q_NO_EDS, g) == (qc11 && DM_GAME_ENG_QC11_NO_EDS),
-          "Adreno rules for this game: render passes, background pipelines, draw state");
+    CHECK(quirk_default(Q_NO_DYNREN, g) == qc && quirk_default(Q_ASYNC_PSO, g) == !DM_GAME_ENG_ASYNC_PSO_OFF && quirk_default(Q_NO_EDS, g) == (qc11 && DM_GAME_ENG_QC11_NO_EDS),
+          "rules for this game: render passes and draw state on Adreno, background pipelines on every GPU (beta-exit f09e58f)");
     CHECK(quirk_default(Q_NVN_ASYNC, g) == (strstr(g->name, "Adreno") && !DM_GAME_ENG_NVN_ASYNC_NEVER) && quirk_default(Q_DRIVER_SELFTESTS, g) == !!DM_GAME_ENG_DRIVER_SELFTESTS,
           "the replay thread's Auto and the start-up self-tests for this game");
     if (!getenv("DM_VK_BARRIER")) CHECK(g_qset[Q_BARRIER_RELAXED] && g_qval[Q_BARRIER_RELAXED] == quirk_default(Q_BARRIER_RELAXED, g), "barriers decided as the table says");

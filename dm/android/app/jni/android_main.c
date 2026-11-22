@@ -234,6 +234,9 @@ void dm_set_opmode(int m);   // (host/hle_oe.c)
 static int display_galar(void) { return !strcmp(DM_GAME_ID, "01008DB008C2C000") || !strcmp(DM_GAME_ID, "0100ABF008968000"); }
 static int display_mode(void) { const char *m = getenv("DM_DISPLAY_MODE"); return m && !strcmp(m, "quality") ? 1 : m && !strcmp(m, "performance") ? 2 : 0; }   // 0 Auto
 static float g_user_cap = -1;   // the player's 3D render scale (the slider or the Graphics level's; -1 none), which Performance only ever goes under (Sword / Shield)
+// The budget tier (graphics_auto): the cap Graphics Low / Lowest set at start when the app picked that level for the phone and nobody set a cap of their own (0: none).
+//   The guard then steps the scale under it, down to 35 %. A cap set in the menu ends it; Auto there brings it back (g_lvl_gen: the guard starts its ladder again)
+static float g_lvl_cap, g_lvl_cap0; static _Atomic int g_lvl_gen;
 static float display_cap(float c) { return display_mode() == 2 && display_galar() && c > 0.667f ? 0.667f : c; }
 static int g_fps_guard;   // (the fps guard's target: defined below with fps_guard_init; changed here when the frame rate is)
 JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env, jclass c, jstring jk, jstring jv) {
@@ -281,7 +284,10 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
 #else
     else if (!strcmp(k, "DM_RES_CAP")) { extern void dm_res_cap_set(float) __attribute__((weak)); extern int dm_res_scale_ready(void);
         float c = v ? (float)atof(v) : 0; const char *g = getenv("DM_GRAPHICS");
-        if (c >= 0.5f && c <= 1.0f) setenv("DM_RES_CAP", v, 1); else { unsetenv("DM_RES_CAP"); c = g && !strcmp(g, "lowest") ? 0.50f : g && !strcmp(g, "low") ? 0.55f : 1.0f; }
+        if (c >= 0.35f && c <= 1.0f) { setenv("DM_RES_CAP", v, 1); g_lvl_cap = 0; }
+        else { unsetenv("DM_RES_CAP"); c = g && !strcmp(g, "lowest") ? 0.50f : g && !strcmp(g, "low") ? 0.55f : 1.0f;
+               if (g_lvl_cap0 > 0) { char b[16]; snprintf(b, sizeof b, "%.2f", g_lvl_cap0); setenv("DM_RES_CAP", b, 1); g_lvl_cap = c = g_lvl_cap0; } }   // (Auto: the budget tier again)
+        atomic_fetch_add(&g_lvl_gen, 1);
         g_user_cap = c; c = display_cap(c);   // (Mode: Performance keeps it at the 720p step at most)
         if (display_cap(1.0f) < 1.0f) { char b[16]; snprintf(b, sizeof b, "%.3f", c); setenv("DM_RES_CAP", b, 1); }   // (held: Auto's guard leaves it alone)
         if (&dm_res_cap_set && dm_res_scale_ready()) { dm_res_cap_set(c); fprintf(stderr, "3D render scale: %.0f %% (%s), set while playing\n", c * 100, v ? "chosen" : "Auto"); } else now = 0; }
@@ -1062,22 +1068,29 @@ static void graphics_auto(void) {
 }
 #else
 int dm_res_scale_ready(void), dm_res_scale_applies(void); void dm_res_factor_set(float f);   // host/hle_resscale.c
-static const float k_res_steps[] = { 1.0f, 0.85f, 0.667f, 0.6f, 0.5f };   // (0.667: 720p from 1080p; 0.5 only on the lowest tier: res_lowest)
-#define NRES ((int)(sizeof k_res_steps / sizeof k_res_steps[0]))
-// The lowest step Auto goes to, by the phone's tier: 50 % on phones with 6 GB or less (their GPUs are the slowest), else 60 %; DM_RES_FLOOR=0.5..1 sets it
-static int res_lowest(void) {
-    static int lo = -1;
-    if (lo < 0) { const char *e = getenv("DM_RES_FLOOR"); float f = e ? (float)atof(e) : 0;
-        if (!(f >= 0.5f && f <= 1.0f)) { long mt = kb_of("/proc/meminfo", "MemTotal:"); f = mt > 0 && mt <= 6500000 ? 0.5f : 0.6f; }
-        lo = 0; for (int i = 0; i < NRES; i++) if (k_res_steps[i] >= f - 0.001f) lo = i;
-        fprintf(stderr, "fps guard: the lowest 3D render scale for this phone is %d %%\n", (int)(k_res_steps[lo] * 100 + 0.5f)); }
-    return lo;
+static const float k_res_all[] = { 1.0f, 0.85f, 0.667f, 0.6f, 0.5f, 0.42f, 0.35f };   // (0.667: 720p from 1080p; 0.5 on 6 GB phones, 0.42 / 0.35 on the budget tier)
+// The guard's ladder (built at start and again when the budget tier starts over): the factors it steps through and the scale each draws (k_res_eff: what the log names).
+//   The lowest by the phone's tier: 35 % on a budget phone (the app picked Graphics Low / Lowest: an Adreno 610 / 613, a Mali-G52), 50 % on phones with 6 GB or less,
+//   else 60 %; DM_RES_FLOOR=0.35..1 sets it. On the budget tier the level's cap (55 / 50 %) is the top and the ladder goes on under it (the factor alone below the cap
+//   changes nothing: those steps are left out). RES_HOT: the step heat goes straight to, the first at about 720p or below
+static float k_res_steps[8], k_res_eff[8]; static int NRES = 1, RES_HOT = 1, g_res_lo, g_res_gen = -1;
+static void res_ladder(void) {
+    const char *e = getenv("DM_RES_FLOOR"); float f = e ? (float)atof(e) : 0, cap = g_lvl_cap;
+    if (!(f >= 0.35f && f <= 1.0f)) { long mt = kb_of("/proc/meminfo", "MemTotal:"); f = cap > 0 ? 0.35f : mt > 0 && mt <= 6500000 ? 0.5f : 0.6f; }
+    NRES = 0; k_res_steps[NRES] = 1.0f; k_res_eff[NRES++] = cap > 0 ? cap : 1.0f;
+    for (int i = 1; i < (int)(sizeof k_res_all / sizeof *k_res_all); i++) { float k = k_res_all[i];
+        if (k < f - 0.001f || (cap > 0 && k >= cap - 0.005f)) continue;
+        k_res_steps[NRES] = k; k_res_eff[NRES++] = k; }
+    RES_HOT = NRES - 1; for (int i = 1; i < NRES; i++) if (k_res_eff[i] <= 0.668f) { RES_HOT = i; break; }
+    g_res_lo = NRES - 1;
+    fprintf(stderr, "fps guard: 3D render scale %d %% down to %d %% for this phone%s\n", (int)(k_res_eff[0] * 100 + 0.5f), (int)(k_res_eff[g_res_lo] * 100 + 0.5f),
+            cap > 0 ? " (budget tier: under the Graphics level's cap)" : "");
 }
+static int res_lowest(void) { if (g_res_gen < 0) { g_res_gen = 0; res_ladder(); } return g_res_lo; }
 // Where a slow frame rate comes from (Intelligent Adaptive Resolution, #321): the GPU's time per frame (hle_nvn.c dm_gpu_avg_ms, timestamps; -1 when the driver gives
 //   none) and the game thread's own work (nvn_vk.c g_nvn_game_work_avg_ns), against the frame's budget. A lower resolution helps only a GPU that is behind
 extern double dm_gpu_avg_ms(int frames) __attribute__((weak));
 extern _Atomic uint64_t g_nvn_game_work_avg_ns __attribute__((weak));
-#define RES_HOT 2   // the step heat goes straight to: 720p from 1080p (the upscaler brings it back to the screen's size)
 // One governor with frame generation (nvn_vk.c fg_gov_absorb): when its pictures cost the game frames, the render scale gives way first. dm_guard_fg_absorb: 1 when this
 //   guard has a step left that can help (running, the scale applies, not at its lowest, not after a step that did not help, not CPU-bound): it takes the next step at
 //   its next check, judged as its own. dm_guard_heat: 0 cool, 1 hot, 2 hot with the scale already at its heat step (frame generation then gets lighter too).
@@ -1119,9 +1132,9 @@ static void heat_guard(void) {
     float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
     calm_n = calm ? calm_n + 1 : 0;
     atomic_store(&g_guard_heat, hot ? 2 : 0);   // (no frame-rate steps here: hot means the scale is at its heat step already)
-    if (hot && !on) { on = 1; calm_n = 0; dm_res_factor_set(k_res_steps[RES_HOT]);
-        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% (about 720p) until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(k_res_steps[RES_HOT] * 100 + 0.5f)); }
-    else if (on && calm_n >= 12) { on = 0; dm_res_factor_set(k_res_steps[0]); fprintf(stderr, "heat guard: cooled down: the game's own 3D render scale again\n"); }
+    if (hot && !on) { on = 1; calm_n = 0; dm_res_factor_set(0.667f);
+        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% (about 720p) until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(0.667f * 100 + 0.5f)); }
+    else if (on && calm_n >= 12) { on = 0; dm_res_factor_set(1.0f); fprintf(stderr, "heat guard: cooled down: the game's own 3D render scale again\n"); }
 }
 // Locked 30, the last lever (Sword and Shield; Legends: Arceus has the same with its draw distance, lock30_draw there): when the lightest 3D render scale still falls
 //   short of 30 for 30 s, lighter shadows (DM_SHADOWS=low: 512 x 512 maps) and a shorter terrain-detail distance (DM_DRAW_DIST=75) are remembered in
@@ -1165,19 +1178,21 @@ static void graphics_auto(void) {
     cool = calm && (!g_fps_guard || full) ? cool + 1 : 0;
     if (dm_res_scale_ready()) {   // the render scale (a cap set by hand, DM_RES_CAP or Lowest, is left alone)
         static int probe, probe_hot, nogain, noheat; static double fps_was;
-        if (getenv("DM_RES_CAP")) { atomic_store(&g_guard_room, 0); return; }
+        if (getenv("DM_RES_CAP") && !(g_lvl_cap > 0)) { atomic_store(&g_guard_room, 0); return; }   // (a cap of the player's own: left alone)
+        { int gen = atomic_load(&g_lvl_gen); res_lowest(); if (gen != g_res_gen) { g_res_gen = gen; res_ladder();   // (the menu changed the cap: the ladder from its top)
+              lv = 0; dm_res_factor_set(1.0f); probe = 0; nogain = noheat = 0; cool = held = slow = since = 0; if (gen) return; } }
         since++;
         if (nogain > 0) nogain--;
         if (noheat > 0) noheat--;
         if (!dm_res_scale_applies()) { probe = 0; slow = 0; atomic_store(&g_guard_room, 0); return; }
         if (power_saver() && lv < RES_HOT) { lv = RES_HOT; dm_res_factor_set(k_res_steps[lv]); probe = 0; cool = 0; held = 0; slow = 0; since = 0;   // (battery saver: no larger than the 720p step)
-            fprintf(stderr, "power: battery saver: 3D render scale %d %%\n", (int)(k_res_steps[lv] * 100 + 0.5f)); return; }   // (a scene at the game's full size: see above)
+            fprintf(stderr, "power: battery saver: 3D render scale %d %%\n", (int)(k_res_eff[lv] * 100 + 0.5f)); return; }   // (a scene at the game's full size: see above)
         // Start at 85 % and settle: a phone that holds 30 there for a calm minute goes up to the game's full size, one short of it goes down to 720p, and back when a step falls
         //   short, so each phone settles at the most it holds at a steady 30. Starting at full size and stepping down only after two short checks let slower phones
         //   (Xclipse 530, Mali, a hot Dimensity) spend minutes under 30, which the game's fixed step turns into slow motion (#289 #299 #300)
-        { static int started; if (!started) { started = 1; const char *e = getenv("DM_RES_START"); int st = e && *e ? atoi(e) : RES_START; if (st < 0) st = 0; if (st > res_lowest()) st = res_lowest();
+        { static int started; if (!started) { started = 1; const char *e = getenv("DM_RES_START"); int st = e && *e ? atoi(e) : g_lvl_cap > 0 ? 0 : RES_START; if (st < 0) st = 0; if (st > res_lowest()) st = res_lowest();
               if (st > 0) { lv = st; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0;
-                            fprintf(stderr, "fps guard: starting at 3D render scale %d %% (%dp); a step up after each calm minute at a steady 30\n", (int)(k_res_steps[lv] * 100 + 0.5f), (int)(1080 * k_res_steps[lv] + 0.5f)); }
+                            fprintf(stderr, "fps guard: starting at 3D render scale %d %% (%dp); a step up after each calm minute at a steady 30\n", (int)(k_res_eff[lv] * 100 + 0.5f), (int)(1080 * k_res_eff[lv] + 0.5f)); }
               return; } }
         // a step is tried for 15 s, then kept only if the average gained clearly (1.5 fps, or 6 %): a lower resolution only helps a GPU that is behind, not a CPU
         double gain_need = fps_was * 0.06 > 1.5 ? fps_was * 0.06 : 1.5;
@@ -1185,7 +1200,7 @@ static void graphics_auto(void) {
             lv--; dm_res_factor_set(k_res_steps[lv]); slow = 0; since = 0;
             if (probe_hot) noheat = 60; else nogain = 60;
             fprintf(stderr, "%s: the lighter picture %s (%.1f → %.1f fps on average): back to 3D render scale %d %%; %s for 5 minutes\n", probe_hot ? "graphics auto" : "fps guard",
-                    probe_hot ? "cost frames" : "did not help", fps_was, fps_avg, (int)(k_res_steps[lv] * 100 + 0.5f),
+                    probe_hot ? "cost frames" : "did not help", fps_was, fps_avg, (int)(k_res_eff[lv] * 100 + 0.5f),
                     probe_hot ? "heat lowers it no further" : "the slowdown is not the GPU's, so a short frame rate lowers it no further");
             return;
         }
@@ -1210,19 +1225,19 @@ static void graphics_auto(void) {
         atomic_store(&g_guard_room, g_fps_guard && lv < res_lowest() && !nogain && !probe && !cpu_bound && !fgp);
         if (fgp && for_rate) fprintf(stderr, "fps guard: frame generation costs the game frames: a lighter 3D picture first\n");
         // up early: the GPU's time projected to the next larger size (pixels grow with the square of the scale) fits in 75 % of the budget, after 10 s calm at the full rate
-        double r_up = lv > 0 ? k_res_steps[lv - 1] / k_res_steps[lv] : 1;
+        double r_up = lv > 0 ? k_res_eff[lv - 1] / k_res_eff[lv] : 1;
         int up_early = lv > 0 && !probe && gpu > 0 && cool >= 2 && full && !hot && gpu * r_up * r_up < 0.75 * budget;
         if ((for_heat || for_rate) && lv < res_lowest()) {
             if (!for_heat && held < 24 && wait < 192) wait *= 2;   // short again soon after a step up: wait twice as long next time
             probe = 3; probe_hot = for_heat; fps_was = fps_avg > 1 ? fps_avg : fps;
             lv++; if (for_heat && lv < RES_HOT) lv = RES_HOT;   // hot: straight to 720p (67 % of 1080p), not one step every 30 s while the phone keeps heating up
             dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0;
-            if (for_heat) fprintf(stderr, "graphics auto: the phone is hot: 3D render scale %d %% (about %dp)\n", (int)(k_res_steps[lv] * 100 + 0.5f), (int)(1080 * k_res_steps[lv] + 0.5f));
-            else fprintf(stderr, "fps guard: %.1f fps, short of %d (GPU %.1f ms, game thread %.1f ms of %.1f): 3D render scale %d %%; a step up after %d s steady\n", fps, g_fps_guard, gpu, cpu, budget, (int)(k_res_steps[lv] * 100 + 0.5f), wait * 5);
+            if (for_heat) fprintf(stderr, "graphics auto: the phone is hot: 3D render scale %d %% (about %dp)\n", (int)(k_res_eff[lv] * 100 + 0.5f), (int)(1080 * k_res_eff[lv] + 0.5f));
+            else fprintf(stderr, "fps guard: %.1f fps, short of %d (GPU %.1f ms, game thread %.1f ms of %.1f): 3D render scale %d %%; a step up after %d s steady\n", fps, g_fps_guard, gpu, cpu, budget, (int)(k_res_eff[lv] * 100 + 0.5f), wait * 5);
         } else if (((lv > 0 && cool >= wait) || up_early) && !(power_saver() && lv <= RES_HOT)) {
             lv--; dm_res_factor_set(k_res_steps[lv]); cool = 0; held = 0; slow = 0; since = 0; probe = 0;
-            if (up_early) fprintf(stderr, "graphics auto: the GPU has room (%.1f ms of %.1f): 3D render scale %d %%\n", gpu, budget, (int)(k_res_steps[lv] * 100 + 0.5f));
-            else fprintf(stderr, "graphics auto: %s: 3D render scale %d %%\n", g_fps_guard ? "steady and cool" : "cooled down", (int)(k_res_steps[lv] * 100 + 0.5f));
+            if (up_early) fprintf(stderr, "graphics auto: the GPU has room (%.1f ms of %.1f): 3D render scale %d %%\n", gpu, budget, (int)(k_res_eff[lv] * 100 + 0.5f));
+            else fprintf(stderr, "graphics auto: %s: 3D render scale %d %%\n", g_fps_guard ? "steady and cool" : "cooled down", (int)(k_res_eff[lv] * 100 + 0.5f));
         }
         return;
     }
@@ -1376,6 +1391,7 @@ static void *inspector_main(void *p) {
     return NULL;
 }
 #include "safe_start.h"   // safe_start(): one level safer after a start that crashed in the graphics driver (tests/t_safe_start.c)
+static void seed_from_assets(void);   // (below: the pipeline list shipped with the app)
 static void host_start(void) {
     if (g_started++) return;
     const char *f = g_app->activity->externalDataPath; snprintf(g_files, sizeof g_files, "%s", f ? f : "/sdcard/nxnative");
@@ -1472,9 +1488,11 @@ static void host_start(void) {
       if (m == 1 || (m == 2 && display_galar())) setenv("DM_OPMODE", "1", 1); else if (m == 2) setenv("DM_OPMODE", "0", 1); }
     { const char *g = getenv("DM_GRAPHICS"); int galar = !strcmp(DM_GAME_ID, "01008DB008C2C000");
       if (g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) setenv("DM_OPMODE", galar ? "1" : "0", 0); else if (g && (!strcmp(g, "high") || !strcmp(g, "auto"))) setenv("DM_OPMODE", "1", 0);
+      int own = getenv("DM_RES_CAP") != NULL;   // (the slider or env.txt: the player's own)
       if (g && !strcmp(g, "lowest")) setenv("DM_RES_CAP", galar ? "0.50" : "0.75", 0);
       else if (g && !strcmp(g, "low") && galar) setenv("DM_RES_CAP", "0.55", 0);
-      { const char *rc = getenv("DM_RES_CAP"); float u = rc ? (float)atof(rc) : 1.0f; if (!(u >= 0.5f && u <= 1.0f)) u = 1.0f; g_user_cap = u;   // (Performance on Sword / Shield: the 720p step at most)
+      if (!own && galar && g && (!strcmp(g, "low") || !strcmp(g, "lowest"))) g_lvl_cap = g_lvl_cap0 = (float)atof(getenv("DM_RES_CAP"));   // (the budget tier: graphics_auto)
+      { const char *rc = getenv("DM_RES_CAP"); float u = rc ? (float)atof(rc) : 1.0f; if (!(u >= 0.35f && u <= 1.0f)) u = 1.0f; g_user_cap = u;   // (Performance on Sword / Shield: the 720p step at most)
         if (display_cap(u) < u) { char b[16]; snprintf(b, sizeof b, "%.3f", display_cap(u)); setenv("DM_RES_CAP", b, 1); fprintf(stderr, "mode: performance: 3D render scale %.0f %% (TV mode kept)\n", display_cap(u) * 100); } } }
 #if defined(DM_GAME_ANDROID_OPMODE) && DM_GAME_ANDROID_OPMODE >= 0
     { char m[4]; snprintf(m, sizeof m, "%d", DM_GAME_ANDROID_OPMODE); setenv("DM_OPMODE", m, 0); }
@@ -1496,6 +1514,7 @@ static void host_start(void) {
     style_fx();   // Legends: Arceus's "Style move effects" (off unless DM_ARC_STYLE_FX=1): the No More Styles start effects first in the overlay
     draw_distance();   // Legends: Arceus's "Draw distance" (DM_ARC_DRAW): the player's own config files with the distances changed, first in the overlay
     flat_normals();   // Legends: Arceus's "No reflections": its flat normal maps last in the overlay, under any mod
+    seed_from_assets();
     SETP("DM_VK_PSO_RECORD", "vk_pipelines.bin"); SETP("DM_VK_PCACHE", "vk_pipeline_cache.bin"); SETG("DM_VK_PSO_SEED", "vk_pipelines_seed.bin");
     snprintf(q, sizeof q, "%s/shaders.pak", g_game); if (!stat(q, &st)) setenv("DM_SPV_PAK", q, 0);   // the packed shader set, else vk/b-<chain>/
     { snprintf(p, sizeof p, "%s/aoc", g_game); struct stat as; if (!stat(p, &as)) setenv("DM_AOC_DIR", p, 0); }   // the DLC the player owns (Shield: the Expansion Pass keys; its content is in the update)
@@ -1599,7 +1618,11 @@ void front_frame_work(uint64_t busy_ns, uint64_t period_ns) {
     if (!g_hint) {
         static int tried; if (tried++) return;
         setpriority(PRIO_PROCESS, (id_t)gettid(), -10);
-        void *lib = dlopen("libandroid.so", RTLD_NOW); if (!lib) { g_hint_failed = 1; return; }
+        // the presenting thread and the game's main thread go to the fastest cores whether or not a hint session comes: Android 12 and older have none, and a refused
+        //   session left a budget phone with no pinning at all (the session's own list replaces this one when it comes)
+        g_pin_tid[0] = gettid(); g_pin_n = 1; if (g_game_tid && g_game_tid != gettid()) g_pin_tid[g_pin_n++] = g_game_tid;
+        pin_update();
+        void *lib = dlopen("libandroid.so", RTLD_NOW); if (!lib) { g_hint_failed = 1; fprintf(stderr, "[cpu] no performance hints (no libandroid): main threads pinned all the same\n"); return; }
         p_hint_mgr = (void *(*)(void))dlsym(lib, "APerformanceHint_getManager");
         p_hint_create = (void *(*)(void *, const int32_t *, size_t, int64_t))dlsym(lib, "APerformanceHint_createSession");
         p_hint_target = (int (*)(void *, int64_t))dlsym(lib, "APerformanceHint_updateTargetWorkDuration");
@@ -1611,7 +1634,7 @@ void front_frame_work(uint64_t busy_ns, uint64_t period_ns) {
           for (int i = 0; i < k; i++) if (w[i] != t[0] && (pinned < 2 || w[i] != t[1])) t[n++] = w[i]; }
         g_hint = m && p_hint_create ? p_hint_create(m, t, n, (int64_t)target_ns) : NULL;
         if (!g_hint && n > pinned && m && p_hint_create) g_hint = p_hint_create(m, t, n = pinned, (int64_t)target_ns);   // (refused with the workers: the two threads as before)
-        if (!g_hint || !p_hint_report) { g_hint_failed = 1; fprintf(stderr, "[cpu] no performance hint session\n"); return; }
+        if (!g_hint || !p_hint_report) { g_hint_failed = 1; fprintf(stderr, "[cpu] no performance hint session: main threads pinned all the same\n"); return; }
         g_hint_target = (int64_t)target_ns; for (size_t i = 0; i < pinned; i++) g_pin_tid[i] = t[i]; g_pin_n = (int)pinned; pin_update();
         fprintf(stderr, "[cpu] performance hint session: %zu threads (%zu of them the game's frame workers), target %.1f ms of the %.1f ms frame; presenting thread at priority -10\n", n, n - pinned, target_ns / 1e6, period_ns / 1e6);
     }
@@ -1727,6 +1750,26 @@ static void load_boost(int loading, uint64_t t) {
         if (sl) fprintf(stderr, "[cpu] load: busy thread(s) to the fast cores:%s\n", said);
     }
     memcpy(prev, cur, sizeof *cur * (size_t)nc); nprev = nc; prev_t = t;
+}
+// The pipeline list shipped with the app (assets/vk_pipelines_seed.bin, build_apk.py: every pipeline the game used on a phone) into the game folder, where
+//   DM_VK_PSO_SEED points: the first play after a setup gets them built before it starts too (nvn_vk.c prewarm), not only what this phone recorded. Copied
+//   when missing or of another size (a new app version's list); dm.zip is only unpacked by a setup, so the list is an asset of its own
+static void seed_from_assets(void) {
+    AAssetManager *am = g_app && g_app->activity ? g_app->activity->assetManager : NULL; if (!am) return;
+    AAsset *a = AAssetManager_open(am, "vk_pipelines_seed.bin", AASSET_MODE_STREAMING); if (!a) return;
+    char dst[1100], tmp[1110]; snprintf(dst, sizeof dst, "%s/vk_pipelines_seed.bin", g_game); snprintf(tmp, sizeof tmp, "%s.part", dst);
+    off_t n = AAsset_getLength(a); struct stat st;
+    if (!stat(dst, &st) && st.st_size == n) { AAsset_close(a); return; }
+    FILE *f = fopen(tmp, "wb"); char b[65536]; int k, ok = f != NULL; off_t got = 0;
+    while (ok && (k = AAsset_read(a, b, sizeof b)) > 0) { ok = fwrite(b, 1, (size_t)k, f) == (size_t)k; got += k; }
+    AAsset_close(a); if (f && fclose(f)) ok = 0;
+    if (ok && got == n && !rename(tmp, dst)) fprintf(stderr, "pipeline list shipped with the app: %lld bytes into the game folder\n", (long long)n); else unlink(tmp);
+}
+// the shaders built before the game starts (nvn_vk.c nvn_vk_prewarm_progress, DM_VK_PREWARM): done << 32 | listed while the game waits for them, else -1
+JNIEXPORT jlong JNICALL Java_com_nxnative_GameActivity_nativePrewarm(JNIEnv *env, jclass c) {
+    (void)env; (void)c; extern int nvn_vk_prewarm_progress(int *done, int *total) __attribute__((weak));
+    int d = 0, t = 0; if (!nvn_vk_prewarm_progress || !nvn_vk_prewarm_progress(&d, &t)) return -1;
+    return (jlong)((uint64_t)(uint32_t)d << 32 | (uint32_t)t);
 }
 JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env, jclass c) {
     (void)env; (void)c;

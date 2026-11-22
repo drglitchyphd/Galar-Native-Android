@@ -52,6 +52,7 @@ int main(void) {
         ok = ok && ls_img_make(&G, &G.c[0], u, mw, mh, fmt) && ls_img_make(&G, &G.c[1], u, mw, mh, fmt) && ls_img_make(&G, &G.hud, u, W, H, fmt) && ls_img_make(&G, &G.o, u, W, H, fmt);
         if (half) ok = ok && ls_img_make(&G, &G.sfull, u, W, H, fmt);
         CHECK(ok, "images"); if (!ok) break;
+        G.hpipe = ls_hud_pipe(&G, u); CHECK(G.hpipe, "no HUD pipeline for the frame's format"); if (!G.hpipe) break;   // (RGBA8 frames: the module that names rgba8)
         G.w = mw; G.h = mh; G.ow = W; G.oh = H; G.fresh = 1; ls_hud_write(&G); CHECK(ls_hud_ok(&G), "ls_hud_ok");
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) for (int c = 0; c < 4; c++) { int i = (y * W + x) * 4 + c;
             uint8_t sc = (uint8_t)((x * 3 + y * 5 + c * 40) & 255);

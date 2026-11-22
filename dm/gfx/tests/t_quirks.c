@@ -1,8 +1,11 @@
-// The unified driver layer's quirk table (nvn/vk_quirks.h) against the per-site rules it replaced, as beta-exit 6e0e1dd decided them (the reviewed behaviour of
-// all three apps, docs/ENGINE_UNIFY.md), copied below as they stood there, for each port with its own profile (game.tsv port and engine_quirks):
+// The unified driver layer's quirk table (nvn/vk_quirks.h) against the per-site rules it replaced, as beta-exit decided them (the reviewed behaviour of all three
+// apps, docs/ENGINE_UNIFY.md), copied below as they stood there, for each port with its own profile (game.tsv port and engine_quirks): every rule as beta-exit
+// 6e0e1dd had it (each of those sites is the same line at beta-exit's head 3d21471), and Q_ASYNC_PSO as the head has it (f09e58f, the owner's call: pipelines the
+// lists lacked built in the background on every GPU, not only on Adreno; 6e0e1dd's rule stays below as ref_6e0e1dd_async_pso, and part 1 checks where they differ):
 //   1. every quirk's default for Galar Native (Sword / Shield), Arceus Native and Paldea Native (Scarlet / Violet), over a grid of GPU descriptions (vendors, driver
 //      IDs or none, Vulkan 1.0-1.4, driver versions with Arm releases r20p0-r55p2 with and without beta, driver packages, device names, memory sizes, dynamic
-//      rendering): what 6e0e1dd's site decided, so moving the decisions into one table changed no phone's behaviour in any game. Q_QUERY_LOD is the one new rule;
+//      rendering): what the reference site decided, so moving the decisions into one table changed no phone's behaviour in any game. Q_QUERY_LOD is the one new
+//      rule; background pipelines differ from 6e0e1dd exactly on the GPUs other than Adreno, in the games without async_pso_off;
 //   2. no rule reads the port: each port with each combination of the engine_quirks bits gets the rules of a game whose profile says those quirks;
 //   3. the three profiles as dm/games/<id>/game.tsv has them (port, engine_quirks; Sword and Scarlet through tables_from), so a profile change shows up here;
 //   4. the phones from players' logs, by name, in each game;
@@ -32,9 +35,10 @@ static unsigned eng_of(const profile *P) {
     return (P->qc11_no_eds ? ENG_QC11_NO_EDS : 0u) | (P->async_pso_off ? ENG_ASYNC_PSO_OFF : 0u) | (P->driver_selftests ? ENG_DRIVER_SELFTESTS : 0u) | (P->nvn_async_never ? ENG_NVN_ASYNC_NEVER : 0u);
 }
 
-// ---- 6e0e1dd's per-site defaults (env.txt unset), copied (file:line in 6e0e1dd; nvn_vk.c unless named). g_props.vendorID → g->vendor, .driverVersion →
-//   g->driver_version, .deviceName → g->name, .apiVersion → g->api; g_arm_rel / g_arm_p / g_arm_beta → g->arm_*; g_dynren → g->dynren; getenv ("DM_VK_DRIVER")
-//   set → g->custom; MemTotal → g->ram_kb; DM_GAME_ENG_<X> → P-><x>; with driver properties (drvp) dp.driverID → g->driver_id, without them g->driver_id is -1 ----
+// ---- beta-exit's per-site defaults (env.txt unset), copied (file:line in 6e0e1dd, nvn_vk.c unless named; a line beta-exit changed since is named with the revision
+//   it was copied from: Q_ASYNC_PSO, the head 3d21471). g_props.vendorID → g->vendor, .driverVersion → g->driver_version, .deviceName → g->name, .apiVersion →
+//   g->api; g_arm_rel / g_arm_p / g_arm_beta → g->arm_*; g_dynren → g->dynren; getenv ("DM_VK_DRIVER") set → g->custom; MemTotal → g->ram_kb; DM_GAME_ENG_<X> →
+//   P-><x>; with driver properties (drvp) dp.driverID → g->driver_id, without them g->driver_id is -1 ----
 static int old_qcom_driver(const gpu_id *g) { return g->vendor == 0x5143 && VK_API_VERSION_MINOR(g->api) < 3 && !strncmp(g->name, "Adreno", 6); }   // :1594
 static int ref(int q, const gpu_id *g, const profile *P) {
     int v = g->arm_rel * 100 + g->arm_p;
@@ -64,7 +68,7 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     case Q_GATHER_BIAS: return g->vendor == 0x5143;                             // :3072 gbias = e ? atoi (e) != 0 : g_props.vendorID == 0x5143
     case Q_PASS_DEFER: return g->vendor == 0x5143;                              // :3573 v = e ? atoi (e) != 0 : g_props.vendorID == 0x5143
     case Q_PIPE_KEEP: return (g->vendor == 0x13B5 || (g->ram_kb > 0 && g->ram_kb < 7500000)) ? 800 : 0;   // :3850 cap = e ? atoi (e) : (... || (kb > 0 && kb < 7500000)) ? 800 : 0
-    case Q_ASYNC_PSO: return !P->async_pso_off && g->vendor == 0x5143;         // :3925 v = e ? atoi (e) != 0 : !DM_GAME_ENG_ASYNC_PSO_OFF && g_props.vendorID == 0x5143
+    case Q_ASYNC_PSO: return !P->async_pso_off;                                 // 3d21471 nvn_vk.c:3964 v = e ? atoi (e) != 0 : !DM_GAME_ENG_ASYNC_PSO_OFF (f09e58f: every GPU)
     case Q_PCACHE_GAPS_OFF: return g->vendor == 0x1010;                         // :4194 if (g_props.vendorID == 0x1010 && !g_dynren) ... pc_ = VK_NULL_HANDLE (!g_dynren stays at the site)
     case Q_TF_CHECK: return g->arm_rel > 0;                                     // :4688 chk = e ? atoi (e) != 0 : g_arm_rel > 0
     case Q_CLEAR_BY_PASS: return g->vendor == 0x144D;                           // :4947 v = e ? atoi (e) != 0 : g_props.vendorID == 0x144D
@@ -75,6 +79,9 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     }
     return -999;   // a quirk with no reference here: add its rule above
 }
+// 6e0e1dd's background-pipeline rule, before beta-exit f09e58f (6e0e1dd :3925 v = e ? atoi (e) != 0 : !DM_GAME_ENG_ASYNC_PSO_OFF && g_props.vendorID == 0x5143): part 1
+//   checks that the table differs from it exactly where f09e58f meant it to, on every GPU but Adreno in a game without async_pso_off, and nowhere for Legends: Arceus
+static int ref_6e0e1dd_async_pso(const gpu_id *g, const profile *P) { return !P->async_pso_off && g->vendor == 0x5143; }
 
 // ---- the grid of GPU descriptions ----
 // Arm's own driver as nvn_vk.c finds it (6e0e1dd :599-601 with the float-controls block: by driver ID or, without driver properties, by vendor; :629 without that
@@ -107,16 +114,20 @@ static long grid_run(const grid_t *G, int port, unsigned eng, visit_fn fn, void 
     return n;
 }
 static void fail_line(const gpu_id *g, int q, int table, int want, const char *what) {
-    printf("FAIL: %s, quirk %d (%s): table %d, 6e0e1dd %d; port %d eng %#x api %u.%u vendor %#x driver id %d version %#x (Arm r%dp%d%s)%s \"%s\" %ld kB dynren %d\n", what, q,
+    printf("FAIL: %s, quirk %d (%s): table %d, reference %d; port %d eng %#x api %u.%u vendor %#x driver id %d version %#x (Arm r%dp%d%s)%s \"%s\" %ld kB dynren %d\n", what, q,
            Q_INFO[q].what, table, want, g->port, g->eng, VK_API_VERSION_MAJOR(g->api), VK_API_VERSION_MINOR(g->api), g->vendor, g->driver_id, g->driver_version, g->arm_rel,
            g->arm_p, g->arm_beta ? " beta" : "", g->custom ? " package" : "", g->name, g->ram_kb, g->dynren);
 }
-typedef struct { const profile *P; const char *what; } cmp_ctx;
-static void cmp_all(const gpu_id *g, void *u) {   // part 1: this port's profile, 6e0e1dd's rules with its DM_GAME_ENG_*
-    const cmp_ctx *c = u;
+typedef struct { const profile *P; const char *what; long apso_changed; } cmp_ctx;
+static void cmp_all(const gpu_id *g, void *u) {   // part 1: this port's profile, the reference rules with its DM_GAME_ENG_*
+    cmp_ctx *c = u;
     for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), w = ref(q, g, c->P); checks++; if (t != w && fails++ < 25) fail_line(g, q, t, w, c->what); }
+    // background pipelines against 6e0e1dd's rule: changed exactly on the GPUs other than Adreno, in a game without async_pso_off (beta-exit f09e58f)
+    int t = quirk_default(Q_ASYNC_PSO, g), o = ref_6e0e1dd_async_pso(g, c->P), meant = g->vendor != 0x5143 && !c->P->async_pso_off;
+    checks++; if ((t != o) != meant && fails++ < 25) fail_line(g, Q_ASYNC_PSO, t, o, "background pipelines against 6e0e1dd's rule: changed where beta-exit f09e58f did not mean it, or kept where it did (6e0e1dd: the second value)");
+    c->apso_changed += t != o;
 }
-static void cmp_eng(const gpu_id *g, void *u) {   // part 2: this port with these bits, 6e0e1dd's rules for a game whose profile says the quirks the bits stand for
+static void cmp_eng(const gpu_id *g, void *u) {   // part 2: this port with these bits, the reference rules for a game whose profile says the quirks the bits stand for
     (void)u; profile P = { .ids = "", .app = "", .port = g->port, .qc11_no_eds = !!(g->eng & ENG_QC11_NO_EDS), .async_pso_off = !!(g->eng & ENG_ASYNC_PSO_OFF),
                            .nvn_async_never = !!(g->eng & ENG_NVN_ASYNC_NEVER), .driver_selftests = !!(g->eng & ENG_DRIVER_SELFTESTS) };
     for (int q = 0; q < Q_N; q++) { int t = quirk_default(q, g), w = ref(q, g, &P); checks++; if (t != w && fails++ < 25) fail_line(g, q, t, w, "port and engine_quirks bits"); }
@@ -242,13 +253,17 @@ static void phones(const profile *P) {
           "%s, PowerVR BXM-8-256 on 4 GB: no cache for gap pipelines, pipelines capped, BC on the CPU and decoded, no GPU timestamps", gm);
     gpu_id g5 = phone(P, 1u << 22 | 3u << 12, 0x1010, 7, 0, 0, 0, 0, "PowerVR D-Series DXT-48-1536", 11800000, 1);
     CHECK(QD(Q_BC_GPU_OFF, g5) && QD(Q_BC_DECODE, g5), "%s, Tensor G5 (PowerVR, Arceus #32): BC converted on the CPU, decoded to RGBA", gm);
+    CHECK(QD(Q_ASYNC_PSO, tu) == !arc && QD(Q_ASYNC_PSO, g615) == !arc && QD(Q_ASYNC_PSO, g925) == !arc && QD(Q_ASYNC_PSO, panvk) == !arc && QD(Q_ASYNC_PSO, xcl) == !arc
+          && QD(Q_ASYNC_PSO, bxm) == !arc && QD(Q_ASYNC_PSO, g5) == !arc,
+          "%s: pipelines the lists lacked built in the background on Turnip, Mali (Arm's driver and PanVK), Xclipse and PowerVR too (beta-exit f09e58f; Adreno only before), "
+          "never for Legends: Arceus (async_pso_off, #34)", gm);
 }
 
 int main(int argc, char **argv) {
     const char *games = argc > 1 ? argv[1] : "../../games";
     for (int q = 0; q < Q_N; q++) { gpu_id z; memset(&z, 0, sizeof z);
-        CHECK(Q_INFO[q].what && Q_INFO[q].env, "quirk %d has no Q_INFO row", q); CHECK(ref(q, &z, &PROFILES[0]) != -999, "quirk %d (%s) has no 6e0e1dd rule here", q, Q_INFO[q].what); }
-    // 1. each port's profile against 6e0e1dd, over the whole grid
+        CHECK(Q_INFO[q].what && Q_INFO[q].env, "quirk %d has no Q_INFO row", q); CHECK(ref(q, &z, &PROFILES[0]) != -999, "quirk %d (%s) has no reference rule here", q, Q_INFO[q].what); }
+    // 1. each port's profile against the reference (6e0e1dd's sites; Q_ASYNC_PSO beta-exit 3d21471's), over the whole grid
     static const uint32_t vens[] = { 0x5143, 0x13B5, 0x144D, 0x1010, 0x10DE, 0x10005, 0 };
     static const int dids[] = { -1, 9 /* Arm */, 21 /* Samsung */, 8 /* Qualcomm */, 18 /* Turnip */, 20 /* PanVK */, 7 /* Imagination */, 13 /* llvmpipe */, 0 };
     static const uint32_t apis[] = { 1u << 22, 1u << 22 | 1u << 12 | 128, 1u << 22 | 2u << 12 | 200, 1u << 22 | 3u << 12 | 231, 1u << 22 | 4u << 12 };
@@ -258,10 +273,12 @@ int main(int argc, char **argv) {
     static const uint32_t dvs[] = { 0, 44u << 22 | 1u << 12, 48u << 22, 49u << 22, 0x80000000u | 512u << 12 | 762u, 0x5d9576 };   // (none, r44p1, r48p0, r49p0, Qualcomm 512.762, PowerVR)
     const grid_t G = { vens, 7, dids, 9, apis, 5, names, 9, rams, 5, dvs, 6, 1 };
     for (int i = 0; i < NPROF; i++) {
-        long c0 = checks; cmp_ctx c = { &PROFILES[i], PROFILES[i].app };
+        long c0 = checks; cmp_ctx c = { &PROFILES[i], PROFILES[i].app, 0 };
         long n = grid_run(&G, PROFILES[i].port, eng_of(&PROFILES[i]), cmp_both, &c);
-        printf("%s (port %d, engine_quirks bits %#x): %ld GPU descriptions x %d quirks = %ld comparisons with 6e0e1dd's sites (and part 5's, before the device)\n", PROFILES[i].app,
-               PROFILES[i].port, eng_of(&PROFILES[i]), n, Q_N, checks - c0);
+        printf("%s (port %d, engine_quirks bits %#x): %ld GPU descriptions x %d quirks = %ld comparisons with the reference sites (and part 5's, before the device); "
+               "background pipelines unlike 6e0e1dd on %ld of them (beta-exit f09e58f)\n", PROFILES[i].app, PROFILES[i].port, eng_of(&PROFILES[i]), n, Q_N, checks - c0, c.apso_changed);
+        CHECK(PROFILES[i].async_pso_off ? c.apso_changed == 0 : c.apso_changed > 0, "%s: background pipelines unlike 6e0e1dd on %ld GPU descriptions (async_pso_off %d)", PROFILES[i].app,
+              c.apso_changed, PROFILES[i].async_pso_off);
     }
     // 5. (the rest) every late rule reads what comes after the device somewhere in the grid
     for (int q = 0; q < Q_N; q++) CHECK(!quirk_late(q) || g_late_reads[q], "quirk %d (%s) is in quirk_late but reads neither the driver ID nor Arm's release anywhere in the grid", q, Q_INFO[q].what);

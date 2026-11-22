@@ -563,11 +563,12 @@ NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; stat
 NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 _Atomic uint64_t g_wait_sync_ns, g_wait_sync_n;   // DM_VK_PROF: the game thread's time in sync waits (GPU not done yet)
+static _Atomic uint64_t g_st_sync_ns;   // the same, never reset (the long-frame log's per-frame differences)
 static NVNsyncWaitResult sync_wait_(const sync_t *o, uint64_t timeout);
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s; uint64_t last = mtl_last_fence(), behind = o->fenced && o->fence <= last ? last - o->fence : 99;
     uint64_t t0 = now_ns(); NVNsyncWaitResult r = sync_wait_(o, timeout); uint64_t d = now_ns() - t0;
-    if (timeout) { atomic_fetch_add(&g_wait_sync_ns, d); atomic_fetch_add(&g_wait_sync_n, 1);
+    if (timeout) { atomic_fetch_add(&g_wait_sync_ns, d); atomic_fetch_add(&g_wait_sync_n, 1); atomic_fetch_add(&g_st_sync_ns, d);
         // DM_VK_PROF: which submission the game waits for, counted back from the newest (0: the one it just submitted), and how long that took
         static int prof = -1; if (prof < 0) prof = getenv("DM_VK_PROF") != NULL;
         if (prof) { static uint64_t n, cnt[4], ns[4]; int k = behind > 2 ? 3 : (int)behind; cnt[k]++; ns[k] += d; static uint64_t inl, inl_ns; if (o->fenced == 2) { inl++; inl_ns += d; }
@@ -1369,7 +1370,8 @@ uint64_t dm_nvn_sub_cpu_ns(void) { return atomic_load(&g_cum_sub_cpu_ns); }   //
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac); overridden by iOS front_ios.m   // default (Mac); the strong definition in the iOS front end front_ios.m overrides it
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup; } lf_rec;
+// (the waits inside the frame: the game's GPU sync waits, a free submission slot, the queue submissions, the swapchain image, the present queue; ms)
+typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms, w_sync, w_slot, w_sub, w_acq, w_pq; unsigned pso, lib, up, rup; } lf_rec;
 static lf_rec g_lf[LFN];
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
@@ -1785,6 +1787,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
             plns = lns; ppns = pns; pup = up; prup = rup; pub = ub;
+            { extern _Atomic uint64_t g_st_slot_ns, g_st_submit_ns; static uint64_t psy, psl, psu; uint64_t sy = atomic_load(&g_st_sync_ns), sl = atomic_load(&g_st_slot_ns), su = atomic_load(&g_st_submit_ns);
+              r->w_sync = (sy - psy) / 1e6; r->w_slot = (sl - psl) / 1e6; r->w_sub = (su - psu) / 1e6; r->w_acq = g_acq_wait_ns / 1e6; r->w_pq = g_pq_wait_ns / 1e6; psy = sy; psl = sl; psu = su; }
         }
         plib = lib_; ppso = pso_;
         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
@@ -1798,9 +1802,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           // "Long" is relative to recent conditions: when running steadily at 30 fps (menus / windowless host) or under sustained overload, every frame is > 20 ms; those are not long frames and must not flood the log - a frame has to be 40% above the sliding mean of the last 16 frames to count
           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;
           if (r->f == f - 8) { ef += ((r->fr < 3 * ef ? r->fr : 3 * ef) - ef) / 16; eg += ((g < 3 * eg ? g : 3 * eg) - eg) / 16; }
-          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[512];
-              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms",
-                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms);
+          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[640];
+              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; "
+                       "waits: GPU sync %.1f, submission slot %.1f, queue submit %.1f, image acquire %.1f, present queue %.1f ms",
+                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->w_sync, r->w_slot, r->w_sub, r->w_acq, r->w_pq);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }

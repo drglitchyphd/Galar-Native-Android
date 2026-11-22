@@ -2,7 +2,8 @@
 // instead of a vendor test at every site. The translation itself (NVN → Vulkan, Maxwell → SPIR-V, BC → ETC2 / ASTC) is the same for every GPU; these are the
 // workarounds on top of it, each one found on real phones (the issue numbers are in the comments at each site in nvn_vk.c).
 //   quirk_default(q, g): the default for this GPU, a pure function. dm/gfx/tests/t_quirks.c checks it, for each of the three apps, against the per-site rules it
-//   replaced as beta-exit 6e0e1dd had them (the reviewed behaviour; docs/ENGINE_UNIFY.md), and pins it for the GPUs players reported. env.txt still wins at each
+//   replaced as beta-exit 6e0e1dd had them (the reviewed behaviour; docs/ENGINE_UNIFY.md), Q_ASYNC_PSO as beta-exit has it since f09e58f (background pipelines
+//   on every GPU; the head merged here: 3d21471), and pins it for the GPUs players reported. env.txt still wins at each
 //   site, as before (the DM_VK_* name in Q_INFO). quirk_note(): what was decided and why, printed together at start ("[quirk]" lines; DebugBundle copies them) so a
 //   log says at once which workarounds a phone runs with.
 // One table for every game (Galar Native: Sword / Shield, Arceus Native, Paldea Native: Scarlet / Violet; docs/ENGINE_UNIFY.md): no rule tests which game it is.
@@ -81,7 +82,8 @@ enum {
     Q_BARRIER_RELAXED,   // fewer full barriers before passes: Adreno, but not Qualcomm's own drivers before Vulkan 1.3 (#209, Arceus #34 #46 #59)
     Q_GATHER_BIAS,       // gathers nudged 1/512 texel: Adreno rounds texel centres the other way
     Q_PASS_DEFER,        // target changes that need no new pass keep it open: Adreno
-    Q_ASYNC_PSO,         // pipelines built on worker threads: Adreno, unless the game's profile says async_pso_off (Arceus #34)
+    Q_ASYNC_PSO,         // pipelines built on worker threads: every GPU (beta-exit f09e58f, 2026-11-22; Adreno only before), unless the game's profile says
+                         //   async_pso_off (Arceus #34)
     Q_PIPE_KEEP,         // at most 800 pipelines kept (least recently used destroyed): Mali, or a phone under 7.5 GB
     Q_CLEAR_BY_PASS,     // clears in a layered pass over a 3D target as passes of their own: Xclipse
     Q_PCACHE_GAPS_OFF,   // a pipeline with a colour gap made without the pipeline cache: PowerVR's driver crashes on it
@@ -153,8 +155,10 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     case Q_NVN_ASYNC: return strstr(g->name, "Adreno") != NULL && !(g->eng & ENG_NVN_ASYNC_NEVER);
     // the games apart, each by its own profile (engine_quirks → gpu_id.eng): worker-built pipelines left objects missing for frames on an Adreno 710 (Arceus #34:
     //   async_pso_off); Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34: qc11_no_eds; Sword / Shield answered #209 with full barriers
-    //   instead); the driver self-tests at start (driver_selftests); the replay never on its own thread (nvn_async_never, above)
-    case Q_ASYNC_PSO: return g->vendor == VEN_QCOM && !(g->eng & ENG_ASYNC_PSO_OFF);
+    //   instead); the driver self-tests at start (driver_selftests); the replay never on its own thread (nvn_async_never, above).
+    //   Pipelines the lists lacked are built in the background on every GPU, not only on Adreno (beta-exit f09e58f, the owner's call 2026-11-22: a hitch waiting for a
+    //   pipeline was the stutter left on Mali / Xclipse / PowerVR): no vendor test, only the game's own async_pso_off
+    case Q_ASYNC_PSO: return !(g->eng & ENG_ASYNC_PSO_OFF);
     case Q_NO_EDS: return (g->eng & ENG_QC11_NO_EDS) && g->vendor == VEN_QCOM && (g->api >> 22 & 0x7f) == 1 && (g->api >> 12 & 0x3ff) < 2;   // (VK_API_VERSION_MAJOR / MINOR)
     case Q_DRIVER_SELFTESTS: return (g->eng & ENG_DRIVER_SELFTESTS) != 0;
     // PowerVR, every game: BC textures converted on the CPU, not by the BC layer, and decoded, not transcoded (Tensor G5, Arceus #32: objects purple, meshes lavender)
