@@ -3937,7 +3937,7 @@ static VkPipeline pso_lookup_s(vprog *pr, const pkey *k, const sst *ss, int reco
     pthread_mutex_unlock(&g_psomu);
     return p;
 }
-// Pipelines built in the background (DM_VK_ASYNC_PSO, on by default on Adreno; =0 / =1 decides on any GPU): one the game needs that neither the prewarm list nor the cache had is
+// Pipelines built in the background (DM_VK_ASYNC_PSO, on by default on every GPU since 2026-11-22, Adreno only before; =0 / =1 decides): one the game needs that neither the prewarm list nor the cache had is
 //   compiled by a worker, and the draws that need it are skipped until it is done (an object missing for a frame or two instead of a hitch, as emulators' asynchronous
 //   shaders do). The queue holds 256; a full queue compiles on the spot as before
 // Balance: three workers, and each frame may wait up to 8 ms in all (DM_VK_ASYNC_WAIT_MS) for pipelines being built before it skips their draws, so most come in on
@@ -3961,7 +3961,8 @@ static void *apso_main(void *a) { DM_THREAD_NAME("dm-pipelines");
 }
 static int apso_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = e ? atoi(e) != 0 : !DM_GAME_ENG_ASYNC_PSO_OFF && g_props.vendorID == 0x5143;   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before. Profile engine_quirks
+    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = e ? atoi(e) != 0 : !DM_GAME_ENG_ASYNC_PSO_OFF;   // (on by default on every GPU: a hitch waiting for a pipeline was the stutter left on Mali / Xclipse / PowerVR (the owner's call,
+        //   2026-11-22); Adreno only before. Profile engine_quirks
         //   async_pso_off (Legends: Arceus): off unless DM_VK_ASYNC_PSO=1, on a slower Adreno (710, #34) its skipped draws were objects missing for frames)
    
         if (v) { int nw = 0; for (int i = 0; i < APSO_WORKERS; i++) { pthread_t t; if (!pthread_create(&t, NULL, apso_main, NULL)) { pthread_detach(t); nw++; } }
