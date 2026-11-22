@@ -42,9 +42,18 @@ int main(void) {
     float prio = 1; VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qf, .queueCount = 1, .pQueuePriorities = &prio };
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .pEnabledFeatures = &en };
     if (vkCreateDevice(pd, &dci, NULL, &dev)) { printf("SKIP: no device\n"); return 0; }
+    // (as in the engine: the frames are only compared where frame generation itself runs, which samples them filtered (nvn_fgen.h fg_setup, nvn_lsfg.h ls_fmt_lacks):
+    //  a driver without linear filtering of RGBA8 (PowerVR Rogue G6430) has neither; and fgc_init says no where a group of 256 threads is not allowed)
+    { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(pd, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+      if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) { printf("SKIP: no linear filtering of RGBA8: no frame generation here\n"); return 0; } }
     VkQueue q; vkGetDeviceQueue(dev, qf, 0, &q); vkGetPhysicalDeviceMemoryProperties(pd, &mp);
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qf }; VkCommandPool pool; vkCreateCommandPool(dev, &pci, NULL, &pool);
-    static fgc C; CHECK(fgc_init(&C, dev, pd), "fgc_init: %s", C.why ? C.why : "?"); if (!C.ok) return 1;
+    static fgc C;
+    { VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pd, &pp);
+      if (pp.limits.maxComputeWorkGroupInvocations < 256 || pp.limits.maxComputeWorkGroupSize[0] < 256) { CHECK(!fgc_init(&C, dev, pd), "fgc_init took a driver with %u threads a group", pp.limits.maxComputeWorkGroupInvocations);
+          if (fails) { printf("t_fgcut_vk: %d FAILED\n", fails); return 1; }
+          printf("SKIP: %u threads a work group at most: no cut check here (fgc_init refused it)\n", pp.limits.maxComputeWorkGroupInvocations); return 0; } }
+    CHECK(fgc_init(&C, dev, pd), "fgc_init: %s", C.why ? C.why : "?"); if (!C.ok) return 1;
     if (!C.can_select) printf("note: no storage writes without a format here: the swap is not tested\n");
     VkBuffer buf; uint8_t *map; { VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = W * H * 4 * 4, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
         vkCreateBuffer(dev, &bci, NULL, &buf); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(dev, buf, &rq);

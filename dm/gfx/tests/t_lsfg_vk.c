@@ -68,8 +68,23 @@ int main(int argc, char **argv) {
     if (vkCreateInstance(&ici, NULL, &inst)) { printf("SKIP: no Vulkan 1.3 instance on this machine\n"); return 0; }
     uint32_t n = 8; VkPhysicalDevice pds[8]; vkEnumeratePhysicalDevices(inst, &n, pds); if (!n) { printf("SKIP: no Vulkan device on this machine\n"); return 0; }
     pd = pds[0]; VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pd, &pp);
+    // (each Lossless Scaling refusal below is the engine's own: nvn_vk.c then falls back to our frame generation, fg_ls_fallback)
     const char *lack = ls_device_lacks(pd, 0); if (lack) { printf("SKIP: %s lacks %s\n", pp.deviceName, lack); return 0; }
+    { const char *l = ls_group_lacks(&G, pd); if (l) { printf("SKIP: %s: %s\n", pp.deviceName, l); return 0; } }
     if (ls_device_lacks(pd, 1)) printf("(%s lacks %s: the shaders go without their float controls)\n", pp.deviceName, ls_device_lacks(pd, 1));
+    // The frame formats the games present (ls_setup_work's checks): which ones Lossless Scaling takes, and whether the work size can scale them (nvn_vk.c fg_ready's blit check)
+    static const VkFormat FF[4] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT };
+    static const char *const FN[4] = { "RGBA8", "RGBA8 sRGB", "RGB10A2", "RGBA16F" };
+    const VkFormat need[3] = { VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT }; static const char *const NN[3] = { "R8", "RGBA8", "RGBA16F" };
+    const char *shared = NULL; int si = 0;
+    for (int i = 0; i < 3 && !shared; i++) if ((shared = ls_fmt_lacks(pd, need[i]))) si = i;
+    int fmt_ok[4];
+    for (int i = 0; i < 4; i++) { const char *l = ls_fmt_lacks(pd, ls_unorm(FF[i])); VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(pd, FF[i], &fp);
+        const VkFormatFeatureFlags bl = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        fmt_ok[i] = !shared && !l;
+        printf("FMT %-10s Lossless Scaling: %s%s%s%s; work size: %s\n", FN[i], fmt_ok[i] ? "runs" : "falls back to ours: no ", shared ? shared : l ? l : "", shared ? " on " : l ? " on the frame's format" : "",
+               shared ? NN[si] : "", (fp.optimalTilingFeatures & bl) == bl ? "blit-scaled" : "frame size only (no blit / linear blit)"); }
+    if (!fmt_ok[0]) { printf("SKIP: %s: Lossless Scaling cannot run on RGBA8 frames (no %s on %s)\n", pp.deviceName, shared ? shared : ls_fmt_lacks(pd, FF[0]), shared ? NN[si] : "RGBA8"); return 0; }
     uint32_t nq = 16; VkQueueFamilyProperties qp[16]; vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qp); uint32_t qf = 0; while (qf < nq && !(qp[qf].queueFlags & VK_QUEUE_COMPUTE_BIT)) qf++;
     float prio = 1; VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qf, .queueCount = 1, .pQueuePriorities = &prio };
     // every feature the device has, on (as nvn_vk.c creates its device)
@@ -77,8 +92,20 @@ int main(int argc, char **argv) {
     VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &f13 };
     VkPhysicalDeviceVulkan11Features f11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12 };
     VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f11 }; vkGetPhysicalDeviceFeatures2(pd, &f2);
+    // (update-after-bind left off, which robust buffer access needs where robustBufferAccessUpdateAfterBind is false: Turnip on Adreno 740,
+    //  VUID-VkDeviceCreateInfo-robustBufferAccess-10247; the engine's own fix is on the simdev-tests branch)
+    f12.descriptorBindingUniformBufferUpdateAfterBind = f12.descriptorBindingStorageBufferUpdateAfterBind = f12.descriptorBindingUniformTexelBufferUpdateAfterBind =
+        f12.descriptorBindingStorageTexelBufferUpdateAfterBind = f12.descriptorBindingSampledImageUpdateAfterBind = f12.descriptorBindingStorageImageUpdateAfterBind = VK_FALSE;
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci };
-    if (vkCreateDevice(pd, &dci, NULL, &dev)) { printf("SKIP: no Vulkan device could be opened\n"); return 0; }
+    VkResult dr = vkCreateDevice(pd, &dci, NULL, &dev);
+    if (dr == VK_ERROR_FEATURE_NOT_PRESENT) {   // (a simulated GPU, simdev: the profile promises features the driver under it has not got) only what the chain needs (ls_device_lacks)
+        VkPhysicalDeviceVulkan13Features n13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .maintenance4 = VK_TRUE, .shaderZeroInitializeWorkgroupMemory = VK_TRUE };   // (the latter: 1.3 requires it)
+        VkPhysicalDeviceVulkan12Features n12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &n13, .bufferDeviceAddress = VK_TRUE, .vulkanMemoryModel = VK_TRUE, .shaderFloat16 = VK_TRUE };
+        VkPhysicalDeviceFeatures2 n2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &n12 };
+        n2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE; n2.features.shaderImageGatherExtended = f2.features.shaderImageGatherExtended;
+        dci.pNext = &n2; dr = vkCreateDevice(pd, &dci, NULL, &dev);
+        printf("note: the device with every feature it reports was refused; made with the chain's own features only (%d)\n", dr); }
+    if (dr) { printf("SKIP: no Vulkan device could be opened (%d)\n", dr); return 0; }
     vkGetDeviceQueue(dev, qf, 0, &q);
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf }; vkCreateCommandPool(dev, &pci, NULL, &pool);
     VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(pd, &mp);
@@ -107,6 +134,42 @@ int main(int argc, char **argv) {
             if (PX == 0 && PY == 0) CHECK(e < 1.5, "%dx: a still picture changed: %.2f", count + 1, e);
             else if (fabsf(PX) < 40) CHECK(e < eb, "%dx pan %g,%g at %.2f: %.2f, plain mix %.2f", count + 1, PX, PY, t, e, eb); }
         printf("; the frame and %d picture(s) took %.0f ms\n", count, ms); }
+    // Every frame format it takes, as nvn_vk.c feeds it: at the work size (half the frame, the frame scaled down with a linear blit, where the format can be blitted:
+    //   fg_ready's check) or the frame's size, HUD-free (the frame as shown and the scene at the frame's size copied in), one picture with its HUD put back.
+    //   Nothing is compared: the run is for the validation layer (image creation in each format, the storage views, the blit, the HUD pass)
+    for (int i = 0; i < 4; i++) {
+        if (!fmt_ok[i]) continue;
+        VkFormat f = FF[i]; VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(pd, f, &fp);
+        const VkFormatFeatureFlags bl = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        int ws = (fp.optimalTilingFeatures & bl) == bl; uint32_t ww = ws ? W / 2 : W, wh = ws ? H / 2 : H;
+        vkDeviceWaitIdle(dev);
+        if (!ls_setup_work(&G, dev, pd, f, ww, wh, 0.5f, W, H)) { CHECK(0, "%s: no setup at %ux%u: %s", FN[i], ww, wh, G.why ? G.why : "?"); break; }
+        VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f, .extent = { W, H, 1 }, .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT };
+        VkImage src; fg_mem sm = { 0 }; CHECK(!vkCreateImage(dev, &ci, NULL, &src) && fg_mem_get(dev, pd, src, &sm), "%s: the frame's image", FN[i]);
+        VkCommandBuffer cb = cb_begin(); ls_begin(&G, cb);
+        VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = src, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+        const VkClearColorValue grey = { { 0.4f, 0.5f, 0.6f, 1 } }; const VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        const VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { W, H, 1 } };
+        for (int k = 0; k < 4; k++) { int p = k & 1;
+            VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+            vkCmdClearColorImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, &grey, 1, &rg);
+            VkMemoryBarrier tb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &tb, 0, NULL, 0, NULL);
+            if (ws) { VkImageBlit b = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { W, H, 1 } }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)ww, (int32_t)wh, 1 } } };
+                      vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, G.c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR); }
+            else vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, G.c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+            if (ls_hud_ok(&G)) { vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, G.hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+                                 if (G.sfull.img) vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, G.sfull.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
+            ls_ingest(&G, cb, p); }
+        ls_generate(&G, cb, 1, 0); if (ls_hud_ok(&G)) ls_hud(&G, cb, 0);
+        cb_end(cb);
+        printf("FMT %-10s ran: working at %ux%u of %ux%u%s, HUD pass %s\n", FN[i], G.w, G.h, W, H, ws ? " (blit-scaled)" : "", ls_hud_ok(&G) ? "on" : "off");
+        vkDestroyImage(dev, src, NULL); fg_mem_put(dev, sm); }
     printf(fails ? "t_lsfg_vk: %d FAILED\n" : "t_lsfg_vk: all passed\n", fails);
     return fails != 0;
 }

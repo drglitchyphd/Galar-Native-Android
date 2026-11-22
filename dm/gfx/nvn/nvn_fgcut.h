@@ -48,6 +48,8 @@ static int fgc_init(fgc *c, VkDevice dev, VkPhysicalDevice pd) {
     { const char *e = getenv("DM_FG_CUT_TUNE"); float a, b, d; c->cell_diff = 0.08f; c->cut_share = 0.6f; c->cut_mean = 0.07f;
       if (e && sscanf(e, "%f,%f,%f", &a, &b, &d) == 3 && a > 0 && b > 0 && b <= 1 && d >= 0) { c->cell_diff = a; c->cut_share = b; c->cut_mean = d; } }
     VkPhysicalDeviceFeatures f; vkGetPhysicalDeviceFeatures(pd, &f);
+    { VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pd, &pp);   // fg_cut.comp runs 256 threads a group; Vulkan promises 128 (Mali-T830, VeriSilicon: simdev)
+      if (pp.limits.maxComputeWorkGroupInvocations < 256 || pp.limits.maxComputeWorkGroupSize[0] < 256) return fgc_fail(c, "the driver allows fewer than 256 threads a work group"); }
     VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
     if (vkCreateSampler(dev, &sci, NULL, &c->samp)) return fgc_fail(c, "no sampler");

@@ -99,6 +99,29 @@ static const char *ls_spv_check(const uint32_t *w, size_t n, int ix) {
     for (int b = 0, k = 0; k < 4 && !bad; k++) for (int j = 0; j < c[k]; j++, b++) if (got[b] != k + 1) { bad = "a binding of another kind than the chain gives"; break; }
     free(d); return bad;
 }
+// The work group a module declares (LocalSize, or LocalSizeId naming constants: the converted shaders use the latter) → s[3]; 0 when it declares none
+static int ls_spv_group(const uint32_t *w, size_t n, uint32_t s[3]) {
+    uint32_t id[3] = { 0 }; int have = 0; s[0] = s[1] = s[2] = 1;
+    for (size_t i = 5; i < n; ) { uint32_t op = w[i] & 0xffff, len = w[i] >> 16; if (!len || i + len > n) break;
+        if (op == 16 && len >= 6 && w[i + 2] == 17) { s[0] = w[i + 3]; s[1] = w[i + 4]; s[2] = w[i + 5]; have = 1; }        // OpExecutionMode LocalSize
+        else if (op == 331 && len >= 6 && w[i + 2] == 38) { id[0] = w[i + 3]; id[1] = w[i + 4]; id[2] = w[i + 5]; have = 2; }   // OpExecutionModeId LocalSizeId
+        i += len; }
+    if (have == 2) for (size_t i = 5; i < n; ) { uint32_t op = w[i] & 0xffff, len = w[i] >> 16; if (!len || i + len > n) break;
+        if (op == 43 && len >= 4) for (int k = 0; k < 3; k++) if (w[i + 2] == id[k]) s[k] = w[i + 3];   // OpConstant
+        i += len; }
+    return have != 0;
+}
+// The loaded shaders' work groups against the driver's limits: 255 and 302 run 32 x 32 = 1024 threads a group, which Mali-G52 / G57 / G68 / G77 / G78 / G310 / G710
+//   (384-512 on Arm's drivers), PowerVR Rogue / BXM and Maleoon (512) do not allow (simdev, VUID-RuntimeSpirv-x-06432). NULL when every one fits, else why not
+static const char *ls_group_lacks(const lsfg *g, VkPhysicalDevice pd) {
+    VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pd, &pp); const VkPhysicalDeviceLimits *L = &pp.limits;
+    for (int ix = 0; ix < LS_NSH; ix++) { uint32_t s[3];
+        if (!g->spv[ix] || !ls_spv_group(g->spv[ix], g->nspv[ix] / 4, s)) continue;
+        if ((uint64_t)s[0] * s[1] * s[2] > L->maxComputeWorkGroupInvocations || s[0] > L->maxComputeWorkGroupSize[0] || s[1] > L->maxComputeWorkGroupSize[1] || s[2] > L->maxComputeWorkGroupSize[2]) {
+            static char why[128]; snprintf(why, sizeof why, "the graphics driver allows %u threads a work group, shader %d needs %ux%ux%u", L->maxComputeWorkGroupInvocations, ls_id(ix), s[0], s[1], s[2]);
+            return why; } }
+    return NULL;
+}
 static void ls_unload(lsfg *g) { for (int i = 0; i < LS_NSH; i++) { free(g->spv[i]); g->spv[i] = NULL; g->nspv[i] = 0; } }
 // The 25 converted shaders from a folder (<id>.spv): 1, or 0 with g->why (nothing kept)
 static int ls_load(lsfg *g, const char *dir) {
@@ -141,6 +164,7 @@ static const char *ls_device_lacks(VkPhysicalDevice pd, int precise) {
     if (!f12.shaderFloat16) return "16-bit floats in shaders";
     if (!f13.maintenance4) return "maintenance4";
     if (!f2.features.shaderStorageImageWriteWithoutFormat) return "storage image writes without a format";
+    if (!f2.features.shaderImageGatherExtended) return "gathers with offsets (shaderImageGatherExtended)";   // (24 of the 25 declare ImageGatherExtended)
     if (!precise) return NULL;
     if (!p12.shaderRoundingModeRTEFloat16 || !p12.shaderRoundingModeRTEFloat32) return "round-to-even float control";
     if (!p12.shaderDenormFlushToZeroFloat32 || !p12.shaderDenormPreserveFloat16) return "denormal float control";
@@ -179,10 +203,25 @@ static int ls_img_make(lsfg *g, ls_img *i, VkFormat fmt, uint32_t w, uint32_t h,
 static VkFormat ls_unorm(VkFormat f) {
     return f == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : f == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : f == VK_FORMAT_A8B8G8R8_SRGB_PACK32 ? VK_FORMAT_A8B8G8R8_UNORM_PACK32 : f;
 }
-static int ls_fmt_ok(lsfg *g, VkFormat f) {
-    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g->pd, f, &fp); return (fp.optimalTilingFeatures & need) == need;
+// Every storage image of the 25 shaders (and ls_hud.comp's, fg_cutsel.comp's) is declared without a format: on Vulkan 1.3 each format written needs its own
+//   STORAGE_WRITE_WITHOUT_FORMAT, the device feature alone is not enough (VUID-vkCmdDispatch-OpTypeImage-07027). A driver without it on a format the chain writes:
+//   our own frame generation instead. (simdev cannot tell: gpuinfo's profiles carry no VkFormatProperties3, so every simulated GPU lacks it; see t_lsfg_vk.)
+//   NULL when f has all the chain needs, else what it lacks
+static const char *ls_fmt_lacks(VkPhysicalDevice pd, VkFormat f) {
+    VkFormatProperties3 f3 = { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 }; VkFormatProperties2 f2 = { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &f3 };
+    vkGetPhysicalDeviceFormatProperties2(pd, f, &f2);
+    const VkFormatFeatureFlags2 t = f3.optimalTilingFeatures;
+    if (!(t & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT)) return "storage images";
+    if (!(t & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT) || !(t & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)) return "linear filtering";
+    // (refused only where the device feature is off too: Lossless Scaling ran on a Galaxy S25+ in v0.67 without this check, and whether real drivers fill the per-format
+    //   bit in is unknown, the simulated set cannot say. A driver with the feature but without the bit is logged once and used)
+    if (!(t & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) {
+        VkPhysicalDeviceFeatures pf; vkGetPhysicalDeviceFeatures(pd, &pf);
+        if (!pf.shaderStorageImageWriteWithoutFormat) return "storage writes without a format";
+        static int said; if (!said++) fprintf(stderr, "[nvn-vk] Lossless Scaling: the driver has storage writes without a format but does not mark format %d for them: used anyway\n", (int)f); }
+    return NULL;
 }
+static int ls_fmt_ok(lsfg *g, VkFormat f) { return ls_fmt_lacks(g->pd, f) == NULL; }
 
 // ---- descriptor sets ----
 static VkDescriptorSet ls_set(lsfg *g, int id) {
@@ -230,6 +269,7 @@ static int ls_hud_base(lsfg *g) {
 static int ls_base(lsfg *g) {
     VkDevice dev = g->dev;
     for (int ix = 0; ix < LS_NSH; ix++) if (!g->spv[ix]) { g->why = "the Lossless Scaling shaders are not imported"; return 0; }
+    { const char *lack = ls_group_lacks(g, g->pd); if (lack) return ls_fail(g, lack); }
     for (int s = 0; s < 3; s++) { VkSamplerAddressMode am = s == LS_S_EDGE ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
         VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
             .addressModeU = am, .addressModeV = am, .addressModeW = am, .maxLod = VK_LOD_CLAMP_NONE, .borderColor = s == LS_S_WHITE ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
@@ -297,7 +337,9 @@ static int ls_setup_work(lsfg *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fm
         if (!ls_base(g)) return 0; }
     if (w < 64 || h < 64) { g->why = "the frame is too small"; return 0; }
     const VkFormat u = ls_unorm(fmt), R8 = VK_FORMAT_R8_UNORM, C8 = VK_FORMAT_R8G8B8A8_UNORM, F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
-    if (!ls_fmt_ok(g, u) || !ls_fmt_ok(g, R8) || !ls_fmt_ok(g, C8) || !ls_fmt_ok(g, F16)) return ls_fail(g, "the driver cannot use the frame's format, R8, RGBA8 or RGBA16F as a compute target");
+    { static const char *const nm[4] = { "the frame's format", "R8", "RGBA8", "RGBA16F" }; const VkFormat fs[4] = { u, R8, C8, F16 };
+      for (int i = 0; i < 4; i++) { const char *lack = ls_fmt_lacks(pd, fs[i]); if (!lack) continue;
+          static char why[128]; snprintf(why, sizeof why, "the graphics driver has no %s on %s (format %d)", lack, nm[i], (int)fs[i]); return ls_fail(g, why); } }
     ls_images_free(g);
     uint32_t fw = (uint32_t)((float)w * flow), fh = (uint32_t)((float)h * flow); fw = fw ? fw : 1; fh = fh ? fh : 1;
     int ok = 1;
