@@ -705,8 +705,9 @@ void mtl_init(void) {
       if (!(g_feat_have & SPV_NEED_GEOM) || !(g_feat_have & SPV_NEED_TESS))
           VLOG("shader stages this device lacks: %s%s%s (programs with them are skipped)", g_feat_have & SPV_NEED_GEOM ? "" : "geometry", !(g_feat_have & SPV_NEED_GEOM) && !(g_feat_have & SPV_NEED_TESS) ? ", " : "", g_feat_have & SPV_NEED_TESS ? "" : "tessellation"); }
     // The BC layer's set-up builds and runs its shaders on this GPU: a start that dies there leaves the marker, and later starts on this driver convert on the CPU
-    //   (DM_VK_BC_GPU=1 tries again)
-    if (!f2.features.textureCompressionBC) {
+    //   (DM_VK_BC_GPU=1 tries again). Not on Vulkan 1.0: its shader is SPIR-V 1.3 and bc_gpu.c makes its module itself, past vk_shader_module_10 (simdev t_vkdev,
+    //   Mali-G72 r14p0 profile: VUID-VkShaderModuleCreateInfo-pCode-08737); BC textures are converted on the CPU there
+    if (!f2.features.textureCompressionBC && g_api >= VK_API_VERSION_1_1) {
         const char *be = getenv("DM_VK_BC_GPU");
         if (mark_file(drv_mark("bc_gpu_crashed"), "", 0) && !be) VLOG("[RED] BC layer: the driver crashed setting it up at an earlier start: BC textures converted on the CPU (DM_VK_BC_GPU=1 tries again)");
         // PowerVR: its compute results already differ from the CPU's for some kinds at the start-up check, and objects came out purple on a Tensor G5 (#32, with
