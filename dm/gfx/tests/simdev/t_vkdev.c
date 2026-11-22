@@ -428,6 +428,85 @@ static void work(void) {
     printf("WORK pool route: %s\n", g_host_import ? "host import" : g_heapmap ? "dma-buf heap" : g_fdmap ? "fd export" : "driver memory moved onto the pool");
 }
 
+// ---- R11G11B10F, the format the Mali float-target tests change (DM_VK_B10_AS_RGBA16: drawn as RGBA16F; DM_VK_B10_NOCOMPRESS: its targets without framebuffer
+//   compression), through the engine's own paths, judged by the validation layer against the simulated GPU, and checked bit for bit: a render target made and
+//   cleared in a pass (the load op, then vkCmdClearAttachments), copied into a pool and back, a pool's every channel code copied in and out, a texture clear, a
+//   CPU-filled linear texture uploaded, CPU reads, a view in a 4-byte format; with the stand-in, an RGBA8 copy into it. Run with and without the switches
+static tex_t *b10_tex(pool_t *pl, uint8_t *mem, int fmt, uint32_t w, uint32_t h, int linear) {
+    tex_t *t = calloc(1, sizeof *t); t->magic = MAGIC('T', 'E', 'X', 0); t->d.target = NVN_TEXTURE_TARGET_2D; t->d.format = fmt; t->d.width = w; t->d.height = h; t->d.depth = 1; t->d.levels = 1;
+    t->d.flags = linear ? NVN_TEXTURE_FLAGS_LINEAR : NVN_TEXTURE_FLAGS_COMPRESSIBLE; if (linear) t->d.stride = w * 4;
+    nvn_tex_layout(&t->d, &t->L); t->pool = pl; t->off = mem - pl->mem; t->mem = mem; t->serial = nvn_new_serial(); mtl_tex_init(t);
+    return t;
+}
+static int b10_same(uint32_t a, uint32_t b) {   // packed texels equal, a NaN channel matching any NaN
+    for (int c = 0; c < 3; c++) { int mb = c == 2 ? 5 : 6, sh = c == 0 ? 0 : c == 1 ? 11 : 22; uint32_t m = c == 2 ? 0x3ff : 0x7ff, x = a >> sh & m, y = b >> sh & m;
+        int nx = (x >> mb) == 31 && (x & ((1u << mb) - 1)), ny = (y >> mb) == 31 && (y & ((1u << mb) - 1)); if (nx || ny ? !(nx && ny) : x != y) return 0; }
+    return 1;
+}
+static void b10_work(void) {
+    // the moved-mapping pool route cannot run on lavapipe (work's SIMGAP): there the memory is not made a pool and the copies through one are left out
+    int moved = !g_host_import && !g_fdmap && !g_heapmap;
+    if (moved) printf("SIMGAP b10: the pool route (moved mappings) cannot run on lavapipe: the copies through a pool left out, the rest runs\n");
+    // VK_EXT_image_compression_control listed by the profile but not lavapipe's: not enabled on the device (w_cd), so the engine must not use it here
+    if ((g_compctl || p_layout2) && !lvp_has_ext("VK_EXT_image_compression_control")) { g_compctl = 0; p_layout2 = NULL;
+        printf("SIMGAP b10: VK_EXT_image_compression_control is the profile's, not lavapipe's: DM_VK_B10_NOCOMPRESS takes its other route here\n"); }
+    size_t n = 1u << 20; uint8_t *mem = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(mem != MAP_FAILED, "b10 mmap"); if (mem == MAP_FAILED) return;
+    memset(mem, 0, n); g_step = "b10 pool"; if (!moved) mtl_pool_add(mem, n);
+    pool_t *pl = calloc(1, sizeof *pl); pl->magic = MAGIC('P', 'O', 'O', 'L'); pl->flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED; pl->mem = mem; pl->size = n;
+    // lavapipe's opaque-fd memory is the pool one page off (work's SIMGAP): there the checks of what the GPU read from or wrote into the pool are left out; the commands
+    //   still run (the validation layer judges them)
+    int pool_ok = 0; if (!moved) { mtl_sub_begin(); mtl_sub_fill((uint64_t)(uintptr_t)(mem + 0x8000), 4096, 0xB10B10B1u); uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+        uint32_t w0; memcpy(&w0, mem + 0x8000, 4); pool_ok = w0 == 0xB10B10B1u;
+        if (!pool_ok) printf("SIMGAP b10: the GPU does not see this pool where the CPU does (lavapipe's opaque-fd layout): the pool's checks are left out, its commands still run\n"); }
+    enum { W = 64 }; uint8_t *bufA = mem + 0x10000, *bufB = mem + 0x20000, *bufC = mem + 0x30000, *lin = mem + 0x40000;
+    uint32_t codes[W * W]; for (uint32_t i = 0; i < W * W; i++) codes[i] = (i & 0x7ff) | ((i * 7 + 3) & 0x7ff) << 11 | ((i * 13) & 0x3ff) << 22;   // (every R, G and B code)
+    memcpy(bufB, codes, sizeof codes); memcpy(lin, codes, sizeof codes);
+    tex_t *T1 = b10_tex(pl, mem + 0x80000, NVN_FORMAT_R11G11B10F, W, W, 0), *T5 = b10_tex(pl, mem + 0x90000, NVN_FORMAT_R11G11B10F, 16, 16, 0);
+    tex_t *T6 = b10_tex(pl, lin, NVN_FORMAT_R11G11B10F, W, W, 1), *T3 = b10_tex(pl, mem + 0xA0000, NVN_FORMAT_RGBA8, W, W, 0), *T4 = b10_tex(pl, mem + 0xB0000, NVN_FORMAT_R11G11B10F, W, W, 0);
+    // the commands, as hle_nvn.c records them: the target set, a clear (taken by the pass's load op), then a second clear inside the open pass
+    static uint64_t cmdbuf[512]; uint8_t *q = (uint8_t *)cmdbuf;
+    #define B10OP(op_, T, v) do { op_hdr h_ = { (op_), (uint32_t)((8 + sizeof(T) + 7) & ~7u) }; memcpy(q, &h_, 8); memset(q + 8, 0, h_.size - 8); memcpy(q + 8, &(v), sizeof(T)); q += h_.size; } while (0)
+    p_set_rt rt; memset(&rt, 0, sizeof rt); rt.n = 1; rt.color[0] = T1; B10OP(OP_SET_RT, p_set_rt, rt);
+    p_clear_color c1 = { 0, 0xf, { 0.25f, -1.0f, 8.0f, 0.0f } }; B10OP(OP_CLEAR_COLOR, p_clear_color, c1);
+    op_hdr end = { OP_END, 8 }; memcpy(q, &end, 8);
+    uint8_t *second = q + 8; q = second; p_clear_color c2 = { 0, 0xf, { 0.5f, 0.125f, 3.0f, 0.0f } }; B10OP(OP_CLEAR_COLOR, p_clear_color, c2); memcpy(q, &end, 8);
+    #undef B10OP
+    g_step = "b10 submission"; mtl_sub_begin();
+    mtl_exec((const uint8_t *)cmdbuf); CHECK(pass_begin(), "b10: the R11G11B10F target's pass did not begin");
+    if (P.open) CHECK((P.b10 & 1) == (b10_on() ? 1u : 0u) && P.cfmt[0] == (uint32_t)(b10_on() ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_B10G11R11_UFLOAT_PACK32),
+                      "b10: the pass's target format %u (stand-in mask %#x)", P.cfmt[0], P.b10);
+    mtl_exec(second); pass_end();
+    p_copy_b2t cp; memset(&cp, 0, sizeof cp); cp.r.width = W; cp.r.height = W; cp.r.depth = 1;
+    if (!moved) { cp.tex = T1; cp.src = (uint64_t)(uintptr_t)bufA; copy_b2t(&cp, 1);   // the cleared target into the pool (packed)
+                  cp.src = (uint64_t)(uintptr_t)bufB; copy_b2t(&cp, 0);                // every code from the pool into it (expanded)
+                  cp.src = (uint64_t)(uintptr_t)bufC; copy_b2t(&cp, 1); }              // and out again
+    p_clear_tex ct; memset(&ct, 0, sizeof ct); ct.tex = T5; ct.r.width = 16; ct.r.height = 16; ct.r.depth = 1; ct.mask = 0xf; ct.c.f[0] = -1; ct.c.f[1] = 0.5f; ct.c.f[2] = 3; ct.c.f[3] = 1; clear_tex(&ct);
+    if (b10_on()) {   // an RGBA8 texture (cleared) copied into the stand-in: then made what R11G11B10F holds
+        p_clear_tex c3; memset(&c3, 0, sizeof c3); c3.tex = T3; c3.r.width = W; c3.r.height = W; c3.r.depth = 1; c3.mask = 0xf; c3.c.f[0] = 1; c3.c.f[1] = 0; c3.c.f[2] = 1; c3.c.f[3] = 1; clear_tex(&c3);
+        p_copy_t2t tt; memset(&tt, 0, sizeof tt); tt.src = T3; tt.dst = T4; tt.sr.width = tt.dr.width = W; tt.sr.height = tt.dr.height = W; tt.sr.depth = tt.dr.depth = 1; copy_t2t(&tt); }
+    uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+    // a view of the target in a 4-byte format (an image that is the stand-in: viewed as itself)
+    { vtex *x = tex_res(T1); uint8_t sw[4] = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+      CHECK(x && view_get(x, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 0, 1, 0, 1, sw, VK_IMAGE_ASPECT_COLOR_BIT) != VK_NULL_HANDLE, "b10: a view of the target in a 4-byte format"); }
+    // the checks: the clear (as R11G11B10F stores it), every code through the pool, the texture clear, the upload, the RGBA8 copy
+    uint32_t qc = b10_float_to_chan(0.5f, B10_MR) | b10_float_to_chan(0.125f, B10_MR) << 11 | b10_float_to_chan(3.0f, B10_MB) << 22, q5 = b10_float_to_chan(-1, B10_MR) | b10_float_to_chan(0.5f, B10_MR) << 11 | b10_float_to_chan(3, B10_MB) << 22;
+    int bad[6] = { 0 }; uint32_t got[W * W]; NVNcopyRegion r = { 0, 0, 0, W, W, 1 }, r16 = { 0, 0, 0, 16, 16, 1 };
+    for (int i = 0; i < W * W; i++) { uint32_t a, cc; memcpy(&a, bufA + 4 * i, 4); memcpy(&cc, bufC + 4 * i, 4); bad[0] += !b10_same(a, qc); bad[1] += !b10_same(cc, codes[i]); }
+    mtl_read_texels(T1, 0, 0, &r, (uint8_t *)got, W * 4, W * W * 4); for (int i = 0; i < W * W; i++) bad[2] += !b10_same(got[i], codes[i]);
+    mtl_read_texels(T5, 0, 0, &r16, (uint8_t *)got, 16 * 4, 16 * 16 * 4); for (int i = 0; i < 16 * 16; i++) bad[3] += !b10_same(got[i], q5);
+    mtl_read_texels(T6, 0, 0, &r, (uint8_t *)got, W * 4, W * W * 4); for (int i = 0; i < W * W; i++) bad[4] += !b10_same(got[i], codes[i]);
+    if (b10_on()) { uint32_t m = b10_float_to_chan(1, B10_MR) | b10_float_to_chan(1, B10_MB) << 22; mtl_read_texels(T4, 0, 0, &r, (uint8_t *)got, W * 4, W * W * 4); for (int i = 0; i < W * W; i++) bad[5] += !b10_same(got[i], m); }
+    if (!pool_ok) bad[0] = bad[1] = bad[2] = 0;   // (the SIMGAP above: what the GPU read from the pool and wrote into it is somewhere else)
+    CHECK(!bad[0], "b10: the cleared target copied into the pool: %d of %d texels not (0.5, 0.125, 3)", bad[0], W * W);
+    CHECK(!bad[1], "b10: every channel code through the target and back into the pool: %d of %d texels differ", bad[1], W * W);
+    CHECK(!bad[2], "b10: the CPU's read of the target holding every code: %d of %d texels differ", bad[2], W * W);
+    CHECK(!bad[3], "b10: the texture clear (-1, 0.5, 3) read by the CPU: %d of 256 texels differ", bad[3]);
+    CHECK(!bad[4], "b10: the CPU-filled linear texture uploaded and read back: %d of %d texels differ", bad[4], W * W);
+    CHECK(!bad[5], "b10: the RGBA8 texture copied into the stand-in: %d of %d texels not (1, 0, 1)", bad[5], W * W);
+    printf("WORK b10: R11G11B10F %s%s: clears, copies through a pool, upload, CPU reads%s: %s%s\n", b10_on() ? "as its RGBA16F stand-in" : "as itself", g_b10nc ? (g_compctl ? ", targets with compression disabled" : ", targets mutable with no format list") : "",
+           b10_on() ? ", an RGBA8 copy into it" : "", bad[0] + bad[1] + bad[2] + bad[3] + bad[4] + bad[5] ? "WRONG" : "exact", pool_ok ? "" : " (the pool's checks left out: SIMGAP)");
+}
+
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -447,7 +526,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) work();
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); g_step = "b10"; b10_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
