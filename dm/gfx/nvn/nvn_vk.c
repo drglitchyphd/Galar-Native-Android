@@ -3365,6 +3365,7 @@ static int g_cap_wait, g_cap_n, g_cap_layout, g_cap_draws, g_cap_ntex; static in
 //   fragment shader: on a GPU whose scene comes out white (Mali, #47 / #53 / #64 / #68 / #69) the first draw that leaves them at the format's maximum names the shader
 enum { CAPD = 128 };
 static int g_cap_dp, g_cap_nd; static char g_cap_dkey[CAPD][17];   // g_cap_dp: 0 not chosen yet, 1 in that pass, 2 done
+static VkFormat g_cap_dfmt;   // that pass's colour 0 as stored: B10G11R11, or the RGBA16F stand-in (DM_VK_B10_AS_RGBA16)
 static VkImage g_cap_img; static vmalloc_t g_cap_ia; static VkBuffer g_cap_buf; static vmalloc_t g_cap_ba;
 static char *g_cap_meta; static size_t g_cap_len, g_cap_size; static uint64_t g_cap_frame;
 static void cap_printf(const char *f, ...) {
@@ -3398,7 +3399,7 @@ static void cap_pass(void) {
         uint32_t lv = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0, ly = R.rt.has_cview[i] && R.rt.cview[i].set_layers ? R.rt.cview[i].min_layer : 0;
         VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, x->fmt, &fp);
         const char *skip = x->samples > 1 ? "multisampled" : fmt_int_class(x->fmt) ? "integer format" : !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ? "format cannot be blitted" : g_cap_n >= CAPN ? "no room left" : NULL;
-        cap_printf("  colour %d: vk %d (nvn %#x) %ux%u level %u layer %u%s", i, x->fmt, ct->d.format, x->w, x->h, lv, ly, x->is3d ? " (3D)" : "");
+        cap_printf("  colour %d: vk %d (nvn %#x) %ux%u level %u layer %u%s%s", i, x->fmt, ct->d.format, x->w, x->h, lv, ly, x->is3d ? " (3D)" : "", b10_swapped_tex(x) ? " (R11G11B10F stored as RGBA16F)" : "");
         {   uint32_t tb = fmt_texel_bytes(x->fmt);
             if (tb && x->samples <= 1 && g_cap_ns < CAPS) {   // values.txt: the pixels' own numbers (the pictures clamp everything above 1.0 to white)
                 uint32_t sw = x->w >> lv ? x->w >> lv : 1, sh = x->h >> lv ? x->h >> lv : 1; VkBufferImageCopy pc[CAPP];
@@ -3472,12 +3473,14 @@ static void cap_write(void) {
                 }
                 if (g_cap_nd && len + 512 < cap) {   // draw by draw in the first lit pass (cap_draw_values): colour 0 (B10G11R11) after each draw
                     const uint8_t *dv = sv + (size_t)CAPS * CAPP * 16;
-                    len += (size_t)snprintf(t + len, cap - len, "\nDraw by draw, the frame's first full-screen B10G11R11 pass: its colour 0 at the same 12 points after each of its first %d draws."
-                                                                 "\n'max' counts the points at the format's maximum (65024: overflow); then the fragment shader and the 12 values.\n", g_cap_nd);
+                    len += (size_t)snprintf(t + len, cap - len, "\nDraw by draw, the frame's first full-screen B10G11R11 pass%s: its colour 0 at the same 12 points after each of its first %d draws."
+                                                                 "\n'max' counts the points at the format's maximum (65024: overflow); then the fragment shader and the 12 values.\n",
+                                            g_cap_dfmt == VK_FORMAT_R16G16B16A16_SFLOAT ? " (stored as RGBA16F: DM_VK_B10_AS_RGBA16; 'max' counts 60000 and up, infinity and NaN)" : "", g_cap_nd);
                     for (int d = 0; d < g_cap_nd && len + 1024 < cap; d++) {
                         float v[CAPP][3]; int nmax = 0;
-                        for (int k = 0; k < CAPP; k++) { uint32_t w; memcpy(&w, dv + ((size_t)d * CAPP + (size_t)k) * 16, 4); uint32_t c[3] = { w & 0x7ff, w >> 11 & 0x7ff, w >> 22 }; int mb[3] = { 6, 6, 5 };
-                            for (int j = 0; j < 3; j++) { uint32_t e = c[j] >> mb[j], m = c[j] & ((1u << mb[j]) - 1); v[k][j] = e == 31 ? (m ? NAN : INFINITY) : e ? ldexpf(1.0f + m / (float)(1u << mb[j]), (int)e - 15) : ldexpf(m / (float)(1u << mb[j]), -14); }
+                        for (int k = 0; k < CAPP; k++) { const uint8_t *q = dv + ((size_t)d * CAPP + (size_t)k) * 16;
+                            if (g_cap_dfmt == VK_FORMAT_R16G16B16A16_SFLOAT) { for (int j = 0; j < 3; j++) { uint16_t h; memcpy(&h, q + 2 * j, 2); v[k][j] = b10_half_to_float(h); } }   // (the stand-in's texels)
+                            else { uint32_t w; memcpy(&w, q, 4); for (int j = 0; j < 3; j++) v[k][j] = b10_chan_to_float(j == 0 ? w & 0x7ff : j == 1 ? w >> 11 & 0x7ff : w >> 22, j == 2 ? B10_MB : B10_MR); }
                             if (v[k][0] >= 6e4f || v[k][1] >= 6e4f || v[k][2] >= 6e4f || isnan(v[k][0]) || isnan(v[k][1]) || isnan(v[k][2])) nmax++; }
                         len += (size_t)snprintf(t + len, cap - len, "draw %3d, max %2d, fragment %s:", d + 1, nmax, g_cap_dkey[d]);
                         for (int k = 0; k < CAPP; k++) len += (size_t)snprintf(t + len, cap - len, " (%.3g %.3g %.3g)", v[k][0], v[k][1], v[k][2]);
@@ -4657,7 +4660,7 @@ static void cap_draw_values(void) {
     if (!P.open || P_tf || g_cap_nd >= CAPD) return;
     const tex_t *ct = R.rt.color[0]; vtex *x = ct ? tex_res(ct) : NULL; if (!x || !x->img || x->samples > 1) return;
     sk_read(x);
-    if (!g_cap_dp) { if (x->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || P.tw < 640) return; g_cap_dp = 1; }
+    if (!g_cap_dp) { if ((x->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 && !b10_swapped_tex(x)) || P.tw < 640) return; g_cap_dp = 1; g_cap_dfmt = x->fmt; }   // (the stand-in: the same pass, DM_VK_B10_AS_RGBA16)
     uint32_t lv = R.rt.has_cview[0] && R.rt.cview[0].set_levels ? R.rt.cview[0].base_level : 0, ly = R.rt.has_cview[0] && R.rt.cview[0].set_layers ? R.rt.cview[0].min_layer : 0;
     uint32_t sw = x->w >> lv ? x->w >> lv : 1, sh = x->h >> lv ? x->h >> lv : 1; VkBufferImageCopy pc[CAPP];
     for (int k = 0; k < CAPP; k++) pc[k] = (VkBufferImageCopy){ .bufferOffset = (VkDeviceSize)CAPN * CAPW * CAPH * 4 + (VkDeviceSize)CAPS * CAPP * 16 + ((VkDeviceSize)g_cap_nd * CAPP + (VkDeviceSize)k) * 16,

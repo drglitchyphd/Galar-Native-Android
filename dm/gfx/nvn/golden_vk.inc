@@ -162,6 +162,7 @@ static void gv_readback(vtex *x, const tex_t *t) {
                 o += px * 4; }
             if (stencil) { memcpy(o, (const uint8_t *)m + rg[r++].bufferOffset, px); o += px; } } }
     vkDestroyBuffer(g_dev, b, NULL); vk_free(a);
+    // (R11G11B10F's RGBA16F stand-in, DM_VK_B10_AS_RGBA16, is recorded as it is: vkfmt RGBA16F, nvnfmt 0x3F; golden_be_tex_fill converts for a replay without the test)
     golden_texi h; memset(&h, 0, sizeof h); h.t = *t; h.vkfmt = x->fmt; h.nvnfmt = x->nvn_fmt; h.w = x->w; h.h = x->h; h.d = x->d; h.levels = x->levels < 16 ? x->levels : 16;
     h.layers = x->layers; h.samples = x->samples; h.is3d = (uint32_t)x->is3d; h.kind = depth || stencil ? 1 : 0; h.has_stencil = (uint32_t)stencil; h.bpe = bpe;
     if (!depth && stencil) h.kind = 2;   // (stencil only: no depth floats)
@@ -200,7 +201,18 @@ int golden_be_tex_fill(const golden_texi *h, const uint8_t *data, size_t n) {
     if (x->w != h->w || x->h != h->h || x->levels != h->levels || (x->is3d ? x->d != h->d : x->layers != h->layers) || (h->kind == 0) != (!depth && !stencil)) {
         VLOG("[RED] golden: texture ser=%llu is %ux%ux%u, %u levels here, %ux%ux%u, %u levels recorded: not filled", (unsigned long long)h->t.serial, x->w, x->h, x->is3d ? x->d : x->layers, x->levels, h->w, h->h, h->is3d ? h->d : h->layers, h->levels);
         return 0; }
-    if (h->kind == 0 && ((int)x->fmt != h->vkfmt && gv_fmt_bpe(x->fmt) != h->bpe)) { VLOG("[RED] golden: texture ser=%llu: format %d here, %d recorded: not filled", (unsigned long long)h->t.serial, x->fmt, h->vkfmt); return 0; }
+    // R11G11B10F recorded in one form and replayed in the other (DM_VK_B10_AS_RGBA16 on in one run only: the packed format, or its RGBA16F stand-in): converted (b10_conv.h)
+    golden_texi hc; uint8_t *conv = NULL;
+    if (h->kind == 0 && h->nvnfmt == 0x3F && (int)x->fmt != h->vkfmt && ((x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT && h->vkfmt == VK_FORMAT_B10G11R11_UFLOAT_PACK32) ||
+                                                                        (x->fmt == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && h->vkfmt == VK_FORMAT_R16G16B16A16_SFLOAT))) {
+        size_t px = 0; for (uint32_t l = 0; l < x->levels && l < 16; l++) { gv_lv v; gv_level(x, l, &v); px += (size_t)v.w * v.h * v.n; }
+        int expand = x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT; size_t need = px * (expand ? 4 : 8);
+        if (need > n || !(conv = malloc(px * (expand ? 8 : 4) + 1))) { VLOG("[RED] golden: texture ser=%llu: %zu bytes recorded, %zu needed", (unsigned long long)h->t.serial, n, need); return 0; }
+        if (expand) b10_rows_expand(data, px * 4, (uint32_t)px, 1, conv, px * 8); else b10_rows_pack(data, px * 8, (uint32_t)px, 1, conv, px * 4);
+        hc = *h; hc.vkfmt = (int32_t)x->fmt; hc.bpe = expand ? 8 : 4; h = &hc; data = conv; n = px * hc.bpe;
+        static int said; if (!said++) VLOG("golden: an R11G11B10F texture recorded as %s, replayed as %s: converted", expand ? "the packed format" : "its RGBA16F stand-in", expand ? "the stand-in" : "the packed format");
+    }
+    if (h->kind == 0 && ((int)x->fmt != h->vkfmt && gv_fmt_bpe(x->fmt) != h->bpe)) { VLOG("[RED] golden: texture ser=%llu: format %d here, %d recorded: not filled", (unsigned long long)h->t.serial, x->fmt, h->vkfmt); free(conv); return 0; }
     uint32_t db = depth ? gv_depth_bytes(x->fmt) : 0;
     VkBufferImageCopy rg[32]; uint32_t nr = 0; VkDeviceSize off = 0; size_t in = 0;
     for (uint32_t l = 0; l < x->levels && l < 16; l++) { gv_lv v; gv_level(x, l, &v); VkDeviceSize px = (VkDeviceSize)v.w * v.h * v.n;
@@ -209,9 +221,9 @@ int golden_be_tex_fill(const golden_texi *h, const uint8_t *data, size_t n) {
         if (h->kind == 1) { if (depth) { sub.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; rg[nr++] = (VkBufferImageCopy){ off, 0, 0, sub, {0, 0, 0}, ext }; off = (off + px * db + 3) & ~(VkDeviceSize)3; } in += px * 4; }
         if (h->has_stencil) { if (stencil) { sub.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT; rg[nr++] = (VkBufferImageCopy){ off, 0, 0, sub, {0, 0, 0}, ext }; off = (off + px + 3) & ~(VkDeviceSize)3; } in += px; }
     }
-    if (in > n) { VLOG("[RED] golden: texture ser=%llu: %zu bytes recorded, %zu needed", (unsigned long long)h->t.serial, n, in); return 0; }
+    if (in > n) { VLOG("[RED] golden: texture ser=%llu: %zu bytes recorded, %zu needed", (unsigned long long)h->t.serial, n, in); free(conv); return 0; }
     vmalloc_t a; void *m; VkBuffer b = buf_make(off ? off : 16, &a, &m);
-    if (h->kind == 0) memcpy(m, data, in);
+    if (h->kind == 0) { memcpy(m, data, in); free(conv); conv = NULL; }   // (a converted copy: not read after this)
     else { const uint8_t *s = data; uint32_t r = 0;
         for (uint32_t l = 0; l < x->levels && l < 16; l++) { gv_lv v; gv_level(x, l, &v); size_t px = (size_t)v.w * v.h * v.n;
             if (h->kind == 1) { if (depth) { uint8_t *d = (uint8_t *)m + rg[r++].bufferOffset;
