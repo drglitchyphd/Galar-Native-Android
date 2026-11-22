@@ -15,6 +15,7 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct { int16_t sp, form; int8_t st; } g_cell[NCELL]; static int g_ncell;   // st: 0 asked, 1 drawn, -1 no icon
 static char g_dir[1024]; static int g_dir_tried;
 static char (*g_files)[96]; static int g_nfiles;
+static char (*g_inner)[64];   // v65: the name of the texture inside each file (Steven, Nov 22: the file numbers are not the Pokémon: poke_icon_0819 holds Mimikyu)
 static int g_lines;
 #define ILOG(...) do { if (g_lines < 80) { g_lines++; LOG(__VA_ARGS__); } } while (0)
 
@@ -38,6 +39,16 @@ static int find_dir(const char *d, int depth) {   // a folder holding poke_icon_
     for (int i = 0; i < ns; i++) { char p[1024]; snprintf(p, sizeof p, "%s/%s", d, sub[i]); struct stat st; if (!stat(p, &st) && S_ISDIR(st.st_mode) && find_dir(p, depth - 1)) return 1; }
     return 0;
 }
+static uint8_t *read_file(const char *path, size_t *n);
+// the first texture's name in a BNTX (BRTI +0x60: a string entry, u16 length then the characters)
+static int bntx_name(const uint8_t *d, size_t n, char *out, size_t on) {
+    out[0] = 0; if (n < 0x40 || memcmp(d, "BNTX", 4)) return 0;
+    const uint8_t *nx = NULL; for (size_t o = 0x20; o + 0x28 <= n && o < 0x100; o += 4) if (!memcmp(d + o, "NX  ", 4)) { nx = d + o; break; }
+    if (!nx || rd32(nx + 4) < 1) return 0;
+    uint64_t pa = rd64(nx + 8); if (pa + 8 > n) return 0; uint64_t bi = rd64(d + pa); if (bi + 0x78 > n || memcmp(d + bi, "BRTI", 4)) return 0;
+    uint64_t np = rd64(d + bi + 0x60); if (np + 2 > n) return 0; size_t L = rd16(d + np); if (np + 2 + L > n || L >= on) return 0;
+    memcpy(out, d + np + 2, L); out[L] = 0; return 1;
+}
 static void index_dir(void) {
     g_dir_tried = 1; char p[1024]; romfs_path(p, sizeof p, "bin/appli/icon_pokemon");
     if (!find_dir(p, 0)) { romfs_path(p, sizeof p, "bin"); if (!find_dir(p, 4)) { ILOG("[FORK] icons: no poke_icon_*.bntx found in RomFS: no icons"); return; } }
@@ -47,12 +58,23 @@ static void index_dir(void) {
         snprintf(g_files[g_nfiles++], 96, "%s", e->d_name); }
     if (D) closedir(D);
     ILOG("[FORK] icons: %d icon files in %s", g_nfiles, g_dir);
+    // v65: each file's texture name (it says which Pokémon it is); icon_file matches on it first
+    g_inner = calloc((size_t)(g_nfiles ? g_nfiles : 1), 64); int named = 0, differ = 0; uint64_t t0 = now_ns();
+    for (int i = 0; g_inner && i < g_nfiles; i++) { char p2[1200]; snprintf(p2, sizeof p2, "%s/%s", g_dir, g_files[i]); size_t n = 0; uint8_t *d = read_file(p2, &n);
+        if (d && bntx_name(d, n, g_inner[i], 64)) { named++; if (strncmp(g_inner[i], g_files[i], strlen(g_inner[i])) && differ++ < 12) ILOG("[FORK] icons: %s holds texture %s", g_files[i], g_inner[i]); }
+        free(d); }
+    ILOG("[FORK] icons: %d texture names read, %d differ from their file's name (%.1f s)", named, differ, (now_ns() - t0) / 1e9);
     for (int i = 0; i < g_nfiles && i < 16; i++) ILOG("[FORK] icons: file %s", g_files[i * (g_nfiles / 16 + 1) % g_nfiles]);   // (v62: a spread of names)
 }
 // the file for a species / form. v62: Sword names them poke_icon_SSSS_FFg_x.bntx (Steven's v61 log: "poke_icon_0000_00s_n.bntx": a 2-digit form, then the
 //   gender (s both / m / f), then n (normal; g Gigantamax?)): the m / s one, then any
 static const char *icon_file(int sp, int form) {
     char pre[32]; snprintf(pre, sizeof pre, "poke_icon_%04d_%02d", sp, form); size_t L = strlen(pre); const char *best = NULL; int bs = -1;
+    if (g_inner) {   // v65: by the texture's own name (the same pattern), when the files carry names
+        for (int i = 0; i < g_nfiles; i++) { const char *f = g_inner[i]; if (strncmp(f, pre, L)) continue; char gch = f[L]; if (gch >= '0' && gch <= '9') continue;
+            int s = 0; size_t n = strlen(f); if (n > 2 && !strcmp(f + n - 2, "_n")) s += 4; if (gch == 's' || gch == 'm') s += 2;
+            if (s > bs) { bs = s; best = g_files[i]; } }
+        if (best) return best; }
     for (int i = 0; i < g_nfiles; i++) { const char *f = g_files[i]; if (strncmp(f, pre, L)) continue;
         char gch = f[L]; if (gch >= '0' && gch <= '9') continue;   // (a longer form number: another form)
         int s = 0; size_t n = strlen(f); if (n > 7 && !strcmp(f + n - 7, "_n.bntx")) s += 4; if (gch == 's' || gch == 'm') s += 2;

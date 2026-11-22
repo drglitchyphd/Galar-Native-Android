@@ -111,7 +111,8 @@ void dm_fork_dex_weather_next(void) __attribute__((weak));
 volatile int dm_fork_dex_on;   // host/fork_dex.c reads game memory only while this is set
 static int g_dex_on = -1, g_dex_open, g_dex_ready; static float g_dex_scroll, g_dex_scroll0; static dm_fork_dex_info g_dex_now;   // (v58: folded until there is a list: it opens by itself once, then taps decide)
 static int dex_on(void) { if (g_dex_on < 0) { const char *e = getenv("DM_FORK_AREADEX"); g_dex_on = e && !strcmp(e, "on"); dm_fork_dex_on = g_dex_on; g_enc_census = g_enc_census || g_dex_on; census_sync(); } return g_dex_on; }
-static int dex_live(void) { return dex_on() && dm_fork_dex_get && g_dex_now.active && screen_kind() == 0 && !enc_live(); }
+// (v65, Steven Nov 22: it came up in battles while an attack animation hid the battle HUD: hidden until the HUD has been gone 10 s)
+static int dex_live(void) { return dex_on() && dm_fork_dex_get && g_dex_now.active && screen_kind() == 0 && !enc_live() && (!&dm_fork_battle_age || atomic_load(&dm_fork_battle_age) > 300); }
 static void dex_rect(float r4[4], int list_only);   // (below, with the drawing)
 static float pan_ch(int c);
 // the panels (encounter, area dex): which one a finger dragged, and from where
