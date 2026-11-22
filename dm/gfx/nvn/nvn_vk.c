@@ -746,7 +746,7 @@ void mtl_init(void) {
         if (mark_file(drv_mark("bc_gpu_crashed"), "", 0) && !be) VLOG("[RED] BC layer: the driver crashed setting it up at an earlier start: BC textures converted on the CPU (DM_VK_BC_GPU=1 tries again)");
         // PowerVR: its compute results already differ from the CPU's for some kinds at the start-up check, and objects came out purple on a Tensor G5 (#32, with
         //   reflections on and off): every BC texture converted on the CPU there unless DM_VK_BC_GPU=1
-        else if (g_props.vendorID == 0x1010 && !(be && atoi(be) > 0)) VLOG("BC layer: off on PowerVR (BC textures converted on the CPU; DM_VK_BC_GPU=1 turns it on)");
+        else if (quirk_note(Q_BC_GPU_OFF, quirk_default(Q_BC_GPU_OFF, &g_gpuid) && !(be && atoi(be) > 0), be != NULL)) VLOG("BC layer: off on PowerVR (BC textures converted on the CPU; DM_VK_BC_GPU=1 turns it on)");
         else {
             mark_file(drv_mark("bc_gpu_crashed"), "setting up the BC layer (its shaders built and checked on this GPU); if this file is still here the driver crashed doing so, and later starts convert on the CPU\n", 1);
             bc_gpu_info bi = { g_dev, g_q, g_qf, vkGetDeviceProcAddr, &g_memp, vk_logf }; g_bcgpu = bc_gpu_init(&bi) ? 7 : 0;
