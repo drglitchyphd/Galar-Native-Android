@@ -407,6 +407,12 @@ Record the frame's passes	Gravar os passes do quadro
 For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Para cenas lentas: feche este menu em até 3 segundos e fique onde o jogo está lento. Os passes de renderização de três quadros, com o tempo de GPU quando o telefone informa, são salvos em Download (um arquivo terminado em framegraph.txt). Anexe à sua issue.
 Recording in 3 seconds: close the menu.	Gravando em 3 segundos: feche o menu.
 Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	Esquerda: Automático, o que a configuração de Gráficos dá, reduzido sozinho quando o telefone esquenta. Mais baixo: mais frio e rápido, o 3D mais suave; texto e menus continuam nítidos.
+Lossless Scaling pictures	Imagens do Lossless Scaling
+2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: uma imagem entre cada dois quadros do jogo (30 fps se movem como 60)
+3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: duas imagens entre cada dois quadros (como 90 fps; uniforme só numa tela de 90 Hz)
+4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: três imagens entre cada dois quadros (como 120 fps; precisa de uma tela de 120 Hz e uma GPU rápida)
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto: quantas a taxa da tela permitir (um jogo a 30 fps: 4x a 120 Hz, 3x a 90 Hz, 2x a 60 Hz)
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	Pausada: aqui o jogo roda a %s fps, abaixo da taxa de quadros configurada. Volta sozinha quando o jogo a mantém de novo.
 Mode	Modo
 Auto: as the Graphics setting decides	Auto: o que o ajuste de Gráficos decidir
 Quality	Qualidade
@@ -478,4 +484,6 @@ Normal: as the game is made	Normal: como o jogo foi feito
 Low: softer shadows, lighter on the GPU (from the next start)	Baixas: sombras mais suaves, menos carga na GPU (a partir do próximo início)
 Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	Mínimas: sombras suaves só perto, sem sombras distantes: o mais leve (a partir do próximo início)
 How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	Até onde a grama e os detalhes do campo são desenhados (a partir do próximo início). Menos: mais leve e frio. Mais: mais detalhe ao longe, mais carga na GPU.
+Dynamic	Dinâmico
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinâmico: 60 onde o celular consegue, 30 onde não, com a imagem completa; a velocidade do jogo fica certa
 Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	A geração de quadros do Lossless Scaling não roda neste celular, então a do próprio app é usada no lugar (o log diz por quê).

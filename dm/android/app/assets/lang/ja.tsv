@@ -407,6 +407,15 @@ Record the frame's passes	フレームのパスを記録
 For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	重い場面向け：3秒以内にこのメニューを閉じ、ゲームが重い場所にとどまってください。3フレーム分の描画パス（端末が対応していればGPU時間付き）がダウンロードに保存されます（framegraph.txt で終わるファイル）。issue に添付してください。
 Recording in 3 seconds: close the menu.	3秒後に記録します：メニューを閉じてください。
 Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	左端：自動（グラフィック設定どおり、端末が熱いと自動で下げます）。下げるほど発熱が減り速くなり、3Dはやわらかくなります。文字やメニューはくっきりのままです。
+Lossless Scaling pictures	Lossless Scalingの生成枚数
+2x: one picture between each two of the game's frames (30 fps moves like 60)	2x：ゲームの2つのフレームの間に1枚（30 fpsが60のように動きます）
+3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x：2つのフレームの間に2枚（90 fps相当。均一になるのは90 Hzの画面のみ）
+4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x：2つのフレームの間に3枚（120 fps相当。120 Hzの画面と高速なGPUが必要）
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	オフ：最も軽い設定でも、ここではゲーム自身のフレームを奪っていました（%s fpsまで低下）。オフにしてからオンにすると再試行します。
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	オフ：このGPUは1枚の画像に%s msかかり、ゲームが割ける時間を超えています。オフにしてからオンにすると再試行します。
+Off until the next start (see the log for why).	次回の起動までオフ（理由はログにあります）。
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	自動：画面のリフレッシュレートに合わせて最大まで（30 fps のゲームなら 120 Hz で 4x、90 Hz で 3x、60 Hz で 2x）
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	一時停止中：ここではゲームが %s fps で、設定したフレームレートを下回っています。ゲームが再びそのレートを保つと自動で再開します。
 Mode	モード
 Auto: as the Graphics setting decides	自動：グラフィック設定に従います
 Quality	画質優先
@@ -478,4 +487,6 @@ Normal: as the game is made	標準：ゲーム本来の設定
 Low: softer shadows, lighter on the GPU (from the next start)	低：影が柔らかくなり、GPUの負荷が減ります（次回起動から）
 Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	最低：近くの影だけ（柔らかめ）、遠くの影なし：最も軽い（次回起動から）
 How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	草やフィールドの細部を描く距離です（次回起動から）。低い：軽く、発熱が少ない。高い：遠くまで細かく、GPUの負荷が増えます。
+Dynamic	ダイナミック
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます
 Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	この端末では Lossless Scaling のフレーム生成を使えないため、代わりにアプリ独自のフレーム生成を使います（理由はログを参照）。

@@ -89,7 +89,8 @@ int dm_res_scale_applies(void) { return g_applies; }
 // The scale the 3D is drawn at (what the game asks, times the guard's factor, under the cap; float bits, 0 = not known yet): frame generation's work size
 //   (nvn_vk.c fg_work_scale) follows it, so it makes its pictures at the size the 3D really has
 static _Atomic uint32_t g_scene_bits;
-float dm_scene_scale(void) { uint32_t b = g_scene_bits; float f; memcpy(&f, &b, sizeof f); return b ? f : 1.0f; }
+float dm_arc_scene_scale(void);   // (loader.c: Legends: Arceus's own render scale word; 0 in the other games)
+float dm_scene_scale(void) { float arc = dm_arc_scene_scale(); if (arc > 0) return arc; uint32_t b = g_scene_bits; float f; memcpy(&f, &b, sizeof f); return b ? f : 1.0f; }
 
 void dm_res_scale_tick(void) {
     static float game = -1, wrote = -1; static uint64_t n; static int nlog, was_mode = -2, nmode;
