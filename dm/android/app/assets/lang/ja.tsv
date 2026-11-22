@@ -360,6 +360,7 @@ Off: the framebuffer compression the driver chooses	オフ：ドライバーが�
 Mali: the white-screen fix did not take; trying the second fix at the next start	Mali：白い画面の修正が効きませんでした。次回の起動時に2つ目の修正を試します
 Mali: the white-screen fix did not take; the next start tries the other fix again	Mali：白い画面の修正が効きませんでした。次回の起動時にもう一方の修正をもう一度試します
 Mali: a test switch in the settings overrides the white-screen fix	Mali：設定のテスト用スイッチが白い画面の修正より優先されています
+Mali: a test switch in the settings (%s) overrides the white-screen fix	Mali：設定のテスト用スイッチ（%s）が白い画面の修正より優先されています
 Mali: neither white-screen fix took; the next start offers the PanVK driver	Mali：白い画面の修正はどちらも効きませんでした。次回の起動時にPanVKドライバーを提案します
 White screen on this phone's own driver	この端末のドライバーで画面が白くなります
 On this phone's own Mali driver (%s), %s drew its lit scenes white, and both of the app's fixes were tried at earlier starts without success.	この端末のMaliドライバー（%s）では、%sの明るい場面が白く描画され、アプリの2つの修正も以前の起動で試しましたが効果がありませんでした。

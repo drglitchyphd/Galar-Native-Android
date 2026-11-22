@@ -360,6 +360,7 @@ Off: the framebuffer compression the driver chooses	Desligado: a compressão de 
 Mali: the white-screen fix did not take; trying the second fix at the next start	Mali: a correção da tela branca não funcionou; a segunda correção será testada no próximo início
 Mali: the white-screen fix did not take; the next start tries the other fix again	Mali: a correção da tela branca não funcionou; o próximo início testará a outra correção de novo
 Mali: a test switch in the settings overrides the white-screen fix	Mali: um interruptor de teste nas configurações substitui a correção da tela branca
+Mali: a test switch in the settings (%s) overrides the white-screen fix	Mali: um interruptor de teste nas configurações (%s) substitui a correção da tela branca
 Mali: neither white-screen fix took; the next start offers the PanVK driver	Mali: nenhuma correção da tela branca funcionou; o próximo início oferecerá o driver PanVK
 White screen on this phone's own driver	Tela branca com o driver do próprio celular
 On this phone's own Mali driver (%s), %s drew its lit scenes white, and both of the app's fixes were tried at earlier starts without success.	Com o driver Mali do próprio celular (%s), %s desenhou as cenas iluminadas em branco, e as duas correções do app foram testadas em inícios anteriores sem sucesso.

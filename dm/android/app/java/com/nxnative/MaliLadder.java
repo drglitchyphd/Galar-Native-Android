@@ -22,16 +22,40 @@ import java.util.Map;
 final class MaliLadder {
     private MaliLadder() { }
     static File file(Context c) { return new File(GameSettings.root(c), "mali_ladder.txt"); }
-    // the engine's note, by its key, translated, over the game (called from native code: android_main.c note_main)
+    // the engine's note, by its key, translated, over the game (called from native code: android_main.c note_main). "mali-env:<keys>" names the env.txt switches
+    //   that hold the fix back (DM_VK_B10_AS_RGBA16, DM_VK_B10_NOCOMPRESS): the note gives their names in the menu
     static void note(final Activity a, final String key) {
         a.runOnUiThread(() -> {
-            String t = key;   // (if / else, not a ?: chain: lang_check.py reads a quoted value after ? or : on a T.t line as a text)
-            if ("mali-try-b".equals(key)) t = T.t(a, "Mali: the white-screen fix did not take; trying the second fix at the next start");
-            else if ("mali-retry".equals(key)) t = T.t(a, "Mali: the white-screen fix did not take; the next start tries the other fix again");
-            else if ("mali-panvk".equals(key)) t = T.t(a, "Mali: neither white-screen fix took; the next start offers the PanVK driver");
-            else if ("mali-env".equals(key)) t = T.t(a, "Mali: a test switch in the settings overrides the white-screen fix");
+            String[] kn = noteKey(key); String k = kn[0], t = k;   // (if / else, not a ?: chain: lang_check.py reads a quoted value after ? or : on a T.t line as a text)
+            if ("mali-try-b".equals(k)) t = T.t(a, "Mali: the white-screen fix did not take; trying the second fix at the next start");
+            else if ("mali-retry".equals(k)) t = T.t(a, "Mali: the white-screen fix did not take; the next start tries the other fix again");
+            else if ("mali-panvk".equals(k)) t = T.t(a, "Mali: neither white-screen fix took; the next start offers the PanVK driver");
+            else if ("mali-env".equals(k)) {
+                StringBuilder names = new StringBuilder();
+                for (String e : kn[1].split(",")) {
+                    String n = e.trim(), l = switchLabel(n);
+                    if (l != null) n = T.t(a, l);
+                    if (n.isEmpty()) continue;
+                    if (names.length() > 0) names.append(", ");
+                    names.append(n); }
+                if (names.length() == 0) t = T.t(a, "Mali: a test switch in the settings overrides the white-screen fix");
+                else t = T.t(a, "Mali: a test switch in the settings (%s) overrides the white-screen fix", names.toString());
+            }
             Toast.makeText(a, t, Toast.LENGTH_LONG).show();
         });
+    }
+    // a note's key and what follows its first ':' ("" when nothing does)
+    static String[] noteKey(String key) {
+        if (key == null) return new String[] { "", "" };
+        int c = key.indexOf(':');
+        if (c < 0) return new String[] { key, "" };
+        return new String[] { key.substring(0, c), key.substring(c + 1) };
+    }
+    // the menu's name (its English text, the translation's key: GameMenu's White screen tests) of a switch the engine named; null for one the menu does not show
+    static String switchLabel(String env) {
+        if ("DM_VK_B10_AS_RGBA16".equals(env)) return "Bright scenes in a wider format";
+        if ("DM_VK_B10_NOCOMPRESS".equals(env)) return "Bright scenes without compression";
+        return null;
     }
 
     // ---- the state file (no Android here) ----

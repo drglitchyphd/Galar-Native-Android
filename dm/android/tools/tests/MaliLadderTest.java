@@ -35,6 +35,12 @@ public final class MaliLadderTest {
         { Map<String, String> g = MaliLadder.fields(Arrays.asList("app=96", "panvk=offerX", "x", "=y", "A=white=really"));
           check(!MaliLadder.due(g, 96, "") && "white=really".equals(g.get("A")) && !g.containsKey(""), "odd lines: a value of another word is not an offer; '=' inside a value kept; a line without a key left out"); }
         { Map<String, String> g = MaliLadder.fields(Arrays.asList("app=96\r", "panvk=offer ")); check(MaliLadder.due(g, 96, ""), "a file edited on Windows (CR, a space): still read"); }
+        // the engine's notes: "mali-env:<switches>" names the env.txt switches that hold the fix back (mali_white_vk.inc mw_moved), the menu's names for them
+        { String[] k = MaliLadder.noteKey("mali-env:DM_VK_B10_AS_RGBA16,DM_VK_B10_NOCOMPRESS"), k2 = MaliLadder.noteKey("mali-try-b"), k3 = MaliLadder.noteKey(null);
+          check("mali-env".equals(k[0]) && "DM_VK_B10_AS_RGBA16,DM_VK_B10_NOCOMPRESS".equals(k[1]) && "mali-try-b".equals(k2[0]) && "".equals(k2[1]) && "".equals(k3[0]) && "".equals(k3[1]),
+                "a note's key and the switches after its ':' (none: empty; no key: empty)"); }
+        check("Bright scenes in a wider format".equals(MaliLadder.switchLabel("DM_VK_B10_AS_RGBA16")) && "Bright scenes without compression".equals(MaliLadder.switchLabel("DM_VK_B10_NOCOMPRESS"))
+              && MaliLadder.switchLabel("DM_VK_PROBE") == null && MaliLadder.switchLabel("") == null, "the menu's names of the two route switches (translated by T.t); any other: its own key");
         // the PanVK build for each GPU (deviceName in lower case, as the offer and the menu pass it)
         check(DriverPackages.PANVK_FAUX_RELEASES.equals(src("mali-g720-immortalis mc12")) && DriverPackages.PANVK_FAUX_RELEASES.equals(src("mali-g720 mc7"))
               && DriverPackages.PANVK_FAUX_RELEASES.equals(src("mali-g725 mc6")), "Mali-G720 / G725 (CSF): faux123's PanVK (the Bifrost G72 rule no longer takes them)");
