@@ -1,24 +1,28 @@
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 // The Mali white-screen detector (nvn_vk.c mali_white_vk.inc): a 32 x 18 grid of texel fetches over the drawn part of the lit scene's target (R11G11B10F, or its
-//   RGBA16F stand-in), dispatched as 1 x 18 groups of 32. Per texel two words for the CPU, read once the pass's fence has signalled: its verdict (bit 0 a colour
-//   channel at or above the threshold, 60000 by default: R11G11B10F's largest value is 65024; bit 1 +infinity; bit 2 NaN) and its largest finite channel (float
-//   bits, for the log). Judged on the bits with integer operations only, so a compiler that takes infinities and NaN as absent cannot fold the checks away.
+//   RGBA16F stand-in), dispatched as 1 x 18 groups of 32. Per texel two words for the CPU, read once the pass's fence has signalled: its flags and its largest finite
+//   channel (float bits, for the log). Flags: bit 0 a colour channel at or above the threshold (thr: 1024 by default; the stand-in does not clamp at R11G11B10F's
+//   65024 and a white Arm left finite values such as 21250), bit 1 +infinity, bit 2 NaN, bit 3 a channel at or above the lower bucket (thr_low: 64, for the log), bit 4
+//   near black (every channel below thr_dark, none infinite or NaN: a cleared, black or never drawn target says nothing). Judged on the bits with integer
+//   operations only, so a compiler that takes infinities and NaN as absent cannot fold the checks away (positive floats order as their bits do).
 //   Vulkan 1.0: a sampled image read without a sampler (OpImageFetch) and a storage buffer. Built into mali_white_spv.h by build_comp_spv.sh
 layout(local_size_x = 32) in;
 layout(set = 0, binding = 0) uniform texture2D lit;
 layout(set = 0, binding = 1, std430) writeonly buffer Out { uint v[]; } o;
-layout(push_constant) uniform P { int x0, y0, w, h; uint base, thr; } p;   // the drawn rectangle (texels), the first word of this sample's slot, the threshold's bits
+layout(push_constant) uniform P { int x0, y0, w, h; uint base, thr, thr_low, thr_dark; } p;   // the drawn rectangle (texels), the first word of this sample's slot, the thresholds' bits
 void main() {
     uint gx = gl_LocalInvocationID.x, gy = gl_WorkGroupID.y;
     ivec2 c = ivec2(p.x0 + int((2u * gx + 1u) * uint(p.w) / 64u), p.y0 + int((2u * gy + 1u) * uint(p.h) / 36u));   // (each cell's centre)
     vec4 t = texelFetch(lit, c, 0);
-    uint flags = 0u, mx = 0u;
+    uint flags = 16u, mx = 0u;   // (near black until a channel says otherwise)
     for (int i = 0; i < 3; i++) {
         uint b = floatBitsToUint(t[i]);
-        if ((b & 0x7f800000u) == 0x7f800000u) { flags |= (b & 0x007fffffu) != 0u ? 4u : (b >> 31) == 0u ? 2u : 0u; continue; }   // NaN; +inf (-inf: stored as 0)
+        if ((b & 0x7f800000u) == 0x7f800000u) { flags = (flags & ~16u) | ((b & 0x007fffffu) != 0u ? 4u : (b >> 31) == 0u ? 2u : 0u); continue; }   // NaN; +inf (-inf: stored as 0)
         if ((b >> 31) != 0u) continue;   // negative: R11G11B10F holds 0 there
         if (b >= p.thr) flags |= 1u;
+        if (b >= p.thr_low) flags |= 8u;
+        if (b >= p.thr_dark) flags &= ~16u;
         mx = max(mx, b);
     }
     uint k = p.base + 2u * (gy * 32u + gx);
