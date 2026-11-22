@@ -10,6 +10,9 @@
 #include <unistd.h>
 #include <mach/mach_time.h>
 #include <sched.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 // Order of page state and mprotect: the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
 //   set read-only: NONE -> BUSY -> mprotect(read-only) -> PROT; unprotect: PROT -> BUSY -> mprotect(writable) -> NONE.
@@ -38,6 +41,7 @@ static _Atomic uint64_t g_adds_total;
 static _Atomic int g_live, g_live_peak;   // number of registered pools and peak (for the memory readout line)
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }
 static _Atomic int g_overflow_logged;
+static int g_untracked_clean;   // DM_NO_DIRTY=2 (the Android emulator's default): an untracked pool's textures count as unchanged after their first upload
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation / destruction (guest threads, possibly concurrent) pick slots under a mutex; the page-fault handling path does not touch it
 static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
 static void mp(uintptr_t a, size_t len, int prot) {
@@ -120,7 +124,16 @@ static void prep_write(void *addr, size_t len) {
 void nvn_dirty_add_range(const void *mem, size_t size) {
     // DM_NO_DIRTY=1: no pool is tracked, so no page is write-protected and no write faults (the Android emulator's ARM translation cannot deliver them: "Cannot process signal 11");
     // untracked pools count as dirty, their textures uploaded again at every use (slower, never stale)
-    static int off = -1; if (off < 0) { const char *e = getenv("DM_NO_DIRTY"); off = e && atoi(e); }
+    // DM_NO_DIRTY=2: the same, but untracked pools count as clean: a texture is uploaded once and not again (fast; stale wherever the game rewrites a texture in
+    //   place, e.g. streamed textures and movies). For test runs only: the Android emulator's default (ro.kernel.qemu / ro.boot.qemu = 1: its arm64 translation
+    //   aborts on these faults, and with every texture uploaded again at every use a frame took 4-10 s there). DM_NO_DIRTY=0 / 1 / 2 decides anywhere
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_NO_DIRTY"); off = e ? atoi(e) : 0;
+#ifdef __ANDROID__
+        if (!e) { char v[PROP_VALUE_MAX] = ""; __system_property_get("ro.kernel.qemu", v); if (v[0] != '1') __system_property_get("ro.boot.qemu", v);
+            if (v[0] == '1') { off = 2; LOG("dirty-page tracking off: the Android emulator (its arm64 translation cannot deliver the write faults); textures uploaded once, not checked again (DM_NO_DIRTY=1: every use, 0: tracking)"); } }
+#endif
+        if (off == 2) g_untracked_clean = 1;
+    }
     if (off) return;
     static int inited;
     if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
@@ -193,7 +206,7 @@ int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_
     if (!len) return 0;
     range_t *r = (range_t *)span; uintptr_t a0 = (uintptr_t)addr;   // the kept handle still holds the span (a slot reused by another pool over the same memory is as good): no scan
     if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a0 < r->base || a0 + len > r->end) r = find_span(a0, len);
-    if (!r) return 1;   // When untracked, conservatively treat as dirty: better to upload more than to show stale content
+    if (!r) return !g_untracked_clean;   // When untracked, conservatively treat as dirty: better to upload more than to show stale content (DM_NO_DIRTY=2 aside)
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
