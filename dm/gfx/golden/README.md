@@ -96,15 +96,23 @@ differ), every check exact; the engine before the stand-in's conversions (f0035a
 ## The Mali white-screen check and its ladder (no phone)
 
 On Arm's own Mali driver the engine checks Sword / Shield's lit scene while playing (`nvn_vk.c` `mali_white_vk.inc`, rules in `mali_white.h`): route A (the RGBA16F
-stand-in) first; white → route B (no framebuffer compression) from the next start; white too → route A again and the app offers PanVK; a route found fine is kept
-unchecked. `golden_check.py mali` runs `golden_synth` with `GOLDEN_SYNTH_LIT=white|fine`: after the recorded frame (unchanged), `GOLDEN_SYNTH_FRAMES` (16) frames
-draw an R11G11B10F target of 1280x720 with 240 draws, its `GOLDEN_SYNTH_LIT_SCALE` part at 65504 (white) or in a normal colour, each presented. Each run is one
-start of the game; a case's runs share the ladder's state file (`DM_MALI_LADDER_FILE`), samples are taken at every eligible present (`DM_MALI_WHITE_EVERY_MS=0`).
-Lavapipe is not Arm's driver: with no switch nothing may happen (no `[mali-white]` line, no state file, no route); `DM_MALI_LADDER=1` forces the ladder on:
-white goes A → B → A with the PanVK offer pending, start by start, and `DM_APP_VERSION=97` starts it over; a white scene drawn into half of the target is judged on
-its drawn part; fine stops the check after 5 samples and the next start does not check; `DM_MALI_WHITE_SIM=1` alone counts a fine scene as white; `DM_MALI_LADDER=0`
-wins over it; `DM_VK_B10_AS_RGBA16=0` in env.txt wins over the ladder's route and its verdict is not kept. Every sample is the engine's own compute pass on the
-real target, read back after its fence. Result on lavapipe (2026-11-22): PASS, 11 starts.
+stand-in) first; white → route B (no framebuffer compression) from the next start; white too → route A again and the app offers PanVK. White is quick to call (3
+samples in a row with a quarter of the texels at 1024+, infinite or NaN, or a 8 % mean over 40 samples), fine is slow (20 samples over 3 minutes of play, kept only
+after two starts, then re-checked in three starts); a start that crashes on a route before 20 s of play or its first sample counts against the route.
+`golden_check.py mali` runs `golden_synth` with `GOLDEN_SYNTH_LIT=<kind>`: after the recorded frame (unchanged), `GOLDEN_SYNTH_FRAMES` (16) frames draw an R11G11B10F
+target of 1280x720 with 240 draws, its `GOLDEN_SYNTH_LIT_SCALE` part white (65504), fine, black, fine then white, fine with a white tenth, or white through two
+corner viewports only; `GOLDEN_SYNTH_LIT_DRAWS` / `GOLDEN_SYNTH_OTHER_DRAWS` split the frame's draws, `GOLDEN_SYNTH_LIT_ABORT=<n>` ends it with abort() after the
+n-th lit frame (a crash on the route). Each run is one start of the game; a case's runs share the ladder's state file (`DM_MALI_LADDER_FILE`), samples are taken at
+every eligible present (`DM_MALI_WHITE_EVERY_MS=0`, `DM_MALI_RECHECK_MS=0`; lavapipe signals a sample's fence a few presents later, about one sample every two
+frames). Lavapipe is not Arm's driver: with no switch nothing may happen (no `[mali-white]` line, no state file, no route); `DM_MALI_LADDER=1` forces the ladder
+on. The cases (33 starts): white goes A → B → A with the PanVK offer pending, and `DM_APP_VERSION=97` starts it over; a white half-size part is judged on its
+drawn part; fine (made quick: `DM_MALI_FINE_N=5 DM_MALI_FINE_SPAN_MS=0`) is kept at the second start, re-checked in three, then unchecked; a kept route re-checked
+on a white scene turns white; with the default rules fine samples then white end WHITE; a black target gives empty samples and the cap's summary, never fine; a
+white tenth is WHITE by the slow rule at the 40th sample; 60 lit draws of 260 in the frame, or draws through two corner viewports, are not sampled; an abort
+leaves the start marker, and the next start counts the route as closing the game with `DM_LAST_CRASH_DEVICE=1`, or after a second early end, but not for a crash
+in the game's own code (`DM_LAST_CRASH_GAME=1`); `DM_VK_PROBE=f16target` under route B and `DM_VK_B10_AS_RGBA16=0` keep the verdict out of the file (the settings
+note instead of the try-B one); A+B white counts as both white; `DM_MALI_WHITE_SIM=1` alone counts a fine scene as white; `DM_MALI_LADDER=0` wins over it. Every
+sample is the engine's own compute pass on the real target, read back after its fence. Result on lavapipe (2026-11-22): PASS, 33 starts.
 
 ## Recording on the phone (S25+)
 
