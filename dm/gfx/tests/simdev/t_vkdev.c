@@ -336,7 +336,7 @@ static void decisions_and_checks(const char *profile) {
       if (DV.fc_ok) CHECK(g_fctl == (DV.fc.shaderSignedZeroInfNanPreserveFloat32 && (arm_drv || sec_drv)), "float controls %d (Arm %d, Samsung %d, supported %d)", g_fctl, arm_drv, sec_drv, DV.fc.shaderSignedZeroInfNanPreserveFloat32);
       else CHECK(!g_fctl, "float controls asked for where the driver cannot say it has them"); }
     CHECK(g_dynren == 0 || DV.p.vendorID != 0x5143, "Adreno: render passes by default");
-    CHECK(pdef == (DV.p.vendorID == 0x5143) && apso == (DV.p.vendorID == 0x5143) && cbp == (DV.p.vendorID == 0x144D), "per-vendor pass / pipeline / clear defaults");
+    CHECK(pdef == (DV.p.vendorID == 0x5143) && apso == !DM_GAME_ENG_ASYNC_PSO_OFF && cbp == (DV.p.vendorID == 0x144D), "per-vendor pass / pipeline / clear defaults");
     if (DV.p.vendorID == 0x13B5) CHECK(pkeep == 800, "Mali: at most 800 pipelines kept (%d)", pkeep);
     if (DV.p.vendorID == 0x144D) CHECK(!g_host_import, "Xclipse: pools not imported as host memory (#39)");
     // the profile's own facts
