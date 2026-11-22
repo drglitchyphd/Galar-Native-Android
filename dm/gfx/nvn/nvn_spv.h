@@ -61,6 +61,9 @@ uint32_t *spv_tf_variant(const uint32_t *code, size_t words, const int tf[4][2],
 uint32_t *spv_tf_points_variant(const uint32_t *code, size_t words, const int tf[4][2], uint32_t w_px, size_t *out_words);   // the point route for drivers without vertex stores
 // A copy that declares StorageImageWriteWithoutFormat / StorageImageReadWithoutFormat where the shader writes / reads a storage image of format Unknown without them. NULL if none is missing
 uint32_t *spv_image_caps(const uint32_t *code, size_t words, size_t *out_words);
+// Image declarations of SPIR-V ImageFormat from changed to to, in place (R11fG11fB10f 8 → Rgba16f 2: DM_VK_B10_AS_RGBA16's stand-in); returns how many
+enum { SPV_IMGFMT_RGBA16F = 2, SPV_IMGFMT_R11G11B10F = 8 };
+int spv_image_format_swap(uint32_t *code, size_t words, uint32_t from, uint32_t to);
 // A copy whose 2D / 2D-array texture gathers have their coordinate nudged by 1/512 of a texel (the host picks Maxwell's 2x2 block on a texel centre: Adreno). NULL if none
 uint32_t *spv_gather_bias(const uint32_t *code, size_t words, size_t *out_words);
 // A copy whose entry points ask for SignedZeroInfNanPreserve on 32-bit floats (SPV_KHR_float_controls): drivers keep infinities and NaN as they are. NULL if not patched

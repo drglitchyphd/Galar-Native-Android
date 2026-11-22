@@ -589,6 +589,16 @@ uint32_t *spv_image_caps(const uint32_t *code, size_t words, size_t *out_words) 
     memcpy(o + w, code + last_cap, 4 * (words - last_cap)); w += words - last_cap;
     *out_words = w; return o;
 }
+// Storage images declared in one format re-declared in another, in place (the operand only): an R11G11B10F image the engine stands in for by RGBA16F
+//   (DM_VK_B10_AS_RGBA16) is given to the shader as RGBA16F, which its declaration must then name. Rgba16f needs no capability beyond Shader. Returns how many changed
+int spv_image_format_swap(uint32_t *code, size_t words, uint32_t from, uint32_t to) {
+    if (words < 5 || code[0] != 0x07230203u) return 0;
+    int n = 0;
+    for (size_t i = 5; i < words;) { uint32_t wc = code[i] >> 16, op = code[i] & 0xffff; if (!wc || i + wc > words) return n;
+        if (op == OpTypeImage && wc >= 9 && code[i + 8] == from) { code[i + 8] = to; n++; }
+        i += wc; }
+    return n;
+}
 // Gathers nudged by 1/512 of a texel (Adreno). On a coordinate right at a texel centre the host picks another 2x2 block than Maxwell does; Ryujinx's translator adds
 //   1 / (size * 2^(8+1)) to the coordinate for such hosts (TexturePass, QueryHostGatherBiasPrecision 8), and Lemon found Adreno is one (64x64 dark shadow squares in
 //   Tears of the Kingdom). Done here on the loaded SPIR-V, so shaders translated earlier get it too. 2D and 2D-array gathers only (x and y; a layer stays as it is)
