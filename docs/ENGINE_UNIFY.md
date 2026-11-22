@@ -4,6 +4,10 @@ Branch `engine-unified` (local only) merges the three ports into one source tree
 cherry-picked across three repositories. It starts from Galar Native's `main` (389214a) and merges Arceus Native's `main` (def6392) and Paldea Native's
 `main` (8e8fda7). Nothing here is pushed or released; each app's own `main` is untouched.
 
+Branch `beta-exit-quirks` (local only) is `beta-exit` 6e0e1dd with the driver probes and the debug layers merged in: `galar-driver-probes` ad0f638 (it holds
+`debug-bundle` and `galar-vk10-validation`), then `arceus-debug-layer` b16bdd5 and `arceus-vk10-validation` 85e72fd. Their per-GPU rules became one table for
+all three apps ("Per-GPU rules" below); every default is 6e0e1dd's on every GPU, for every game, except the new rules listed under "Behaviour changes".
+
 | Game | Profile | `port` | Shader chain (expected = its own main) | Chain generation |
 | --- | --- | --- | --- | --- |
 | Pokémon Shield | `01008DB008C2C000` | galar | bc2f6b2e5f0d = bc2f6b2e5f0d | live (`dm/gfx/tools`) |
@@ -31,22 +35,22 @@ All new switches come from the profile; none is a copy of code per game.
 
 | Key | Generated | Values | Why |
 | --- | --- | --- | --- |
-| `port` | `DM_PORT_GALAR / _ARCEUS / _PALDEA` | Shield galar, Arceus arceus, Violet paldea (Sword / Scarlet through `tables_from`) | the parts of android_main.c that are per app (below) |
+| `port` | `DM_PORT_GALAR / _ARCEUS / _PALDEA` | Shield galar, Arceus arceus, Violet paldea (Sword / Scarlet through `tables_from`) | the parts of android_main.c that are per app (below); `gpu_id.port` names the app in the `[quirk]` log line (no table rule reads it) |
 | `docs_dir` | `DM_GAME_DOCS_DIR` | Galar Native / NXNative / Paldea Native | the shared save folder `Documents/<docs_dir>/<title id>/save` each app's releases already use (Galar hard-coded "Galar Native", Arceus "NXNative", Paldea took its app name). Players with their save in Documents keep it |
-| `engine_quirks` | `DM_GAME_ENG_<NAME>` 0 / 1 | Arceus: all seven below; others none | where the two engines' defaults disagreed, each game keeps what its releases did |
+| `engine_quirks` | `DM_GAME_ENG_<NAME>` 0 / 1 | Arceus: all seven below; others none | where the two engines' defaults disagreed, each game keeps what its releases did; the four that decide a GPU default reach vk_quirks.h as `gpu_id.eng` bits ("Per-GPU rules") |
 | `xlate_chain` | (shader tools only) | Arceus, Violet: `pre-fmz` | reproduces each game's shader chain (below) |
 
 ### `engine_quirks` (each one keeps Arceus Native's released behaviour; Sword / Shield / Scarlet / Violet take Galar's)
 
 | Quirk | Where | Arceus (on) | Galar (off) |
 | --- | --- | --- | --- |
-| `qc11_no_eds` | nvn_vk.c mtl_init | Qualcomm Vulkan 1.1 drivers: draw state built into each pipeline (Arceus #34 exploded polygons) | per-draw state; #209 handled with full barriers (old_qcom_driver), which both keep |
-| `gpu_time_auto_only` | nvn_vk.c | GPU timestamps only with Graphics Auto | on by default except Mali / PowerVR |
-| `frame_hold_off` | nvn_vk.c hold_on | DM_VK_FRAME_HOLD off by default (TF captures / report timestamps never run held) | mode 2 by default where the replay has its own thread |
-| `async_pso_off` | nvn_vk.c apso_on | background pipeline builds off (Adreno 710 #34: objects missing) | on for Adreno, 3 workers, 8 ms wait |
-| `framegen_game_rate` | nvn_vk.c frame generation | runs at the game's 30 or 60, floor = rate − 2 | needs a locked 60 |
-| `nvn_async_never` | hle_nvn.c rq_on | the replay never on its own thread (crashed at loading screens, Arceus #3) | Auto: on for Adreno. **Without this quirk the merge would have turned it back on for Arceus** (hle_nvn.c merged cleanly to Galar's Auto) |
-| `driver_selftests` | nvn_vk.c mtl_init | vtx_canary + tf_selftest at start | not run (unchanged start-up for Galar) |
+| `qc11_no_eds` | vk_quirks.h `Q_NO_EDS` (through `gpu_id.eng`), nvn_vk.c mtl_init | Qualcomm Vulkan 1.1 drivers: draw state built into each pipeline (Arceus #34 exploded polygons) | per-draw state; #209 handled with full barriers (`Q_BARRIER_RELAXED`, old Qualcomm drivers), which both keep |
+| `gpu_time_auto_only` | nvn_vk.c (`#if`: a setting, not a GPU rule) | GPU timestamps only with Graphics Auto | on by default except Mali / PowerVR (`Q_GPU_TIME_OFF`, both) |
+| `frame_hold_off` | nvn_vk.c hold_on (`#if`) | DM_VK_FRAME_HOLD off by default (TF captures / report timestamps never run held) | mode 2 by default where the replay has its own thread |
+| `async_pso_off` | vk_quirks.h `Q_ASYNC_PSO` (through `gpu_id.eng`), nvn_vk.c apso_on | background pipeline builds off (Adreno 710 #34: objects missing) | on for Adreno, 3 workers, 8 ms wait |
+| `framegen_game_rate` | no reader since fg-plan f9ae686 | runs at the game's 30 or 60, floor = rate − 2 | the same since f9ae686 (frame generation is locked off by default for Sword / Shield; Scarlet / Violet also need `DM_FG_PALDEA=1`) |
+| `nvn_async_never` | vk_quirks.h `Q_NVN_ASYNC` (through `gpu_id.eng`) for Auto; hle_nvn.c rq_on (`#if`) refuses the player's setting too | the replay never on its own thread (crashed at loading screens, Arceus #3) | Auto: on for Adreno. **Without this quirk the merge would have turned it back on for Arceus** (hle_nvn.c merged cleanly to Galar's Auto) |
+| `driver_selftests` | vk_quirks.h `Q_DRIVER_SELFTESTS` (through `gpu_id.eng`), nvn_vk.c mtl_init | vtx_canary + tf_selftest at start | not run (unchanged start-up for Galar) |
 
 ### `#if DM_PORT_ARCEUS` in android_main.c
 
@@ -55,18 +59,73 @@ All new switches come from the profile; none is a copy of code per game.
 - `DM_RES_CAP` set live: `dm_arc_scale_set` (Arceus) or `dm_res_cap_set` + Mode: Performance cap (others).
 - The "frame generation locked off" boot rule (DM_UNLOCK_EXPERIMENTS) applies to every port but Arceus, whose releases offer frame generation;
   `GameSettings.experimentsUnlocked` agrees.
-- Already there before: `DM_GAME_PROGRAM_ID == Arceus` blocks (Auto 30 fps, Faster rendering dropped, present interval), `arceus_pass_default` in nvn_vk.c.
+- Already there before: `DM_GAME_PROGRAM_ID == Arceus` blocks (Auto 30 fps, Faster rendering dropped, present interval), `arceus_pass_default` in nvn_vk.c
+  (since beta-exit-quirks only `DM_VK_UB_DEFER` reads it: uniform updates inside a pass deferred for Arceus; no GPU rule does).
 
 ### Other per-game choices
 
 - `touch_ui.c target_at`: the touch-menu games (`GESTURES_ON`, profile `touch_menu`, Arceus) send the top left and every other free spot to the camera / menu
   taps and give the small back button a 2.5x touch area; Sword / Shield keep the top left dead and 1.3x for all, as before. Galar's floating sticks work in both.
 - `barrier_relaxed` (nvn_vk.c): rewritten so both games get exactly what they had: relaxed on Adreno (not old stock Qualcomm), full elsewhere (Arceus #20 #31 #32);
-  the Galar version taken as is would have relaxed barriers on Mali / Xclipse for Arceus.
+  the Galar version taken as is would have relaxed barriers on Mali / Xclipse for Arceus. Since beta-exit-quirks the rule is vk_quirks.h's `Q_BARRIER_RELAXED`
+  (`old_qcom_driver` became `gpu_is_old_qcom`), the same for every game.
 - Java menu (GameMenu / GameSettings): Arceus-only entries stay Arceus-only (resolution `DM_ARC_RES`, No reflections, Lower specs, draw distance, style move
   effects, movement stick, touch camera, right stick hide, gyro aiming, barrier choice); Galar-only entries stay off Arceus (`DM_GALAR_RES`, Battery saver,
   Faster rendering). Texts that differed (Widescreen, frame generation notes, Lossless Scaling Auto, render scale note, Auto fps) are chosen per game.
 - `GameSettings.docsDir` mirrors `docs_dir` for the save-folder entries (the language tables' key became `Documents/%s/%s/save, …`).
+
+## Per-GPU rules: one table for every game (`dm/gfx/nvn/vk_quirks.h`, since beta-exit-quirks)
+
+Every per-GPU default comes from one place. `nvn_vk.c mtl_init` describes the GPU once (`gpu_id`: vendor, driver ID or none, Vulkan version, driver version,
+Arm's own driver release and beta, device name, a driver package or the phone's own driver, the phone's memory, dynamic rendering in use) together with the
+game it runs, from its profile:
+
+- `gpu_id.port`: the profile's `port` (`DM_PORT_*`; Sword and Scarlet through `tables_from`). It only names the app in the `[quirk]` log line (Galar Native,
+  Arceus Native, Paldea Native): no rule reads it.
+- `gpu_id.eng`: the profile's `engine_quirks` that decide a GPU default, one bit each, mapped by name: `qc11_no_eds` → `Q_NO_EDS`, `async_pso_off` →
+  `Q_ASYNC_PSO`, `driver_selftests` → `Q_DRIVER_SELFTESTS`, `nvn_async_never` → `Q_NVN_ASYNC`. A game's own choice lives in its `game.tsv`: Sword / Shield
+  would take Arceus's Qualcomm Vulkan 1.1 rule by adding `qc11_no_eds` to Shield's `engine_quirks`, nothing else.
+
+`quirk_default(q, gpu_id)` is each site's default; the site still lets env.txt (and `driver-check.env`) win with the same `DM_VK_*` switch as before, and
+`quirk_note` prints a `[quirk]` line for each workaround in effect at start (the debug report copies them to `quirks.txt`). `hle_nvn.c` asks through
+`nvn_vk_quirk_default`. The other `engine_quirks` decide nothing per GPU and stay `#if DM_GAME_ENG_*` at their sites: `frame_hold_off`, `gpu_time_auto_only`
+(timestamps only with Graphics Auto: a setting), `nvn_async_never`'s refusal of the player's own setting; `framegen_game_rate` has no reader (above).
+GPU tests left outside the table on purpose are listed at the top of vk_quirks.h: building `gpu_id` itself, what is decided before a driver is open
+(android_main.c chip profiles, `panvk_defaults` and the driver check's copy of it, the safe-start ladder, the heat guard's kgsl clock), the driver check's own
+self-tests (they run on every GPU), the Java menu's GPU sections and texts, test switches (`DM_VK_AS_MALI`, `DM_VK_DEVICE`), and the frame hold, which follows
+the replay thread's decision.
+
+What each app runs by default (env.txt still wins). "Arm's own driver": by driver ID where the driver gives one, else Arm's vendor ID and not a driver package
+(PanVK is not). Bold: the games differ, each by its own profile.
+
+| Rule (`vk_quirks.h`) | Switch | Sword / Shield | Legends: Arceus | Scarlet / Violet |
+| --- | --- | --- | --- | --- |
+| `Q_NO_DYNREN` render passes, not dynamic rendering | `DM_VK_NO_DYNREN` | Adreno | Adreno | Adreno |
+| `Q_BARRIER_RELAXED` fewer full barriers before passes | `DM_VK_BARRIER` | Adreno, but not Qualcomm's own driver before Vulkan 1.3 (Turnip is not one) | same | same |
+| `Q_GATHER_BIAS`, `Q_PASS_DEFER`, `Q_IMPORT_MARK_OFF` | `DM_VK_GATHER_BIAS`, `DM_VK_PASS_DEFER`, (`DM_VK_HOST_IMPORT`) | Adreno | same | same |
+| `Q_ASYNC_PSO` pipelines built in the background | `DM_VK_ASYNC_PSO` | Adreno | **never** (`async_pso_off`, #34) | Adreno |
+| `Q_NO_EDS` draw state in each pipeline | `DM_VK_NO_EDS` | never | **Qualcomm Vulkan 1.0 / 1.1** (`qc11_no_eds`, #34) | never |
+| `Q_NVN_ASYNC` Faster rendering's Auto (the replay's own thread) | `DM_NVN_ASYNC` | a GPU name holding "Adreno" (Turnip too) | **never**, the player's setting refused too (`nvn_async_never`, #3) | as Sword / Shield |
+| `Q_DRIVER_SELFTESTS` vertex canary and TF self-test at start; `Q_TF_SELFTEST` within them | —, `DM_VK_TF_SELFTEST` | not run | **run**; the TF self-test on Arm's own driver (`driver_selftests`) | not run |
+| `Q_HOST_IMPORT_OFF`, `Q_CLEAR_BY_PASS` | `DM_VK_HOST_IMPORT`, `DM_VK_CLEAR_BY_PASS` | Xclipse | same | same |
+| `Q_DMAHEAP` | `DM_VK_DMAHEAP` | Arm's or Samsung's vendor ID | same | same |
+| `Q_DMABUF_TRY`, `Q_ARM_FORMATS` | —, `DM_VK_ARM_FORMATS` | Arm's vendor ID (PanVK too) | same | same |
+| `Q_PIPE_KEEP` at most 800 pipelines | `DM_VK_PIPE_KEEP` | Arm's vendor ID, or a phone under 7.5 GB | same | same |
+| `Q_GPU_TIME_OFF` no GPU timestamps | `DM_VK_GPU_TIME` | Mali, PowerVR | same; on the others **only with Graphics Auto** (`gpu_time_auto_only`, at the site) | as Sword / Shield |
+| `Q_FLOAT_CONTROLS` | `DM_VK_FLOAT_CONTROLS` | Arm's and Samsung's own drivers (without driver properties: their vendor IDs) | same | same |
+| `Q_G615_SAFE` uniform snapshots, BC decoded | `DM_VK_UBO_SNAPSHOT`, `DM_VK_BC_TRANSCODE` | a Mali-G615 on Arm's driver before r49, not a package | same | same |
+| `Q_CLAMP_ZERO` | `DM_VK_CLAMP_ZERO` | Arm's own r38p1-r49p0, beta r49p1, r50p0-r51p0 | same | same |
+| `Q_NAN_MINMAX` (2), `Q_EXACT_MATH`, `Q_INIT_LOCALS`, `Q_TF_CHECK`, `Q_QUERY_LOD` (new) | `DM_VK_NAN_MINMAX`, `_EXACT_MATH`, `_INIT_LOCALS`, `_TF_CHECK`, `_QUERY_LOD` | Arm's own driver | same | same |
+| `Q_VIEW_QUARANTINE` (2048 views kept back) | `DM_VK_VIEW_QUARANTINE` | Arm's own driver with dynamic rendering | same | same |
+| `Q_TEX_HALF_UNSAFE` (the profile's half textures dropped) | `DM_VK_TEX_QUALITY` | Arm's own driver before r49 | same | same |
+| `Q_BC_GPU_OFF`, `Q_BC_DECODE` BC on the CPU, decoded | `DM_VK_BC_GPU`, `DM_VK_BC_TRANSCODE` | PowerVR | same | same |
+| `Q_PCACHE_GAPS_OFF` | — | PowerVR (render passes) | same | same |
+
+Checks: `dm/gfx/tests/t_quirks.c` compares the table with 6e0e1dd's per-site expressions (copied, with their line numbers) for each port's profile over
+2.57 M GPU descriptions each (vendors, driver IDs or none, Vulkan 1.0-1.4, Arm releases r20p0-r55p2 with and without beta, driver packages, names, memory sizes,
+dynamic rendering), then every port with every combination of the `eng` bits (no rule reads the port), reads the five `game.tsv` files, and pins players'
+phones for each game: 328.6 M comparisons, equal everywhere; `Q_QUERY_LOD` is the one rule without a 6e0e1dd counterpart. `simdev/t_vkdev.c`, built for each
+game, checks the decisions `mtl_init` makes against the same rules on the 42 simulated GPUs.
 
 ## Shader chains: generations instead of options
 
@@ -110,6 +169,47 @@ kind on the Android Emulator, `DM_SCAN_F32` / `DM_POKE_F32` / `DM_VK_TRACE_FS` t
 Paldea gains all of Galar since 2026-11-12 (FSR1, frame recorder, Lossless Scaling HUD pass, Graphics → Mode, battery saver, heat guard, …) and keeps its own
 `DM_SHADOWS=off`, `shadows_low`, the app name / repository in the log and `build_apk.py --official`.
 
+### 6e0e1dd's changes that the tables above make explicit (not new in beta-exit-quirks)
+
+Found while copying 6e0e1dd's rules into t_quirks.c; 6e0e1dd already had them, the lines above did not name them:
+
+- Sword / Shield and Scarlet / Violet: the BC layer is off on PowerVR (BC converted on the CPU), as for Arceus (#32). Galar 389214a / v0.94 and Paldea 8e8fda7
+  had it on there.
+- Legends: Arceus: `spv_exact_math` and `spv_init_locals` on Arm's own driver (Galar's #47 work); def6392 / v0.44 had neither.
+- Scarlet / Violet (within "Paldea gains all of Galar"): exact math and zeroed registers on Arm's own driver, PowerVR BC decoded, PowerVR pipelines with a colour
+  gap made without the cache, full barriers on Qualcomm's own drivers before Vulkan 1.3, GPU timestamps on by default (not on Mali / PowerVR), Faster
+  rendering's Auto on Adreno (8e8fda7 had it locked off) and the frame hold (mode 2) with it.
+- `framegen_game_rate` is read by nothing since fg-plan f9ae686: every game's frame generation floor is its own rate − 2.
+
+### New in beta-exit-quirks (the merged branches; every game unless noted)
+
+- `Q_QUERY_LOD` (`spv_query_lod`, the one new table rule): on Arm's own driver textureQueryLod's level component becomes clamp (LOD, 0, levels − 1); Arm's driver
+  gives floor (LOD) (dEQP-VK texturequerylod, Mali-G615 MC6). A load-time SPIR-V pass: no new setup, the shader chains are unchanged. `DM_VK_QUERY_LOD=0 / 1`.
+- Vulkan validation fixes (the S25+ layer run), on every GPU: `spv_strip_clipcull` drops the unused ClipDistance[8] / CullDistance[1] of every vertex shader at
+  load (over the limit of 8); a scaled / mirrored / format-changing copy into a depth / stencil format that is no blit destination (D24S8 on Adreno) is drawn
+  (`zcopy_draw`; `DM_VK_ZCOPY=0`: the blit); an integer texture read through a float sampler is viewed in the shader's class (`tex_view_for` / `fmt_as_class`;
+  `DM_VK_INT_TEX=keep`: its own format).
+- The driver check before Play (`DriverCheck.java`, `DriverCheckService` in its own `:drvcheck` process, `libdmprobe.so`: built by the `lib` target and
+  `win_build_lib.py`, optional in the APK): the probe app's GPU self-tests on the game's own driver, once per driver / system build / app version, crash- and
+  hang-safe (a journal, up to 4 attempts, 90 s; Play always follows). What it finds goes to `driver-check.env`, read after env.txt and before the phone profile
+  (`DM_DRIVER_CHECK=0`: not read): `DM_VK_DMAHEAP=0`, `DM_VK_BC_GPU=0`, `DM_VK_ZCOPY=0`, `DM_VK_INT_TEX=keep` or `DM_VK_NO_LAYERED_3D=1` after a test that crashed
+  or failed, `DM_VK_FLOAT_CONTROLS=1` where a driver is right only with float controls. Those change a default for that driver as env.txt would (their `[quirk]`
+  line says env.txt; the debug report holds `driver-check.env`). A driver change drops every game's results; menu: "Check the graphics driver again". Scarlet /
+  Violet get it too (shared app code; no branch targeted Paldea).
+- The debug report (`DebugBundle.java`; ☰ → Bug reports → Make a debug report, and offered once after a run that crashed, hung or was ended for memory on
+  screen): one ZIP in Download and a pre-filled
+  GitHub issue (Galar-Native-Android's issue form; Arceus's and Paldea's repositories get a plain body). With it: Android tombstones after our crash record
+  (`crash.c` hands the signal on to debuggerd; `DM_CRASH_CHAIN=0`: the old `_exit`), `DM_TEST_CRASH=<s>`, GPU breadcrumbs (`vk_crumbs.h`, printed on device
+  lost, a failed submit, a 10 s hang or a crash; `DM_VK_BREADCRUMBS=1`: the GPU marks each pass, menu "GPU crash tracing"), a `[mem-by]` status line every 30 s
+  beside 6e0e1dd's smaps breakdown, the `[quirk]` lines, `tools/read_debug_report.py`.
+- Old-driver mode (`DM_VK_BASELINE=1`, menu): the Vulkan 1.1 floor on any GPU (render passes, draw state in each pipeline, a fence per submission).
+- The four menu entries above are in the shared system menu of all three apps.
+
+Not taken from the branches: arceus-debug-layer b16bdd5 was built on Arceus v0.44 (3c5c6d1), older than arceus-renderer: its table kept dynamic rendering on
+Adreno for Arceus, never relaxed barriers for Sword / Shield / Scarlet / Violet, relaxed them on old Qualcomm drivers for Arceus and keyed the EDS and async
+pipeline rules on the port; galar-driver-probes' barrier site relaxed Arceus on Mali / Xclipse / PowerVR (`arceus_pass_default`); both tables had the PowerVR BC
+layer off for Arceus only; arceus-vk10-validation added a second query-LOD pass outside the table. 6e0e1dd's rules hold instead (t_quirks.c).
+
 ## Verification (2026-11-21, WSL, NDK r27c)
 
 - `make -f Makefile.host GAME=<id> lib` for all five profiles: builds; no unresolved engine symbols (`llvm-nm -D --undefined-only`).
@@ -117,14 +217,33 @@ Paldea gains all of Galar since 2026-11-12 (FSR1, frame recorder, Lossless Scali
 - Unit tests on Linux: see the report of this branch (host tests built with gcc per profile, gfx tests that are not Metal-only, `t_*.sh`, `dm/tests`).
 - Not done: no APK packaged end to end (needs the CPython-for-Android / build-tools set-up of `build_apk_pc.sh`), nothing run on a phone or emulator.
 
+## Verification of beta-exit-quirks (2026-11-22, WSL, NDK r27c)
+
+- `make -f Makefile.host GAME=<id> lib` from a clean `out/` for all five profiles: `libnxnative.so` and `libdmprobe.so` build and link (`--no-undefined`);
+  nvn_vk.c, hle_nvn.c and the probe compile without warnings for each port.
+- `chain_tree.py --verify`: bc2f6b2e5f0d (Shield, Sword), ba40200b20b8 (Arceus), b72f9b70ebb2 (Violet, Scarlet), unchanged.
+- Linux tests pass: t_quirks (328.6 M comparisons), t_crumbs, t_fgen_vk, t_lshud_vk, t_pool_pages, t_pool_index, t_xf_learn, t_fg_rec, t_fb_cache, t_hmap,
+  t_cover, t_pace, t_fstep, t_fmz.sh, t_clamp_zero.sh, t_nan_minmax.sh, t_safe_start, and dm/tests' test_android_shader_map, test_build_apk, test_spv_pak.
+  test_shader_split_capture.py fails as on 6e0e1dd (it expects a [RED] line for an empty capture folder that shader_split.py does not print).
+- Golden frames: 6e0e1dd's PC tools do not link (`dm_gpu_ts614`; beta-exit 95d0777 adds the stub). With that stub applied for the run only,
+  `golden_check.py synth` passes for Shield's, Arceus's and Violet's engines.
+- simdev (lavapipe and the 42 profiles; t_vkdev built for Shield, Arceus and Violet; on 6e0e1dd t_vkdev needs beta-exit 3812695's golden_rec.c to link, applied
+  for the run only): no t_vkdev check fails in 129 runs. t_lshud_vk's VUID-vkCmdDispatch-OpTypeImage-07027 on 24 profiles and, for Arceus only, its transform
+  feedback self-test's VUID-RuntimeSpirv-NonWritable-06341 / VUID-vkCmdDraw-colorAttachmentCount-06179 on the 17 Mali profiles are the same on 6e0e1dd. (There
+  Arceus's t_vkdev also failed on the 16 Adreno / Turnip profiles: the test expected background pipelines; it now reads async_pso_off.)
+- Not done: no APK packaged, nothing run on a phone or emulator.
+
 ## Not merged yet / open
 
 - READMEs: the root README is Galar's. Arceus's and Paldea's READMEs are not merged (per-game READMEs to do); `docs/HANDOFF.md` took Arceus's edits as git merged them.
   Paldea's deletion of `site/` and `docs/DEVICES.md` was not taken (Galar's repo keeps them). Arceus's removal of `docs/handoff/arceus-lowspec_*` was taken.
 - Releasing Arceus / Paldea from this tree is a product decision: the source of a release must be in that app's repository (GPL), so either this branch
   becomes each repo's `main`, or each repo gets a copy; package names stay `com.nxnative.pokemonshield` / `.pokemonlegendsarceus` / `.pokemonviolet`.
-- Adoption candidates (one quirk / menu line each, after a phone test): `qc11_no_eds` and `driver_selftests` for Galar (#209 is the same bug), Arceus's touch
-  camera / gyro / movement stick menu for Galar, Galar's battery saver for Arceus, the y-flip route on real Vulkan 1.0 drivers.
+- Adoption candidates (one quirk / menu line each, after a phone test): `qc11_no_eds` and `driver_selftests` for Galar (#209 is the same bug: one word in
+  Shield's `engine_quirks` each, the table does the rest), Arceus's touch camera / gyro / movement stick menu for Galar, Galar's battery saver for Arceus, the
+  y-flip route on real Vulkan 1.0 drivers.
+- beta-exit-quirks: the driver check, the debug report (its crash / hang handling, the tombstone hand-over) and `Q_QUERY_LOD` have not run on a phone; a
+  `[quirk]` line set by `driver-check.env` says "env.txt" (android_main.c could record which keys it set from that file for `quirk_note`).
 - `lang_src.py` is still stale; the `.tsv` tables were merged by union (Galar's text wins on the same key).
 - Linux reference setups of a pre-fmz game need a host translator built from the generation's tree (`--bin`); the frozen dlls come with a macOS apphost wrapper.
 - Phone tests for all three apps before any release from this tree.
