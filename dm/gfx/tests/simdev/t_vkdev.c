@@ -431,7 +431,8 @@ static void work(void) {
 // ---- R11G11B10F, the format the Mali float-target tests change (DM_VK_B10_AS_RGBA16: drawn as RGBA16F; DM_VK_B10_NOCOMPRESS: its targets without framebuffer
 //   compression), through the engine's own paths, judged by the validation layer against the simulated GPU, and checked bit for bit: a render target made and
 //   cleared in a pass (the load op, then vkCmdClearAttachments), copied into a pool and back, a pool's every channel code copied in and out, a texture clear, a
-//   CPU-filled linear texture uploaded, CPU reads, a view in a 4-byte format; with the stand-in, an RGBA8 copy into it. Run with and without the switches
+//   CPU-filled linear texture uploaded, CPU reads, views in 4-byte formats (the stand-in's refused or made in RGBA16F by use), an image-flagged texture's storage
+//   usage against the GPU's R11G11B10F storage support; with the stand-in, an RGBA8 copy into it. Run with and without the switches
 static tex_t *b10_tex(pool_t *pl, uint8_t *mem, int fmt, uint32_t w, uint32_t h, int linear) {
     tex_t *t = calloc(1, sizeof *t); t->magic = MAGIC('T', 'E', 'X', 0); t->d.target = NVN_TEXTURE_TARGET_2D; t->d.format = fmt; t->d.width = w; t->d.height = h; t->d.depth = 1; t->d.levels = 1;
     t->d.flags = linear ? NVN_TEXTURE_FLAGS_LINEAR : NVN_TEXTURE_FLAGS_COMPRESSIBLE; if (linear) t->d.stride = w * 4;
@@ -485,9 +486,24 @@ static void b10_work(void) {
         p_clear_tex c3; memset(&c3, 0, sizeof c3); c3.tex = T3; c3.r.width = W; c3.r.height = W; c3.r.depth = 1; c3.mask = 0xf; c3.c.f[0] = 1; c3.c.f[1] = 0; c3.c.f[2] = 1; c3.c.f[3] = 1; clear_tex(&c3);
         p_copy_t2t tt; memset(&tt, 0, sizeof tt); tt.src = T3; tt.dst = T4; tt.sr.width = tt.dr.width = W; tt.sr.height = tt.dr.height = W; tt.sr.depth = tt.dr.depth = 1; copy_t2t(&tt); }
     uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
-    // a view of the target in a 4-byte format (an image that is the stand-in: viewed as itself)
+    // a view of the target in a 4-byte format (on the Switch its packed bits): R11G11B10F takes it (viewed in its own format where its formats are fixed); the stand-in has
+    //   no packed bits: a float view to sample is made in RGBA16F (it reads the colour), an integer view, a storage view or a render target is not made (b10_view_fmt)
     { vtex *x = tex_res(T1); uint8_t sw[4] = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
-      CHECK(x && view_get(x, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 0, 1, 0, 1, sw, VK_IMAGE_ASPECT_COLOR_BIT) != VK_NULL_HANDLE, "b10: a view of the target in a 4-byte format"); }
+      VkImageView vu = x ? view_get(x, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 0, 1, 0, 1, sw, VK_IMAGE_ASPECT_COLOR_BIT) : VK_NULL_HANDLE;
+      VkImageView vf = x ? view_get(x, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 0, 1, 0, 1, sw, VK_IMAGE_ASPECT_COLOR_BIT) : VK_NULL_HANDLE;
+      if (b10_on()) {
+          CHECK(x && !vu && vf, "b10: the stand-in's 4-byte views: an integer one not made (%p), a float one made in RGBA16F (%p)", (void *)vu, (void *)vf);
+          CHECK(x && b10_view_fmt(x, VK_FORMAT_R32_UINT, B10V_SAMPLED, "t_vkdev") == VK_FORMAT_UNDEFINED && b10_view_fmt(x, VK_FORMAT_R32_SFLOAT, B10V_SAMPLED, "t_vkdev") == VK_FORMAT_R16G16B16A16_SFLOAT
+                && b10_view_fmt(x, VK_FORMAT_R32_SFLOAT, B10V_STORAGE, "t_vkdev") == VK_FORMAT_UNDEFINED && b10_view_fmt(x, VK_FORMAT_R8G8B8A8_UNORM, B10V_ATTACH, "t_vkdev") == VK_FORMAT_UNDEFINED
+                && b10_view_fmt(x, VK_FORMAT_R16G16B16A16_SFLOAT, B10V_ATTACH, "t_vkdev") == VK_FORMAT_R16G16B16A16_SFLOAT, "b10: the stand-in's views by use (b10_view_fmt)");
+      } else CHECK(x && vu && vf && b10_view_fmt(x, VK_FORMAT_R32_UINT, B10V_STORAGE, "t_vkdev") == VK_FORMAT_R32_UINT, "b10: views of the target in 4-byte formats (%p, %p)", (void *)vu, (void *)vf); }
+    // a texture the game may bind as a storage image: storage usage exactly where R11G11B10F itself has storage on this GPU, the stand-in too (it must not change the
+    //   compression a storage image may cost)
+    { tex_t *T7 = b10_tex(pl, mem + 0xC0000, NVN_FORMAT_R11G11B10F, 16, 16, 0); T7->d.flags |= NVN_TEXTURE_FLAGS_IMAGE; vtex *x = tex_res(T7);
+      VkFormatProperties bp; vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &bp); int want = !!(bp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+      CHECK(x && !!(x->usage & VK_IMAGE_USAGE_STORAGE_BIT) == want, "b10: an image-flagged R11G11B10F texture%s: storage usage %d, R11G11B10F storage on this GPU %d",
+            b10_on() ? " (the stand-in)" : "", x ? !!(x->usage & VK_IMAGE_USAGE_STORAGE_BIT) : -1, want);
+      printf("WORK b10: an image-flagged R11G11B10F texture: storage usage %s (R11G11B10F storage %s on this GPU)\n", x && (x->usage & VK_IMAGE_USAGE_STORAGE_BIT) ? "yes" : "no", want ? "supported" : "not supported"); }
     // the checks: the clear (as R11G11B10F stores it), every code through the pool, the texture clear, the upload, the RGBA8 copy
     uint32_t qc = b10_float_to_chan(0.5f, B10_MR) | b10_float_to_chan(0.125f, B10_MR) << 11 | b10_float_to_chan(3.0f, B10_MB) << 22, q5 = b10_float_to_chan(-1, B10_MR) | b10_float_to_chan(0.5f, B10_MR) << 11 | b10_float_to_chan(3, B10_MB) << 22;
     int bad[6] = { 0 }; uint32_t got[W * W]; NVNcopyRegion r = { 0, 0, 0, W, W, 1 }, r16 = { 0, 0, 0, 16, 16, 1 };

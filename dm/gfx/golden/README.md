@@ -92,6 +92,20 @@ recording replayed without the test and the default's with it. Every colour show
 cannot show (lavapipe truncates, the stand-in rounds to nearest even). Result on lavapipe (2026-11-22): every picture identical to the default (0 of 76,800 pixels
 differ), every check exact; the engine before the stand-in's conversions (f0035ae) fails it.
 
+Frame 1 also writes what reviewers asked to see (18 + 5 `b10 check` lines; `b10 checks: N run` ends them): a draw giving every pixel its own three values
+(`b10v.frag`: negative, -0, -inf, NaN, +inf, past the range, any exponent), a draw blended by MAX with a negative channel and one past the range, one blended by
+REVERSE_SUB, a compute shader's stores into an image declared `r11f_g11f_b10f` and one declared without a format (`b10img.comp`), a 2-layer array and a 2-slice 3D
+texture copied in from the game's memory and out again, a copy in from memory only the CPU wrote, an RGBA8 2-layer array blitted into R11G11B10F, and a block-linear
+texture the CPU filled. A CPU read packs, which hides a negative or out-of-range value the stand-in kept, so `b10probe.frag` also reads the draw, the MAX blend and
+both images in a later pass into RGBA32F targets, as the game's later passes would. Row 0 of the draw holds values every rounding rule stores alike and is checked on
+every route; the rest of it, with the stand-in (its one rule, round to nearest even). A fifth run, `DM_VK_B10_CPU_COPY=1` with the stand-in, takes the CPU route of
+copies in from the game's memory (its picture is not compared: one corner is a copy that route cannot see). Then the pipeline lists: recorded with
+`DM_VK_PSO_RECORD`, with the stand-in and without, they must be the same file, and a start that prewarms one (shaders from a pack, `spv_pak.py`, as on a phone),
+with the stand-in or without, with extended dynamic state or without (`DM_VK_NO_EDS=1`), must find built every pipeline its draws ask for (nothing more recorded).
+With the stand-in's new rules taken out (a scratch copy: no rounding of draws, of image stores, after dispatches, `b10_key_here` a no-op) it fails as it should.
+`dm/gfx/tests/t_b10_spv.sh` checks the SPIR-V side alone: the patches on modules from glslc and by hand (spirv-val), and the store rule run by lavapipe over a
+million texels against `b10_conv.h`.
+
 ## Recording on the phone (S25+)
 
 1. Install a build of this branch (the recorder is in the engine; off unless asked for).

@@ -29,7 +29,7 @@ $(OUT)/libnvnvk.a: $(LIBOBJ)
 $(OUT)/golden_play: $(OUT)/obj/golden_play.o $(OUT)/libnvnvk.a
 	$(CC) -o $@ $^ $(LIBS)
 # The synthetic frame's shaders: GLSL compiled at build time (SPIR-V 1.0, Vulkan 1.0 environment); their reflection (.vkr) is written by golden_synth itself
-SYNTH_SH = $(patsubst ../gfx/golden/synth/%,$(OUT)/synth/%.spv,$(wildcard ../gfx/golden/synth/*.vert ../gfx/golden/synth/*.frag))
+SYNTH_SH = $(patsubst ../gfx/golden/synth/%,$(OUT)/synth/%.spv,$(wildcard ../gfx/golden/synth/*.vert ../gfx/golden/synth/*.frag ../gfx/golden/synth/*.comp))
 $(OUT)/synth/%.spv: ../gfx/golden/synth/%
 	@mkdir -p $(dir $@); $(GLSLC) --target-env=vulkan1.0 -o $@ $<
 $(OUT)/golden_synth: $(OUT)/obj/golden_synth.o $(OUT)/libnvnvk.a $(SYNTH_SH)
