@@ -110,23 +110,33 @@ million texels against `b10_conv.h`.
 ## The Mali white-screen check and its ladder (no phone)
 
 On Arm's own Mali driver the engine checks Sword / Shield's lit scene while playing (`nvn_vk.c` `mali_white_vk.inc`, rules in `mali_white.h`): route A (the RGBA16F
-stand-in) first; white → route B (no framebuffer compression) from the next start; white too → route A again and the app offers PanVK. White is quick to call (3
-samples in a row with a quarter of the texels at 1024+, infinite or NaN, or a 8 % mean over 40 samples), fine is slow (20 samples over 3 minutes of play, kept only
-after two starts, then re-checked in three starts); a start that crashes on a route before 20 s of play or its first sample counts against the route.
+stand-in) first; white or broken → route B (no framebuffer compression) from the next start; that too → route A again and the app offers PanVK. White is quick to
+call (3 samples in a row with a quarter of the texels at 1024+ or infinite, or 5 with 90 % of the picture shown white; or a 8 % mean over 40 samples); NaN is
+counted apart (a quarter of the lit target NaN 3 times in a row, or 10 near-black samples in a row, is BROKEN: a black picture); fine is slow (20 samples over 3
+minutes of play, none of them with 8 % NaN; those with half the picture shown white or more are bright, no evidence either way; kept only after two starts, then
+re-checked in three starts); a start that reaches the cap with no verdict is counted unless its samples were mostly bright (three make the route broken, one mostly
+black at once); a start that crashes on a route before 20 s of play or its first sample counts against the route, one that ends before its first picture only with
+the crash flag, one that dies making the check's own compute pass never.
 `golden_check.py mali` runs `golden_synth` with `GOLDEN_SYNTH_LIT=<kind>`: after the recorded frame (unchanged), `GOLDEN_SYNTH_FRAMES` (16) frames draw an R11G11B10F
-target of 1280x720 with 240 draws, its `GOLDEN_SYNTH_LIT_SCALE` part white (65504), fine, black, fine then white, fine with a white tenth, or white through two
-corner viewports only; `GOLDEN_SYNTH_LIT_DRAWS` / `GOLDEN_SYNTH_OTHER_DRAWS` split the frame's draws, `GOLDEN_SYNTH_LIT_ABORT=<n>` ends it with abort() after the
-n-th lit frame (a crash on the route). Each run is one start of the game; a case's runs share the ladder's state file (`DM_MALI_LADDER_FILE`), samples are taken at
-every eligible present (`DM_MALI_WHITE_EVERY_MS=0`, `DM_MALI_RECHECK_MS=0`; lavapipe signals a sample's fence a few presents later, about one sample every two
-frames). Lavapipe is not Arm's driver: with no switch nothing may happen (no `[mali-white]` line, no state file, no route); `DM_MALI_LADDER=1` forces the ladder
-on. The cases (33 starts): white goes A → B → A with the PanVK offer pending, and `DM_APP_VERSION=97` starts it over; a white half-size part is judged on its
-drawn part; fine (made quick: `DM_MALI_FINE_N=5 DM_MALI_FINE_SPAN_MS=0`) is kept at the second start, re-checked in three, then unchecked; a kept route re-checked
-on a white scene turns white; with the default rules fine samples then white end WHITE; a black target gives empty samples and the cap's summary, never fine; a
-white tenth is WHITE by the slow rule at the 40th sample; 40 lit draws of 240 in the frame, or draws through two corner viewports, are not sampled; an abort
-leaves the start marker, and the next start counts the route as closing the game with `DM_LAST_CRASH_DEVICE=1`, or after a second early end, but not for a crash
-in the game's own code (`DM_LAST_CRASH_GAME=1`); `DM_VK_PROBE=f16target` under route B and `DM_VK_B10_AS_RGBA16=0` keep the verdict out of the file (the settings
-note instead of the try-B one); A+B white counts as both white; `DM_MALI_WHITE_SIM=1` alone counts a fine scene as white; `DM_MALI_LADDER=0` wins over it. Every
-sample is the engine's own compute pass on the real target, read back after its fence. Result on lavapipe (2026-11-22): PASS, 33 starts.
+target of 1280x720 with 240 draws, its `GOLDEN_SYNTH_LIT_SCALE` part white (65504), fine, black, fine then white, fine with a white corner
+(`GOLDEN_SYNTH_LIT_CORNER`), white through two corner viewports only, NaN, fine with NaN spots, or fine with the window (the picture shown) then drawn white, all
+of it or 60 %; `GOLDEN_SYNTH_LIT_DRAWS` / `GOLDEN_SYNTH_OTHER_DRAWS` split the frame's draws, `GOLDEN_SYNTH_LIT_ABORT=<n>` ends it with abort() after the n-th lit
+frame (a crash on the route), `GOLDEN_SYNTH_ABORT_LOADING=1` before the first picture. Each run is one start of the game; a case's runs share the ladder's state
+file (`DM_MALI_LADDER_FILE`), samples are taken at every eligible present (`DM_MALI_WHITE_EVERY_MS=0`, `DM_MALI_RECHECK_MS=0`; lavapipe signals a sample's fence a
+few presents later, about one sample every two frames). Lavapipe is not Arm's driver: with no switch nothing may happen (no `[mali-white]` line, no state file, no
+route); `DM_MALI_LADDER=1` forces the ladder on. The cases (51 starts): white goes A → B → A with the PanVK offer pending, and `DM_APP_VERSION=97` starts it over;
+a white half-size part is judged on its drawn part; fine (made quick: `DM_MALI_FINE_N=5 DM_MALI_FINE_SPAN_MS=0`) is kept at the second start, re-checked in
+three, then unchecked; a kept route re-checked on a white scene turns white; with the default rules fine samples then white end WHITE; a black target gives empty
+samples, never fine: 10 in a row are BROKEN, and a cap reached with mostly empty ones makes the route broken at once; a white tenth is WHITE by the slow rule at the
+40th sample; a white corner of 28 texels is capped with no verdict and the third such start makes the route broken; a lit target of NaN is BROKEN, NaN spots stay
+fine; a white window over a fine lit target is WHITE after 5 samples, a 60 % white one is bright (never fine, a start capped on it not counted); 40 lit draws of 240 in the frame, or draws through two corner
+viewports, are not sampled; an abort leaves the start marker, and the next start counts the route as closing the game with `DM_LAST_CRASH_DEVICE=1`, or after a
+second early end, but not for a crash in the game's own code (`DM_LAST_CRASH_GAME=1`); starts that end before their first picture count only with the crash flag;
+a start that dies making the check's own compute pass (`DM_MALI_WHITE_INIT_ABORT=1`) blames no route, and the check is off on that driver after it (its marker
+beside `DM_VK_PCACHE`); `DM_VK_PROBE=f16target` under route B keeps its white verdict (both white, the offer), `DM_VK_FMZ=1` keeps a fine one out of the file, and
+`DM_VK_B10_AS_RGBA16=0` keeps the verdict out with the settings note naming the switch; A+B white counts as both white; `DM_MALI_WHITE_SIM=1` alone counts a fine
+scene as white; `DM_MALI_LADDER=0` wins over it. Every sample is the engine's own compute pass on the real target and the picture shown, read back after its
+fence. Result on lavapipe (2026-11-22): PASS, 51 starts.
 
 ## Recording on the phone (S25+)
 

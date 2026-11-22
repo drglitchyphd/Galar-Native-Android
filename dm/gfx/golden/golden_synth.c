@@ -24,9 +24,13 @@
 //   GOLDEN_SYNTH_LIT_SCALE (1: all) of it, then small draws in its centre (GOLDEN_SYNTH_LIT_DRAWS, 240, into the target a frame), each frame presented. Kinds:
 //   white (the big draw at 65504: what Arm's driver leaves in Sword / Shield's lit scene), fine (a normal colour), black (cleared to 0 and drawn black: a target
 //   that says nothing), finewhite (fine for GOLDEN_SYNTH_LIT_FINE_FRAMES (8) frames, then white), partial (fine, with a white corner over a tenth of the part:
-//   60 of the detector's 576 texels), sparse (no big draw: the draws at 65504 through small viewports in two opposite corners, so the part they span is mostly
-//   not drawn). GOLDEN_SYNTH_OTHER_DRAWS adds that many small draws into the window (RGBA8) to each frame; GOLDEN_SYNTH_LIT_ABORT=<n> ends the program with
-//   abort() right after the n-th lit frame is presented (a crash on the route: the check's start marker stays in its file)
+//   60 of the detector's 576 texels; GOLDEN_SYNTH_LIT_CORNER: the corner's side as a share of the part's, 0.316 by default, 0.224 for 28 texels), sparse (no big
+//   draw: the draws at 65504 through small viewports in two opposite corners, so the part they span is mostly not drawn), nan (the big draw's colour NaN: what the
+//   stand-in keeps of a NaN, a black picture), nanspots (fine, with a NaN corner over 28 of the 576 texels: dark spots, not white), postwhite (the lit target
+//   fine, then a pass that draws the window, the picture shown, all white: a white made after the lit scene) and postbright (the same over 60 % of the window).
+//   GOLDEN_SYNTH_OTHER_DRAWS adds that many small draws into the window (RGBA8) to each frame; GOLDEN_SYNTH_LIT_ABORT=<n> ends the program with abort() right
+//   after the n-th lit frame is presented (a crash on the route: the check's start marker stays in its file); GOLDEN_SYNTH_ABORT_LOADING=1 ends it with abort()
+//   before its first picture is presented (the device up, nothing shown yet: a start ended while loading)
 #define _GNU_SOURCE 1
 #include <errno.h>
 #include <math.h>
@@ -367,6 +371,7 @@ int main(int argc, char **argv) {
     program(lit); vlayout(3, lt_fmt, lt_off, 32); ubo(0, 1, UBV, 256); ubo(1, 1, UBF, 256); tex_handle(1, 0, 1, 1); depth_state(1);
     set_rt(Wt, D); viewport(WW, WH); clear(0, 0, 0);
     submit(cmd_end());
+    { const char *e = getenv("GOLDEN_SYNTH_ABORT_LOADING"); if (e && atoi(e) > 0) { mtl_finish(); SLOG("before the first picture: abort() (GOLDEN_SYNTH_ABORT_LOADING, a start ended while loading)"); fflush(stderr); abort(); } }
     present(Wt);
     // ---- frame 2 (recorded), submission 1: the checker copied in, clears, the quad sampling A at the back ----
     cmd_begin();
@@ -438,17 +443,17 @@ int main(int argc, char **argv) {
     }
     {   // GOLDEN_SYNTH_LIT: frames with a lit pass for the white-screen check to sample (the recording above is the same with or without them)
         const char *lm = getenv("GOLDEN_SYNTH_LIT"), *fe = getenv("GOLDEN_SYNTH_FRAMES"), *se = getenv("GOLDEN_SYNTH_LIT_SCALE"), *de = getenv("GOLDEN_SYNTH_LIT_DRAWS"),
-                   *oe = getenv("GOLDEN_SYNTH_OTHER_DRAWS"), *ae = getenv("GOLDEN_SYNTH_LIT_ABORT"), *ff = getenv("GOLDEN_SYNTH_LIT_FINE_FRAMES");
+                   *oe = getenv("GOLDEN_SYNTH_OTHER_DRAWS"), *ae = getenv("GOLDEN_SYNTH_LIT_ABORT"), *ff = getenv("GOLDEN_SYNTH_LIT_FINE_FRAMES"), *ce = getenv("GOLDEN_SYNTH_LIT_CORNER");
         int nf = fe && atoi(fe) > 0 ? atoi(fe) : 16, nd = de && atoi(de) > 0 ? atoi(de) : 240, no = oe && atoi(oe) > 0 ? atoi(oe) : 0, ab = ae ? atoi(ae) : 0, nfine = ff && atoi(ff) >= 0 ? atoi(ff) : 8;
-        float sc = se && atof(se) > 0 && atof(se) <= 1 ? (float)atof(se) : 1.0f;
-        static const char *const kinds[] = { "white", "fine", "black", "finewhite", "partial", "sparse" }; int kind = -1;
-        for (int i = 0; lm && i < 6; i++) if (!strcmp(lm, kinds[i])) kind = i;
+        float sc = se && atof(se) > 0 && atof(se) <= 1 ? (float)atof(se) : 1.0f, corner = ce && atof(ce) > 0 && atof(ce) <= 1 ? (float)atof(ce) : 0.316f;
+        static const char *const kinds[] = { "white", "fine", "black", "finewhite", "partial", "sparse", "nan", "nanspots", "postwhite", "postbright" }; int kind = -1;
+        for (int i = 0; lm && i < 10; i++) if (!strcmp(lm, kinds[i])) kind = i;
         if (kind >= 0) {
-            enum { LW = 1280, LH = 720 }; const uint64_t FW = VB + 0x4000, FF = VB + 0x4100, FB = VB + 0x4200, SMALL = VB + 0x4300, SMALLB = VB + 0x4400;
+            enum { LW = 1280, LH = 720 }; const uint64_t FW = VB + 0x4000, FF = VB + 0x4100, FB = VB + 0x4200, SMALL = VB + 0x4300, SMALLB = VB + 0x4400, FN = VB + 0x4500;
             tex_t *LIT = mk_tex(NVN_FORMAT_R11G11B10F, LW, LH);
-            const float col[3][3] = { { 65504.0f, 65504.0f, 65504.0f }, { 0.25f, 0.5f, 0.75f }, { 0, 0, 0 } };   // white, fine, black
-            for (int c = 0; c < 3; c++) { float t[18] = { -1, -1, 0, col[c][0], col[c][1], col[c][2],  3, -1, 0, col[c][0], col[c][1], col[c][2],  -1, 3, 0, col[c][0], col[c][1], col[c][2] };   // (one triangle over the whole viewport)
-                memcpy((void *)(uintptr_t)(c == 0 ? FW : c == 1 ? FF : FB), t, sizeof t); }
+            const float col[4][3] = { { 65504.0f, 65504.0f, 65504.0f }, { 0.25f, 0.5f, 0.75f }, { 0, 0, 0 }, { NAN, NAN, NAN } };   // white, fine, black, NaN
+            for (int c = 0; c < 4; c++) { float t[18] = { -1, -1, 0, col[c][0], col[c][1], col[c][2],  3, -1, 0, col[c][0], col[c][1], col[c][2],  -1, 3, 0, col[c][0], col[c][1], col[c][2] };   // (one triangle over the whole viewport)
+                memcpy((void *)(uintptr_t)(c == 0 ? FW : c == 1 ? FF : c == 2 ? FB : FN), t, sizeof t); }
             float sm[18] = { -0.01f, -0.01f, 0, 0.5f, 0.5f, 0.5f,  0.01f, -0.01f, 0, 0.5f, 0.5f, 0.5f,  0, 0.01f, 0, 0.5f, 0.5f, 0.5f }, smb[18];
             memcpy(smb, sm, sizeof sm); for (int v = 0; v < 3; v++) smb[v * 6 + 3] = smb[v * 6 + 4] = smb[v * 6 + 5] = 0;
             memcpy((void *)(uintptr_t)SMALL, sm, sizeof sm); memcpy((void *)(uintptr_t)SMALLB, smb, sizeof smb);
@@ -458,8 +463,9 @@ int main(int argc, char **argv) {
             uint8_t *lit_cmd = g_pool_mem + ((g_tex_off + 0xfffff) & ~(uint64_t)0xfffff);
             if (lit_cmd + (1u << 20) > g_pool_mem + POOL_SIZE) { SLOG("no room for the lit frames' commands"); _exit(2); }
             SLOG("lit frames: %d, a %dx%d R11G11B10F target, its %dx%d part drawn, %s; %d draws into it a frame, %d into the window%s", nf, LW, LH, pw, ph,
-                 kind == 0 ? "at 65504 (white)" : kind == 1 ? "in a normal colour (fine)" : kind == 2 ? "black" : kind == 3 ? "fine, then white" : kind == 4 ? "fine with a white corner (a tenth)"
-                 : "only through two small corner viewports (at 65504)", nd, no, ab > 0 ? ", then abort()" : "");
+                 kind == 0 ? "at 65504 (white)" : kind == 1 ? "in a normal colour (fine)" : kind == 2 ? "black" : kind == 3 ? "fine, then white" : kind == 4 ? "fine with a white corner"
+                 : kind == 5 ? "only through two small corner viewports (at 65504)" : kind == 6 ? "in NaN" : kind == 7 ? "fine with a NaN corner" : kind == 8 ? "fine, the window then drawn white"
+                 : "fine, 60 % of the window then drawn white", nd, no, ab > 0 ? ", then abort()" : "");
             p_draw d; memset(&d, 0, sizeof d); d.prim = NVN_DRAW_PRIMITIVE_TRIANGLES; d.count = 3; d.instances = 1;
             for (int f = 0; f < nf; f++) {
                 int white = kind == 0 || (kind == 3 && f >= nfine);
@@ -471,18 +477,20 @@ int main(int argc, char **argv) {
                     vbuf(FW, 72); for (int k = 0; k < nd; k++) { if (k % 2) viewport_at(pw - 128, ph - 72, 128, 72); else viewport_at(0, 0, 128, 72); cmd(OP_DRAW, &d, sizeof d); }
                     left = 0; viewport(pw, ph); }
                 else {
-                    vbuf(white ? FW : kind == 2 ? FB : FF, 72); cmd(OP_DRAW, &d, sizeof d); left--;
-                    if (kind == 4 && left > 0) { viewport((int)(pw * 0.316f), (int)(ph * 0.316f)); vbuf(FW, 72); cmd(OP_DRAW, &d, sizeof d); left--; viewport(pw, ph); }
+                    vbuf(white ? FW : kind == 2 ? FB : kind == 6 ? FN : FF, 72); cmd(OP_DRAW, &d, sizeof d); left--;
+                    if ((kind == 4 || kind == 7) && left > 0) { viewport((int)(pw * corner), (int)(ph * corner)); vbuf(kind == 7 ? FN : FW, 72); cmd(OP_DRAW, &d, sizeof d); left--; viewport(pw, ph); }
                 }
                 vbuf(kind == 2 ? SMALLB : SMALL, sizeof sm); for (int k = 0; k < left; k++) cmd(OP_DRAW, &d, sizeof d);
                 if (no) { set_rt(Wt, NULL); viewport(WW, WH); vbuf(SMALL, sizeof sm); for (int k = 0; k < no; k++) cmd(OP_DRAW, &d, sizeof d); }
+                if (kind == 8 || kind == 9) {   // a later pass (the game's post-processing) drawing the picture shown white: all of it, or 0.775 x 0.775 of it (350 of the 576 texels)
+                    set_rt(Wt, NULL); if (kind == 8) viewport(WW, WH); else viewport((int)(WW * 0.775f), (int)(WH * 0.775f)); vbuf(FW, 72); cmd(OP_DRAW, &d, sizeof d); }
                 submit(cmd_end());
                 present(Wt);
                 if (ab > 0 && f + 1 == ab) { SLOG("lit frame %d presented: abort() (GOLDEN_SYNTH_LIT_ABORT, a crash on the route)", f + 1); fflush(stderr); abort(); }
             }
             mtl_finish();
             SLOG("lit frames done");
-        } else if (lm && *lm) { SLOG("GOLDEN_SYNTH_LIT=%s: not a kind (white, fine, black, finewhite, partial, sparse)", lm); _exit(2); }
+        } else if (lm && *lm) { SLOG("GOLDEN_SYNTH_LIT=%s: not a kind (white, fine, black, finewhite, partial, sparse, nan, nanspots, postwhite, postbright)", lm); _exit(2); }
     }
     char rec[1400]; snprintf(rec, sizeof rec, "%s/%s-synth-p2.nxgold", outdir, title);
     struct stat st; if (stat(rec, &st)) { SLOG("no recording at %s", rec); _exit(1); }

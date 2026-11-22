@@ -21,16 +21,21 @@
         extended dynamic state: DM_VK_NO_EDS=1) must find every pipeline its draws ask for built (nothing more recorded). Exit 0 when everything passes.
   golden_check.py mali [--out DIR] [--engine ID] [--title ID] [--players DIR]
         The Mali white-screen check and its ladder (nvn_vk.c mali_white_vk.inc) on this PC: golden_synth with lit frames (GOLDEN_SYNTH_LIT: a 1280x720 R11G11B10F
-        target, 240 draws a frame: white at 65504, fine, black, fine then white, a white tenth, or drawn through two corner viewports only), run as successive starts
-        of the game sharing the ladder's state file. Lavapipe is not Arm's driver, so with no switch nothing may happen; DM_MALI_LADDER=1 forces the ladder on:
-        white moves it A -> B -> back to A with the PanVK offer, start by start, and an app update starts it over; fine (made quick here: 5 samples, no span) is kept
-        only after two starts, then re-checked in three starts, then not checked; a route kept as fine that is re-checked on a white scene turns white; with the
-        default rules a few fine samples then white end WHITE; a black target is never fine (empty samples, the cap's summary); a white tenth is WHITE by the slow
-        rule; frames with too few draws into the lit target, or whose draws cover little of the part they span, are not sampled; a start that crashes on a route
-        (GOLDEN_SYNTH_LIT_ABORT) leaves the marker, and the next start counts the route as closing the game after a crash flag, or after two early ends in a row;
-        other white-screen tests (DM_VK_PROBE=f16target) and a route set in env.txt keep the verdict out of the file; both fixes at once and white count as both
-        white; DM_MALI_WHITE_SIM=1 makes a fine scene count as white; DM_MALI_LADDER=0 turns that off. Every sample is the engine's compute pass on the real lit
-        target, read back after its fence. Exit 0 when everything passes.
+        target, 240 draws a frame: white at 65504, fine, black, fine then white, a white corner, drawn through two corner viewports only, NaN, NaN spots, or fine with
+        the window then drawn white by a later pass, all of it or 60 %), run as successive starts of the game sharing the ladder's state file. Lavapipe is not Arm's
+        driver, so with no switch nothing may happen; DM_MALI_LADDER=1 forces the ladder on: white moves it A -> B -> back to A with the PanVK offer, start by start,
+        and an app update starts it over; fine (made quick here: 5 samples, no span) is kept only after two starts, then re-checked in three starts, then not checked;
+        a route kept as fine that is re-checked on a white scene turns white; with the default rules a few fine samples then white end WHITE; a black target is
+        never fine: 10 empty samples in a row are BROKEN, and a start capped with mostly empty ones makes the route broken; a white tenth is WHITE by the slow rule; a
+        start capped with no verdict is counted, and the third makes the route broken; a lit target of NaN is BROKEN, NaN spots stay fine; a white window over a fine
+        lit target is WHITE after 5 samples, a 60 % white one is bright (never fine, a start capped on it not counted); frames with too few draws into the lit
+        target, or whose draws cover little of the part they span, are not sampled; a start that crashes on a route (GOLDEN_SYNTH_LIT_ABORT) leaves the marker, and
+        the next start counts the route as closing the game after a
+        crash flag, or after two early ends in a row; starts that end before their first picture (GOLDEN_SYNTH_ABORT_LOADING) count only with the crash flag; a start
+        that dies making the check's own compute pass (DM_MALI_WHITE_INIT_ABORT) blames no route, and the check is off on that driver after it; other white-screen
+        tests (DM_VK_PROBE=f16target, DM_VK_FMZ=1) keep a fine verdict out of the file but not a white one, and a route set in env.txt keeps the verdict out, its
+        note naming the switch; both fixes at once and white count as both white; DM_MALI_WHITE_SIM=1 makes a fine scene count as white; DM_MALI_LADDER=0 turns
+        that off. Every sample is the engine's compute pass on the real lit target and the picture shown, read back after its fence. Exit 0 when everything passes.
 
 A recording's name is its file name without .nxgold. Tolerance: a pixel differs when any channel differs by more than --threshold (default 2 of 255); a recording
 fails when more than --max-diff percent of its pixels differ (default 0.1). <folder>/<name>.tolerance ("<threshold> <max-diff>") overrides both for one recording.
@@ -295,7 +300,7 @@ def cmd_mali(a):
         route format lines, the log's path)"""
         nstart[0] += 1; d = os.path.join(a.out, case); os.makedirs(d, exist_ok=True); out = os.path.join(d, f'start{nstart[0]}'); sp = os.path.join(d, 'mali_ladder.txt')
         env = vk_env()
-        for k in [k for k in env if k.startswith(('DM_MALI_', 'DM_VK_B10_', 'GOLDEN_SYNTH_', 'DM_LAST_CRASH', 'DM_VK_PROBE'))]: del env[k]   # (only what the case sets)
+        for k in [k for k in env if k.startswith(('DM_MALI_', 'DM_VK_B10_', 'GOLDEN_SYNTH_', 'DM_LAST_CRASH', 'DM_VK_PROBE', 'DM_VK_PCACHE'))]: del env[k]   # (only what the case sets)
         env.update({'GOLDEN_SYNTH_LIT': lit, 'GOLDEN_SYNTH_FRAMES': str(frames), 'DM_MALI_WHITE_EVERY_MS': '0', 'DM_MALI_RECHECK_MS': '0', 'DM_APP_VERSION': app, 'DM_MALI_LADDER_FILE': sp})
         env.update(sw)
         r = subprocess.run([synth, out, title], env=env, capture_output=True, text=True, timeout=900)
@@ -311,10 +316,10 @@ def cmd_mali(a):
         m = [re.search(r'this start: route (\S+), (checked while playing|re-checked once a minute|not checked)', l) for l in lines]; m = [x for x in m if x]
         return (m[0].group(1), m[0].group(2)) if m else (None, None)
     def samples(lines): return [l for l in lines if re.match(r'sample \d+, ', l)]
-    def verdicts(lines): return [(int(m.group(1)), m.group(2), m.group(3)) for m in (re.search(r'verdict after (\d+) samples: route (\S+) is (WHITE|FINE)', l) for l in lines) if m]
+    def verdicts(lines): return [(int(m.group(1)), m.group(2), m.group(3)) for m in (re.search(r'verdict after (\d+) samples: route (\S+) is (WHITE|FINE|BROKEN)', l) for l in lines) if m]
     def verdict(lines): v = verdicts(lines); return v[-1] if v else None
     def has(lines, text): return any(text in l for l in lines)
-    def kinds(lines): return [m.group(1) for m in (re.search(r': (white|fine|between|empty); runs', l) for l in samples(lines)) if m]
+    def kinds(lines): return [m.group(1) for m in (re.search(r': (white|fine|between|empty|nan|shown white|bright); runs', l) for l in samples(lines)) if m]
     A16 = 'R11G11B10F drawn and sampled as RGBA16F'; NC = 'R11G11B10F render targets made without framebuffer compression'
     L1 = {'DM_MALI_LADDER': '1'}; FAST = dict(L1, DM_MALI_FINE_N='5', DM_MALI_FINE_SPAN_MS='0')   # (fine after 5 samples, no span: the fine branch in a few frames)
     print(f'golden_synth {synth}, title {title}; lavapipe unless VK_ICD_FILENAMES is set; logs in {a.out}/<case>/start<n>.log')
@@ -328,7 +333,7 @@ def cmd_mali(a):
           f'white, start 1: 3 samples, all 576 of 576 texels saturated (and at 64+), 240 lit draws, the part fully covered; verdict {v}')
     check(has(L, 'start marker: route A') and has(L, 'route A: the first sample came back (start marker cleared)') and st.get('started') == '-',
           f'white, start 1: the start marker set at the start, cleared at the first sample (started={st.get("started")})')
-    check(has(L, 'the second fix (route B') and has(L, 'note over the game (no screen here): Mali: the white-screen fix did not take; trying the second fix') and st.get('A') == 'white'
+    check(has(L, 'the second fix (route B') and has(L, 'note over the game (no screen here, mali-try-b): Mali: the white-screen fix did not take; trying the second fix') and st.get('A') == 'white'
           and st.get('B') == '-' and st.get('next') == 'B (checked)' and st.get('gpu', '') != '',
           f'white, start 1: the ladder moves to B, its note; state A={st.get("A")} B={st.get("B")} next={st.get("next")} gpu={st.get("gpu")}')
     L, st, rc, fmt, lg = start('white', 'white', L1); v = verdict(L)
@@ -369,10 +374,16 @@ def cmd_mali(a):
     L, st, rc, fmt, lg = start('recheck', 'white', FAST, frames=16); v = verdicts(L); s = samples(L)
     check(rc == 0 and plan(L) == ('A', 're-checked once a minute') and v == [(3, 'A', 'WHITE')] and all('(re-check)' in x for x in s) and st.get('A') == 'white' and st.get('next') == 'B (checked)'
           and has(L, 'trying the second fix'), f'a route kept as fine, re-checked on a white scene: {v}, state A={st.get("A")} next={st.get("next")}')
-    # 7. a black (cleared, never drawn) lit target: empty samples, never fine; the cap stops the check with a summary
+    # 7. a black (cleared, never drawn) lit target: empty samples, never fine; the cap stops the check with a summary, and a start that was mostly black there makes
+    #   the route broken at once (a black picture is no fix either); with no cap in the way, 10 empty samples in a row (30 s of play) are a BROKEN verdict
     L, st, rc, fmt, lg = start('black', 'black', dict(FAST, DM_MALI_WHITE_CAP='8'), frames=32); k = kinds(L)
     check(rc == 0 and not verdicts(L) and k[:8] == ['empty'] * 8 and all('576 near black' in x for x in samples(L)) and has(L, 'no verdict after 8 samples') and has(L, 'the lit target was near black in 8 of 8')
-          and st.get('A') == '-' and st.get('A_fine_starts') == '0', f'a black lit target: {len(k)} samples, all empty ({k[:3]}...), no verdict even with fine after 5; capped at 8 with a summary; state A={st.get("A")}')
+          and has(L, 'route A is BROKEN: its lit target was near black at most samples') and st.get('A') == 'broken' and st.get('A_fine_starts') == '0' and st.get('next') == 'B (checked)'
+          and has(L, 'trying the second fix'), f'a black lit target: {len(k)} samples, all empty ({k[:3]}...), no verdict even with fine after 5; capped at 8 with a summary, A broken at once; '
+          f'state A={st.get("A")} next={st.get("next")}')
+    L, st, rc, fmt, lg = start('blackrun', 'black', FAST, frames=40); v = verdicts(L); k = kinds(L)
+    check(rc == 0 and v == [(10, 'A', 'BROKEN')] and k[:10] == ['empty'] * 10 and has(L, 'near black at every sample in a row') and st.get('A') == 'broken' and st.get('next') == 'B (checked)',
+          f'a black lit target, no cap: BROKEN at the 10th empty sample in a row: {v}, state A={st.get("A")} next={st.get("next")}')
     # 8. a partly white picture (a tenth of the part: 60 of 576 texels): between, never 3 white in a row; the slow rule calls it WHITE at the 40th sample
     L, st, rc, fmt, lg = start('partial', 'partial', L1, frames=110); v = verdicts(L); k = kinds(L)
     #   (past the first 30 samples one line a minute: the 30 logged and the 40th, the verdict's, are all between)
@@ -399,23 +410,29 @@ def cmd_mali(a):
     check(rc != 0 and has(L, 'the last start on route A ended before 20 s of play or a sample, without a crash') and plan(L) == ('A', 'checked while playing') and st.get('early_ends') == '1' and st.get('started') == 'A',
           f'a start that ended early without the crash flag (closed, or ended by the system): route A again, counted (early_ends={st.get("early_ends")})')
     L, st, rc, fmt, lg = start('early', 'white', L1)
-    check(rc == 0 and has(L, 'route A closed the game at an earlier start (two starts in a row on it ended before 20 s of play') and plan(L) == ('B', 'checked while playing') and st.get('A') == 'crashed',
-          f'the second such start in a row: route A closed the game, route B: {plan(L)}, A={st.get("A")}')
+    check(rc == 0 and has(L, 'route A closed the game at an earlier start (two starts in a row on it ended before 20 s of play') and plan(L) == ('B', 'checked while playing') and st.get('A') == 'crashed'
+          and st.get('A_ends') == '1' and st.get('A_crashes') == '0', f'the second such start in a row: route A closed the game on early ends, route B: {plan(L)}, A={st.get("A")} A_ends={st.get("A_ends")} A_crashes={st.get("A_crashes")}')
     start('gamecrash', 'white', dict(L1, GOLDEN_SYNTH_LIT_ABORT='1'))
     L, st, rc, fmt, lg = start('gamecrash', 'white', dict(L1, DM_LAST_CRASH_DEVICE='1', DM_LAST_CRASH_GAME='1'))
     check(rc == 0 and has(L, 'ended before 20 s of play or a sample, without a crash') and plan(L) == ('A', 'checked while playing') and st.get('A') == 'white',
           f'a crash in the game\'s own code (DM_LAST_CRASH_GAME): not the route\'s, counted as an early end only; route A again: {plan(L)}')
-    # 12. other white-screen tests set in env.txt: the verdict is logged, not kept (DM_VK_PROBE=f16target under route B)
+    # 12. other white-screen tests set in env.txt (the menu's White screen tests, left set): a white verdict still moves the ladder (the fix did not take with them),
+    #   a fine one is not kept, and no start marker is left (DM_VK_PROBE=f16target under route B: B white too, so both white and the PanVK offer)
     start('others', 'white', L1)
     L, st, rc, fmt, lg = start('others', 'white', dict(L1, DM_VK_PROBE='f16target')); v = verdict(L)
     check(rc == 0 and plan(L) == ('B', 'checked while playing') and NC in fmt and has(L, 'other white-screen tests (DM_VK_PROBE=f16target)') and v == (3, 'B', 'WHITE')
-          and has(L, 'the verdict is not kept') and st.get('B') == '-' and st.get('A') == 'white' and not has(L, 'start marker: route') and has(L, 'a test switch in the settings overrides the white-screen fix'),
-          f'DM_VK_PROBE=f16target under route B: verdict {v} logged, not kept (B={st.get("B")}), no start marker, the settings note')
-    # 13. a route set in env.txt wins: its verdict is not kept for a route it is not, and the note says the settings hold the fix back
+          and has(L, 'kept although other white-screen tests are set in env.txt: DM_VK_PROBE=f16target') and st.get('B') == 'white' and st.get('A') == 'white' and st.get('panvk') == 'offer'
+          and not has(L, 'start marker: route') and has(L, 'neither white-screen fix took'),
+          f'DM_VK_PROBE=f16target under route B: verdict {v} kept (B={st.get("B")}, panvk={st.get("panvk")}), no start marker, the ladder\'s own note')
+    L, st, rc, fmt, lg = start('othersfine', 'fine', dict(FAST, DM_VK_FMZ='1'), frames=24); v = verdicts(L)
+    check(rc == 0 and v == [(5, 'A', 'FINE')] and has(L, 'with other white-screen tests set in env.txt: fine is not kept') and st.get('A') == '-' and st.get('A_fine_starts') == '0'
+          and not has(L, 'start marker: route'), f'DM_VK_FMZ=1, a fine scene: {v} at this start, not kept (A={st.get("A")}, A_fine_starts={st.get("A_fine_starts")})')
+    # 13. a route set in env.txt wins: its verdict is not kept for a route it is not, and the note names the menu's switch that holds the fix back
     L, st, rc, fmt, lg = start('envwins', 'white', dict(L1, DM_VK_B10_AS_RGBA16='0')); v = verdict(L)
     check(rc == 0 and has(L, 'env.txt sets DM_VK_B10_AS_RGBA16: this start runs none, not route A') and not fmt and v == (3, 'none', 'WHITE') and has(L, 'the verdict is not kept')
-          and st.get('A') == '-' and st.get('next') == 'A (checked)' and has(L, 'a test switch in the settings overrides the white-screen fix') and not has(L, 'trying the second fix'),
-          f'DM_VK_B10_AS_RGBA16=0 over the ladder: runs none (formats {fmt or "none"}), verdict {v}, not kept: A={st.get("A")}, the settings note (not the try-B one)')
+          and st.get('A') == '-' and st.get('next') == 'A (checked)' and has(L, 'mali-env:DM_VK_B10_AS_RGBA16): Mali: a test switch in the settings overrides the white-screen fix')
+          and not has(L, 'trying the second fix'),
+          f'DM_VK_B10_AS_RGBA16=0 over the ladder: runs none (formats {fmt or "none"}), verdict {v}, not kept: A={st.get("A")}, the settings note naming the switch (not the try-B one)')
     # 14. both fixes at once (B set in env.txt beside the ladder's A) and white: both count as white, the PanVK offer is reached
     L, st, rc, fmt, lg = start('both', 'white', dict(L1, DM_VK_B10_NOCOMPRESS='1')); v = verdict(L)
     check(rc == 0 and A16 in fmt and NC in fmt and v == (3, 'A+B', 'WHITE') and st.get('A') == 'white' and st.get('B') == 'white' and st.get('panvk') == 'offer' and has(L, 'neither white-screen fix took'),
@@ -427,6 +444,62 @@ def cmd_mali(a):
     # 16. DM_MALI_LADDER=0 wins over the simulation
     L, st, rc, fmt, lg = start('ladder0', 'white', {'DM_MALI_LADDER': '0', 'DM_MALI_WHITE_SIM': '1'})
     check(rc == 0 and not L and not st and not fmt, f'DM_MALI_LADDER=0 with DM_MALI_WHITE_SIM=1: {len(L)} [mali-white] lines, state file {"written" if st else "none"}, formats {fmt or "none"}')
+    # 17. the driver crashes making the check's own compute shader (#89; DM_MALI_WHITE_INIT_ABORT stands in for it): the start dies in mw_gpu_init with route A's marker
+    #   at the detector stage, and the next start, crash flag and all, blames the check, not route A; from then on the check is off on this driver (its own marker
+    #   beside the pipeline cache: DM_VK_PCACHE in the case's folder) and an end without a crash counts for nothing. DM_MALI_WHITE_SIM=1 turns the ladder on here
+    #   (DM_MALI_LADDER=1 would make mw_gpu_init try again)
+    dd = os.path.join(a.out, 'detector'); SIMD = {'DM_VK_PCACHE': os.path.join(dd, 'pcache.bin'), 'DM_MALI_WHITE_SIM': '1'}
+    L, st, rc, fmt, lg = start('detector', 'white', dict(SIMD, DM_MALI_WHITE_INIT_ABORT='1'))
+    check(rc != 0 and st.get('started') == 'A' and st.get('stage') == 'detector' and os.path.exists(os.path.join(dd, 'mali_white_crashed')) and not samples(L),
+          f'a start whose driver dies making the check\'s compute pass (abort, exit {rc}): marker started={st.get("started")} stage={st.get("stage")}, the check\'s own marker left')
+    L, st, rc, fmt, lg = start('detector', 'white', dict(SIMD, DM_LAST_CRASH_DEVICE='1'))
+    check(rc == 0 and has(L, "ended while making the check's own compute pass (it crashed there): the check's doing, not the route's") and st.get('A') == '-' and st.get('A_crashes') == '0'
+          and plan(L) == ('A', 'checked while playing') and has(L, "the check's compute shader closed the game on this driver at an earlier start: no check") and not samples(L) and A16 in fmt
+          and st.get('started') == 'A' and st.get('stage') == 'loading',
+          f'the next start with the crash flag: route A not blamed (A={st.get("A")}, A_crashes={st.get("A_crashes")}), route A, no check on this driver, its marker at loading (stage={st.get("stage")})')
+    for i in range(2): L, st, rc, fmt, lg = start('detector', 'white', SIMD)
+    check(rc == 0 and has(L, 'ended at the loading stage') and st.get('A') == '-' and st.get('early_ends') == '0' and not samples(L),
+          f'two more starts without the check, ended without a crash: nothing counted (A={st.get("A")}, early_ends={st.get("early_ends")})')
+    # 18. starts that end before their first picture without a crash (the player leaving during the pipeline builds, Android ending it in the background): not
+    #   counted, however many; one with the crash flag is
+    for i in range(3): L, st, rc, fmt, lg = start('loading', 'white', dict(L1, GOLDEN_SYNTH_ABORT_LOADING='1'))
+    check(rc != 0 and st.get('started') == 'A' and st.get('stage') == 'loading' and has(L, 'ended at the loading stage') and st.get('A') == '-' and st.get('early_ends') == '0',
+          f'three starts ended before their first picture: not counted (A={st.get("A")}, early_ends={st.get("early_ends")}, stage={st.get("stage")})')
+    L, st, rc, fmt, lg = start('loading', 'white', dict(L1, DM_LAST_CRASH_DEVICE='1'))
+    check(rc == 0 and has(L, 'route A closed the game at an earlier start (it crashed after the graphics device came up') and st.get('A') == 'crashed' and st.get('A_crashes') == '1'
+          and plan(L) == ('B', 'checked while playing'), f'... then one with the crash flag: route A closed the game (A={st.get("A")}, A_crashes={st.get("A_crashes")}), route B')
+    # 19. NaN in the lit target is counted apart from white: a lit target of NaN (what the stand-in keeps of a NaN: black on screen) is BROKEN, not white; NaN over
+    #   28 texels (dark spots) does not keep a route from being fine
+    L, st, rc, fmt, lg = start('nan', 'nan', L1); v = verdict(L); s = samples(L)
+    check(rc == 0 and v == (3, 'A', 'BROKEN') and s and all('0 of 576 texels saturated' in x and '576 NaN' in x for x in s) and kinds(L)[:3] == ['nan'] * 3
+          and has(L, 'NaN in a quarter of the lit target') and st.get('A') == 'broken' and st.get('next') == 'B (checked)',
+          f'a lit target of NaN: {v}, samples 0 saturated / 576 NaN, state A={st.get("A")} next={st.get("next")}')
+    L, st, rc, fmt, lg = start('nanspots', 'nanspots', dict(FAST, GOLDEN_SYNTH_LIT_CORNER='0.224'), frames=24); v = verdicts(L); s = samples(L)
+    check(rc == 0 and v == [(5, 'A', 'FINE')] and s and all('0 of 576 texels saturated' in x and '28 NaN' in x for x in s) and st.get('A_fine_starts') == '1',
+          f'NaN spots over 28 of 576 texels (fine after 5 here): {v}, A_fine_starts={st.get("A_fine_starts")}')
+    # 20. the picture shown as a second signal: the lit target fine but a later pass drawing the window white is WHITE (5 in a row: longer than a fade to white);
+    #   60 % of it white is a bright sample, no evidence either way: never fine (FINE after 5 here otherwise), never white, and a start capped on bright samples is
+    #   not counted against the route; a fine scene's picture shown has no white in it
+    L, st, rc, fmt, lg = start('postwhite', 'postwhite', L1); v = verdict(L); s = samples(L)
+    check(rc == 0 and v == (5, 'A', 'WHITE') and s and all('0 of 576 texels saturated' in x and 'the picture shown 576 of 576 white' in x for x in s) and kinds(L)[:5] == ['shown white'] * 5
+          and has(L, 'the picture shown white in samples in a row (longer than a fade to white), the lit target not') and st.get('A') == 'white',
+          f'the lit target fine, the window drawn white after it: {v} (5 shown-white samples in a row), state A={st.get("A")}')
+    L, st, rc, fmt, lg = start('postbright', 'postbright', dict(FAST, DM_MALI_WHITE_CAP='8'), frames=24); v = verdicts(L); s = samples(L)
+    check(rc == 0 and not v and len(s) >= 8 and all('the picture shown 350 of 576 white' in x for x in s) and set(kinds(L)) == {'bright'} and has(L, 'no verdict after 8 samples')
+          and has(L, 'a bright scene: no evidence either way): this start is not counted') and st.get('A') == '-' and st.get('A_fine_starts') == '0' and st.get('A_undecided') == '0',
+          f'the lit target fine, 60 % of the window drawn white: {len(s)} samples, kinds {sorted(set(kinds(L)))}, no verdict (fine after 5 otherwise); capped at 8, not counted '
+          f'(A_undecided={st.get("A_undecided")})')
+    L, st, rc, fmt, lg = start('shownfine', 'fine', FAST, frames=24); s = samples(L)
+    check(rc == 0 and s and all('the picture shown 0 of 576 white' in x for x in s) and verdicts(L) == [(5, 'A', 'FINE')], f'a fine scene: the picture shown read, none of it white ({len(s)} samples), fine')
+    # 21. starts with no verdict are remembered: a white corner over 28 texels (4.9 %: between, under the slow rule's 8 %) reaches the cap (8 here) with no verdict;
+    #   the third such start makes route A broken, and the next start runs B
+    logs = []
+    for i in range(3): L, st, rc, fmt, lg = start('undecided', 'partial', dict(L1, GOLDEN_SYNTH_LIT_CORNER='0.224', DM_MALI_WHITE_CAP='8'), frames=24); logs.append(L)
+    check(has(logs[0], 'no verdict after 8 samples') and has(logs[0], 'route A: starts with no verdict 1 of the 3 that make it broken') and has(logs[1], 'starts with no verdict 2 of the 3')
+          and set(kinds(logs[0])) == {'between'} and all('28 of 576 texels saturated' in x for x in samples(logs[0])),
+          f'a start capped with no verdict (28 of 576 saturated, between): counted, 1 then 2 of 3')
+    check(rc == 0 and has(L, 'route A is BROKEN: no verdict at the starts it needed') and st.get('A') == 'broken' and st.get('A_undecided') == '3' and st.get('next') == 'B (checked)'
+          and has(L, 'trying the second fix'), f'the third: route A broken (A={st.get("A")}, A_undecided={st.get("A_undecided")}), next={st.get("next")}')
     print('Mali white-screen check: ' + ('PASS' if not fails else f'FAIL ({fails})') + f' ({nstart[0]} starts)')
     return 1 if fails else 0
 
