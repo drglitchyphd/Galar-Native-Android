@@ -9,7 +9,7 @@
   golden_check.py synth [--out DIR] [--title ID] [--players DIR]
         The round trip without a phone: golden_synth draws two frames through the PC replay layer with the recorder on, golden_play replays the recording in a
         fresh process, the pictures must be identical; and with the recording's images from earlier frames (TEXI) or its start state (PROL) left out they must not be.
-  golden_check.py b10 [--out DIR] [--engine ID] [--players DIR] [--threshold N] [--max-diff PCT]
+  golden_check.py b10 [--out DIR] [--engine ID] [--title ID] [--players DIR] [--threshold N] [--max-diff PCT]
         The Mali float-target tests on this PC (DM_VK_B10_AS_RGBA16: R11G11B10F drawn as RGBA16F; DM_VK_B10_NOCOMPRESS: R11G11B10F targets without framebuffer
         compression): golden_synth with its R11G11B10F part (GOLDEN_SYNTH_B10=1: a lit pass into R11G11B10F with blending that reads the target's alpha, a copy
         into the game's memory and back, a texture clear, a blit from RGBA8, CPU-filled textures, CPU reads) once with each setting, both, and neither. Each run:
@@ -186,7 +186,7 @@ def cmd_synth(a):
 
 def cmd_b10(a):
     """The Mali float-target tests (DM_VK_B10_AS_RGBA16, DM_VK_B10_NOCOMPRESS) on golden_synth's R11G11B10F part: see the module's help"""
-    engine = a.engine; synth = os.path.join(a.players, f'pc-{engine}', 'golden_synth')
+    engine = a.engine; synth = os.path.join(a.players, f'pc-{engine}', 'golden_synth'); title = a.title or engine
     if not os.path.exists(synth): print(f'ERROR no {synth} (bash dm/pc/build.sh GAME={engine})'); return 2
     if os.path.isdir(a.out): shutil.rmtree(a.out)
     cfgs = [('default', {}), ('rgba16', {'DM_VK_B10_AS_RGBA16': '1'}), ('nocompress', {'DM_VK_B10_NOCOMPRESS': '1'}), ('both', {'DM_VK_B10_AS_RGBA16': '1', 'DM_VK_B10_NOCOMPRESS': '1'})]
@@ -194,8 +194,8 @@ def cmd_b10(a):
     for name, sw in cfgs:
         out = os.path.join(a.out, name); os.makedirs(out)
         env = vk_env(); env.update(sw); env['GOLDEN_SYNTH_B10'] = '1'
-        r = subprocess.run([synth, out, engine], env=env, capture_output=True, text=True, timeout=900)
-        rec = os.path.join(out, f'{engine}-synth-p2.nxgold'); lp = rec[:-7] + '.phone.png'
+        r = subprocess.run([synth, out, title], env=env, capture_output=True, text=True, timeout=900)
+        rec = os.path.join(out, f'{title}-synth-p2.nxgold'); lp = rec[:-7] + '.phone.png'
         open(os.path.join(out, 'golden_synth.log'), 'w').write(r.stderr)
         checks = [l.split('] ', 1)[-1] for l in r.stderr.splitlines() if 'b10 check' in l]
         notes = sorted({l.split('] ', 1)[-1].split(' (first:')[0] for l in r.stderr.splitlines() if 'b10 swap:' in l or 'b10 nocompress:' in l or 'formats: R11G11B10F' in l})
@@ -236,7 +236,7 @@ def main():
     c = s.add_parser('accept'); c.add_argument('folder'); c.add_argument('names', nargs='*'); c.add_argument('--out')
     y = s.add_parser('synth'); y.add_argument('--out', default=os.path.join(PLAYERS, 'golden-synth')); y.add_argument('--engine', default='01008DB008C2C000'); y.add_argument('--title')
     y.add_argument('--players', default=PLAYERS)
-    b = s.add_parser('b10'); b.add_argument('--out', default=os.path.join(PLAYERS, 'golden-b10')); b.add_argument('--engine', default='01008DB008C2C000'); b.add_argument('--players', default=PLAYERS)
+    b = s.add_parser('b10'); b.add_argument('--out', default=os.path.join(PLAYERS, 'golden-b10')); b.add_argument('--engine', default='01008DB008C2C000'); b.add_argument('--title'); b.add_argument('--players', default=PLAYERS)
     b.add_argument('--threshold', type=int, default=2); b.add_argument('--max-diff', type=float, default=0.1)
     a = p.parse_args()
     if a.cmd in ('run', 'accept') and not a.out: a.out = os.path.join(a.folder, 'out')
