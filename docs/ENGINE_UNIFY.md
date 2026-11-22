@@ -86,9 +86,22 @@ game it runs, from its profile:
   `Q_ASYNC_PSO`, `driver_selftests` → `Q_DRIVER_SELFTESTS`, `nvn_async_never` → `Q_NVN_ASYNC`. A game's own choice lives in its `game.tsv`: Sword / Shield
   would take Arceus's Qualcomm Vulkan 1.1 rule by adding `qc11_no_eds` to Shield's `engine_quirks`, nothing else.
 
-`quirk_default(q, gpu_id)` is each site's default; the site still lets env.txt (and `driver-check.env`) win with the same `DM_VK_*` switch as before, and
-`quirk_note` prints a `[quirk]` line for each workaround in effect at start (the debug report copies them to `quirks.txt`). `hle_nvn.c` asks through
-`nvn_vk_quirk_default`. The other `engine_quirks` decide nothing per GPU and stay `#if DM_GAME_ENG_*` at their sites: `frame_hold_off`, `gpu_time_auto_only`
+`quirk_default(q, gpu_id)` is each site's default; the site still lets env.txt win with the same `DM_VK_*` switch as before, and `quirk_note` prints a
+`[quirk]` line for each workaround in effect at start (the debug report copies them to `quirks.txt`), saying where its value came from: "default for this
+GPU" (or "… in this game's profile" for the four rules that read `gpu_id.eng`), "env.txt" or "driver check". The first decision of a rule is kept, atomically
+(the game's thread and the replay's can decide one lazily). `hle_nvn.c` asks through `nvn_vk_quirk_default`, which answers -1 before the device exists (as
+6e0e1dd's `nvn_vk_gpu_name` test: `rq_on` takes that as Auto off) and, for the rules that read the driver ID or Arm's release (`quirk_late`), until `mtl_init`
+has read them just after the device is made; t_quirks.c checks that no other rule reads those.
+
+Settings start-up order (android_main.c `host_start`, each file's keys set only when not set: `env_file.h`): env.txt (the player's), then the safe-start
+ladder's level (safe_start.h), then `driver-check.env` (the driver check's settings for this driver, DriverCheck.java), then the phone profile. So the player's
+settings and the ladder's levels win over the driver check (ladder level 5's `DM_VK_FLOAT_CONTROLS=0` over the check's 1, #89). android_main.c names the keys
+it took from `driver-check.env` in `DM_DRIVER_CHECK_KEYS`, and nvn_vk.c takes those values as this driver's defaults, not as the player's (vk_quirks.h
+`vkq_env_src` / `vkq_env_player`): the crash markers that only the player's own setting skips still apply to them (`float_controls_crashed`,
+`bc_gpu_crashed`, `heap_import_crashed`), and their `[quirk]` line says "driver check". The check writes `DM_VK_FLOAT_CONTROLS`, `DM_VK_DMAHEAP`, `DM_VK_BC_GPU`
+(table rules) and `DM_VK_ZCOPY`, `DM_VK_INT_TEX`, `DM_VK_NO_LAYERED_3D` (switches of their own code paths).
+
+The other `engine_quirks` decide nothing per GPU and stay `#if DM_GAME_ENG_*` at their sites: `frame_hold_off`, `gpu_time_auto_only`
 (timestamps only with Graphics Auto: a setting), `nvn_async_never`'s refusal of the player's own setting; `framegen_game_rate` has no reader (above).
 GPU tests left outside the table on purpose are listed at the top of vk_quirks.h: building `gpu_id` itself, what is decided before a driver is open
 (android_main.c chip profiles, `panvk_defaults` and the driver check's copy of it, the safe-start ladder, the heat guard's kgsl clock), the driver check's own
@@ -124,8 +137,12 @@ What each app runs by default (env.txt still wins). "Arm's own driver": by drive
 Checks: `dm/gfx/tests/t_quirks.c` compares the table with 6e0e1dd's per-site expressions (copied, with their line numbers) for each port's profile over
 2.57 M GPU descriptions each (vendors, driver IDs or none, Vulkan 1.0-1.4, Arm releases r20p0-r55p2 with and without beta, driver packages, names, memory sizes,
 dynamic rendering), then every port with every combination of the `eng` bits (no rule reads the port), reads the five `game.tsv` files, and pins players'
-phones for each game: 328.6 M comparisons, equal everywhere; `Q_QUERY_LOD` is the one rule without a 6e0e1dd counterpart. `simdev/t_vkdev.c`, built for each
-game, checks the decisions `mtl_init` makes against the same rules on the 42 simulated GPUs.
+phones for each game: 328.6 M comparisons, equal everywhere; `Q_QUERY_LOD` is the one rule without a 6e0e1dd counterpart. It also checks, over the same grid,
+that only the `quirk_late` rules change when the driver ID and Arm's release are not known yet and that `Q_FLOAT_CONTROLS` reads the vendor and driver ID alone
+(the driver check asks it from those), and where a setting came from (`DM_DRIVER_CHECK_KEYS`): 567 M checks in all. `simdev/t_vkdev.c`, built for each game,
+checks the decisions `mtl_init` makes against the same rules on the 42 simulated GPUs, every rule decided at its site so far against the table, the GPU
+timestamps site, `nvn_vk_quirk_default` before, while and after the device is made, and (`SIMDEV_DC_FC`) a driver-check value under a crash marker;
+`t_safe_start` checks the settings order with `driver-check.env`.
 
 ## Shader chains: generations instead of options
 
@@ -187,21 +204,45 @@ Found while copying 6e0e1dd's rules into t_quirks.c; 6e0e1dd already had them, t
   gives floor (LOD) (dEQP-VK texturequerylod, Mali-G615 MC6). A load-time SPIR-V pass: no new setup, the shader chains are unchanged. `DM_VK_QUERY_LOD=0 / 1`.
 - Vulkan validation fixes (the S25+ layer run), on every GPU: `spv_strip_clipcull` drops the unused ClipDistance[8] / CullDistance[1] of every vertex shader at
   load (over the limit of 8); a scaled / mirrored / format-changing copy into a depth / stencil format that is no blit destination (D24S8 on Adreno) is drawn
-  (`zcopy_draw`; `DM_VK_ZCOPY=0`: the blit); an integer texture read through a float sampler is viewed in the shader's class (`tex_view_for` / `fmt_as_class`;
-  `DM_VK_INT_TEX=keep`: its own format).
+  (`zcopy_draw`; `DM_VK_ZCOPY=0`: the blit); an integer texture read as another numeric class (`tex_view_for` / `fmt_as_class`; `DM_VK_INT_TEX=keep`: its own
+  format always), as the table below.
+  - `zcopy_draw` begins its pass through `rend_begin`, as the game's passes: in a held frame (`DM_VK_FRAME_HOLD=2`, the default with Faster rendering's Auto on
+    Adreno, Sword / Shield and Scarlet / Violet) the command buffer outside a pass is a secondary, where the branch's `vkCmdBeginRenderPass` was invalid with
+    Adreno's render passes (VUID-vkCmdBeginRenderPass-bufferlevel); the copy is now a segment of its own, its pass begun in the primary at the flush. And it
+    tells `draw_`'s pipeline-bind cache (`g_gfx_bind_gen`), so the game's next draw binds its own pipeline again instead of drawing with the copy's. simdev's
+    t_vkdev draws a copy in both kinds of submission (`run_simdev.sh all` runs it again with `DM_VK_FRAME_HOLD=2`); with the branch's code the held run
+    reported VUID-vkCmdBeginRenderPass-bufferlevel / -EndRenderPass-bufferlevel on the Adreno 830 and 710 profiles (render passes), with this one none.
+  - An integer texture read as another class gets one of three outcomes (6e0e1dd bound its own format in every case):
+
+    | Texture (its view format) | Read as | Its image's formats (nvn_vk.c `tex_new`) | Outcome |
+    | --- | --- | --- | --- |
+    | 32-bit channels: R32 / R32G32 / R32G32B32A32 UINT or SINT | float, or the other signedness | mutable without a format list: 3D images, `DM_VK_NO_FMT_LIST`, and outside Mali a format that cannot be a render target or a driver without format lists (Vulkan 1.1 without `VK_KHR_image_format_list`) | **the same bits** in a view of the shader's class (new) |
+    | the same | the same | fixed: not mutable (every plain colour image on Mali, `Q_ARM_FORMATS`: Arm's driver and PanVK), or listing only its own format and sRGB twin (render-target formats wherever format lists exist: Adreno, Xclipse, most Vulkan 1.2 drivers) | its own format, as 6e0e1dd (a view of another class would be invalid there; undefined in Vulkan, the layer still names it) |
+    | 8 / 16 / 10-bit integers | float | any | **the empty texture** of its class: 0, the Switch's flushed denormals (new; Shield's `fp_t_tcb_8`) |
+    | 8 / 16-bit integers | the other signedness | any | its own format, as 6e0e1dd: a view of the other signedness extends the sign the other way (R16_UINT 0xffff read as -1, the Switch gives 65535) |
+    | float, UNORM, SNORM, sRGB (or BC decoded here) | uint / sint | any | its own format, as 6e0e1dd (not seen in Sword / Shield yet) |
+
+    galar-vk10-validation viewed 8 / 16-bit integers as the other signedness, and on fixed-format images read 32-bit ones as 0 although its notes said "the
+    same bits": both are 6e0e1dd's binding again. The driver check's `int-view` test now reads 32-bit textures through float and other-signedness views of
+    mutable images (where the engine makes them; a failure writes `DM_VK_INT_TEX=keep`), and `int-view-own` reports what the driver returns for the old binding
+    on a non-mutable and a format-listed image and for a 16-bit integer read as int (information only, no setting).
 - The driver check before Play (`DriverCheck.java`, `DriverCheckService` in its own `:drvcheck` process, `libdmprobe.so`: built by the `lib` target and
-  `win_build_lib.py`, optional in the APK): the probe app's GPU self-tests on the game's own driver, once per driver / system build / app version, crash- and
-  hang-safe (a journal, up to 4 attempts, 90 s; Play always follows). What it finds goes to `driver-check.env`, read after env.txt and before the phone profile
-  (`DM_DRIVER_CHECK=0`: not read): `DM_VK_DMAHEAP=0`, `DM_VK_BC_GPU=0`, `DM_VK_ZCOPY=0`, `DM_VK_INT_TEX=keep` or `DM_VK_NO_LAYERED_3D=1` after a test that crashed
-  or failed, `DM_VK_FLOAT_CONTROLS=1` where a driver is right only with float controls. Those change a default for that driver as env.txt would (their `[quirk]`
-  line says env.txt; the debug report holds `driver-check.env`). A driver change drops every game's results; menu: "Check the graphics driver again". Scarlet /
-  Violet get it too (shared app code; no branch targeted Paldea).
+  `win_build_lib.py`, optional in the APK): the probe app's GPU self-tests on the game's own driver, once per driver / system build / app version (and
+  `DriverCheck.VERSION`, 2), crash- and hang-safe (a journal, up to 4 attempts, 90 s; Play always follows). What it finds goes to `driver-check.env`, read after
+  env.txt and the safe-start ladder and before the phone profile (`DM_DRIVER_CHECK=0`: not read; "Per-GPU rules" above): `DM_VK_DMAHEAP=0`, `DM_VK_BC_GPU=0`,
+  `DM_VK_ZCOPY=0`, `DM_VK_INT_TEX=keep` or `DM_VK_NO_LAYERED_3D=1` after a test that crashed or failed, `DM_VK_FLOAT_CONTROLS=1` where a driver is right only
+  with float controls. Those are this driver's defaults: the player's env.txt and the ladder win over them, the engine's crash markers still apply to them, and
+  their `[quirk]` line says "driver check" (the debug report holds `driver-check.env`). A test that only stops answering for 20 s (hung, or slow: the BC layer's
+  pipelines on an old Mali) is left out of the next attempt without its setting, and named in `driver-check.txt` (the game's own markers, `bc_gpu_crashed`
+  and `heap_import_crashed`, still cover a hang the player ends). A driver change drops every game's results; menu: "Check the graphics driver again".
+  Scarlet / Violet get it too (shared app code; no branch targeted Paldea). Its report no longer calls itself Galar Native's in the other apps.
 - The debug report (`DebugBundle.java`; ☰ → Bug reports → Make a debug report, and offered once after a run that crashed, hung or was ended for memory on
   screen): one ZIP in Download and a pre-filled
   GitHub issue (Galar-Native-Android's issue form; Arceus's and Paldea's repositories get a plain body). With it: Android tombstones after our crash record
   (`crash.c` hands the signal on to debuggerd; `DM_CRASH_CHAIN=0`: the old `_exit`), `DM_TEST_CRASH=<s>`, GPU breadcrumbs (`vk_crumbs.h`, printed on device
-  lost, a failed submit, a 10 s hang or a crash; `DM_VK_BREADCRUMBS=1`: the GPU marks each pass, menu "GPU crash tracing"), a `[mem-by]` status line every 30 s
-  beside 6e0e1dd's smaps breakdown, the `[quirk]` lines, `tools/read_debug_report.py`.
+  lost, a failed submit, a 10 s hang or a crash; `DM_VK_BREADCRUMBS=1`: the GPU marks each pass, menu "GPU crash tracing"; in a held frame the mark goes into
+  the gap after the pass, so with it on those passes are not run as one), a `[mem-by]` status line every 30 s beside 6e0e1dd's smaps breakdown, the `[quirk]`
+  lines, `tools/read_debug_report.py`. The breadcrumbs' bookkeeping on every pipeline bind copies the two shader keys (no formatting).
 - Old-driver mode (`DM_VK_BASELINE=1`, menu): the Vulkan 1.1 floor on any GPU (render passes, draw state in each pipeline, a fence per submission).
 - The four menu entries above are in the shared system menu of all three apps.
 
@@ -233,6 +274,25 @@ layer off for Arceus only; arceus-vk10-validation added a second query-LOD pass 
   Arceus's t_vkdev also failed on the 16 Adreno / Turnip profiles: the test expected background pipelines; it now reads async_pso_off.)
 - Not done: no APK packaged, nothing run on a phone or emulator.
 
+After the review (2026-11-22; the depth copy in held frames, draw_'s bind cache, the integer-texture views, the driver check's order and values, the table's
+late rules and notes):
+
+- `make -f Makefile.host GAME=<id> lib` from a clean `out/` for all five profiles; nvn_vk.c, hle_nvn.c, android_main.c and libdmprobe.so compile without
+  warnings for Shield, Arceus and Violet. The Java app compiles (javac 21, android-34). `chain_tree.py --verify` unchanged.
+- t_quirks: 567.3 M checks pass (parts 5 and 6 new); its mutation runs (rules drifting from 6e0e1dd, a rule left out of `quirk_late` or added without reading
+  a late field, `Q_FLOAT_CONTROLS` reading the API version, `vkq_env_src` matching a key's prefix, a profile change) each fail. t_safe_start 23 checks (the
+  settings order with `driver-check.env`), t_crumbs, and the other Linux tests as above; test_shader_split_capture.py fails as on 6e0e1dd.
+- simdev, `run_simdev.sh all` for Shield, Arceus and Violet (516 runs): t_vkdev and t_vkdev_held (`DM_VK_FRAME_HOLD=2`) pass on all 43 devices for each game;
+  the depth copy drawn right in both kinds of submission on the 41 devices with Vulkan 1.1 or newer (D24S8 or D32S8; render passes on 24 of them: Adreno and
+  the drivers without dynamic rendering), with no validation error; the validation errors left are the ones listed above, unchanged. With the branch's
+  `zcopy_draw` restored for a control run, t_vkdev_held reported VUID-vkCmdBeginRenderPass-bufferlevel and -EndRenderPass-bufferlevel on the Adreno 830 and 710
+  profiles. `SIMDEV_DC_FC=1` (the driver check's `DM_VK_FLOAT_CONTROLS=1` with a `float_controls_crashed` marker) leaves float controls off, noted "driver
+  check", and `=2` (the same from env.txt) asks for them, on 7 devices for each game.
+- The probe's self-tests built for the PC and run on lavapipe: `int-view` passes; `int-view-own` reports lavapipe's own-format reads as the Switch's bits on
+  the non-mutable and the format-listed image (and the 16-bit integers zero-extended); its three VUID-vkCmdDispatch-format-07753 are that test's deliberate
+  mismatches.
+- Golden synthetic round trip (with 95d0777's stub for the run only): PASS for Shield's, Arceus's and Violet's engines.
+
 ## Not merged yet / open
 
 - READMEs: the root README is Galar's. Arceus's and Paldea's READMEs are not merged (per-game READMEs to do); `docs/HANDOFF.md` took Arceus's edits as git merged them.
@@ -242,8 +302,13 @@ layer off for Arceus only; arceus-vk10-validation added a second query-LOD pass 
 - Adoption candidates (one quirk / menu line each, after a phone test): `qc11_no_eds` and `driver_selftests` for Galar (#209 is the same bug: one word in
   Shield's `engine_quirks` each, the table does the rest), Arceus's touch camera / gyro / movement stick menu for Galar, Galar's battery saver for Arceus, the
   y-flip route on real Vulkan 1.0 drivers.
-- beta-exit-quirks: the driver check, the debug report (its crash / hang handling, the tombstone hand-over) and `Q_QUERY_LOD` have not run on a phone; a
-  `[quirk]` line set by `driver-check.env` says "env.txt" (android_main.c could record which keys it set from that file for `quirk_note`).
+- beta-exit-quirks: the driver check, the debug report (its crash / hang handling, the tombstone hand-over), `Q_QUERY_LOD`, the depth copy (`zcopy_draw`) and
+  the integer-texture views have not run on a phone. Before a release: count the `read as float by a shader` / `read as uint` / `read as sint` log lines
+  (tex_view_for) in a run of each game, Legends: Arceus's shaders above all (only Shield's `fp_t_tcb_8` was seen): an 8 / 16-bit integer read as float now
+  reads 0, which is the Switch's answer only where the shader uses it as a float (a shader that takes the bits as an integer read them through the old binding
+  on most drivers).
+- `arceus_pass_default` (uniform updates deferred inside a pass, `DM_VK_UB_DEFER`, Arceus only) still picks the game by `DM_GAME_PROGRAM_ID`, as 6e0e1dd: no GPU
+  rule, a candidate for an `engine_quirks` word (`ub_defer`).
 - `lang_src.py` is still stale; the `.tsv` tables were merged by union (Galar's text wins on the same key).
 - Linux reference setups of a pre-fmz game need a host translator built from the generation's tree (`--bin`); the frozen dlls come with a macOS apphost wrapper.
 - Phone tests for all three apps before any release from this tree.
