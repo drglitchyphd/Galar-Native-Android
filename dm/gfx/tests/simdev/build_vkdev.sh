@@ -14,7 +14,7 @@ python3 "$DM/games/game.py" header "$GAME" "$OUT/gen/game_profile.h"
 INC="-I$OUT/inc -I$DM/host -I$DM/gfx/nvn -I$DM/gfx/nvn/include -I$DM/third_party/vulkan-headers/include -I$OUT/gen"
 for d in $(python3 "$DM/games/game.py" dirs "$GAME"); do INC="$INC -I$d"; done
 CF="-D_GNU_SOURCE -include $PWD/vk_linux_shim.h -O1 -g -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-format -Wno-misleading-indentation -Wno-unused-label -Wno-pointer-sign -Wno-sign-compare -Wno-parentheses -Wno-unused-value -Wno-address -Wno-stringop-truncation -Wno-format-truncation -Wno-array-bounds -Wno-maybe-uninitialized -Wno-unused-result -Wno-dangling-pointer -Wno-int-in-bool-context -Wno-stringop-overflow"
-SRC="$DM/gfx/nvn/nvn_spv.c $DM/gfx/nvn/nvn_tex.c $DM/gfx/nvn/framecap_zip.c $DM/gfx/tex/bc_decode.c $DM/gfx/tex/bc_gpu.c $DM/gfx/tex/etc_encode.c $DM/gfx/tex/nvn_deswizzle.c $DM/gfx/tex/nvn_fmt_vk.c $DM/gfx/tex/tex_cache.c"
+SRC="$DM/gfx/nvn/nvn_spv.c $DM/gfx/nvn/nvn_tex.c $DM/gfx/nvn/golden_rec.c $DM/gfx/nvn/framecap_zip.c $DM/gfx/tex/bc_decode.c $DM/gfx/tex/bc_gpu.c $DM/gfx/tex/etc_encode.c $DM/gfx/tex/nvn_deswizzle.c $DM/gfx/tex/nvn_fmt_vk.c $DM/gfx/tex/tex_cache.c"
 OBJ=
 for s in $SRC; do o="$OUT/obj/$(basename "$s" .c).o"; gcc $CF $INC -c "$s" -o "$o" 2>"$o.log" || { cat "$o.log"; exit 1; }; OBJ="$OBJ $o"; done
 gcc $CF $INC -no-pie -rdynamic -o "$OUT/t_vkdev" t_vkdev.c $OBJ -lz -lm -ldl -lpthread   # (no PIE: a crash's addresses go straight to addr2line) 2>"$OUT/t_vkdev.log" || { cat "$OUT/t_vkdev.log"; exit 1; }
