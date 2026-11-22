@@ -710,6 +710,9 @@ public final class GameMenu {
                 { "1", t(a, "On"), t(a, "On: depth that nothing reads afterwards is not written back to memory (faster on Mali; a test: tell us if anything flickers)") } });
             choice(a, "DM_VK_B10_AS_RGBA16", t(a, "Bright scenes in a wider format"), new String[][] { { "", t(a, "Off"), "" },
                 { "1", t(a, "On"), t(a, "On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory") } });
+            // the other float-target route (nvn_vk.c tex_new, DM_VK_B10_NOCOMPRESS): R11G11B10F kept, its render targets without framebuffer compression (Arm's AFBC)
+            choice(a, "DM_VK_B10_NOCOMPRESS", t(a, "Bright scenes without compression"), new String[][] { { "", t(a, "Off"), "" },
+                { "1", t(a, "On"), t(a, "On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth") } });
             choice(a, "DM_VK_NO_PASS_MERGE", t(a, "Merge render passes"), new String[][] { { "", t(a, "On"), "" },
                 { "1", t(a, "Off"), t(a, "Off: every render target change starts a new pass") } });
         }

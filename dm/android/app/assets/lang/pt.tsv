@@ -350,6 +350,8 @@ Auto: on for Adreno GPUs, off for others	Auto: ligado em GPUs Adreno, desligado 
 Off: the graphics work runs on the game's own thread	Desligado: o trabalho gráfico roda na própria thread do jogo
 Bright scenes in a wider format	Cenas iluminadas em um formato mais amplo
 On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	Ligado: a cena iluminada é desenhada em um formato com mais margem (RGBA16F em vez de R11G11B10F), um teste para imagens brancas ou piscando; usa um pouco mais de memória
+Bright scenes without compression	Cenas iluminadas sem compressão
+On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth	Ligado: a cena iluminada mantém seu formato, mas é armazenada sem a compressão de framebuffer da GPU (AFBC), um teste para imagens brancas; usa mais largura de banda de memória
 AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1: ampliação que respeita as bordas e depois nitidez (Nitidez ajusta quanto)
 Colour	Cor
 Natural	Natural

@@ -350,6 +350,8 @@ Auto: on for Adreno GPUs, off for others	自動：Adreno GPUではオン、そ�
 Off: the graphics work runs on the game's own thread	オフ：グラフィック処理をゲーム自身のスレッドで行います
 Bright scenes in a wider format	明るい場面をより広い形式で描画
 On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	オン：明るい場面をより余裕のある形式（R11G11B10Fの代わりにRGBA16F）で描画します。白い画面やちらつきのテストです。メモリを少し多く使います
+Bright scenes without compression	明るい場面を圧縮なしで描画
+On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth	オン：明るい場面の形式はそのままで、GPUのフレームバッファ圧縮（AFBC）を使わずに保存します。白い画面のテストです。メモリ帯域を多く使います
 AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1：輪郭を保つ拡大の後にシャープ化（シャープネスで強さを調整）
 Colour	色合い
 Natural	ナチュラル
