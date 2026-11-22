@@ -4161,8 +4161,49 @@ static int prewarm_threads(void) {
     if (pages > 0 && psz > 0 && (double)pages * psz < 6.5e9 && t > 2) t = 2;
     return t;
 }
+// Compute pipelines in the prewarm. A compute pipeline was only ever built at its first dispatch, on the replay thread (dispatch below): the driver's compile sat
+//   in the middle of a frame the first time the game ran that shader (Scarlet / Violet's GPU culling and instancing as the open world loads; Sword / Shield have
+//   72 compute shaders, 41 distinct). The list of graphics pipelines (pso_rec) has no room for them (five stage keys), so the compute shaders the game has
+//   dispatched on this phone are kept beside it, <DM_VK_PSO_RECORD>.cs ("NXPC" + 8-byte shader keys; a shipped <DM_VK_PSO_SEED>.cs is read too when there is
+//   one). At the prewarm each is built once into the driver's pipeline cache and let go: the dispatch's own build then comes from the cache, with the game's own
+//   program and layout as before (nothing else changes there). DM_VK_PREWARM_COMPUTE=0: off
+#define PSO_MAGIC_C "NXPC"
+static void cs_record(const vshader *cs) {   // the replay thread only (dispatch): a compute shader's first pipeline on this run
+    static nvn_hmap known = {.klen = 8}; static FILE *f; static int tried;
+    uint8_t k[8]; if (hexkey(cs->key, k)) return;
+    if (!tried++) { const char *e = getenv("DM_VK_PSO_RECORD"); char p[1100];
+        if (e && *e && snprintf(p, sizeof p, "%s.cs", e) < (int)sizeof p) {
+            FILE *r = fopen(p, "rb"); char mg[4]; uint8_t o[8]; int have = 0;   // (what earlier runs wrote: not written twice)
+            if (r) { if (fread(mg, 1, 4, r) == 4 && !memcmp(mg, PSO_MAGIC_C, 4)) { have = 1; while (fread(o, 8, 1, r) == 1) nvn_hm_put(&known, o, (void *)1); } fclose(r); }
+            f = fopen(p, have ? "ab" : "wb"); if (f && !have) fwrite(PSO_MAGIC_C, 1, 4, f); } }
+    if (nvn_hm_get(&known, k)) return;
+    nvn_hm_put(&known, k, (void *)1);
+    if (f) { fwrite(k, 8, 1, f); fflush(f); }
+}
+static void prewarm_compute(void) {
+    { const char *e = getenv("DM_VK_PREWARM_COMPUTE"); if (e && !strcmp(e, "0")) return; }
+    const char *lists[2] = { getenv("DM_VK_PSO_SEED"), getenv("DM_VK_PSO_RECORD") }; static nvn_hmap seen = {.klen = 8};
+    int n = 0, built = 0, missing = 0, failed = 0; uint64_t t0 = mono_ns();
+    for (int l = 0; l < 2; l++) { char p[1100]; if (!lists[l] || !*lists[l] || snprintf(p, sizeof p, "%s.cs", lists[l]) >= (int)sizeof p) continue;
+        FILE *f = fopen(p, "rb"); if (!f) continue;
+        char mg[4]; uint8_t k[8];
+        if (fread(mg, 1, 4, f) == 4 && !memcmp(mg, PSO_MAGIC_C, 4)) while (fread(k, 8, 1, f) == 1) {
+            if (nvn_hm_get(&seen, k)) continue;
+            nvn_hm_put(&seen, k, (void *)1); n++;
+            pthread_mutex_lock(&g_pw.mu);   // (prog_layout is not for two threads: the graphics prewarm's lock)
+            vshader *cs = shader_get(k, 5); vprog *pr = cs ? calloc(1, sizeof *pr) : NULL; VkPipelineLayout pl = VK_NULL_HANDLE;
+            if (pr) { pr->sh[5] = cs; pl = prog_layout(pr, 1); }   // (a program of its own, kept: its layout lives as long as the cache entry is useful)
+            pthread_mutex_unlock(&g_pw.mu);
+            if (!cs || !pl) { missing++; continue; }
+            VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
+            VkPipeline pp = VK_NULL_HANDLE;
+            if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &pp)) failed++; else { vkDestroyPipeline(g_dev, pp, NULL); built++; } }
+        fclose(f); }
+    if (n) VLOG("prewarm: %d compute pipelines listed: %d built into the pipeline cache, %d failed, %d with a shader missing, %.1f s", n, built, failed, missing, (mono_ns() - t0) / 1e9);
+}
 static void *prewarm_run(void) {
     uint64_t t0 = mono_ns();
+    prewarm_compute();   // (first: few, and the open world's first frames need them before most graphics pipelines)
     if (!g_eds) return prewarm_static();   // the shared lists leave out the draw state this driver needs built in: this phone's own list instead
     pso_rec *rs = NULL; int n = 0;
     int ns = pso_rec_load(getenv("DM_VK_PSO_SEED"), &rs, &n), nr = pso_rec_load(getenv("DM_VK_PSO_RECORD"), &rs, &n);
@@ -4857,7 +4898,7 @@ static void dispatch(const p_dispatch *dp) {
     void *key = pr; VkPipeline p = nvn_hm_get(&g_cps, &key);
     if (!p) { VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
         if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &p)) { VLOG("[RED] compute pipeline %s failed", cs->key); return; }
-        nvn_hm_put(&g_cps, &key, p); }
+        nvn_hm_put(&g_cps, &key, p); cs_record(cs); }   // (listed for the next start's prewarm: prewarm_compute)
     outside_pass();
     VkCommandBuffer cb = CB();
     if (atomic_load(&g_cap) == 2) { cap_printf("compute dispatch %ux%ux%u%s: shader %s\n", (unsigned)dp->x, (unsigned)dp->y, (unsigned)dp->z, dp->ind ? " (indirect)" : "", cs->key); g_cap_ntex = 0; }
