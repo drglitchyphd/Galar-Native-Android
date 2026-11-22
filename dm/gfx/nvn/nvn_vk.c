@@ -63,7 +63,7 @@
 //   neither went a safe-start level up nor offered another driver (#280: Mali-G68 r38p1, "vkWaitSemaphores failed: -4 (device lost?)" 12 s in, every start)
 void dm_crash_note(int in_game) __attribute__((weak));
 #define VDIE(...) do { VLOG("FATAL " __VA_ARGS__); if (dm_crash_note) dm_crash_note(0); abort(); } while (0)
-static int g_red_once[160];
+static int g_red_once[176];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) VLOG("[RED] " __VA_ARGS__); } while (0)
 #define VKCHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) VDIE("%s failed: %d (%s:%d)", #x, r_, __FILE__, __LINE__); } while (0)
 #define NTEX 256
@@ -653,12 +653,17 @@ void mtl_init(void) {
     //   Mali-G52 r26p0: 86 % white instead of 81 %, the dark outlines gone, about 10 % slower)
     // R11G11B10F render targets as RGBA16F (nvn_fmt_vk.c nvn_fmt_vk_b10_as_rgba16): a test for Mali's white lit scene, off unless DM_VK_B10_AS_RGBA16=1 (the menu's Mali tests)
     { const char *e = getenv("DM_VK_B10_AS_RGBA16"); if (e && atoi(e) > 0) { nvn_fmt_vk_b10_as_rgba16(1); VLOG("formats: R11G11B10F drawn and sampled as RGBA16F (DM_VK_B10_AS_RGBA16, a Mali test): texels converted where the game's memory meets the image, its alpha read as 1 ('b10 swap:' lines name each kind once)"); } }
+    // (a result of this test alone does not tell the format from the compression: RGBA16F may get no framebuffer compression where R11G11B10F gets it, on a GPU
+    //   without FP16 AFBC. Read it beside DM_VK_B10_NOCOMPRESS's, by the picture. Both are Sword / Shield tests: see b10_on)
+    if (nvn_fmt_vk_b10_swapped(0x3F)) VLOG("formats: the float-target test changes the format and may change the compression with it (a GPU without FP16 framebuffer compression): read its result beside DM_VK_B10_NOCOMPRESS's%s",
+                                           DM_PORT_GALAR ? "" : "; a Sword / Shield test: here it only makes every R11G11B10F image twice the size (Legends: Arceus draws its G-buffer and bloom in it)");
     // The other route (DM_VK_B10_NOCOMPRESS, tex_new): R11G11B10F kept, its render targets made without framebuffer compression, for the case that Arm's driver
     //   mishandles the packed float format in AFBC. Off by default; the log names how it was done and what the driver then reports for each target (b10 nocompress)
     { const char *e = getenv("DM_VK_B10_NOCOMPRESS"); g_b10nc = e && atoi(e) > 0;
-      if (g_b10nc) VLOG("formats: R11G11B10F render targets made without framebuffer compression (DM_VK_B10_NOCOMPRESS, a Mali test): %s", g_compctl
+      if (g_b10nc) VLOG("formats: R11G11B10F render targets made without framebuffer compression (DM_VK_B10_NOCOMPRESS, a Mali test): %s%s", g_compctl
             ? "VK_EXT_image_compression_control, compression disabled image by image"
-            : "the driver has no VK_EXT_image_compression_control: made mutable with no list of view formats, which keeps Mali's AFBC (and Adreno's UBWC) off"); }
+            : "the driver has no VK_EXT_image_compression_control: made mutable with no list of view formats, which keeps Mali's AFBC (and Adreno's UBWC) off",
+            DM_PORT_GALAR ? "" : " (a Sword / Shield test: see b10_on)"); }
     //   Since chain 91294b095153 the translator writes FMZ into the multiplies the game marked (as yuzu / Eden do), on every GPU: PanVK keeps its fix and the multiplies
     //   the game did not mark keep their NaN (the dark outlines on Mali-G52, #215), with a fraction of the cost. The every-multiply copy is off by default, DM_VK_FMZ=1 to compare
     { const char *e = getenv("DM_VK_FMZ"); g_fmz = e && *e && atoi(e) > 0;
@@ -2263,12 +2268,23 @@ static VkClearColorValue clear_for(VkFormat f, const float rgba[4]) {
 //    what the GPU wrote before); CPU reads pack them; a buffer texture keeps the packed format (it is the game's memory);
 //  - the packed format has no alpha: views read alpha 1 (the format's channel mapping), draws never write it and blending reads the target's alpha as 1 (pso_make,
 //    pkey.b10); clears store the colour as the packed format would (negative to 0, rounded) with alpha 1, a new image's first clear too;
+//  - what a draw writes into it is rounded as the packed format stores it (negative and -inf to 0, its mantissa, at most its largest finite value: spv_b10_outputs
+//    in a variant of the fragment shader, pso_make), where the shader's output is what gets stored: without blending, or blending by min / max. A blended result
+//    cannot be rounded in a shader: there what the blend adds up to is kept (below 0 or past 65024 too; logged once);
+//  - what a shader stores into it as a storage image likewise: through an image the shader declares R11G11B10F at load (spv_b10_image_writes, alpha 1), through one
+//    declared without a format by a compute shader after its dispatch (b10_quantize_region); a storage image only where R11G11B10F could be one (tex_new);
 //  - a texture → texture copy or blit into the stand-in from another format is then made what R11G11B10F holds there (its range and rounding: b10_quantize_region);
-//  - no view across texel sizes: the stand-in viewed in a 4-byte format is viewed as itself, a 4-byte image viewed as R11G11B10F as the packed format it holds;
-//  - storage images the shaders declare R11G11B10F are declared RGBA16F (the image they are given);
+//  - no view across texel sizes (b10_view_fmt): the stand-in viewed in a 4-byte format (on the Switch, its packed bits) is sampled as itself where the view is a
+//    float one (it reads the colour, not the bits: said in red) and not made at all for an integer view, a storage image or a render target (said in red); a
+//    4-byte image viewed as R11G11B10F is viewed as the packed format it holds;
+//  - storage images the shaders declare R11G11B10F are declared RGBA16F (the image they are given); texel buffers keep the packed format;
 //  - render targets: the attachment format is RGBA16F everywhere (passes, render passes, pipelines); the pipeline lists keep R11G11B10F (pso_record, prewarm);
 //  - the frame capture and the golden recorder read the stand-in as it is (RGBA16F, labelled); the golden player converts when a recording and a replay differ.
-// Each kind of meeting is logged once ("b10 swap: ..."), so a player's log shows what the swap met
+// Each kind of meeting is logged once ("b10 swap: ..."), so a player's log shows what the swap met.
+// Not a per-game choice: both float-target tests (this one and DM_VK_B10_NOCOMPRESS) key on the format alone. They are tests for Sword / Shield's white lit scene on
+//   Arm's own driver; Legends: Arceus draws 21-31 R11G11B10F images a frame (a 1080p G-buffer, its bloom chain), which the stand-in makes twice the size and wider
+//   than many Mali GPUs' tile budget, for no white to fix there. Any default-on of either must key on the game (Sword / Shield) as well as on the driver
+//   (DM_PORT_GALAR and Arm's vendor ID), never on the driver alone; the Android menu offers them for Sword / Shield only
 static int b10_on(void) { return nvn_fmt_vk_b10_swapped(0x3F); }   // (DM_VK_B10_AS_RGBA16, or DM_VK_PROBE=f16target)
 static int b10_swapped_tex(const vtex *x) { return x && x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT && nvn_fmt_vk_b10_swapped(x->nvn_fmt); }
 static void b10_note(const char *what, const vtex *x, int other) {
@@ -2284,10 +2300,24 @@ static uint32_t vk_fmt_bytes(VkFormat f) {   // a colour format's texel size (0:
     if ((v >= 91 && v <= 97) || (v >= 101 && v <= 103) || (v >= 110 && v <= 112)) return 8; if (v >= 104 && v <= 106) return 12; if ((v >= 107 && v <= 109) || (v >= 113 && v <= 115)) return 16;
     return 0;
 }
-// the format a view of image t asked for in fmt is made in (no view across texel sizes); fmt itself unless the test is on
-static VkFormat b10_view_fmt(const vtex *t, VkFormat fmt) {
+// the format a view of image t asked for in fmt is made in, for use B10V_* (who: the shader binding or target, for the log; may be NULL); VK_FORMAT_UNDEFINED: the
+//   view is not made. fmt itself unless the test is on.
+//  - the stand-in in a 4-byte format: on the Switch its packed bits read through another format, which the stand-in does not hold. A float view to sample is made in
+//    the stand-in's own RGBA16F (it reads the colour, not the bits: wrong, said in red once); an integer view (Vulkan leaves a float image read through one
+//    undefined), a storage image or a render target is not made (the slot reads 0, the target is not attached: said in red once, with the first binding's name)
+//  - a 4-byte image viewed as R11G11B10F (which the swap made RGBA16F): viewed as the packed format it holds, the bits as they are
+enum { B10V_SAMPLED, B10V_STORAGE, B10V_ATTACH };
+static VkFormat b10_view_fmt(const vtex *t, VkFormat fmt, int use, const char *who) {
     if (!t || fmt == t->fmt || !b10_on()) return fmt;
-    if (b10_swapped_tex(t) && vk_fmt_bytes(fmt) != 8) { b10_note("a view in a 4-byte format: made in the image's own RGBA16F", t, fmt); return t->fmt; }
+    if (b10_swapped_tex(t) && vk_fmt_bytes(fmt) != 8) {
+        if (use == B10V_SAMPLED && !fmt_int_class(fmt)) {
+            RED_ONCE(154, "b10 swap: the stand-in sampled through a view in 4-byte format %d (%s; on the Switch it reads the packed bits): made in RGBA16F, it reads the colour instead (wrong data: if that scene looks wrong, turn the test off)", fmt, who ? who : "-");
+            return t->fmt; }
+        if (use == B10V_SAMPLED) RED_ONCE(155, "b10 swap: the stand-in sampled through an integer view in 4-byte format %d (%s; on the Switch its packed bits): there are none here, it reads 0 (wrong data: turn the test off)", fmt, who ? who : "-");
+        else if (use == B10V_STORAGE) RED_ONCE(156, "b10 swap: the stand-in bound as a storage image in 4-byte format %d (%s; on the Switch its packed bits): not bound, it reads 0 and takes no writes (wrong data: turn the test off)", fmt, who ? who : "-");
+        else RED_ONCE(157, "b10 swap: the stand-in as a render target in 4-byte format %d (%s; on the Switch drawn as its packed bits): not attached, the pass's draws into it are lost (wrong picture: turn the test off)", fmt, who ? who : "-");
+        return VK_FORMAT_UNDEFINED;
+    }
     if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT && !b10_swapped_tex(t) && vk_fmt_bytes(t->fmt) == 4) { b10_note("a 4-byte image viewed as R11G11B10F: viewed as the packed format it holds", t, t->fmt); return VK_FORMAT_B10G11R11_UFLOAT_PACK32; }
     return fmt;
 }
@@ -2357,7 +2387,14 @@ static vtex *tex_new(const tex_t *t, int pkg) {
         if (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         if (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) ci.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     }
-    if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+        // R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16): a storage image only where R11G11B10F itself could be one on this GPU (storage of it is optional; RGBA16F's
+        //   is not). A storage image may lose Mali's framebuffer compression, and the test must change the format alone, not the compression with it
+        VkFormatProperties bp = { 0 }; int sw = nvn_fmt_vk_b10_swapped(t->d.format);
+        if (sw) vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &bp);
+        if (!sw || (bp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        else b10_note("an image the game may bind as a storage image: made without storage usage, as R11G11B10F has none on this GPU", NULL, (int)bp.optimalTilingFeatures);
+    }
     if (fmt_compressed(t->d.format) && !nvn_fmt_vk_decode(t->d.format)) ci.flags |= VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
     // Mutable formats switch off Adreno's framebuffer compression (UBWC) unless the formats are listed: depth / stencil images are not mutable at all (their views keep
     // the format), colour images that can be render targets list their format and its sRGB / linear twin (the reinterpretations NVN views make of render targets)
@@ -2414,20 +2451,32 @@ static vtex *tex_new(const tex_t *t, int pkg) {
         VLOG("render target %ux%u format %d: framebuffer compression %s (flags %#x)", x->w, x->h, x->fmt,
              cp.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT ? "OFF" : "on", (unsigned)cp.imageCompressionFlags);
     }
-    static int nc_said;
-    if (b10nc && nc_said < 6) { nc_said++;   // DM_VK_B10_NOCOMPRESS: how, and what the driver reports where it can (the first few targets)
-        const char *how = g_compctl ? "made with compression disabled (VK_EXT_image_compression_control)" : "made mutable with no list of view formats (no VK_EXT_image_compression_control)";
+    // R11G11B10F render targets (NVN 0x3F), whatever the switches (a log line only): the first two (with DM_VK_B10_NOCOMPRESS the first six) named with how they
+    //   were made (create flags, usage, the view formats listed: what the drivers key framebuffer compression on) and what the driver then reports, where it can.
+    //   A normal log shows whether the lit scene's target is compressed at all, which route B needs; route B's own report proves nothing on Arm's driver, which
+    //   answers "compression OFF" for every render target it is asked about (players' logs: #128 #10 #19 #21, Mali-G610 to G925), so a route's result is read off
+    //   the picture (the white), never off these lines
+    static int b10_said;
+    if (t->d.format == 0x3F && (ci.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && b10_said < (b10nc ? 6 : 2)) { b10_said++;
+        char fl[80] = "none (not mutable)"; const VkBaseInStructure *pn = ci.pNext;
+        for (; pn; pn = pn->pNext) if (pn->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) { const VkImageFormatListCreateInfo *l = (const void *)pn; int o = 0;
+            for (uint32_t i = 0; i < l->viewFormatCount && o < (int)sizeof fl - 12; i++) o += snprintf(fl + o, sizeof fl - (size_t)o, "%s%d", i ? " " : "", (int)l->pViewFormats[i]); break; }
+        if (!pn && (ci.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) snprintf(fl, sizeof fl, "none listed (mutable: any compatible format)");
+        const char *how = !b10nc ? "as usual (DM_VK_B10_NOCOMPRESS off)" : g_compctl ? "with compression disabled (DM_VK_B10_NOCOMPRESS, VK_EXT_image_compression_control)"
+                        : "mutable with no list of view formats (DM_VK_B10_NOCOMPRESS; no VK_EXT_image_compression_control)";
+        char rep[64] = "the driver cannot report its compression";
         if (p_layout2) { VkImageCompressionPropertiesEXT cp = { .sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT };
             VkSubresourceLayout2EXT sl = { .sType = VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2_EXT, .pNext = &cp };
             VkImageSubresource2EXT sr = { .sType = VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2_EXT, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 } };
             p_layout2(g_dev, x->img, &sr, &sl);
-            VLOG("b10 nocompress: R11G11B10F render target %ux%u %s: the driver reports framebuffer compression %s (flags %#x)", x->w, x->h, how,
-                 cp.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT ? "OFF" : "still on", (unsigned)cp.imageCompressionFlags); }
-        else VLOG("b10 nocompress: R11G11B10F render target %ux%u %s (the driver cannot report its compression)", x->w, x->h, how); }
+            snprintf(rep, sizeof rep, "the driver reports framebuffer compression %s (flags %#x)", cp.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT ? "OFF" : "on", (unsigned)cp.imageCompressionFlags); }
+        VLOG("b10 target: R11G11B10F render target %ux%u, %u levels, stored as vk format %d%s: create flags %#x, usage %#x, view formats %s; made %s; %s", x->w, x->h, x->levels,
+             (int)x->fmt, b10_swapped_tex(x) ? " (the RGBA16F stand-in, DM_VK_B10_AS_RGBA16)" : "", (unsigned)ci.flags, (unsigned)ci.usage, fl, how, rep);
+    }
     return x;
 }
 static VkImageView view_get(vtex *t, VkImageViewType vt, VkFormat fmt, uint32_t lvl, uint32_t nlvl, uint32_t lay, uint32_t nlay, const uint8_t sw[4], VkImageAspectFlags aspect) {
-    fmt = b10_view_fmt(t, fmt);   // (DM_VK_B10_AS_RGBA16: no view across texel sizes)
+    fmt = b10_view_fmt(t, fmt, B10V_SAMPLED, NULL); if (!fmt) return VK_NULL_HANDLE;   // (DM_VK_B10_AS_RGBA16: no view across texel sizes; the callers map first, with the use)
     if (t->fixed_fmt && fmt != t->fmt && fmt != t->twin) { RED_ONCE(73, "a view in format %d of an image whose formats are fixed to %d / %d: viewed in its own format (DM_VK_NO_FMT_LIST=1 to compare)", fmt, t->fmt, t->twin); fmt = t->fmt; }
     vview_key k = { (uint32_t)fmt, (uint32_t)vt, lvl, nlvl, lay, nlay, (uint32_t)sw[0] | (uint32_t)sw[1] << 8 | (uint32_t)sw[2] << 16 | (uint32_t)sw[3] << 24, (uint32_t)aspect };
     pthread_mutex_lock(&t->vmu);
@@ -2897,7 +2946,28 @@ static int tex_is_int(int tid) {   // the texture ID's view format is an integer
     VkFormat f = x->fmt; if (rg.has_v && rg.v.set_format) { uint32_t vf = 0; uint8_t s2[4]; if (nvn_fmt_to_vk(rg.v.format, &vf, s2) && vf) f = (VkFormat)vf; }
     return fmt_int_class(f) != 0 || fmt_no_linear(f);
 }
-static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
+// R11G11B10F's stand-in (DM_VK_B10_AS_RGBA16) bound as a storage image of a compute shader that declares it without a format: its stores are made what the packed
+//   format holds after the dispatch (dispatch, b10_quantize_region), the level and layers bound here
+typedef struct { vtex *x; uint32_t lv, z0, nz; } b10q_ent; static b10q_ent g_b10q[8]; static int g_nb10q;
+// the stand-in (or an image viewed as R11G11B10F) bound as a storage image: 0 when it must not be (said in red once)
+static int b10_storage_bind(vtex *x, const spv_res *r, VkFormat f, int st, int img_writes, uint32_t l0, uint32_t s0, uint32_t ns, const char *who) {
+    // an image the shader declares R11G11B10F was re-declared RGBA16F at load (spv_image_format_swap): a view in another format does not fit that declaration
+    if (r->ifmt == SPV_IMGFMT_R11G11B10F && f != VK_FORMAT_R16G16B16A16_SFLOAT) {
+        RED_ONCE(158, "b10 swap: %s: an image declared R11G11B10F (re-declared RGBA16F for the stand-in) given an image viewed in vk format %d: not bound, it reads 0 and takes no writes (turn the test off)", who, (int)f);
+        return 0; }
+    if (!b10_swapped_tex(x)) return 1;
+    if (r->ifmt == SPV_IMGFMT_R11G11B10F) b10_note("the stand-in bound as a storage image declared R11G11B10F: its stores made what the packed format holds (the shader, at load), alpha 1", x, st);
+    else if (r->ifmt == 0 && img_writes && st == 5) {
+        uint32_t nz = x->is3d ? (x->d >> l0 ? x->d >> l0 : 1) : ns, z0 = x->is3d ? 0 : s0; int dup = 0;
+        for (int i = 0; i < g_nb10q; i++) if (g_b10q[i].x == x && g_b10q[i].lv == l0 && g_b10q[i].z0 == z0 && g_b10q[i].nz == nz) dup = 1;
+        if (!dup && g_nb10q < 8) g_b10q[g_nb10q++] = (b10q_ent){ x, l0, z0, nz };
+        b10_note("the stand-in bound as a storage image declared without a format: what the dispatch stores made what R11G11B10F holds after it", x, st); }
+    else if (r->ifmt == 0 && img_writes)
+        RED_ONCE(159, "b10 swap: %s: a draw's shader writes the stand-in through an image declared without a format: what it stores is not made what R11G11B10F holds (negative values, alpha kept)", who);
+    else b10_note("the stand-in bound as a storage image declared in another format, or not written: as it is", x, r->ifmt);
+    return 1;
+}
+static VkImageView tex_view_for(int tid, const spv_res *r, int storage, const char *skey, int st, int img_writes) {
     if (g_tpool_n && tid >= g_tpool_n) return VK_NULL_HANDLE;
     treg_t rg; if (!treg_get(tid, &rg)) { if (tid > 0) RED_ONCE(11, "texture ID %d not registered", tid); return VK_NULL_HANDLE; }
     vtex *x = tex_res(&rg.t); if (!x || !x->img) return VK_NULL_HANDLE;
@@ -2954,6 +3024,11 @@ static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
     VkImageAspectFlags asp = x->aspect;
     if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) asp = rg.has_v && rg.v.set_dsmode && rg.v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL && fmt_has_stencil(x->fmt) ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
     if (storage) { if (!(x->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { RED_ONCE(16, "texture ID %d bound as an image lacks storage usage", tid); return VK_NULL_HANDLE; } memcpy(vk, SW_ID, 4); }
+    if (b10_on()) {   // DM_VK_B10_AS_RGBA16: the format the view is made in, and the stand-in as a storage image (see b10_on)
+        char who[96]; snprintf(who, sizeof who, "shader %s binding %s, texture ID %d", skey ? skey : "-", r->name, tid);
+        VkFormat bf = b10_view_fmt(x, f, storage ? B10V_STORAGE : B10V_SAMPLED, who); if (!bf) return VK_NULL_HANDLE; f = bf;
+        if (storage && !b10_storage_bind(x, r, f, st, img_writes, l0, s0, ns, who)) return VK_NULL_HANDLE;
+    }
     return view_get(x, vt, f, l0, nl, s0, ns, vk, asp);
 }
 
@@ -2971,7 +3046,8 @@ typedef struct vshader {
     uint64_t in_mask, out_mask;                 // user varyings by location (spv_io_masks)
     uint32_t *code; size_t nw;                  // fragment shaders: the (rebound) SPIR-V, for variants
     uint8_t out_cls[8];                         // fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
-    struct { uint64_t drop; uint32_t um, sm; int sw; VkShaderModule mod; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)
+    uint8_t img_writes;                         // the shader stores into storage images (OpImageWrite)
+    struct { uint64_t drop; uint32_t um, sm; int sw; uint32_t qm; VkShaderModule mod; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)   // qm: outputs into R11G11B10F's stand-in, made what the packed format stores (spv_b10_outputs)
     int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod, ptsmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
     uint8_t dp;                                 // reads draw parameters from push constants (a device without them: spv_no_drawparams; the draw pushes them, dp_push)
     uint32_t lacks;                             // SPV_NEED_* the shader needs and the device lacks (spv_feature_needs)
@@ -3183,8 +3259,12 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     if (s->shift) spv_rebind(code, ns / 4, s->shift);
     ns = spv_strip_unused(code, ns / 4) * 4;   // capabilities declared but unused (Float64, fragment interlock): strict drivers refuse or mis-handle them
     { size_t nw; uint32_t *c2 = spv_image_caps(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }   // and the format-less storage image ones they need
-    // DM_VK_B10_AS_RGBA16: a storage image the shader declares R11G11B10F is the RGBA16F stand-in (its declaration must name the view's format)
-    if (b10_on() && spv_image_format_swap(code, ns / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F)) b10_note("a shader's storage image declared R11G11B10F: declared RGBA16F (the image it is given)", NULL, 0);
+    // DM_VK_B10_AS_RGBA16: a storage image the shader declares R11G11B10F is the RGBA16F stand-in: what the shader stores into it is made what the packed format holds
+    //   (spv_b10_image_writes, alpha 1), then the declaration names the view's format
+    if (b10_on()) { size_t nw; int left = 0; uint32_t *c2 = spv_b10_image_writes(code, ns / 4, &nw, &left);
+        if (c2) { free(code); code = c2; ns = nw * 4; b10_note("a shader's stores into an image declared R11G11B10F: made what the packed format holds, alpha 1", NULL, 0); }
+        if (left) RED_ONCE(160, "b10 swap: shader %s stores fewer than 3 components into an image declared R11G11B10F: left as they are", hex);
+        if (spv_image_format_swap(code, ns / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F)) b10_note("a shader's storage image declared R11G11B10F: declared RGBA16F (the image it is given)", NULL, 0); }
     // Adreno picks another 2x2 block than Maxwell for a gather on a texel centre: its gathers are nudged by 1/512 of a texel (spv_gather_bias). DM_VK_GATHER_BIAS=0 / 1 decides
     static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = e ? atoi(e) != 0 : g_props.vendorID == 0x5143; if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
     if (gbias) { size_t nw; uint32_t *c2 = spv_gather_bias(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
@@ -3202,7 +3282,8 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         if (s->shift) spv_rebind(glcode, ngl / 4, s->shift);
         ngl = spv_strip_unused(glcode, ngl / 4) * 4;
         uint32_t *c2 = spv_image_caps(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
-        if (b10_on()) spv_image_format_swap(glcode, ngl / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F);
+        if (b10_on()) { int left; if ((c2 = spv_b10_image_writes(glcode, ngl / 4, &nw, &left))) { free(glcode); glcode = c2; ngl = nw * 4; }
+                        spv_image_format_swap(glcode, ngl / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F); }
         if (gbias && (c2 = spv_gather_bias(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_fctl && (c2 = spv_float_controls(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_nanmm && (c2 = spv_nan_minmax(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
@@ -3251,6 +3332,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
             "storage image reads without a format", "storage image writes without a format", "multiple viewports", "fragment shader stores" };
         for (int b = 0; b < 19; b++) if (fresh >> b & 1) VLOG("[RED] shader %s needs %s, which this device lacks: %s", hex, nm[b], b <= 1 ? "its programs are skipped" : "passed to the driver as it is");
     }
+    for (size_t i = 5, nw = ns / 4; i < nw;) { uint32_t n = code[i] >> 16; if (!n || i + n > nw) break; if ((code[i] & 0xffff) == 99 /* OpImageWrite */) { s->img_writes = 1; break; } i += n; }
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
     atomic_fetch_add(&g_spv_mod_bytes, (uint64_t)ns); if (st == 1) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns);
@@ -3602,7 +3684,8 @@ static VkImageView att_view(const tex_t *t, const view_t *v, int has_v, vtex **o
             has_v && v->set_layers ? v->nlayers : 0, has_v && v->set_layers); } }
     VkFormat f = x->fmt;
     if (has_v && v->set_format) { uint32_t vf = 0; uint8_t s[4]; if (nvn_fmt_to_vk(v->format, &vf, s) && vf) f = (VkFormat)vf; }
-    f = b10_view_fmt(x, f);   // (DM_VK_B10_AS_RGBA16; pass_begin gives the pass the same format)
+    if (b10_on()) { char who[48]; snprintf(who, sizeof who, "render target ser=%llu", (unsigned long long)t->serial);   // (DM_VK_B10_AS_RGBA16; pass_begin gives the pass the same format)
+        f = b10_view_fmt(x, f, B10V_ATTACH, who); if (!f) return VK_NULL_HANDLE; }
     VkImageUsageFlags attachment_usage = x->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     VkFormatFeatureFlags features = 0;
     if (!format_supports_attachment(f, attachment_usage, &features)) {
@@ -3756,7 +3839,7 @@ static int pass_begin(void) {
                         ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
         ca[i].loadOp = R.clear_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; ca[i].clearValue.color = R.cc[i];
         VkFormat f = x->fmt; if (R.rt.has_cview[i] && R.rt.cview[i].set_format) { uint32_t vf = 0; uint8_t s[4]; if (nvn_fmt_to_vk(R.rt.cview[i].format, &vf, s) && vf) f = (VkFormat)vf; }
-        f = b10_view_fmt(x, f); if (b10_swapped_tex(x) && f == x->fmt) P.b10 |= 1u << i;   // (DM_VK_B10_AS_RGBA16: the format att_view made the view in; the target has no alpha)
+        f = b10_view_fmt(x, f, B10V_ATTACH, NULL); if (b10_swapped_tex(x) && f == x->fmt) P.b10 |= 1u << i;   // (DM_VK_B10_AS_RGBA16: the format att_view made the view in; the target has no alpha)
         P.cfmt[i] = (uint32_t)f; P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1; ncol = i + 1;
         x->hp_stamp = g_hp_seq + 1; if (!hp_c0) hp_c0 = x;
         if (atomic_load(&g_fgr.on) && fgn < 10) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)f, (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0),
@@ -3908,20 +3991,23 @@ static VkFormat vfmt_for(int nvn_fmt, int ct) {
 // The fragment module for a pipeline. On the Switch a varying the previous stage never writes reads (0, 0, 0, 1) and a float output to an integer colour target is written
 // as its bits; Vulkan (and Metal under MoltenVK) refuse both, so such a pipeline gets a variant of the fragment shader (made once per shader and combination)
 static int g_ds_swap;   // the draw being recorded is the first half of an emulated dual-source blend: its fragment outputs 0 and 1 swapped (draw, pso_get)
-static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw);
-static VkShaderModule frag_module(vprog *pr, const uint32_t *cfmt) { return frag_module_(pr, cfmt, 0); }
-static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw) {
+// qm: outputs into R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16, pso_make), made what the packed format stores (spv_b10_outputs; locations after the swap)
+static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw, uint32_t qm);
+static VkShaderModule frag_module(vprog *pr, const uint32_t *cfmt) { return frag_module_(pr, cfmt, 0, 0); }
+static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw, uint32_t qm) {
     vshader *fs = pr->sh[1], *pv = pr->sh[2] ? pr->sh[2] : pr->sh[4] ? pr->sh[4] : pr->sh[0];
     uint64_t drop = fs->in_mask & ~(pv ? pv->out_mask : 0); uint32_t um = 0, sm = 0;
     for (int i = 0; i < 8; i++) if (cfmt[i] && fs->out_cls[i] == 0) { int c = fmt_int_class((VkFormat)cfmt[i]); if (c == 1) um |= 1u << i; else if (c == 2) sm |= 1u << i; }
-    if ((!drop && !um && !sm && !sw) || !fs->code) return fs->mod;
+    if ((!drop && !um && !sm && !sw && !qm) || !fs->code) return fs->mod;
     pthread_mutex_lock(&g_psomu);
-    for (int i = 0; i < fs->nvar; i++) if (fs->var[i].drop == drop && fs->var[i].um == um && fs->var[i].sm == sm && fs->var[i].sw == sw) { VkShaderModule m = fs->var[i].mod; pthread_mutex_unlock(&g_psomu); return m; }
+    for (int i = 0; i < fs->nvar; i++) if (fs->var[i].drop == drop && fs->var[i].um == um && fs->var[i].sm == sm && fs->var[i].sw == sw && fs->var[i].qm == qm) { VkShaderModule m = fs->var[i].mod; pthread_mutex_unlock(&g_psomu); return m; }
     pthread_mutex_unlock(&g_psomu);
     size_t nw = fs->nw; uint32_t *c = NULL, *c2;
     if (drop && (c2 = spv_drop_inputs(fs->code, fs->nw, drop, &nw))) c = c2;
     if ((um || sm) && (c2 = spv_int_outputs(c ? c : fs->code, c ? nw : fs->nw, um, sm, &nw))) { free(c); c = c2; }
     if (sw && (c2 = spv_swap_out01(c ? c : fs->code, c ? nw : fs->nw, &nw))) { free(c); c = c2; }
+    if (qm) { if ((c2 = spv_b10_outputs(c ? c : fs->code, c ? nw : fs->nw, qm, &nw))) { free(c); c = c2; b10_note("a draw into the stand-in: its colour made what R11G11B10F stores (negative to 0, rounded, at most 65024 / 64512)", NULL, (int)qm); }
+              else RED_ONCE(161, "b10 swap: fragment shader %s: its output into the stand-in (targets %#x) could not be made what R11G11B10F stores: written as it is", fs->key, qm); }
     if (!c) return fs->mod;
     VkShaderModule m = VK_NULL_HANDLE; VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nw * 4, .pCode = c };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &m); free(c);
@@ -3930,7 +4016,7 @@ static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw) {
     if (um | sm) VLOG("fragment shader %s: float outputs %#x / %#x written as uint / int bits (integer colour targets)", fs->key, um, sm);
     if (sw) { static int said; if (said++ < 16) VLOG("fragment shader %s: a copy with outputs 0 and 1 swapped, for its dual-source blend in two steps", fs->key); }
     pthread_mutex_lock(&g_psomu);
-    if (fs->nvar < 8) { fs->var[fs->nvar].drop = drop; fs->var[fs->nvar].um = um; fs->var[fs->nvar].sm = sm; fs->var[fs->nvar].sw = sw; fs->var[fs->nvar].mod = m; fs->nvar++; }
+    if (fs->nvar < 8) { fs->var[fs->nvar].drop = drop; fs->var[fs->nvar].um = um; fs->var[fs->nvar].sm = sm; fs->var[fs->nvar].sw = sw; fs->var[fs->nvar].qm = qm; fs->var[fs->nvar].mod = m; fs->nvar++; }
     pthread_mutex_unlock(&g_psomu);
     return m;
 }
@@ -4308,13 +4394,7 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     //   with the route off had no point modules: Adreno's driver crashed in vkCreateGraphicsPipelines on the null module
     if (k.tfpts && (g_tf_pts <= 0 || k.tfpts > 4 || !vs || !vs->ptsmod || !tfp_init() || !g_tfp_fs[k.tfpts - 1])) return VK_NULL_HANDLE;
     if (!g_eds && !ss) { RED_ONCE(110, "a pipeline without its draw state on a driver without extended dynamic state (vertex %s): not made", vs ? vs->key : "-"); return VK_NULL_HANDLE; }
-    VkPipelineShaderStageCreateInfo st[5]; uint32_t nst = 0;
     if (!g_clipctl && !k.depth_zero && vs && !vs->glmod) RED_ONCE(27, "GL depth mode without VK_EXT_depth_clip_control and no translated depth fallback for vertex shader %s", vs->key);
-    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && (k.discard || k.tfpts))) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap) : i == 0 && k.tfpts && pr->sh[0]->ptsmod ? pr->sh[0]->ptsmod : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
-    if (k.tfpts && k.tfpts <= 4) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = g_tfp_fs[k.tfpts - 1], .pName = "main" };   // (the points' outputs into the targets)
-    // the y flip (spv_flip_y): -1 for the upper-left origin, 1 otherwise; a module without the constant (capture variants) ignores the entry
-    static const VkSpecializationMapEntry yfe = { SPV_FLIP_Y_SPEC_ID, 0, 4 }; const float yfv = k.yflip ? -1.0f : 1.0f; const VkSpecializationInfo yfi = { 1, &yfe, 4, &yfv };
-    if (g_yflip) for (uint32_t i = 0; i < nst; i++) if (st[i].stage == VK_SHADER_STAGE_VERTEX_BIT) st[i].pSpecializationInfo = &yfi;
     VkVertexInputBindingDescription vb[17]; VkVertexInputAttributeDescription va[32]; VkVertexInputBindingDivisorDescriptionEXT vd[16]; uint32_t nvb = 0, nva = 0, nvd = 0; uint32_t have = 0;
     for (uint32_t loc = 0; loc < 32; loc++) {
         if (!k.attr[loc].used) continue;
@@ -4357,6 +4437,22 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
             if (differ) { VkPipelineColorBlendAttachmentState one = cb[t]; if (anyint) one.blendEnable = VK_FALSE; for (uint32_t i = 0; i < ncb; i++) cb[i] = one;
                 RED_ONCE(131, "targets blended differently on a device without independentBlend (vertex %s): every target as the first written one", vs ? vs->key : "-"); } }
     }
+    // R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16, see b10_on): what the draw writes into it made what the packed format stores (frag_module_ qm), where the
+    //   shader's output is what gets stored: no blending, or blending by min / max (rounding first or after gives the same there). A blended sum cannot be rounded
+    //   in a shader: it is kept as the blend makes it (logged once)
+    uint32_t qm = 0;
+    if (k.b10 && fs && !k.tfpts && !k.discard) for (uint32_t i = 0; i < ncb; i++) {
+        uint8_t cls = fs->out_cls[k.ds_swap && i <= 1 ? i ^ 1 : i];   // (the variant with outputs 0 and 1 swapped writes target i from output i ^ 1)
+        if (!(k.b10 >> i & 1) || !(cb[i].colorWriteMask & 7) || cls != 0) continue;
+        if (!cb[i].blendEnable || cb[i].colorBlendOp == VK_BLEND_OP_MIN || cb[i].colorBlendOp == VK_BLEND_OP_MAX) qm |= 1u << i;
+        else b10_note("a draw blended into the stand-in: the blend's result is kept as it is (R11G11B10F would store a sum below 0 as 0, one past 65024 as 65024)", NULL, (int)cb[i].colorBlendOp);
+    }
+    VkPipelineShaderStageCreateInfo st[5]; uint32_t nst = 0;
+    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && (k.discard || k.tfpts))) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap, qm) : i == 0 && k.tfpts && pr->sh[0]->ptsmod ? pr->sh[0]->ptsmod : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
+    if (k.tfpts && k.tfpts <= 4) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = g_tfp_fs[k.tfpts - 1], .pName = "main" };   // (the points' outputs into the targets)
+    // the y flip (spv_flip_y): -1 for the upper-left origin, 1 otherwise; a module without the constant (capture variants) ignores the entry
+    static const VkSpecializationMapEntry yfe = { SPV_FLIP_Y_SPEC_ID, 0, 4 }; const float yfv = k.yflip ? -1.0f : 1.0f; const VkSpecializationInfo yfi = { 1, &yfe, 4, &yfv };
+    if (g_yflip) for (uint32_t i = 0; i < nst; i++) if (st[i].stage == VK_SHADER_STAGE_VERTEX_BIT) st[i].pSpecializationInfo = &yfi;
     if (!g_f_clamp && rs.depthClampEnable) { rs.depthClampEnable = VK_FALSE; RED_ONCE(132, "depth clamp on a device without it: left off (geometry past the far plane is clipped)"); }
     if (!g_f_nonsolid && rs.polygonMode != VK_POLYGON_MODE_FILL) { rs.polygonMode = VK_POLYGON_MODE_FILL; RED_ONCE(133, "line / point fill on a device without fillModeNonSolid: filled"); }
     int logic_en = k.tfpts ? 0 : k.logic_en;
@@ -4638,7 +4734,7 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
                 if (h->skind == S_SEP) sid = h->sreg < 128 ? (int)(S.samp[st][h->sreg] >> 20) : 0;
                 else if (h->skind == S_UBO) sid = (int)(ubo_word(st, h->sreg, h->soff) >> 20);
                 else if (h->skind == S_ID) sid = h->sreg;
-                VkImageView v = tid ? tex_view_for(tid, r, storage) : VK_NULL_HANDLE;
+                VkImageView v = tid ? tex_view_for(tid, r, storage, s->key, st, s->img_writes) : VK_NULL_HANDLE;
                 if (TD_TRACE) VLOG("[trace]   %s %s tid %d ser=%llu%s", storage ? "image" : "texture", r->name, tid, 0ull, v ? "" : " (no view: dummy)");
                 // DM_VK_TEXOVR=<fs key>:<binding>=0|1,...: that binding reads 0 or 1. Without it, the game profile's tex_unwritten_one pairs read 1 (textures the game
                 // never draws on this host: Pokémon Legends: Arceus' ambient occlusion result, whose pass never runs); DM_VK_TEXOVR=none turns that off
@@ -4951,6 +5047,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     vkCmdDrawIndexed(cb, (uint32_t)di->count, inst, 0, di->base_vertex, (uint32_t)di->base_instance);
 }
 static nvn_hmap g_cps = {.klen = sizeof(void *)};
+static int b10_quantize_region(VkCommandBuffer cb, vtex *x, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h);
 static void dispatch(const p_dispatch *dp) {
     if (!S.cprog) { RED_ONCE(39, "dispatch with no program bound"); return; }
     vprog *pr = prog_get(S.cprog); vshader *cs = pr->sh[5]; if (!cs) { RED_ONCE(40, "dispatched program has no compute shader (or it is not mapped)"); return; }
@@ -4964,6 +5061,7 @@ static void dispatch(const p_dispatch *dp) {
     if (atomic_load(&g_cap) == 2) { cap_printf("compute dispatch %ux%ux%u%s: shader %s\n", (unsigned)dp->x, (unsigned)dp->y, (unsigned)dp->z, dp->ind ? " (indirect)" : "", cs->key); g_cap_ntex = 0; }
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z; g_c0_buf = VK_NULL_HANDLE;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    g_nb10q = 0;   // (the stand-in bound below as a storage image declared without a format: b10_storage_bind)
     push_stage(cs, 5, VK_PIPELINE_BIND_POINT_COMPUTE, pl);
     desc_flush(VK_PIPELINE_BIND_POINT_COMPUTE, pl, pr->dsl[1]);
     if (dp->ind) { VkBuffer ab; VkDeviceSize ao; if (!pool_buf(dp->ind, 12, &ab, &ao, NULL)) { RED_ONCE(41, "indirect dispatch arguments in no pool"); return; }
@@ -4971,6 +5069,11 @@ static void dispatch(const p_dispatch *dp) {
         vkCmdDispatchIndirect(cb, ab, ao); }
     else vkCmdDispatch(cb, (uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z);
     barrier_all(cb);
+    // DM_VK_B10_AS_RGBA16: what the dispatch stored into the stand-in through an image declared without a format, made what R11G11B10F holds (range, rounding, alpha 1)
+    for (int i = 0; i < g_nb10q; i++) { vtex *x = g_b10q[i].x; uint32_t lv = g_b10q[i].lv;
+        if (x->samples > 1 || !b10_quantize_region(cb, x, lv, g_b10q[i].z0, g_b10q[i].nz, 0, 0, x->w >> lv ? x->w >> lv : 1, x->h >> lv ? x->h >> lv : 1))
+            RED_ONCE(162, "b10 swap: what a dispatch stored into the stand-in (declared without a format) could not be made what R11G11B10F holds (no conversion shader): kept as it is"); }
+    g_nb10q = 0;
 }
 
 // ================= Buffer operations (in submission order) =================
@@ -5064,6 +5167,9 @@ static int b10c_run(VkCommandBuffer cb, int mode, VkBuffer hbuf, VkDeviceSize ho
 // the game's packed texels (buffer kb at ko, row / img bytes apart) to or from the stand-in x (level, first layer / slice z0, nz of them, at x0, y0, w x h).
 //   1: done; 0: not here (nothing recorded)
 static int b10_copy_buf(VkCommandBuffer cb, vtex *x, int to_buffer, VkBuffer kb, VkDeviceSize ko, size_t row, size_t img, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h) {
+    // DM_VK_B10_CPU_COPY=1 (a test switch, golden_check.py b10): copies from the game's memory into the stand-in take the CPU route, as where the shader cannot run
+    static int cpu = -1; if (cpu < 0) { const char *e = getenv("DM_VK_B10_CPU_COPY"); cpu = e && atoi(e) > 0; if (cpu && b10_on()) VLOG("b10 swap: copies from the game's memory into the stand-in expanded on the CPU (DM_VK_B10_CPU_COPY, a test)"); }
+    if (cpu && !to_buffer) return 0;
     if (!w || !h || !nz || (ko | row | img) & 3 || !g_sub || !b10c_init()) return 0;
     VkDeviceSize kbytes = (VkDeviceSize)img * (nz - 1) + (VkDeviceSize)row * (h - 1) + (VkDeviceSize)w * 4;
     VkBuffer hb; VkDeviceSize ho; arena_alloc(g_sub, (VkDeviceSize)w * h * nz * 8, &hb, &ho);
@@ -5373,7 +5479,7 @@ void mtl_exec(const uint8_t *p) {
                 { vtex *cx = tex_res(R.rt.color[c->index]); VkFormat cf = cx ? cx->fmt : VK_FORMAT_UNDEFINED;
                   if (R.rt.has_cview[c->index] && R.rt.cview[c->index].set_format) { uint32_t vf = 0; uint8_t sw[4]; if (nvn_fmt_to_vk(R.rt.cview[c->index].format, &vf, sw) && vf) cf = (VkFormat)vf; }
                   cv = clear_for(cf, c->rgba);
-                  if (b10_swapped_tex(cx) && b10_view_fmt(cx, cf) == cx->fmt) { cv = b10_clear(c->rgba); b10_note("a render target clear: the colour as the packed format stores it, alpha 1", cx, 0); } }
+                  if (b10_swapped_tex(cx) && b10_view_fmt(cx, cf, B10V_ATTACH, NULL) == cx->fmt) { cv = b10_clear(c->rgba); b10_note("a render target clear: the colour as the packed format stores it, alpha 1", cx, 0); } }
                 if (P.open || c->mask != 0xf || !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) {
                     if (c->mask != 0xf) RED_ONCE(54, "colour clear with a partial channel mask: all channels cleared");
                     VkClearValue v = { .color = cv }; clear_in_pass(c->index, &v, VK_IMAGE_ASPECT_COLOR_BIT); break; }
