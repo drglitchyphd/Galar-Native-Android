@@ -1,9 +1,10 @@
 // The Mali white-screen ladder's rules (nvn/mali_white.h): the verdict from the detector's samples (white runs, the slow rule for a partly white picture, fine only
-//   after a long stretch of play, empty samples of a black target, the cap), who runs the ladder (Arm's own driver with Sword / Shield, the test switches,
-//   DM_MALI_LADDER=0), the route with env.txt's own settings winning, other white-screen tests keeping a verdict out of the file, env.txt's leftovers from the older
-//   menu taken out once, and the ladder's state from start to start through its file: every transition, fine kept only after two starts and re-checked after, a
-//   route that closed the game (the start marker), both routes white at once, the PanVK offer made once, started over for another driver ID, driver version or app
-//   version, a file that is missing, damaged or edited. Expected values are hand-written.
+//   after a long stretch of play, empty samples of a black target and a run of them, NaN counted apart from white, the picture shown as a second signal, the cap),
+//   who runs the ladder (Arm's own driver with Sword / Shield, the test switches, DM_MALI_LADDER=0), the route with env.txt's own settings winning, other
+//   white-screen tests, env.txt's leftovers from the older menu taken out once, and the ladder's state from start to start through its file: every transition,
+//   fine kept only after two starts and re-checked after, starts without a verdict counted, a route that closed the game (the start marker and its stages: the
+//   check's own compute pass, loading, playing), both routes white at once, the route when both failed or the check cannot run, the PanVK offer made once,
+//   started over for another driver ID, driver version or app version, a file that is missing, damaged or edited. Expected values are hand-written.
 //   cc -O1 -Wall -I../nvn -o /tmp/t_mali_white t_mali_white.c && /tmp/t_mali_white
 //   MW_FIXTURE_DIR=<dir>: also writes state files for the app's side (dm/android/tools/tests/MaliLadderTest.java reads them)
 #include <stdio.h>
@@ -29,17 +30,26 @@ static int run(const mw_rules *r, const int *s, int *at) { return run_t(r, s, 30
 static int *rep(int *buf, int n, int v) { for (int i = 0; i < n; i++) buf[i] = v; buf[n] = -1; return buf; }   // (n samples of v)
 static const char *const RULE_ENV[] = { "DM_MALI_WHITE_N", "DM_MALI_WHITE_PCT", "DM_MALI_FINE_N", "DM_MALI_FINE_PCT", "DM_MALI_FINE_SPAN_MS", "DM_MALI_FINE_STARTS", "DM_MALI_SLOW_N",
     "DM_MALI_SLOW_PCT", "DM_MALI_DARK_PCT", "DM_MALI_WHITE_CAP", "DM_MALI_WHITE_EVERY_MS", "DM_MALI_RECHECK_MS", "DM_MALI_RECHECK_STARTS", "DM_MALI_WHITE_MIN_DRAWS",
-    "DM_MALI_WHITE_LIT_DRAWS", "DM_MALI_WHITE_COVER_PCT", "DM_MALI_WHITE_MIN_W", "DM_MALI_WHITE_LEVEL", "DM_MALI_WHITE_LEVEL_LOW" };
+    "DM_MALI_WHITE_LIT_DRAWS", "DM_MALI_WHITE_COVER_PCT", "DM_MALI_WHITE_MIN_W", "DM_MALI_WHITE_LEVEL", "DM_MALI_WHITE_LEVEL_LOW", "DM_MALI_DARK_N", "DM_MALI_NAN_PCT",
+    "DM_MALI_SHOWN_WHITE_PCT", "DM_MALI_SHOWN_FINE_PCT", "DM_MALI_UNDECIDED_STARTS" };
+// one sample with NaN and the picture shown (o: sat, nan, dark of T; shown white of T, or shown_total 0) into j at t_ms
+static int obs(mw_judge *j, const mw_rules *r, uint32_t sat, uint32_t nan, uint32_t dark, uint32_t shown, uint32_t shown_total, int64_t t_ms) {
+    mw_obs o = { sat, nan, dark, T, shown, shown_total }; return mw_judge_obs(j, r, &o, t_ms);
+}
+static int kind(const mw_rules *r, uint32_t sat, uint32_t nan, uint32_t dark, uint32_t shown, uint32_t shown_total) { mw_obs o = { sat, nan, dark, T, shown, shown_total }; return mw_obs_kind(r, &o); }
 static void unset_rules(void) { for (unsigned i = 0; i < sizeof RULE_ENV / sizeof *RULE_ENV; i++) unsetenv(RULE_ENV[i]); }
 
 static void t_judge(void) {
     unset_rules(); mw_rules r = mw_rules_default(); mw_rules_env(&r); int at; static int b[2000]; mw_judge j;
     CHECK(r.white_n == 3 && r.white_pct == 25 && r.fine_n == 20 && r.fine_pct == 2 && r.fine_span_ms == 180000 && r.fine_starts == 2 && r.slow_n == 40 && r.slow_pct == 8
-          && r.dark_pct == 95 && r.cap_n == 300 && r.every_ms == 3000 && r.recheck_ms == 60000 && r.recheck_starts == 3 && r.min_draws == 120 && r.lit_draws == 60
-          && r.cover_pct == 60 && r.min_w == 1280 && r.level == 1024 && r.level_low == 64,
-          "default rules: white 3 in a row at 25 %%; fine 20 samples under 2 %% over 180 s, kept after 2 starts; slow rule 40 at 8 %%; 95 %% dark is empty; cap 300; every 3 s, "
-          "60 s after fine, 3 re-check starts; 120 draws, 60 lit, 60 %% covered, 1280 wide; saturated at 1024, bucket 64");
-    CHECK(mw_float_bits(1024.0f) == 0x44800000u && mw_float_bits(64.0f) == 0x42800000u && MW_DARK_BITS == mw_float_bits(1.0f / 1024), "the thresholds' bits (1024, 64, 1/1024)");
+          && r.dark_pct == 95 && r.dark_n == 10 && r.nan_pct == 8 && r.shown_white_pct == 90 && r.shown_n == 5 && r.shown_fine_pct == 50 && r.cap_n == 300 && r.undecided_starts == 3
+          && r.every_ms == 3000 && r.recheck_ms == 60000 && r.recheck_starts == 3 && r.min_draws == 120 && r.lit_draws == 60 && r.cover_pct == 60 && r.min_w == 1280
+          && r.level == 1024 && r.level_low == 64,
+          "default rules: white 3 in a row at 25 %%; fine 20 samples under 2 %% over 180 s, kept after 2 starts; slow rule 40 at 8 %%; 95 %% dark is empty, 10 in a row broken; "
+          "8 %% NaN not fine; the picture shown 90 %% white is white (5 in a row), 50 %% bright; cap 300, 3 such starts broken; every 3 s, 60 s after fine, 3 re-check starts; 120 draws, "
+          "60 lit, 60 %% covered, 1280 wide; saturated at 1024, bucket 64");
+    CHECK(mw_float_bits(1024.0f) == 0x44800000u && mw_float_bits(64.0f) == 0x42800000u && MW_DARK_BITS == mw_float_bits(1.0f / 1024) && MW_SHOWN_BITS == mw_float_bits(0.99f),
+          "the thresholds' bits (1024, 64, 1/1024, 0.99)");
     // white quickly
     { int s[] = { 576, 576, 576, -1 }; CHECK(run(&r, s, &at) == MW_WHITE && at == 3, "three white samples in a row: white at the third"); }
     { int s[] = { 576, 576, -1 }; CHECK(run(&r, s, &at) == MW_UNDECIDED, "two white samples: undecided"); }
@@ -67,8 +77,13 @@ static void t_judge(void) {
     { mw_judge k; memset(&k, 0, sizeof k); int64_t t = 0; for (int i = 0; i < 10; i++, t += 3000) mw_judge_add(&k, &r, 0, 0, T, t);
       t += 600000; for (int i = 0; i < 10; i++, t += 3000) mw_judge_add(&k, &r, 0, 0, T, t);
       CHECK(k.verdict == MW_UNDECIDED && k.fine_n == 20 && k.fine_ms == 9 * 3000 + 13000 + 9 * 3000, "a 10-minute pause (a menu) counts as 13 s of play: 20 fine samples over 67 s, not fine (%lld ms)", (long long)k.fine_ms); }
-    // empty samples: a black, cleared or never drawn target is no evidence
-    { for (int i = 0; i < 100; i++) b[i] = -2; b[100] = -1; CHECK(run_t(&r, b, 3000, &at, &j) == MW_UNDECIDED && j.kinds[MW_K_EMPTY] == 100 && j.samples == 100, "100 all-black samples: undecided, never fine (100 empty)"); }
+    // empty samples: a black, cleared or never drawn target is no evidence of white or fine; ten in a row (30 s of play) are a black picture: BROKEN
+    { for (int i = 0; i < 9; i++) b[i] = -2; b[9] = -1; CHECK(run_t(&r, b, 3000, &at, &j) == MW_UNDECIDED && j.kinds[MW_K_EMPTY] == 9 && j.empty_run == 9, "9 all-black samples: undecided, never fine"); }
+    { for (int i = 0; i < 100; i++) b[i] = -2; b[100] = -1; CHECK(run_t(&r, b, 3000, &at, &j) == MW_BROKEN && at == 10 && j.rule == MW_RULE_DARK && j.samples == 10,
+          "100 all-black samples: BROKEN at the 10th (a black picture), the rest not counted"); }
+    { for (int i = 0; i < 30; i++) b[i] = i % 10 == 9 ? 0 : -2; b[30] = -1; CHECK(run(&r, b, &at) == MW_UNDECIDED, "9 black samples, a fine one, again and again: the run of black starts over (undecided)"); }
+    { for (int i = 0; i < 61; i++) b[i] = 0; for (int i = 61; i < 71; i++) b[i] = -2; b[71] = -1;
+      CHECK(run_t(&r, b, 3000, &at, &j) == MW_BROKEN && j.rule == MW_RULE_DARK && at == 61, "fine at this start (61), then 10 black samples: turns BROKEN (verdict changed first at 61)"); }
     { int s[] = { 576, 576, -2, -2, 576, -1 }; CHECK(run(&r, s, &at) == MW_WHITE && at == 5, "empty samples do not break a white run (white at sample 5)"); }
     { for (int i = 0; i < 30; i++) { b[2 * i] = 0; b[2 * i + 1] = -2; } for (int i = 60; i < 92; i++) b[i] = 0; b[92] = -1;
       CHECK(run(&r, b, &at) == MW_FINE, "empty samples between fine ones: the stretch goes on (fine once the fine samples span 180 s of play)"); }
@@ -79,8 +94,8 @@ static void t_judge(void) {
     CHECK(run(&r, rep(b, 100, 47), &at) == MW_WHITE && at == 40, "8.2 %% (47 of 576): white at 40");
     CHECK(run(&r, rep(b, 200, 46), &at) == MW_UNDECIDED, "7.98 %% (46 of 576): never white by the slow rule");
     { for (int i = 0; i < 100; i++) b[i] = i % 2 ? 0 : 116; b[100] = -1; CHECK(run(&r, b, &at) == MW_WHITE && at == 40, "alternating 20 %% and fine (a 10 %% mean): white at 40"); }
-    { for (int i = 0; i < 39; i++) b[i] = 58; for (int i = 39; i < 139; i++) b[i] = -2; b[139] = 58; b[140] = -1;
-      CHECK(run(&r, b, &at) == MW_WHITE && at == 140, "the slow rule's window holds samples with content only: 39 at 10 %%, 100 empty, one more: white"); }
+    { mw_rules nd = r; nd.dark_n = 1000; for (int i = 0; i < 39; i++) b[i] = 58; for (int i = 39; i < 139; i++) b[i] = -2; b[139] = 58; b[140] = -1;
+      CHECK(run(&nd, b, &at) == MW_WHITE && at == 140, "the slow rule's window holds samples with content only: 39 at 10 %%, 100 empty, one more: white (the black run's rule off)"); }
     { for (int i = 0; i < 100; i++) b[i] = 0; for (int i = 100; i < 160; i++) b[i] = 58; b[160] = -1;
       CHECK(run(&r, b, &at) == MW_WHITE, "100 fine (fine at 61), then a steady 10 %%: the window of the last 40 turns it WHITE"); }
     // the cap: no verdict after 300 samples
@@ -91,15 +106,78 @@ static void t_judge(void) {
     { mw_judge k; memset(&k, 0, sizeof k); for (int i = 0; i < 3; i++) mw_judge_add(&k, &r, 300, 0, 400, i); CHECK(k.verdict == MW_WHITE && k.samples == 3, "any grid size: 300 of 400 three times is white"); }
     { mw_judge k; memset(&k, 0, sizeof k); for (int i = 0; i < 3; i++) mw_judge_add(&k, &r, 576, 0, T, i); for (int i = 0; i < 100; i++) mw_judge_add(&k, &r, 0, 0, T, 10 + i * 3000LL);
       CHECK(k.verdict == MW_WHITE && k.samples == 3, "WHITE stays: later samples are not even counted"); }
+    { mw_judge k; memset(&k, 0, sizeof k); for (int i = 0; i < 10; i++) mw_judge_add(&k, &r, 0, T, T, i * 3000LL); for (int i = 0; i < 100; i++) mw_judge_add(&k, &r, 0, 0, T, 40000 + i * 3000LL);
+      CHECK(k.verdict == MW_BROKEN && k.samples == 10, "BROKEN stays too"); }
+    { mw_judge k; memset(&k, 0, sizeof k); for (int i = 0; i < 300; i++) mw_judge_add(&k, &r, i % 3 ? 0 : 29, i % 3 ? T : 0, T, i * 3000LL);
+      CHECK(mw_judge_capped(&k, &r) && !k.verdict && mw_judge_mostly_empty(&k), "300 samples, two in three black and one between: capped, mostly empty (a black picture: the route broken at once)"); }
+    { mw_judge k; memset(&k, 0, sizeof k); for (int i = 0; i < 300; i++) mw_judge_add(&k, &r, i % 2 ? 0 : 29, i % 2 ? T : 0, T, i * 3000LL);
+      CHECK(mw_judge_capped(&k, &r) && !mw_judge_mostly_empty(&k), "half black, half between: capped, not mostly empty (counted as a start without a verdict)"); }
+}
+
+// NaN counted apart from white, and the picture shown as a second signal (mw_obs)
+static void t_nan_shown(void) {
+    unset_rules(); mw_rules r = mw_rules_default(); mw_judge j; int v;
+    CHECK(kind(&r, 0, 144, 0, 0, 0) == MW_K_NAN && kind(&r, 0, 143, 0, 0, 0) == MW_K_BETWEEN && kind(&r, 144, 144, 0, 0, 0) == MW_K_WHITE,
+          "NaN in a quarter of the lit target (144 of 576): a nan sample; 143: between; saturated and NaN alike: white first");
+    CHECK(kind(&r, 0, 47, 0, 0, 0) == MW_K_BETWEEN && kind(&r, 0, 46, 0, 0, 0) == MW_K_FINE && kind(&r, 0, 29, 0, 0, 0) == MW_K_FINE,
+          "NaN over 8.2 %% (47): between, never fine; 7.99 %% (46) or 5 %% (29) scattered (dark spots): fine, not white");
+    CHECK(kind(&r, 0, 20, 528, 0, 0) == MW_K_EMPTY && kind(&r, 0, 20, 527, 0, 0) == MW_K_FINE, "near black and NaN together at 95 %% (528 + 20 of 576): empty; 547: fine");
+    CHECK(kind(&r, 0, 0, 0, 519, 576) == MW_K_SHOWN && kind(&r, 0, 0, 0, 518, 576) == MW_K_BRIGHT && kind(&r, 0, 0, 0, 288, 576) == MW_K_BRIGHT && kind(&r, 0, 0, 0, 287, 576) == MW_K_FINE,
+          "the lit target fine, the picture shown 90 %% white (519 of 576): a white (shown) sample; 518 or half: bright (not fine, no evidence); 287 (49.8 %%): fine");
+    CHECK(kind(&r, 0, 0, 0, 576, 0) == MW_K_FINE && kind(&r, 0, 0, T, 576, 576) == MW_K_SHOWN && kind(&r, 0, 0, T, 300, 576) == MW_K_EMPTY && kind(&r, 29, 0, 0, 300, 576) == MW_K_BETWEEN,
+          "no picture shown read (0 texels): the lit target alone; a black lit target with a white picture shown: shown white; with a half white one: empty; 5 %% saturated and a "
+          "half white picture shown: between");
+    // the verdicts
+    memset(&j, 0, sizeof j); for (int i = 0; i < 3; i++) v = obs(&j, &r, 0, 576, 0, 0, 0, i * 3000LL);
+    CHECK(v == MW_BROKEN && j.rule == MW_RULE_NAN && j.samples == 3, "three samples of NaN in a row: BROKEN (a black or broken picture), not white");
+    memset(&j, 0, sizeof j); obs(&j, &r, 0, 576, 0, 0, 0, 0); obs(&j, &r, 0, 576, 0, 0, 0, 3000); v = obs(&j, &r, 576, 0, 0, 0, 0, 6000);
+    CHECK(v == MW_BROKEN && j.rule == MW_RULE_NAN, "two NaN samples and a white one in a row: BROKEN (mostly NaN)");
+    memset(&j, 0, sizeof j); obs(&j, &r, 576, 0, 0, 0, 0, 0); obs(&j, &r, 0, 576, 0, 0, 0, 3000); v = obs(&j, &r, 576, 0, 0, 0, 0, 6000);
+    CHECK(v == MW_WHITE && j.rule == MW_RULE_RUN, "white, NaN, white: WHITE");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 100; i++) v = obs(&j, &r, 0, 115, 0, 0, 0, i * 3000LL);
+    CHECK(v == MW_UNDECIDED && j.kinds[MW_K_BETWEEN] == 100 && j.win_sum == 0, "NaN over 20 %% of every sample (dark patches): between, never fine, and never white by the slow rule (it counts saturated texels only)");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 61; i++) v = obs(&j, &r, 0, 29, 0, 0, 0, i * 3000LL);
+    CHECK(v == MW_FINE, "NaN scattered over 5 %% (dark spots) for 180 s of play: FINE (not a white picture)");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 4; i++) v = obs(&j, &r, 0, 0, 0, 576, 576, i * 3000LL);
+    CHECK(v == MW_UNDECIDED && j.white_run == 4, "the lit target fine, the picture shown all white four samples in a row (12 s: a fade to white): no verdict yet");
+    v = obs(&j, &r, 0, 0, 0, 576, 576, 12000);
+    CHECK(v == MW_WHITE && j.rule == MW_RULE_SHOWN && j.samples == 5, "... the fifth: WHITE (a white from a later pass, longer than a fade)");
+    memset(&j, 0, sizeof j); obs(&j, &r, 0, 0, 0, 576, 576, 0); obs(&j, &r, 576, 0, 0, 576, 576, 3000); v = obs(&j, &r, 576, 0, 0, 0, 576, 6000);
+    CHECK(v == MW_WHITE && j.rule == MW_RULE_RUN, "a white picture shown, then the lit target white twice: WHITE at three (mostly the lit target's own white)");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 4; i++) obs(&j, &r, 0, 0, 0, 576, 576, i * 3000LL); obs(&j, &r, 0, 0, 0, 345, 576, 12000);
+    for (int i = 0; i < 4; i++) v = obs(&j, &r, 0, 0, 0, 576, 576, 15000 + i * 3000LL);
+    CHECK(v == MW_UNDECIDED && j.white_run == 4, "four white pictures shown, a bright one, four more: the run starts over at the bright one (no verdict)");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 300; i++) v = obs(&j, &r, 0, 0, 0, 345, 576, i * 3000LL);
+    CHECK(v == MW_UNDECIDED && j.kinds[MW_K_BRIGHT] == 300 && mw_judge_capped(&j, &r) && mw_judge_mostly_bright(&j) && !mw_judge_mostly_empty(&j),
+          "the lit target fine, the picture shown 60 %% white (snow, a bright menu) for 300 samples: never fine, never white; capped, mostly bright (the start is not counted)");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 61; i++) v = obs(&j, &r, 0, 0, 0, i == 30 ? 345 : 100, 576, i * 3000LL);
+    CHECK(v == MW_FINE && j.fine_n == 60 && j.kinds[MW_K_BRIGHT] == 1, "fine samples with one bright picture shown between: the stretch goes on (no evidence either way), FINE at the 61st");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 61; i++) v = obs(&j, &r, 0, 0, 0, i % 2 ? 345 : 100, 576, i * 3000LL);
+    CHECK(v == MW_FINE && j.fine_n == 31 && j.fine_ms == 180000, "every other picture shown bright (snow in and out of view): 31 fine samples spread over 180 s of play: FINE");
+    memset(&j, 0, sizeof j); for (int i = 0; i < 100; i++) v = obs(&j, &r, 0, 0, 0, i % 10 ? 345 : 100, 576, i * 3000LL);
+    CHECK(v == MW_UNDECIDED && j.fine_n == 10, "nine bright pictures shown in ten: 10 fine samples, their gaps capped (%lld ms of play): not fine yet", (long long)j.fine_ms);
+    memset(&j, 0, sizeof j); for (int i = 0; i < 61; i++) obs(&j, &r, 0, 0, 0, 0, 576, i * 3000LL);
+    for (int i = 0; i < 5; i++) v = obs(&j, &r, 0, 0, 0, 576, 576, 200000 + i * 60000LL);
+    CHECK(v == MW_WHITE && j.rule == MW_RULE_SHOWN, "fine at this start, then the picture shown white at five re-checks: turns WHITE");
+    memset(&j, 0, sizeof j); obs(&j, &r, 0, 0, 0, 576, 576, 0); obs(&j, &r, 0, 0, 0, 576, 576, 3000); v = obs(&j, &r, 0, 0, 0, 100, 576, 6000);
+    CHECK(v == MW_UNDECIDED && j.white_run == 0, "two white pictures shown (a flash), then a normal one: the run starts over");
+}
+
+static void t_rules_env(void) {
+    int at;
     // the numbers from the environment (tests and tuning); bad values keep the defaults
     setenv("DM_MALI_WHITE_N", "1", 1); setenv("DM_MALI_FINE_N", "2", 1); setenv("DM_MALI_WHITE_PCT", "50", 1); setenv("DM_MALI_FINE_PCT", "10", 1); setenv("DM_MALI_FINE_SPAN_MS", "0", 1);
     setenv("DM_MALI_FINE_STARTS", "1", 1); setenv("DM_MALI_SLOW_N", "5", 1); setenv("DM_MALI_SLOW_PCT", "30", 1); setenv("DM_MALI_DARK_PCT", "50", 1); setenv("DM_MALI_WHITE_CAP", "7", 1);
     setenv("DM_MALI_WHITE_EVERY_MS", "0", 1); setenv("DM_MALI_RECHECK_MS", "0", 1); setenv("DM_MALI_RECHECK_STARTS", "1", 1); setenv("DM_MALI_WHITE_MIN_DRAWS", "8", 1);
     setenv("DM_MALI_WHITE_COVER_PCT", "10", 1); setenv("DM_MALI_WHITE_MIN_W", "64", 1); setenv("DM_MALI_WHITE_LEVEL", "60000", 1); setenv("DM_MALI_WHITE_LEVEL_LOW", "16", 1);
+    setenv("DM_MALI_DARK_N", "4", 1); setenv("DM_MALI_NAN_PCT", "20", 1); setenv("DM_MALI_SHOWN_WHITE_PCT", "101", 1); setenv("DM_MALI_SHOWN_FINE_PCT", "70", 1); setenv("DM_MALI_UNDECIDED_STARTS", "1", 1);
+    setenv("DM_MALI_SHOWN_N", "2", 1);
     mw_rules e = mw_rules_default(); mw_rules_env(&e);
     CHECK(e.white_n == 1 && e.fine_n == 2 && e.white_pct == 50 && e.fine_pct == 10 && e.fine_span_ms == 0 && e.fine_starts == 1 && e.slow_n == 5 && e.slow_pct == 30 && e.dark_pct == 50
           && e.cap_n == 7 && e.every_ms == 0 && e.recheck_ms == 0 && e.recheck_starts == 1 && e.min_draws == 8 && e.lit_draws == 4 && e.cover_pct == 10 && e.min_w == 64
-          && e.level == 60000 && e.level_low == 16, "rules from the environment (the lit draws: half the frame's when not set)");
+          && e.level == 60000 && e.level_low == 16 && e.dark_n == 4 && e.nan_pct == 20 && e.shown_white_pct == 101 && e.shown_fine_pct == 70 && e.undecided_starts == 1 && e.shown_n == 2,
+          "rules from the environment (the lit draws: half the frame's when not set)");
+    CHECK(kind(&e, 0, 0, 0, 576, 576) != MW_K_SHOWN, "DM_MALI_SHOWN_WHITE_PCT=101: the picture shown never makes a white sample (the lit target alone)");
     setenv("DM_MALI_WHITE_LIT_DRAWS", "3", 1); mw_rules_env(&e); CHECK(e.lit_draws == 3, "DM_MALI_WHITE_LIT_DRAWS on its own");
     { int s[] = { 300, -1 }; CHECK(run(&e, s, &at) == MW_WHITE && at == 1, "DM_MALI_WHITE_N=1, 50 %%: one sample of 300 / 576 is white"); }
     { int s[] = { 57, 57, -1 }; CHECK(run(&e, s, &at) == MW_FINE && at == 2, "DM_MALI_FINE_N=2, 10 %%, no span: two samples of 57 / 576 are fine"); }
@@ -172,15 +250,18 @@ static void t_env_migrate(void) {
 // ---- the ladder, start by start, through the file ----
 static char D[256], F[300];
 static mw_rules R;
-static mw_plan start_c(int driver, uint32_t ver, long app, int crashed, int marker, mw_state *s, int *mk) {   // a start as mw_init makes it: read, plan, the marker found, this start's marker, written
+// a start as mw_init makes it: read, plan, the marker found (crashed: the last start crashed after the device came up), this start's marker (marker: it checks a
+//   route of the ladder's) written at each stage it reaches before it ends: the check's compute pass (detector), loading, its first picture (playing)
+static mw_plan start_s(int driver, uint32_t ver, long app, int crashed, int marker, int reach, mw_state *s, int *mk) {
     int have = mw_state_load(F, s); mw_plan p = mw_ladder_start(s, &R, have, driver, ver, app); int reset = p.reset, mr, k = mw_marker_check(s, &R, crashed, &mr);
     if (mk) *mk = k;
     p = mw_plan_of(s, &R); p.reset = reset;
     if (p.exhausted && s->panvk == MW_PANVK_NONE) s->panvk = MW_PANVK_OFFER;
-    mw_marker_set(s, marker && p.check == MW_CHECK_FULL && (p.route == MW_ROUTE_A || p.route == MW_ROUTE_B) ? p.route : 0);
-    mw_state_save(F, s, &R);
+    int rt = marker && p.check == MW_CHECK_FULL && (p.route == MW_ROUTE_A || p.route == MW_ROUTE_B) ? p.route : 0;
+    for (int st = MW_STAGE_DETECTOR; st <= reach; st++) { mw_marker_set(s, rt, st); mw_state_save(F, s, &R); }
     return p;
 }
+static mw_plan start_c(int driver, uint32_t ver, long app, int crashed, int marker, mw_state *s, int *mk) { return start_s(driver, ver, app, crashed, marker, MW_STAGE_PLAYING, s, mk); }
 static mw_plan start(int driver, uint32_t ver, long app, mw_state *s) { return start_c(driver, ver, app, 0, 0, s, NULL); }
 static int verdict(int route, int v) { mw_state s; mw_state_load(F, &s); int ev = mw_ladder_verdict(&s, &R, route, v); mw_state_save(F, &s, &R); return ev; }
 static void marker_clear(void) { mw_state s; mw_state_load(F, &s); mw_marker_clear(&s); mw_state_save(F, &s, &R); }
@@ -265,18 +346,26 @@ static void t_ladder(void) {
     { char p2[400]; snprintf(p2, sizeof p2, "%s/no/such/folder/mali_ladder.txt", D); CHECK(!mw_state_save(p2, &s, &R), "a folder that is not there: the save fails, nothing crashes"); }
     // the format round trip
     mw_state a, b2; mw_state_reset(&a, ARM, 0xb001000, 123); a.res[MW_ROUTE_A] = MW_CRASHED; a.res[MW_ROUTE_B] = MW_FINE; a.panvk = MW_PANVK_SHOWN; a.fine_starts[MW_ROUTE_B] = 2;
-    a.rechecks[MW_ROUTE_B] = 1; a.crashes[MW_ROUTE_A] = 2; a.started = MW_ROUTE_B; a.early = 1; snprintf(a.gpu, sizeof a.gpu, "Mali-G615 MC6 = (test) name");
+    a.rechecks[MW_ROUTE_B] = 1; a.crashes[MW_ROUTE_A] = 2; a.ends[MW_ROUTE_A] = 1; a.ends[MW_ROUTE_B] = 3; a.undecided[MW_ROUTE_A] = 2; a.undecided[MW_ROUTE_B] = 1;
+    a.started = MW_ROUTE_B; a.stage = MW_STAGE_LOADING; a.early = 1; snprintf(a.gpu, sizeof a.gpu, "Mali-G615 MC6 = (test) name");
     char buf[2048]; mw_state_format(&a, &R, buf, sizeof buf); CHECK(mw_state_parse(buf, &b2) && !memcmp(&a, &b2, sizeof a), "format → parse gives the same state (every field, a name with '=' in it)");
-    CHECK(strstr(buf, "next=B (fine: re-checked once a minute)\n") != NULL && strstr(buf, "gpu=Mali-G615 MC6 = (test) name\n"), "next= says what the next start does; gpu= names the GPU");
+    CHECK(strstr(buf, "next=B (fine: re-checked once a minute)\n") != NULL && strstr(buf, "gpu=Mali-G615 MC6 = (test) name\n") && strstr(buf, "A_ends=1\nB_ends=3\nA_undecided=2\nB_undecided=1\n")
+          && strstr(buf, "started=B\nstage=loading\nearly_ends=1\n"), "next= says what the next start does; gpu= names the GPU; the counts and the marker's stage written");
+    for (int st = MW_STAGE_DETECTOR; st <= MW_STAGE_PLAYING; st++) { a.stage = st; mw_state_format(&a, &R, buf, sizeof buf); mw_state_parse(buf, &b2); CHECK(b2.stage == st, "stage %s round trips", mw_stage_name(st)); }
+    a.res[MW_ROUTE_A] = MW_BROKEN; mw_state_format(&a, &R, buf, sizeof buf); CHECK(strstr(buf, "A=broken\n") && mw_state_parse(buf, &b2) && b2.res[MW_ROUTE_A] == MW_BROKEN, "broken round trips");
     mw_state_reset(&a, -1, 0x1000, 0); mw_state_format(&a, &R, buf, sizeof buf); CHECK(mw_state_parse(buf, &b2) && b2.driver == -1 && b2.app == 0, "no driver ID (an old driver without driver properties): -1 round trips");
+    mw_state_parse("driver=9\ndriver_version=1\napp=1\nstarted=A\nearly_ends=1\n", &b2); CHECK(b2.started == MW_ROUTE_A && b2.stage == MW_STAGE_PLAYING && b2.early == 1,
+                                                                                            "a marker without its stage (a file from before the stages): taken as played");
+    mw_state_parse("driver=9\ndriver_version=1\napp=1\nstarted=-\nstage=loading\n", &b2); CHECK(!b2.started && !b2.stage, "a stage without a marker: none");
     // random text: never a crash, every value in its range
     { unsigned seed = 1; static char txt[1024]; int bad = 0;
       for (int it = 0; it < 200000; it++) { int n = (int)((seed = seed * 1103515245 + 12345) >> 16) % 1023;
-          for (int i = 0; i < n; i++) { seed = seed * 1103515245 + 12345; int c = (seed >> 16) & 0xff; const char *al = "driver=_version0x123app=A=B=panvk=offershownwhitefinecrashed_starts\n#-";
-              txt[i] = (c & 1) ? al[c % 70] : (char)(c | 1); }
+          for (int i = 0; i < n; i++) { seed = seed * 1103515245 + 12345; int c = (seed >> 16) & 0xff; const char *al = "driver=_version0x123app=A=B=panvk=offershownwhitefinecrashed_startsbroken_ends_undecidedstage=loadingdetectorplaying\n#-";
+              txt[i] = (c & 1) ? al[c % 119] : (char)(c | 1); }
           txt[n] = 0; mw_state q; int have = mw_state_parse(txt, &q); mw_plan qp = mw_ladder_start(&q, &R, have, 9, 1, 1); int r2; mw_marker_check(&q, &R, it & 1, &r2); qp = mw_plan_of(&q, &R);
-          for (int k = 1; k < 3; k++) bad += q.res[k] < 0 || q.res[k] > 3 || q.crashes[k] < 0 || q.fine_starts[k] < 0 || q.rechecks[k] < 0;
-          bad += qp.route < 0 || qp.route > 2 || q.panvk < 0 || q.panvk > 2; char out[2048]; bad += mw_state_format(&q, &R, out, sizeof out) <= 0; }
+          for (int k = 1; k < 3; k++) bad += q.res[k] < 0 || q.res[k] > 4 || q.crashes[k] < 0 || q.ends[k] < 0 || q.undecided[k] < 0 || q.fine_starts[k] < 0 || q.rechecks[k] < 0;
+          bad += qp.route < 0 || qp.route > 2 || q.panvk < 0 || q.panvk > 2 || q.stage < 0 || q.stage > 3 || mw_route_unchecked(&q, &qp) < 0 || mw_route_unchecked(&q, &qp) > 2;
+          char out[2048]; bad += mw_state_format(&q, &R, out, sizeof out) <= 0; }
       CHECK(!bad, "200,000 random files: parsed, planned and written without a value out of range (%d bad)", bad); }
 }
 
@@ -310,11 +399,90 @@ static void t_marker(void) {
     unlink(F); start_c(ARM, 0xc401000, 96, 0, 0, &s, &mk); CHECK(s.started == 0 && strstr(file(), "started=-\n"), "a start that does not mark (env.txt chose the route): no marker");
     start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); p = start_c(ARM, 0xc401000, 96, 1, 0, &s, &mk);
     CHECK(mk == MW_MK_CRASHED && s.started == 0, "a crash after a marked start is counted even when this start marks nothing");
-    mw_state_reset(&s, ARM, 1, 1); s.started = MW_ROUTE_A; s.early = 1; mw_marker_set(&s, MW_ROUTE_B); CHECK(s.started == MW_ROUTE_B && s.early == 0, "a marker for another route: the early count starts over");
-    mw_state_reset(&s, ARM, 1, 1); s.res[MW_ROUTE_A] = MW_FINE; s.started = MW_ROUTE_A; int r2; CHECK(mw_marker_check(&s, &R, 1, &r2) == MW_MK_CRASHED && s.res[MW_ROUTE_A] == MW_CRASHED && r2 == MW_ROUTE_A,
+    mw_state_reset(&s, ARM, 1, 1); s.started = MW_ROUTE_A; s.early = 1; mw_marker_set(&s, MW_ROUTE_B, MW_STAGE_LOADING);
+    CHECK(s.started == MW_ROUTE_B && s.early == 0 && s.stage == MW_STAGE_LOADING, "a marker for another route: the early count starts over");
+    mw_state_reset(&s, ARM, 1, 1); mw_marker_set(&s, 0, MW_STAGE_PLAYING); CHECK(!s.started && !s.stage, "no route: no marker, no stage");
+    mw_state_reset(&s, ARM, 1, 1); s.res[MW_ROUTE_A] = MW_FINE; s.started = MW_ROUTE_A; s.stage = MW_STAGE_PLAYING; int r2;
+    CHECK(mw_marker_check(&s, &R, 1, &r2) == MW_MK_CRASHED && s.res[MW_ROUTE_A] == MW_CRASHED && r2 == MW_ROUTE_A,
           "a marker found on a route kept as fine (a re-check start does not mark, an edited file can): counted");
-    mw_state_reset(&s, ARM, 1, 1); s.res[MW_ROUTE_A] = MW_CRASHED; s.res[MW_ROUTE_B] = MW_CRASHED;
-    CHECK(mw_plan_of(&s, &R).exhausted && mw_plan_of(&s, &R).route == MW_ROUTE_NONE, "both crashed (an edited file): no route at all");
+    mw_state_reset(&s, ARM, 1, 1); s.res[MW_ROUTE_A] = MW_CRASHED; s.res[MW_ROUTE_B] = MW_CRASHED; s.crashes[MW_ROUTE_A] = s.crashes[MW_ROUTE_B] = 1;
+    CHECK(mw_plan_of(&s, &R).exhausted && mw_plan_of(&s, &R).route == MW_ROUTE_NONE, "both closed the game with the crash flag (an edited file): no route at all");
+    s.crashes[MW_ROUTE_A] = 0; s.ends[MW_ROUTE_A] = 2;
+    CHECK(mw_plan_of(&s, &R).exhausted && mw_plan_of(&s, &R).route == MW_ROUTE_A, "... A only on early ends: route A");
+    unlink(F);
+}
+
+// The marker's stages: the check's own compute pass, loading (no picture yet), playing. An end at the detector stage is never the route's; an end while loading
+//   without a crash counts for nothing (the player left during the pipeline builds, Android ended it in the background); crashes count from loading on
+static void t_stages(void) {
+    mw_state s; mw_plan p; int mk; R = mw_rules_default(); unlink(F);
+    // the review's case: the driver crashes making the check's own compute shader (#89) on a start that checks route A; the next start comes with the crash flag
+    p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_DETECTOR, &s, &mk);
+    CHECK(p.route == MW_ROUTE_A && strstr(file(), "started=A\nstage=detector\n"), "a start on route A that dies making the check's compute pass: the file says started=A, stage=detector");
+    p = start_s(ARM, 0xc401000, 96, 1, 1, MW_STAGE_PLAYING, &s, &mk);
+    CHECK(mk == MW_MK_DETECTOR && s.res[MW_ROUTE_A] == MW_UNDECIDED && !s.crashes[MW_ROUTE_A] && !s.ends[MW_ROUTE_A] && p.route == MW_ROUTE_A && p.check == MW_CHECK_FULL && !p.exhausted,
+          "the next start, crash flag and all: the check's crash, not route A's (A not counted, route A again)");
+    p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_DETECTOR, &s, &mk); p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_LOADING, &s, &mk);
+    CHECK(mk == MW_MK_DETECTOR && s.res[MW_ROUTE_A] == MW_UNDECIDED, "an end at the detector stage without the crash flag: nothing counted either");
+    // problem 2's case: ends before the first picture (the pipeline builds after an update take minutes on Mali) do not count, however many
+    unlink(F); for (int i = 0; i < 4; i++) p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_LOADING, &s, &mk);
+    CHECK(mk == MW_MK_LOADING && s.res[MW_ROUTE_A] == MW_UNDECIDED && !s.early && p.route == MW_ROUTE_A && !p.exhausted, "four starts ended while loading, without a crash: route A, nothing counted");
+    // ... but a crash while loading does (route A's own pipelines and images are being made)
+    p = start_s(ARM, 0xc401000, 96, 1, 1, MW_STAGE_PLAYING, &s, &mk);
+    CHECK(mk == MW_MK_CRASHED && s.res[MW_ROUTE_A] == MW_CRASHED && s.crashes[MW_ROUTE_A] == 1 && !s.ends[MW_ROUTE_A] && p.route == MW_ROUTE_B, "a crash while loading: route A closed the game (the crash flag)");
+    // the early count goes on across an end while loading: two ends while playing, with one while loading between, are two in a row
+    unlink(F); start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_PLAYING, &s, &mk);
+    p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_LOADING, &s, &mk); CHECK(mk == MW_MK_EARLY && s.early == 1, "an end while playing: early 1");
+    p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_PLAYING, &s, &mk); CHECK(mk == MW_MK_LOADING && s.early == 1 && s.res[MW_ROUTE_A] == MW_UNDECIDED, "then one while loading: not counted, early still 1");
+    p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_PLAYING, &s, &mk);
+    CHECK(mk == MW_MK_CRASHED && s.res[MW_ROUTE_A] == MW_CRASHED && !s.crashes[MW_ROUTE_A] && s.ends[MW_ROUTE_A] == 1 && p.route == MW_ROUTE_B,
+          "then one while playing again: two in a row, route A closed the game on early ends (A_ends 1, A_crashes 0)");
+    // a start that cannot run the check (its marker stays at loading for the whole start): its ends without a crash never count
+    unlink(F); for (int i = 0; i < 4; i++) p = start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_LOADING, &s, &mk);
+    CHECK(s.res[MW_ROUTE_A] == MW_UNDECIDED, "no check on this driver: four early ends, nothing counted");
+    unlink(F);
+}
+
+// The route when both failed or the check cannot run, and starts with no verdict
+static void t_exhausted(void) {
+    mw_state t; mw_plan p; R = mw_rules_default();
+    // both failed: route A unless it closed the game with the crash flag; a route left only on early ends is not traded for the white one
+    mw_state_reset(&t, ARM, 1, 1); CHECK(mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_ENDED) == MW_EV_TRY_B && t.res[MW_ROUTE_A] == MW_CRASHED && t.ends[MW_ROUTE_A] == 1 && !t.crashes[MW_ROUTE_A],
+                                         "A closed the game on early ends: kept as crashed (A_ends 1), B next");
+    CHECK(mw_ladder_verdict(&t, &R, MW_ROUTE_B, MW_WHITE) == MW_EV_RETRY && mw_plan_of(&t, &R).route == MW_ROUTE_A && mw_plan_of(&t, &R).retry, "B white: A once more");
+    CHECK(mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_ENDED) == MW_EV_OFFER_PANVK, "A ended early twice again: exhausted, the offer");
+    p = mw_plan_of(&t, &R); CHECK(p.exhausted && p.route == MW_ROUTE_A && !p.check, "exhausted through early ends only: route A (not the known-white B), unchecked");
+    mw_state_reset(&t, ARM, 1, 1); mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_CRASHED); mw_ladder_verdict(&t, &R, MW_ROUTE_B, MW_WHITE); mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_CRASHED);
+    p = mw_plan_of(&t, &R); CHECK(p.exhausted && p.route == MW_ROUTE_B, "A crashed twice with the crash flag, B white: route B (white, but it runs)");
+    mw_state_reset(&t, ARM, 1, 1); mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_CRASHED); mw_ladder_verdict(&t, &R, MW_ROUTE_B, MW_WHITE); mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_ENDED);
+    p = mw_plan_of(&t, &R); CHECK(p.exhausted && p.route == MW_ROUTE_B, "A closed it once with the crash flag and once on early ends: B");
+    mw_state_reset(&t, ARM, 1, 1); CHECK(mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_BROKEN) == MW_EV_TRY_B && t.res[MW_ROUTE_A] == MW_BROKEN, "A broken: B next, as for white");
+    CHECK(mw_ladder_verdict(&t, &R, MW_ROUTE_B, MW_WHITE) == MW_EV_OFFER_PANVK && mw_plan_of(&t, &R).route == MW_ROUTE_A && mw_plan_of(&t, &R).exhausted, "B white: exhausted, route A, the offer");
+    mw_state_reset(&t, ARM, 1, 1); t.res[MW_ROUTE_A] = MW_WHITE; t.res[MW_ROUTE_B] = MW_BROKEN; CHECK(mw_plan_of(&t, &R).exhausted && mw_plan_of(&t, &R).route == MW_ROUTE_A, "A white, B broken: route A");
+    mw_state_reset(&t, ARM, 1, 1); CHECK(mw_ladder_verdict(&t, &R, MW_ROUTE_BOTH, MW_BROKEN) == MW_EV_OFFER_PANVK && t.res[MW_ROUTE_A] == MW_BROKEN && t.res[MW_ROUTE_B] == MW_BROKEN, "A+B broken: both");
+    // the check cannot run (its compute pass failed on this driver): the plan's route, but never B only because A closed the game on early ends
+    mw_state_reset(&t, ARM, 1, 1); p = mw_plan_of(&t, &R); CHECK(mw_route_unchecked(&t, &p) == MW_ROUTE_A, "nothing known: route A");
+    t.res[MW_ROUTE_A] = MW_CRASHED; t.ends[MW_ROUTE_A] = 1; p = mw_plan_of(&t, &R); CHECK(p.route == MW_ROUTE_B && mw_route_unchecked(&t, &p) == MW_ROUTE_A, "A closed the game on early ends only, B never checked: route A");
+    t.crashes[MW_ROUTE_A] = 1; p = mw_plan_of(&t, &R); CHECK(mw_route_unchecked(&t, &p) == MW_ROUTE_B, "A crashed with the crash flag: route B");
+    mw_state_reset(&t, ARM, 1, 1); t.res[MW_ROUTE_A] = MW_WHITE; p = mw_plan_of(&t, &R); CHECK(mw_route_unchecked(&t, &p) == MW_ROUTE_B, "A judged white: route B");
+    mw_state_reset(&t, ARM, 1, 1); t.res[MW_ROUTE_A] = MW_CRASHED; t.ends[MW_ROUTE_A] = 1; t.res[MW_ROUTE_B] = MW_FINE; p = mw_plan_of(&t, &R);
+    CHECK(mw_route_unchecked(&t, &p) == MW_ROUTE_B, "B kept as fine: route B");
+    // starts with no verdict: three make the route broken; one whose samples were mostly near black at once; fine at a start starts the count over
+    mw_state_reset(&t, ARM, 1, 1);
+    CHECK(mw_ladder_undecided(&t, &R, MW_ROUTE_A, 0) == MW_EV_NONE && mw_ladder_undecided(&t, &R, MW_ROUTE_A, 0) == MW_EV_NONE && t.undecided[MW_ROUTE_A] == 2 && !t.res[MW_ROUTE_A],
+          "two starts on A with no verdict: counted (2), A still undecided");
+    CHECK(mw_ladder_undecided(&t, &R, MW_ROUTE_A, 0) == MW_EV_TRY_B && t.res[MW_ROUTE_A] == MW_BROKEN && mw_plan_of(&t, &R).route == MW_ROUTE_B, "the third: A broken, route B next");
+    mw_state_reset(&t, ARM, 1, 1); CHECK(mw_ladder_undecided(&t, &R, MW_ROUTE_A, 1) == MW_EV_TRY_B && t.res[MW_ROUTE_A] == MW_BROKEN, "one start with no verdict and mostly near black: A broken at once");
+    mw_state_reset(&t, ARM, 1, 1); mw_ladder_undecided(&t, &R, MW_ROUTE_A, 0); mw_ladder_undecided(&t, &R, MW_ROUTE_A, 0);
+    CHECK(mw_ladder_verdict(&t, &R, MW_ROUTE_A, MW_FINE) == MW_EV_FINE_ONCE && t.undecided[MW_ROUTE_A] == 0 && mw_ladder_undecided(&t, &R, MW_ROUTE_A, 0) == MW_EV_NONE,
+          "two starts with no verdict, then one fine: the count starts over");
+    mw_state_reset(&t, ARM, 1, 1); CHECK(mw_ladder_undecided(&t, &R, MW_ROUTE_BOTH, 0) == MW_EV_NONE && !t.undecided[MW_ROUTE_A] && !t.undecided[MW_ROUTE_B], "both at once, no verdict: counted for neither");
+    CHECK(mw_ladder_undecided(&t, &R, MW_ROUTE_BOTH, 1) != MW_EV_NONE && t.res[MW_ROUTE_A] == MW_BROKEN && t.res[MW_ROUTE_B] == MW_BROKEN, "both at once, mostly near black: both broken");
+    mw_state_reset(&t, ARM, 1, 1); CHECK(mw_ladder_undecided(&t, &R, MW_ROUTE_NONE, 1) == MW_EV_NONE && !t.res[MW_ROUTE_A], "no route of the ladder's: nothing");
+    // through the file: three starts capped on A, then B
+    unlink(F); mw_state s; int mk;
+    for (int i = 0; i < 3; i++) { start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); marker_clear(); mw_state_load(F, &s); mw_ladder_undecided(&s, &R, MW_ROUTE_A, 0); mw_state_save(F, &s, &R); }
+    p = start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); CHECK(p.route == MW_ROUTE_B && strstr(file(), "A=broken\n") && strstr(file(), "A_undecided=3\n"), "three capped starts on A through the file: A broken, route B");
     unlink(F);
 }
 
@@ -336,7 +504,7 @@ static void fixtures(const char *dir) {
 
 int main(void) {
     snprintf(D, sizeof D, "/tmp/t_mali_white.%d", (int)getpid()); mkdir(D, 0700); snprintf(F, sizeof F, "%s/mali_ladder.txt", D);
-    t_judge(); t_enabled(); t_route(); t_other_tests(); t_env_migrate(); t_ladder(); t_marker();
+    t_judge(); t_nan_shown(); t_rules_env(); t_enabled(); t_route(); t_other_tests(); t_env_migrate(); t_ladder(); t_marker(); t_stages(); t_exhausted();
     const char *fd = getenv("MW_FIXTURE_DIR"); if (fd && *fd) fixtures(fd);
     unlink(F); rmdir(D);
     printf("%s t_mali_white: %d of %d checks failed\n", fails ? "FAIL" : "PASS", fails, checks);

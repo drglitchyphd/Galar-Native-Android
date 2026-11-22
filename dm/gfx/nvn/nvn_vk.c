@@ -191,10 +191,10 @@ static int g_arm_rel, g_arm_p;   // Arm's own Mali driver: its release, r<rel>p<
 static int g_arm_beta;           // ... a beta build of it (driverInfo "v1.r49p1-03bet0": the G925's)
 static int g_drv_id = -1;        // the driver's ID (VkDriverId) where it reports driver properties, else -1 (mtl_init; the white-screen ladder's key)
 // The Mali white-screen ladder and its detector (mali_white_vk.inc, included after the draw counters; its rules: mali_white.h): the route at mtl_init, the lit target
-//   and the part drawn of it from pass_begin / draw_ / pass_end, the samples at mtl_present, the state in the frame capture's notes
+//   and the part drawn of it from pass_begin / draw_ / pass_end, the samples at mtl_present (with the picture shown), the state in the frame capture's notes
 struct vtex; static struct vtex *g_mw_px;   // the open pass's lit-target candidate (mw_pass_target), NULL: none
 static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b); static void mw_pass_target(struct vtex *x, uint32_t lv); static void mw_pass_end(void);
-static void mw_draw_rect(float vx, float vy, float vw, float vh, const VkRect2D *sc); static void mw_present(uint64_t n); static void mw_capture_note(void);
+static void mw_draw_rect(float vx, float vy, float vw, float vh, const VkRect2D *sc); static void mw_present(uint64_t n, const tex_t *shown, const int crop[4]); static void mw_capture_note(void);
 static int g_clampzero; static _Atomic int g_clampzero_n;   // shaders get spv_clamp_zero (Arm erratum 3779215: mtl_init decides); how many it changed
 static int g_fmz; static _Atomic int g_fmz_n;   // shaders get spv_fmz (every multiply by 0 gives 0, as Maxwell's FMZ: DM_VK_FMZ=1, a test); how many it changed
 static unsigned g_exact; static _Atomic int g_exact_n;
@@ -7076,7 +7076,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (sk_on()) { vtex *px = tex_res(t); if (px) { pthread_mutex_lock(&g_skmu); px->presented = 1; pthread_mutex_unlock(&g_skmu); sk_read(px); } }   // shown: never skips its stores
     uint64_t n = atomic_fetch_add(&g_present_n, 1) + 1;
     cap_present(n);
-    mw_present(n);   // the Mali white-screen check: finished samples read, this frame's lit target sampled when due (nothing unless its ladder is on)
+    mw_present(n, t, crop);   // the Mali white-screen check: finished samples read, this frame's lit target and the picture shown sampled when due (nothing unless its ladder is on)
     { vtex *px = tex_res(t); fgr_present(n, px, px ? px->w : 0, px ? px->h : 0, px ? (uint32_t)px->fmt : 0); }   // (the frame recorder: frame boundary, the shown image)
     // the heap route's crash marker goes after 20 s of play on it: 600 presents, or 20 s of wall time and 60 presents (a hot Xclipse 530 building 2,000 pipelines on the
     //   way into Motostoke drew about 300 frames in a minute; the player closed it as stuck, the marker stayed, and the next start took the mirrored route and crashed, #74)
