@@ -106,15 +106,32 @@ int dm_fork_icon_cell(int sp, int form) {
     pthread_mutex_unlock(&g_mu); return r;
 }
 // on the area dex's thread: draws up to 8 asked-for icons
+// v64: the decoded icons, once (Steven, Nov 22: icons show but are the wrong Pokémon; the file names match): the atlas's first two rows of cells as a BMP in
+//   Download (next to the log), and the first icon as decoded (before the crop). Read-only for the game; the picture is the player's own icons
+static void bmp(const char *path, const uint8_t *rgba, int w, int h, int pitch) {
+    FILE *f = fopen(path, "wb"); if (!f) { ILOG("[FORK] icons: %s not writable", path); return; }
+    uint32_t sz = (uint32_t)(54 + w * h * 4); uint8_t hd[54] = { 'B', 'M' }; memcpy(hd + 2, &sz, 4); uint32_t o = 54, hs = 40, img = (uint32_t)(w * h * 4); int32_t W = w, H = -h; uint16_t pl = 1, bpp = 32;
+    memcpy(hd + 10, &o, 4); memcpy(hd + 14, &hs, 4); memcpy(hd + 18, &W, 4); memcpy(hd + 22, &H, 4); memcpy(hd + 26, &pl, 2); memcpy(hd + 28, &bpp, 2); memcpy(hd + 34, &img, 4);
+    fwrite(hd, 1, 54, f);
+    uint8_t *row = malloc((size_t)w * 4); for (int y = 0; y < h && row; y++) { const uint8_t *q = rgba + (size_t)y * pitch * 4;
+        for (int x = 0; x < w; x++) { uint8_t a = q[x * 4 + 3]; row[x * 4] = (uint8_t)(q[x * 4 + 2] * a / 255 + (255 - a) * (((x / 8 + y / 8) & 1) ? 200 : 255) / 255); row[x * 4 + 1] = (uint8_t)(q[x * 4 + 1] * a / 255 + (255 - a) * (((x / 8 + y / 8) & 1) ? 200 : 255) / 255);
+            row[x * 4 + 2] = (uint8_t)(q[x * 4] * a / 255 + (255 - a) * (((x / 8 + y / 8) & 1) ? 200 : 255) / 255); row[x * 4 + 3] = 255; }   // (on a checkerboard: see-through shows)
+        fwrite(row, 1, (size_t)w * 4, f); }
+    free(row); fclose(f); ILOG("[FORK] icons: wrote %s (%dx%d)", path, w, h);
+}
+static void dl_path(char *b, size_t n, const char *name) { snprintf(b, n, "/storage/emulated/0/Download/%s", name); }
+static int g_dumped, g_first_dumped;
 void dm_fork_icons_work(void) {
     if (!g_dir_tried) index_dir(); if (!g_nfiles) return;
     if (!g_atlas && !(g_atlas = calloc((size_t)AW * AW, 4))) return;
     for (int k = 0; k < 8; k++) {
         int c = -1, sp = 0, form = 0; pthread_mutex_lock(&g_mu); for (int i = 0; i < g_ncell; i++) if (g_cell[i].st == 0) { c = i; sp = g_cell[i].sp; form = g_cell[i].form; break; } pthread_mutex_unlock(&g_mu);
-        if (c < 0) return;
+        if (c < 0) { if (!g_dumped && g_ncell >= 8) { g_dumped = 1; char bp[256]; dl_path(bp, sizeof bp, "GalarFork-icons.bmp"); bmp(bp, g_atlas, AW, CELL * 2, AW); } return; }   // v64: the atlas, once
         const char *f = icon_file(sp, form); if (!f && form) f = icon_file(sp, 0);
         int ok = 0; if (f) { char p[1200]; snprintf(p, sizeof p, "%s/%s", g_dir, f); size_t n = 0; uint8_t *d = read_file(p, &n), *px = NULL; int w = 0, h = 0;
-            if (d) px = bntx_rgba(d, n, &w, &h); free(d); if (px) { draw_cell(c, px, w, h); free(px); ok = 1; } }
+            if (d) px = bntx_rgba(d, n, &w, &h); free(d);
+            if (px && !g_first_dumped) { g_first_dumped = 1; char bp[256]; dl_path(bp, sizeof bp, "GalarFork-icon-first.bmp"); bmp(bp, px, w, h, w); ILOG("[FORK] icons: that one is species %d form %d (%s)", sp, form, f); }   // v64
+            if (px) { draw_cell(c, px, w, h); free(px); ok = 1; } }
         if (!ok) ILOG("[FORK] icons: no icon for species %d form %d%s", sp, form, f ? " (file not read)" : "");
         else ILOG("[FORK] icons: species %d form %d <- %s (cell %d)", sp, form, f, c);   // v63 (Steven: the wrong Pokémon: which file each one got)
         pthread_mutex_lock(&g_mu); g_cell[c].st = ok ? 1 : -1; pthread_mutex_unlock(&g_mu);
