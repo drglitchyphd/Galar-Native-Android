@@ -508,44 +508,60 @@ static void b10_work(void) {
 }
 
 // ---- the Mali white-screen check (mali_white_vk.inc): whom its ladder runs for and the route it gives (route A by default on Arm's own driver with Sword / Shield
-//   only; env.txt's own settings win), then its compute pass, forced on here on every GPU, on a lit-size R11G11B10F target (or its RGBA16F stand-in) cleared to
-//   65504, +infinity, NaN and a normal colour, each sample read back after its fence and counted; the validation layer judges the pass against the simulated GPU
+//   only; env.txt's own settings win), whether its verdicts are kept and the start marker is up, then its compute pass, forced on here on every GPU, on a lit-size
+//   R11G11B10F target (or its RGBA16F stand-in) cleared to 65504, +infinity, NaN, a finite white under the old threshold (2000), the lower bucket (100), a normal
+//   colour, black and near black, each sample read back after its fence and counted; the validation layer judges the pass against the simulated GPU
 static void mw_work(void) {
     const char *ea = getenv("DM_VK_B10_AS_RGBA16"), *eb = getenv("DM_VK_B10_NOCOMPRESS"), *le = getenv("DM_MALI_LADDER"), *se = getenv("DM_MALI_WHITE_SIM");
     int arm = g_arm_rel != 0, en = mw_enabled(arm, DM_PORT_GALAR, le, se), a = 0, b = 0;
-    mw_route_apply(en ? g_mw.want : mw_default_route(arm, DM_PORT_GALAR), ea, eb, &a, &b);
-    DEC("mali_ladder", "%d", g_mw.on); DEC("mali_route", "%s", mw_route_name(g_mw.route)); DEC("mali_check", "%d", g_mw.sampling);
+    int route = mw_route_apply(en ? g_mw.want : mw_default_route(arm, DM_PORT_GALAR), ea, eb, &a, &b);
+    char ot[200]; int others = mw_other_tests(ot, sizeof ot), record = (route == MW_ROUTE_A || route == MW_ROUTE_B || route == MW_ROUTE_BOTH) && !others;
+    const char *pr = getenv("DM_VK_PROBE"); int f16 = pr && strstr(pr, "f16target") != NULL;   // (DM_VK_PROBE=f16target makes the stand-in too: b10_on)
+    DEC("mali_ladder", "%d", g_mw.on); DEC("mali_route", "%s", mw_route_name(g_mw.route)); DEC("mali_check", "%d", g_mw.check); DEC("mali_record", "%d", g_mw.record);
+    DEC("mali_marker", "%d", g_mw.marker); DEC("mali_galar", "%d", DM_PORT_GALAR);
     CHECK(g_mw.on == (en != 0), "white-screen ladder on %d, expected %d (Arm's own driver %d, Sword / Shield %d)", g_mw.on, en != 0, arm, DM_PORT_GALAR);
-    CHECK(b10_on() == a && g_b10nc == b, "white-screen route: stand-in %d (expected %d), no compression %d (expected %d)", b10_on(), a, g_b10nc, b);
-    if (!(le && *le) && !(se && *se) && !(ea && *ea) && !(eb && *eb)) CHECK(b10_on() == (arm && DM_PORT_GALAR) && !g_b10nc && g_mw.on == (arm && DM_PORT_GALAR),
+    CHECK(b10_on() == (a || f16) && g_b10nc == b, "white-screen route: stand-in %d (expected %d), no compression %d (expected %d)", b10_on(), a || f16, g_b10nc, b);
+    if (!(le && *le) && !(se && *se) && !(ea && *ea) && !(eb && *eb)) CHECK(b10_on() == ((arm && DM_PORT_GALAR) || f16) && !g_b10nc && g_mw.on == (arm && DM_PORT_GALAR),
         "route A and the ladder by default exactly on Arm's own driver with Sword / Shield (Arm %d): stand-in %d, ladder %d", arm, b10_on(), g_mw.on);
-    if (en && !getenv("DM_MALI_LADDER_FILE")) CHECK(g_mw.sampling, "the ladder's first start (no state file here) checks the lit scene");
+    if (en && !getenv("DM_MALI_LADDER_FILE")) {   // (no state file here: the ladder's first start)
+        CHECK(g_mw.check == MW_CHECK_FULL, "the ladder's first start checks the lit scene while playing (check %d)", g_mw.check);
+        CHECK(g_mw.record == record, "verdicts kept %d, expected %d (route %s, other white-screen tests: %s)", g_mw.record, record, mw_route_name(route), others ? ot : "none");
+        CHECK(g_mw.marker == (record && route == MW_ROUTE_A), "the start marker %d, expected %d (it marks the ladder's own route A, as the ladder asked)", g_mw.marker, record && route == MW_ROUTE_A);
+    }
     g_step = "mali check: compute pass"; CHECK(mw_gpu_init(), "the white-screen check's compute pass made"); if (g_mw.gpu <= 0) return;
     enum { LW = 1280, LH = 720 };
     size_t n = 8u << 20; uint8_t *mem = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(mem != MAP_FAILED, "mali check mmap"); if (mem == MAP_FAILED) return;
     pool_t *pl = calloc(1, sizeof *pl); pl->magic = MAGIC('P', 'O', 'O', 'L'); pl->flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED; pl->mem = mem; pl->size = n;
     tex_t *T = b10_tex(pl, mem, NVN_FORMAT_R11G11B10F, LW, LH, 0);
-    static const struct { const char *what; float v[3]; uint32_t sat, inf, nan; int32_t r[4]; } cs[] = {
-        { "65504 (white)", { 65504.0f, 65504.0f, 65504.0f }, MW_TEX, 0, 0, { 0, 0, LW, LH } },
-        { "65504, a part at an offset", { 65504.0f, 65504.0f, 65504.0f }, MW_TEX, 0, 0, { 100, 50, 640, 360 } },
-        { "+infinity", { INFINITY, INFINITY, INFINITY }, MW_TEX, MW_TEX, 0, { 0, 0, LW, LH } },
-        { "NaN", { NAN, NAN, NAN }, MW_TEX, 0, MW_TEX, { 0, 0, LW, LH } },
-        { "a normal colour (0.5, 0.25, 0.125)", { 0.5f, 0.25f, 0.125f }, 0, 0, 0, { 0, 0, LW, LH } } };
+    // expected: saturated (a channel at 1024+, inf, NaN), at 64+ (or saturated), near black (every channel under 1/1024), infinite, NaN
+    static const struct { const char *what; float v[3]; uint32_t sat, low, dark, inf, nan; int32_t r[4]; } cs[] = {
+        { "65504 (white)", { 65504.0f, 65504.0f, 65504.0f }, MW_TEX, MW_TEX, 0, 0, 0, { 0, 0, LW, LH } },
+        { "65504, a part at an offset", { 65504.0f, 65504.0f, 65504.0f }, MW_TEX, MW_TEX, 0, 0, 0, { 100, 50, 640, 360 } },
+        { "+infinity", { INFINITY, INFINITY, INFINITY }, MW_TEX, MW_TEX, 0, MW_TEX, 0, { 0, 0, LW, LH } },
+        { "NaN", { NAN, NAN, NAN }, MW_TEX, MW_TEX, 0, 0, MW_TEX, { 0, 0, LW, LH } },
+        { "2000 (a finite white the old 60000 threshold missed; Arm left 21250 in #110)", { 2000.0f, 2000.0f, 2000.0f }, MW_TEX, MW_TEX, 0, 0, 0, { 0, 0, LW, LH } },
+        { "100 (the lower bucket only)", { 100.0f, 1.0f, 0.5f }, 0, MW_TEX, 0, 0, 0, { 0, 0, LW, LH } },
+        { "a normal colour (0.5, 0.25, 0.125)", { 0.5f, 0.25f, 0.125f }, 0, 0, 0, 0, 0, { 0, 0, LW, LH } },
+        { "black (0, 0, 0: a cleared target)", { 0.0f, 0.0f, 0.0f }, 0, 0, MW_TEX, 0, 0, { 0, 0, LW, LH } },
+        { "near black (0.0005, 0.0002, 0)", { 0.0005f, 0.0002f, 0.0f }, 0, 0, MW_TEX, 0, 0, { 0, 0, LW, LH } },
+        { "dark but not black (0.002, 0, 0)", { 0.002f, 0.0f, 0.0f }, 0, 0, 0, 0, 0, { 0, 0, LW, LH } } };
     int bad = 0;
     for (unsigned i = 0; i < sizeof cs / sizeof *cs; i++) {
         g_step = "mali check: clear"; mtl_sub_begin();
         p_clear_tex ct; memset(&ct, 0, sizeof ct); ct.tex = T; ct.r.width = LW; ct.r.height = LH; ct.r.depth = 1; ct.mask = 0xf; for (int k = 0; k < 3; k++) ct.c.f[k] = cs[i].v[k]; ct.c.f[3] = 1; clear_tex(&ct);
         uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
         vtex *x = tex_res(T); CHECK(x && x->img && (x->usage & VK_IMAGE_USAGE_SAMPLED_BIT), "mali check: the target made, sampled"); if (!x || !x->img) return;
-        g_step = "mali check: sample"; int ok = mw_sample(x, cs[i].r, 0); CHECK(ok, "mali check: the sample of %s submitted", cs[i].what); if (!ok) { bad++; continue; }
+        g_step = "mali check: sample"; int ok = mw_sample(x, cs[i].r, 0, 0, 0, 100); CHECK(ok, "mali check: the sample of %s submitted", cs[i].what); if (!ok) { bad++; continue; }
         int k = 0; for (int s = 1; s < MW_SLOTS; s++) if (g_mw.slot[s].busy && g_mw.slot[s].seq > g_mw.slot[k].seq) k = s;
         CHECK(vkWaitForFences(g_dev, 1, &g_mw.slot[k].f, VK_TRUE, 10000000000ull) == VK_SUCCESS, "mali check: the sample's fence");
         mw_count c = mw_read_slot(k); vtex *sx = g_mw.slot[k].x; g_mw.slot[k].busy = 0; g_mw.slot[k].x = NULL; vtex_unref(sx);
-        int right = c.sat == cs[i].sat && c.inf == cs[i].inf && c.nan == cs[i].nan; bad += !right;
-        CHECK(right, "mali check, target %s cleared to %s, part %d,%d %dx%d: %u of %d saturated (%u infinite, %u NaN; largest finite %g), expected %u (%u, %u)", x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? "RGBA16F (stand-in)" : "R11G11B10F",
-              cs[i].what, cs[i].r[0], cs[i].r[1], cs[i].r[2], cs[i].r[3], c.sat, MW_TEX, c.inf, c.nan, (double)c.mx, cs[i].sat, cs[i].inf, cs[i].nan);
+        int right = c.sat == cs[i].sat && c.low == cs[i].low && c.dark == cs[i].dark && c.inf == cs[i].inf && c.nan == cs[i].nan; bad += !right;
+        CHECK(right, "mali check, target %s cleared to %s, part %d,%d %dx%d: %u of %d saturated, %u at 64+, %u near black (%u infinite, %u NaN; largest finite %g), expected %u, %u, %u (%u, %u)",
+              x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? "RGBA16F (stand-in)" : "R11G11B10F", cs[i].what, cs[i].r[0], cs[i].r[1], cs[i].r[2], cs[i].r[3], c.sat, MW_TEX, c.low, c.dark, c.inf, c.nan,
+              (double)c.mx, cs[i].sat, cs[i].low, cs[i].dark, cs[i].inf, cs[i].nan);
     }
-    printf("WORK mali check: the lit target as %s, cleared and sampled 5 times (65504, a part of it, +inf, NaN, a normal colour): %s\n", b10_on() ? "its RGBA16F stand-in" : "R11G11B10F", bad ? "WRONG" : "counted right");
+    printf("WORK mali check: the lit target as %s, cleared and sampled %d times (65504, a part of it, +inf, NaN, 2000, 100, a normal colour, black, near black, dark): %s\n",
+           b10_on() ? "its RGBA16F stand-in" : "R11G11B10F", (int)(sizeof cs / sizeof *cs), bad ? "WRONG" : "counted right");
 }
 
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
