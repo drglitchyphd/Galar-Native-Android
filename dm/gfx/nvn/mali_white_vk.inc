@@ -6,7 +6,7 @@
 //  - the lit target: in each frame, the R11G11B10F colour target (or its stand-in) at least DM_MALI_WHITE_MIN_W (1280) wide that the most draws went into, the part of
 //    it they drew (the union of their viewports and scissors: Sword / Shield draw the scene into part of a full-size target at a lower render scale) and the cells of a
 //    32 x 18 grid over it their rectangles touched;
-//  - while playing, every DM_MALI_WHITE_EVERY_MS (3 s) at a present: a frame of DM_MALI_WHITE_MIN_DRAWS (200) draws or more, half that many of them into the lit target
+//  - while playing, every DM_MALI_WHITE_EVERY_MS (3 s) at a present: a frame of DM_MALI_WHITE_MIN_DRAWS (120) draws or more, half that many of them into the lit target
 //    itself, whose cells cover DM_MALI_WHITE_COVER_PCT (60 %) of the part drawn: a compute pass of its own (overlay/mali_white.comp: a 32 x 18 grid of texel fetches,
 //    sampled image + storage buffer, Vulkan 1.0) submitted after the frame's work, ordered by a full barrier, into a host-visible buffer read once its fence has
 //    signalled at a later present (never waited for): texels with a channel at 1024 or more, infinite or NaN (saturated), at 64 or more, near black, of 576;

@@ -374,10 +374,10 @@ def cmd_mali(a):
     #   (past the first 30 samples one line a minute: the 30 logged and the 40th, the verdict's, are all between)
     check(rc == 0 and v == [(40, 'A', 'WHITE')] and len(k) >= 30 and k == ['between'] * len(k) and all('60 of 576 texels saturated' in x for x in samples(L)) and has(L, 'saturated on average past the slow rule')
           and st.get('A') == 'white', f'a white corner over a tenth (60 of 576 each sample): {k.count("between")} logged samples all between, verdict {v} by the slow rule; state A={st.get("A")}')
-    # 9. the 'playing' gate: the frame has 260 draws, but only 60 into the lit target: not sampled
-    L, st, rc, fmt, lg = start('fewlit', 'white', dict(L1, GOLDEN_SYNTH_LIT_DRAWS='60', GOLDEN_SYNTH_OTHER_DRAWS='200'))
-    check(rc == 0 and not samples(L) and has(L, "not sampled: 60 of the frame's 260 draws into the lit target (100 needed)") and st.get('A') == '-',
-          f'60 lit draws of 260 in the frame: {len(samples(L))} samples (the lit target\'s own draws gate it)')
+    # 9. the 'playing' gate: the frame has 240 draws, but only 40 into the lit target: not sampled
+    L, st, rc, fmt, lg = start('fewlit', 'white', dict(L1, GOLDEN_SYNTH_LIT_DRAWS='40', GOLDEN_SYNTH_OTHER_DRAWS='200'))
+    check(rc == 0 and not samples(L) and has(L, "not sampled: 40 of the frame's 240 draws into the lit target (60 needed)") and st.get('A') == '-',
+          f'40 lit draws of 240 in the frame: {len(samples(L))} samples (the lit target\'s own draws gate it)')
     # 10. ... and the lit draws' rectangles must cover most of the part they span: two small corner viewports do not
     L, st, rc, fmt, lg = start('sparse', 'sparse', L1)
     check(rc == 0 and not samples(L) and any(re.search(r"not sampled: the lit target's 240 draws cover \d+ % of the 1280x720 part they span \(60 % needed\)", l) for l in L) and st.get('A') == '-',

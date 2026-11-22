@@ -35,10 +35,10 @@ static void unset_rules(void) { for (unsigned i = 0; i < sizeof RULE_ENV / sizeo
 static void t_judge(void) {
     unset_rules(); mw_rules r = mw_rules_default(); mw_rules_env(&r); int at; static int b[2000]; mw_judge j;
     CHECK(r.white_n == 3 && r.white_pct == 25 && r.fine_n == 20 && r.fine_pct == 2 && r.fine_span_ms == 180000 && r.fine_starts == 2 && r.slow_n == 40 && r.slow_pct == 8
-          && r.dark_pct == 95 && r.cap_n == 300 && r.every_ms == 3000 && r.recheck_ms == 60000 && r.recheck_starts == 3 && r.min_draws == 200 && r.lit_draws == 100
+          && r.dark_pct == 95 && r.cap_n == 300 && r.every_ms == 3000 && r.recheck_ms == 60000 && r.recheck_starts == 3 && r.min_draws == 120 && r.lit_draws == 60
           && r.cover_pct == 60 && r.min_w == 1280 && r.level == 1024 && r.level_low == 64,
           "default rules: white 3 in a row at 25 %%; fine 20 samples under 2 %% over 180 s, kept after 2 starts; slow rule 40 at 8 %%; 95 %% dark is empty; cap 300; every 3 s, "
-          "60 s after fine, 3 re-check starts; 200 draws, 100 lit, 60 %% covered, 1280 wide; saturated at 1024, bucket 64");
+          "60 s after fine, 3 re-check starts; 120 draws, 60 lit, 60 %% covered, 1280 wide; saturated at 1024, bucket 64");
     CHECK(mw_float_bits(1024.0f) == 0x44800000u && mw_float_bits(64.0f) == 0x42800000u && MW_DARK_BITS == mw_float_bits(1.0f / 1024), "the thresholds' bits (1024, 64, 1/1024)");
     // white quickly
     { int s[] = { 576, 576, 576, -1 }; CHECK(run(&r, s, &at) == MW_WHITE && at == 3, "three white samples in a row: white at the third"); }

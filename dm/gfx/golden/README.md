@@ -122,7 +122,7 @@ frames). Lavapipe is not Arm's driver: with no switch nothing may happen (no `[m
 on. The cases (33 starts): white goes A → B → A with the PanVK offer pending, and `DM_APP_VERSION=97` starts it over; a white half-size part is judged on its
 drawn part; fine (made quick: `DM_MALI_FINE_N=5 DM_MALI_FINE_SPAN_MS=0`) is kept at the second start, re-checked in three, then unchecked; a kept route re-checked
 on a white scene turns white; with the default rules fine samples then white end WHITE; a black target gives empty samples and the cap's summary, never fine; a
-white tenth is WHITE by the slow rule at the 40th sample; 60 lit draws of 260 in the frame, or draws through two corner viewports, are not sampled; an abort
+white tenth is WHITE by the slow rule at the 40th sample; 40 lit draws of 240 in the frame, or draws through two corner viewports, are not sampled; an abort
 leaves the start marker, and the next start counts the route as closing the game with `DM_LAST_CRASH_DEVICE=1`, or after a second early end, but not for a crash
 in the game's own code (`DM_LAST_CRASH_GAME=1`); `DM_VK_PROBE=f16target` under route B and `DM_VK_B10_AS_RGBA16=0` keep the verdict out of the file (the settings
 note instead of the try-B one); A+B white counts as both white; `DM_MALI_WHITE_SIM=1` alone counts a fine scene as white; `DM_MALI_LADDER=0` wins over it. Every

@@ -25,9 +25,12 @@
 //   choice, so a "1" found before the marker line DM_MALI_ENV=2 is taken out once (mw_env_migrate, android_main.c). Other white-screen tests set in env.txt
 //   (mw_other_tests) keep the start's verdict out of the file. The rules' numbers (mw_rules_env, for tests): DM_MALI_WHITE_N (3), DM_MALI_WHITE_PCT (25),
 //   DM_MALI_FINE_N (20), DM_MALI_FINE_PCT (2), DM_MALI_FINE_SPAN_MS (180000), DM_MALI_FINE_STARTS (2), DM_MALI_SLOW_N (40), DM_MALI_SLOW_PCT (8), DM_MALI_DARK_PCT (95),
-//   DM_MALI_WHITE_CAP (300), DM_MALI_WHITE_EVERY_MS (3000: between samples), DM_MALI_RECHECK_MS (60000), DM_MALI_RECHECK_STARTS (3), DM_MALI_WHITE_MIN_DRAWS (200: a
+//   DM_MALI_WHITE_CAP (300), DM_MALI_WHITE_EVERY_MS (3000: between samples), DM_MALI_RECHECK_MS (60000), DM_MALI_RECHECK_STARTS (3), DM_MALI_WHITE_MIN_DRAWS (120: a
 //   frame drawing fewer is a load or a menu, not sampled), DM_MALI_WHITE_LIT_DRAWS (half of that: the lit target's own draws), DM_MALI_WHITE_COVER_PCT (60: the part of
-//   the drawn region its draws cover), DM_MALI_WHITE_MIN_W (1280: the narrowest lit target sampled), DM_MALI_WHITE_LEVEL (1024) and DM_MALI_WHITE_LEVEL_LOW (64)
+//   the drawn region its draws cover), DM_MALI_WHITE_MIN_W (1280: the narrowest lit target sampled), DM_MALI_WHITE_LEVEL (1024) and DM_MALI_WHITE_LEVEL_LOW (64).
+//   The draw floors are low on purpose: a Mali-G615 MC2 on Arm's r44p1 (the D7400 player's log, 2026-11-22) drew about 175-260 draws a frame in play, all passes
+//   together, so floors of 200 / 100 could leave the very phones the check is for never sampled; a menu's 3D model or a title screen stays under them, and a scene
+//   that gets through is judged by rules that do not call it fine on a few minutes of it
 #pragma once
 #include <stdint.h>
 #include <stdio.h>
@@ -58,7 +61,7 @@ typedef struct {
 } mw_rules;
 static inline mw_rules mw_rules_default(void) {
     mw_rules r = { .white_n = 3, .white_pct = 25, .fine_n = 20, .fine_pct = 2, .fine_span_ms = 180000, .fine_starts = 2, .slow_n = 40, .slow_pct = 8, .dark_pct = 95,
-                   .cap_n = 300, .every_ms = 3000, .recheck_ms = 60000, .recheck_starts = 3, .min_draws = 200, .lit_draws = 100, .cover_pct = 60, .min_w = 1280,
+                   .cap_n = 300, .every_ms = 3000, .recheck_ms = 60000, .recheck_starts = 3, .min_draws = 120, .lit_draws = 60, .cover_pct = 60, .min_w = 1280,
                    .level = 1024, .level_low = 64 };
     return r;
 }
