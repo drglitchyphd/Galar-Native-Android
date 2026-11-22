@@ -25,15 +25,21 @@ import java.util.Map;
 //   driver-check.txt and driver-check.env's comment (the game's own crash markers, bc_gpu_crashed and heap_import_crashed, still cover a hang the player ends).
 //   What the tests ask for goes to driver-check.env, which the game reads after env.txt and the safe-start ladder and before the phone profile (android_main.c): the
 //   player's own settings and the ladder's levels always win, and the game takes the check's values as this driver's defaults (its crash markers still apply to them).
-//   Files in the game's folder: driver-check.log (the journal), driver-check.txt (the readable report), driver-check.env, driver-check.key. DM_DRIVER_CHECK=0 in
-//   env.txt: no check (and no driver-check.env read: android_main.c)
+//   One check at a time (claim / release): a second Play, or the setup screen made again while one runs, only takes over what runs after it; DriverCheckService
+//   ignores a second start too (the tests' state is global in libdmprobe.so). A check that does not finish (the app itself closed during it: the player left, or the
+//   driver's crash took the app's GPU context with it) is resumed at the next Play from its journal (driver-check.run counts such starts): what it learned is kept,
+//   the test that was running when the app closed left out with no setting; after MAX_STARTS unfinished starts the check gives up with what it has.
+//   Files in the game's folder: driver-check.log (the journal), driver-check.txt (the readable report), driver-check.env, driver-check.key, driver-check.run (an
+//   unfinished check). DM_DRIVER_CHECK=0 in env.txt: no check (and no driver-check.env read: android_main.c)
 final class DriverCheck {
     // raise when the tests or what they set change: every phone checks again (2: int-view on 32-bit textures, int-view-own; no setting after a hang. 3: 3d-layered clears
     //   inside its pass as the engine does on this driver, a pass of its own per slice on Xclipse, and a crash in its vkCmdClearAttachments asks for DM_VK_CLEAR_BY_PASS=1,
     //   not slice 0 only, which version 2 could write on Xclipse; int-view-own also reads a 16-bit integer under a float sampler)
     static final int VERSION = 3;
-    private static final int ATTEMPTS = 4;
+    private static final int ATTEMPTS = 4, MAX_STARTS = 2;   // (MAX_STARTS: checks of one driver that may end unfinished; the next one gives up)
     private static final long TEST_TIMEOUT_MS = 20000, TOTAL_TIMEOUT_MS = 90000;
+    private static final java.util.concurrent.atomic.AtomicBoolean RUNNING = new java.util.concurrent.atomic.AtomicBoolean();
+    private static Runnable s_go;   // what runs when the running check ends: the latest thenRun's (main thread only)
 
     static File dir(Context c) { return GameSettings.dir(c); }
     // what the results are for: this system build (its stock driver), the chosen driver package, this app
@@ -46,23 +52,37 @@ final class DriverCheck {
         return !key(c).equals(read(new File(dir(c), "driver-check.key")).trim());
     }
     // every game's results dropped (DriverPackages: the driver changed for all of them)
-    static void forget(File gameDir) { for (String n : new String[] { "driver-check.key", "driver-check.env" }) new File(gameDir, n).delete(); }
+    static void forget(File gameDir) { for (String n : new String[] { "driver-check.key", "driver-check.env", "driver-check.run" }) new File(gameDir, n).delete(); }
 
-    // Runs the check when this driver has not had one, then go (on the main thread). Whatever happens, go runs: the check never stands between the player and the game
+    // Runs the check when this driver has not had one, then go (on the main thread). Whatever happens, go runs: the check never stands between the player and the game.
+    //   Called on the main thread. While a check runs, another call only replaces what runs after it (claim / release): one check, one go, the latest one asked for
     static void thenRun(Activity a, Runnable go) {
         if (!wanted(a)) { go.run(); return; }
+        if (!claim(go)) return;   // (a check is running: its end runs this go)
         android.widget.Toast.makeText(a, T.t(a, "Checking the graphics driver (once, a few seconds)…"), android.widget.Toast.LENGTH_LONG).show();
-        Handler main = new Handler(Looper.getMainLooper());
+        Handler main = new Handler(Looper.getMainLooper()); Context app = a.getApplicationContext();
         new Thread(() -> {
-            try { check(a.getApplicationContext()); } catch (Throwable t) { append(new File(dir(a), "driver-check.log"), "error " + t + "\n"); }
-            main.post(go);
+            try { check(app); } catch (Throwable t) { append(new File(dir(app), "driver-check.log"), "error " + t + "\n"); }
+            finally { main.post(() -> { Runnable g = release(); if (g != null) g.run(); }); }
         }, "driver-check-wait").start();
     }
+    // (main thread) go becomes what runs after the check; true: no check was running, the caller starts one
+    static boolean claim(Runnable go) { s_go = go; return RUNNING.compareAndSet(false, true); }
+    // (main thread, the check over) what runs now; the next thenRun may check again
+    static Runnable release() { Runnable g = s_go; s_go = null; RUNNING.set(false); return g; }
 
     private static void check(Context c) throws InterruptedException {
-        File d = dir(c), journal = new File(d, "driver-check.log"), report = new File(d, "driver-check.txt");
-        journal.delete(); report.delete();
+        File d = dir(c), journal = new File(d, "driver-check.log"), report = new File(d, "driver-check.txt"), run = new File(d, "driver-check.run");
+        String key = key(c);
         List<String> skip = new ArrayList<>(); Map<String, String> fixes = new LinkedHashMap<>(); List<String> crashed = new ArrayList<>();
+        // an unfinished check of this driver before (driver-check.run: its key, then the starts it took): resumed from its journal, or given up after MAX_STARTS
+        int starts = unfinished(read(run), key);
+        if (starts > 0) { resume(read(journal), skip, fixes, crashed); append(journal, "resumed after " + starts + " unfinished start" + (starts == 1 ? "" : "s") + ", skip " + String.join(",", skip) + "\n"); }
+        else { journal.delete(); report.delete(); }
+        if (starts >= MAX_STARTS) {
+            append(report, "[GAVE UP] the check did not finish at " + starts + " starts (the app closed during it): what it found is kept, and it is not run again for this driver\n");
+            finish(d, key, fixes, crashed, false, journal, run); return; }
+        write(run, key + "\n" + (starts + 1) + "\n");   // (deleted when this check ends; still there when the app closed during it, or the service could not start)
         long t0 = System.currentTimeMillis(); boolean done = false;
         for (int attempt = 0; attempt < ATTEMPTS && !done && System.currentTimeMillis() - t0 < TOTAL_TIMEOUT_MS; attempt++) {
             append(journal, "attempt " + attempt + " skip " + String.join(",", skip) + "\n");
@@ -89,23 +109,54 @@ final class DriverCheck {
                 if (gone || hung) {
                     if (hung) android.os.Process.killProcess(pid);
                     result = open;
+                    boolean applied = open != null && openFix != null && !hung && openFix.indexOf('=') > 0;
                     if (open != null) { skip.add(open); crashed.add(open + (hung ? " (hung: no setting)" : ""));
                         // (a crash: its setting; a hang may be a slow phone, so it only goes into the report)
-                        if (openFix != null && !hung) { int eq = openFix.indexOf('='); if (eq > 0) fixes.put(openFix.substring(0, eq), openFix.substring(eq + 1)); }
+                        if (applied) { int eq = openFix.indexOf('='); fixes.put(openFix.substring(0, eq), openFix.substring(eq + 1)); }
                         if (hung) append(report, "[HUNG] " + open + ": no answer for " + TEST_TIMEOUT_MS / 1000 + " s: left out of the next attempt, nothing changed for it"
                                                  + (openFix != null ? " (" + openFix + " only after a crash)" : "") + "\n"); }
-                    append(journal, "lost " + (open == null ? "-" : open) + (hung ? " hung" : " crashed") + "\n");
+                    append(journal, "lost " + (open == null ? "-" : open) + (hung ? " hung" : " crashed") + (applied ? " " + openFix : "") + "\n");   // (resume reads its setting back)
                     break;
                 }
             }
             if (!done && result == null) break;   // (the process ended outside any test: another attempt would do the same)
         }
+        finish(d, key, fixes, crashed, done, journal, run);
+    }
+    // the check's end: its settings into driver-check.env, the key written (this driver is checked), driver-check.run gone
+    private static void finish(File d, String key, Map<String, String> fixes, List<String> crashed, boolean done, File journal, File run) {
         StringBuilder env = new StringBuilder("# The driver check's settings for this driver (DriverCheck.java; driver-check.txt says why). env.txt and the safe-start ladder win over these\n");
         for (Map.Entry<String, String> e : fixes.entrySet()) env.append(e.getKey()).append('=').append(e.getValue()).append('\n');
         if (!crashed.isEmpty()) env.append("# tests that took the driver down: ").append(String.join(", ", crashed)).append('\n');
         write(new File(d, "driver-check.env"), env.toString());
-        write(new File(d, "driver-check.key"), key(c) + "\n");
+        write(new File(d, "driver-check.key"), key + "\n");
+        run.delete();
         append(journal, "summary " + (done ? "complete" : "incomplete") + ", " + fixes.size() + " settings, crashed: " + (crashed.isEmpty() ? "none" : String.join(" ", crashed)) + "\n");
+    }
+    // driver-check.run's text: the starts an unfinished check of this key took so far (0: none, or another key's)
+    static int unfinished(String run, String key) {
+        String[] rl = run.split("\n");
+        if (rl.length < 2 || !rl[0].equals(key)) return 0;
+        try { return Math.max(0, Integer.parseInt(rl[1].trim())); } catch (NumberFormatException e) { return 0; }
+    }
+    // What an unfinished check's journal says, as the check read it while it ran: the tests lost ("lost <test> crashed|hung [KEY=VALUE]": left out, a crash's
+    //   setting applied), the settings tests asked for ("fix <test> KEY=VALUE"), and the test that was running when the app itself closed (the last "begin" with no
+    //   "result", "lost" or end of its process after it): left out with no setting, as a hang (the app closing may be the player's doing)
+    static void resume(String journal, List<String> skip, Map<String, String> fixes, List<String> crashed) {
+        String open = null;
+        for (String l : journal.split("\n")) {
+            String[] w = l.split(" ");
+            if (l.startsWith("attempt ") || l.startsWith("done") || l.startsWith("nodevice") || l.startsWith("error") || l.startsWith("summary")) open = null;
+            else if (l.startsWith("begin ") && w.length > 1) open = w[1];
+            else if (l.startsWith("result ") && open != null && w.length > 1 && w[1].equals(open)) open = null;
+            else if (l.startsWith("fix ") && w.length > 2) { int eq = w[2].indexOf('='); if (eq > 0) fixes.put(w[2].substring(0, eq), w[2].substring(eq + 1)); }
+            else if (l.startsWith("lost ") && w.length > 2) {
+                open = null;
+                if (w[1].equals("-")) continue;
+                if (!skip.contains(w[1])) { skip.add(w[1]); crashed.add(w[1] + (w[2].equals("hung") ? " (hung: no setting)" : "")); }
+                if (w.length > 3) { int eq = w[3].indexOf('='); if (eq > 0) fixes.put(w[3].substring(0, eq), w[3].substring(eq + 1)); } }
+        }
+        if (open != null && !skip.contains(open)) { skip.add(open); crashed.add(open + " (the app closed during it: no setting)"); }
     }
 
     private static int pid(Context c, String name) {
