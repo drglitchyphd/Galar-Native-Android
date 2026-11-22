@@ -513,6 +513,7 @@ static void *watch_main(void *a) {
         if (on != atomic_load(&g_menu)) { atomic_store(&g_menu, on); fprintf(stderr, "[touch-menu] menu %s%s\n", on ?"open: touch controls kept faint, cursor " : "closed", why); } }
     return NULL;
 }
+void touch_menu_discover_start(void) {}   // (discovery is for the games without touch_menu)
 int touch_menu_active(void) {
     static int started; if (!started) { started = 1; pthread_t t; if (!pthread_create(&t, NULL, watch_main, NULL)) pthread_detach(t); }
     return atomic_load(&g_menu);
@@ -636,6 +637,61 @@ int touch_menu_back_list(float w, float h, float r[4]) {
     return 1;
 }
 #else
+// ---- Discovery (DM_TOUCH_DISCOVER=1, games without touch_menu yet: Sword / Shield, Scarlet / Violet): logs what menu layouts look like in this game's memory,
+// so touch_menu's per-game keys can be filled in. Nothing is assumed about the layout classes: an object counts as a candidate when its first word points into
+// main (a vtable) and a pane-style name ("N_root", "L_btn_00", "P_bg", "T_text_00": one capital, '_', then 2-22 name characters, NUL-terminated) sits at some
+// 8-aligned offset 0x60..0x140 in it. Every DM_TOUCH_DISCOVER_S seconds (default 15) the (vtable, name offset) pairs seen most are logged, with the names
+// first seen since the last round for the busiest classes ([touch-discover] lines in logcat): open a menu or a battle and the classes and names of its layout
+// show up. Reads memory only; changes nothing.
+static ssize_t drd(uintptr_t a, void *b, size_t n) { struct iovec l = { b, n }, r = { (void *)a, n }; return process_vm_readv(getpid(), &l, 1, &r, 1, 0); }
+static int pane_name(const unsigned char *s) {
+    if (!(s[0] >= 'A' && s[0] <= 'Z') || s[1] != '_') return 0;
+    int i = 2; for (; i < 24 && s[i]; i++) { unsigned char c = s[i]; if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return 0; }
+    return i >= 4 && i < 24;
+}
+enum { DK = 4096 };
+static struct { uint64_t vt; unsigned off; unsigned n; } g_dk[DK]; static int g_ndk;
+static uint64_t g_seen[1 << 17];   // hashes of (class, offset, name) already logged (0 = empty)
+static int seen_add(uint64_t vt, unsigned off, const unsigned char *nm) {   // 1 if new
+    uint64_t h = 1469598103934665603ull ^ vt * 31 ^ off; for (int i = 0; i < 24 && nm[i]; i++) h = (h ^ nm[i]) * 1099511628211ull; if (!h) h = 1;
+    for (unsigned i = (unsigned)h & ((1 << 17) - 1), k = 0; k < (1 << 17); k++, i = (i + 1) & ((1 << 17) - 1)) { if (g_seen[i] == h) return 0; if (!g_seen[i]) { g_seen[i] = h; return 1; } }
+    return 0; }
+static int dk_cmp(const void *a, const void *b) { const unsigned *x = &((const typeof(g_dk[0]) *)a)->n, *y = &((const typeof(g_dk[0]) *)b)->n; return (*y > *x) - (*y < *x); }
+static void discover_round(void) {
+    uintptr_t mb = 0, me = 0; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { mb = (uintptr_t)g_mod[i].base; me = mb + g_mod[i].size; }
+    if (!mb) return;
+    static uint64_t buf[1 << 16]; static struct { uint64_t vt; unsigned off; char name[24]; } fresh[2048]; int nfresh = 0;
+    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0); g_ndk = 0; long objs = 0;
+    FILE *m = fopen("/proc/self/maps", "r"); char ln[256];
+    while (m && fgets(ln, sizeof ln, m)) { unsigned long s, e; char pr[8] = "";
+        if (sscanf(ln, "%lx-%lx %7s", &s, &e, pr) != 3 || pr[0] != 'r' || pr[1] != 'w' || pr[3] != 'p') continue;
+        for (unsigned long a = s; a < e; a += sizeof buf) {
+            size_t n = e - a < sizeof buf ? e - a : sizeof buf; if (drd(a, buf, n) != (ssize_t)n) continue;
+            const unsigned char *bb = (const unsigned char *)buf;
+            for (size_t i = 0; i + 0x140 / 8 + 3 < n / 8; i++) { uint64_t w = buf[i]; if (w < mb || w >= me || (w & 7)) continue;
+                for (unsigned off = 0x60; off <= 0x140; off += 8) { const unsigned char *nm = bb + i * 8 + off; if (!pane_name(nm)) continue;
+                    objs++; int k = 0; for (; k < g_ndk; k++) if (g_dk[k].vt == w - mb && g_dk[k].off == off) break;
+                    if (k == g_ndk && g_ndk < DK) { g_dk[k].vt = w - mb; g_dk[k].off = off; g_dk[k].n = 0; g_ndk++; }
+                    if (k < g_ndk) g_dk[k].n++;
+                    if (seen_add(w - mb, off, nm) && nfresh < 2048) { fresh[nfresh].vt = w - mb; fresh[nfresh].off = off; memcpy(fresh[nfresh].name, nm, 24); fresh[nfresh].name[23] = 0; nfresh++; }
+                    break; } } } }
+    if (m) fclose(m);
+    struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+    qsort(g_dk, g_ndk, sizeof g_dk[0], dk_cmp);
+    fprintf(stderr, "[touch-discover] main %s: %ld pane-like objects in %d (class, name offset) pairs, %.0f ms; most common:\n", dm_main_build(), objs, g_ndk,
+            (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
+    for (int k = 0; k < g_ndk && k < 24; k++) {
+        char names[900]; int L = 0; names[0] = 0; int shown = 0;
+        for (int j = 0; j < nfresh && L < (int)sizeof names - 40; j++) if (fresh[j].vt == g_dk[k].vt && fresh[j].off == g_dk[k].off) { L += snprintf(names + L, sizeof names - L, " %s", fresh[j].name); shown++; }
+        fprintf(stderr, "[touch-discover]   class main+0x%llx name at +0x%x: %u objects;%s%s\n", (unsigned long long)g_dk[k].vt, g_dk[k].off, g_dk[k].n, shown ? " new names:" : "", names);
+    }
+}
+static void *discover_main(void *a) { (void)a; prctl(PR_SET_NAME, "dm-discover", 0, 0, 0); setpriority(PRIO_PROCESS, 0, 10);
+    const char *e = getenv("DM_TOUCH_DISCOVER_S"); int s = e ? atoi(e) : 15; if (s < 5) s = 5;
+    sleep(20); for (;;) { discover_round(); sleep(s); } return NULL; }
+void touch_menu_discover_start(void) { static _Atomic int on; if (atomic_exchange(&on, 1)) return;
+    const char *e = getenv("DM_TOUCH_DISCOVER"); if (!e || !atoi(e)) return;
+    pthread_t t; if (!pthread_create(&t, NULL, discover_main, NULL)) pthread_detach(t); fprintf(stderr, "[touch-discover] on: rounds every %s s\n", getenv("DM_TOUCH_DISCOVER_S") ? getenv("DM_TOUCH_DISCOVER_S") : "15"); }
 void touch_menu_tap(float x, float y, float w, float h) { (void)x; (void)y; (void)w; (void)h; }
 void touch_menu_scroll(int right, int down) { (void)right; (void)down; }
 int touch_menu_active(void) { return 0; }

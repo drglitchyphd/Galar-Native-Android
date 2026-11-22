@@ -234,6 +234,7 @@ static int32_t ax(float v) { v = clampf(v, -1, 1); return (int32_t)(v * DM_STICK
 
 #ifdef __ANDROID__
 void touch_menu_tap(float x, float y, float w, float h);   // touch_menu.c
+void touch_menu_discover_start(void);   // touch_menu.c (DM_TOUCH_DISCOVER, games without touch_menu)
 void front_open_menu(int what);   // android_main.c: the in-game settings (GameMenu.java), 0 = all, 1 = the controller buttons
 void touch_menu_scroll(int right, int down);                // touch_menu.c: D-pad steps on the open menu
 void touch_menu_back(void);                                  // touch_menu.c: B for the game's own Back prompt, after the taps waiting
@@ -500,6 +501,7 @@ static void edit_holds_locked(void) {
 }
 // Returns the touch buttons and sticks (for the host's touch source) after this event
 void touch_ui_event(const AInputEvent *e, float w, float h, uint64_t *btn, int32_t s[4]) {
+    touch_menu_discover_start();   // (once; nothing unless DM_TOUCH_DISCOVER=1)
     pthread_mutex_lock(&g_mu);
     layout(w, h); back_place_locked(); g_visible = 1; g_touch_t = now_s();
     if (g_edit) { edit_event(e); *btn = 0; s[0] = s[1] = s[2] = s[3] = 0; pthread_mutex_unlock(&g_mu); return; }
