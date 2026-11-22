@@ -2259,11 +2259,11 @@ static VkClearColorValue clear_for(VkFormat f, const float rgba[4]) {
 // The packed float format (NVN 0x3F) is stood in for by RGBA16F (nvn_fmt_vk.c): every 0x3F image is made RGBA16F, its texel 8 bytes where the game's memory holds 4.
 // What makes the stand-in read and write as R11G11B10F does:
 //  - the game's bytes meet it only through a conversion (b10_conv.h, exact for every packed value): uploads from the game's files and pool content expand them; buffer
-//    → texture copies expand and texture → buffer copies pack them on the GPU, through a temporary R11G11B10F image the GPU blits to or from (b10_copy_buf, in order with
+//    → texture copies expand and texture → buffer copies pack them on the GPU, in a compute shader with the same rules (b10_conv.comp, b10_copy_buf: in order with
 //    what the GPU wrote before); CPU reads pack them; a buffer texture keeps the packed format (it is the game's memory);
 //  - the packed format has no alpha: views read alpha 1 (the format's channel mapping), draws never write it and blending reads the target's alpha as 1 (pso_make,
 //    pkey.b10); clears store the colour as the packed format would (negative to 0, rounded) with alpha 1, a new image's first clear too;
-//  - a texture → texture copy or blit into the stand-in from another image goes through a temporary R11G11B10F image (the packed format's rounding and range);
+//  - a texture → texture copy or blit into the stand-in from another format is then made what R11G11B10F holds there (its range and rounding: b10_quantize_region);
 //  - no view across texel sizes: the stand-in viewed in a 4-byte format is viewed as itself, a 4-byte image viewed as R11G11B10F as the packed format it holds;
 //  - storage images the shaders declare R11G11B10F are declared RGBA16F (the image they are given);
 //  - render targets: the attachment format is RGBA16F everywhere (passes, render passes, pipelines); the pipeline lists keep R11G11B10F (pso_record, prewarm);
@@ -5014,47 +5014,80 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 static int log_copy_pair(uint64_t a, uint64_t b) { static int on = -1, n; static uint64_t seen[400][2]; if (on < 0) on = getenv("DM_VK_LOG_COPY") != NULL;
     if (!on) return 0; for (int i = 0; i < n; i++) if (seen[i][0] == a && seen[i][1] == b) return 0;
     if (n >= 400) return 0; seen[n][0] = a; seen[n][1] = b; n++; return 1; }
-// ---- R11G11B10F's stand-in in copies (DM_VK_B10_AS_RGBA16, see b10_on): the game's 4-byte packed texels and the 8-byte stand-in meet through a temporary R11G11B10F
-//   image the region's size, which the GPU blits to or from the stand-in. A blit converts between the two formats: exactly from the packed format, and into it as
-//   drawing into R11G11B10F rounds. On the GPU, in the submission's order: the copy sees what the GPU wrote before it, and what it writes is there for what follows
-static int b10_blit_ok(void) {   // the GPU blits both ways between B10G11R11 and RGBA16F (optimal tiling); checked once
-    static int v = -1;
-    if (v < 0) { VkFormatProperties a, b; vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &a); vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_R16G16B16A16_SFLOAT, &b);
-        VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
-        v = (a.optimalTilingFeatures & need) == need && (b.optimalTilingFeatures & need) == need;
-        if (!v) VLOG("[RED] b10 swap: the GPU cannot blit between R11G11B10F and RGBA16F (features %#x / %#x): copies in from the game's memory are converted on the CPU, copies out are left out",
-                     (unsigned)a.optimalTilingFeatures, (unsigned)b.optimalTilingFeatures); }
-    return v;
+// ---- R11G11B10F's stand-in in copies (DM_VK_B10_AS_RGBA16, see b10_on): the game's 4-byte packed texels and the 8-byte stand-in meet in a compute shader on buffers
+//   (b10_conv.comp: the rules of b10_conv.h bit for bit), between the game's memory and a copy of the region in the submission's arena, which the image is copied to or
+//   from. On the GPU, in the submission's order: the copy sees what the GPU wrote before it, and what it writes is there for what follows. Any Vulkan 1.0 GPU (no
+//   format features asked of R11G11B10F: lavapipe and Adreno 5xx cannot blit into it); the stand-in's usage is not changed (a storage image would lose Mali's AFBC)
+#include "b10_conv_spv.h"
+static VkShaderModule g_b10c_sm; static VkDescriptorSetLayout g_b10c_dsl; static VkPipelineLayout g_b10c_pl; static VkPipeline g_b10c_cs; static int g_b10c_ready;
+static int b10c_init(void) {
+    if (g_b10c_ready) return g_b10c_ready > 0;
+    g_b10c_ready = -1;
+    VkShaderModuleCreateInfo mi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof b10_conv_spv, .pCode = b10_conv_spv };
+    VkDescriptorSetLayoutBinding lb[2] = { { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL }, { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL } };
+    VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = g_nopush ? 0 : VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 2, .pBindings = lb };
+    VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 36 };
+    if (vkCreateShaderModule(g_dev, &mi, NULL, &g_b10c_sm) || vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_b10c_dsl)) goto fail;
+    { VkPipelineLayoutCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_b10c_dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+      if (vkCreatePipelineLayout(g_dev, &pi, NULL, &g_b10c_pl)) goto fail;
+      VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = g_b10c_sm, .pName = "main" }, .layout = g_b10c_pl };
+      if (vkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &ci, NULL, &g_b10c_cs)) goto fail; }
+    g_b10c_ready = 1; VLOG("b10 swap: R11G11B10F <-> RGBA16F conversion shader ready (copies between the stand-in and the game's memory)");
+    return 1;
+fail:
+    VLOG("[RED] b10 swap: the conversion shader could not be made: copies in from the game's memory are expanded on the CPU, copies out are left out");
+    return 0;
 }
-// a temporary R11G11B10F image, w x h with n layers (3D: n slices), in the GENERAL layout; destroyed once the submission being recorded is done
-static VkImage b10_tmp(VkCommandBuffer cb, int is3d, uint32_t w, uint32_t h, uint32_t n) {
-    VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, .format = VK_FORMAT_B10G11R11_UFLOAT_PACK32,
-        .extent = { w ? w : 1, h ? h : 1, is3d ? (n ? n : 1) : 1 }, .mipLevels = 1, .arrayLayers = is3d ? 1 : (n ? n : 1), .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
-    VkImage im = VK_NULL_HANDLE; if (vkCreateImage(g_dev, &ci, NULL, &im)) { RED_ONCE(152, "b10 swap: a temporary R11G11B10F image (%ux%ux%u) could not be made", w, h, n); return VK_NULL_HANDLE; }
-    VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, im, &rq); vmalloc_t a = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
-    VKCHECK(vkBindImageMemory(g_dev, im, a.b->mem, a.off));
-    VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = im, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS } };
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
-    defer_add((dfr){ .kind = DF_IMAGE, .h.img = im, .a = a });
-    return im;
+// mode 0 pack / 1 expand / 2 quantize (b10_conv.comp) of w x h x n texels: the RGBA16F ones at hoff in hbuf (tight), the packed ones at koff in kbuf (krow / kimg words
+//   apart; mode 2: none). 0 when it cannot run here (the shader, a binding past the device's storage-buffer range): nothing recorded then
+static int b10c_run(VkCommandBuffer cb, int mode, VkBuffer hbuf, VkDeviceSize hoff, VkBuffer kbuf, VkDeviceSize koff, VkDeviceSize kbytes, uint32_t w, uint32_t h, uint32_t n, uint32_t krow, uint32_t kimg) {
+    if (!b10c_init()) return 0;
+    VkDeviceSize al = g_props.limits.minStorageBufferOffsetAlignment ? g_props.limits.minStorageBufferOffsetAlignment : 256, hb0 = hoff / al * al, kb0 = koff / al * al;
+    VkDeviceSize nt = (VkDeviceSize)w * h * n, hr = hoff - hb0 + nt * 8, kr = koff - kb0 + kbytes;
+    if (mode == 2) { kbuf = hbuf; kb0 = hb0; koff = hoff; kr = hr; }
+    if (!nt || hr > g_props.limits.maxStorageBufferRange || kr > g_props.limits.maxStorageBufferRange || ((hoff - hb0) | (koff - kb0)) & 3) return 0;
+    VkDescriptorBufferInfo bi[2] = { { hbuf, hb0, hr }, { kbuf, kb0, kr } };
+    VkWriteDescriptorSet wd[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[0] },
+                                   { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[1] } };
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (g_nopush && !(ds = desc_set_alloc(g_b10c_dsl))) return 0;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_b10c_cs);
+    if (!g_nopush) p_push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_b10c_pl, 0, 2, wd);
+    else { wd[0].dstSet = wd[1].dstSet = ds; vkUpdateDescriptorSets(g_dev, 2, wd, 0, NULL); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_b10c_pl, 0, 1, &ds, 0, NULL); }
+    uint32_t pc[9] = { w, h, n, (uint32_t)mode, (uint32_t)((hoff - hb0) / 4), (uint32_t)((koff - kb0) / 4), krow, kimg, 0 };
+    uint32_t most = (g_props.limits.maxComputeWorkGroupCount[0] < 65535u ? g_props.limits.maxComputeWorkGroupCount[0] : 65535u) * 64u;   // (texels a dispatch takes)
+    for (VkDeviceSize i0 = 0; i0 < nt; i0 += most) { pc[8] = (uint32_t)i0; VkDeviceSize left = nt - i0 < most ? nt - i0 : most;
+        vkCmdPushConstants(cb, g_b10c_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc); vkCmdDispatch(cb, (uint32_t)((left + 63) / 64), 1, 1); }
+    return 1;
 }
-// a buffer region of packed texels (buffer b at o, row / img bytes apart) to or from the stand-in x (level, first layer / slice z0, nz of them, at x0, y0, w x h).
-//   1: done; 0: not on this GPU (no blits between the formats)
-static int b10_copy_buf(VkCommandBuffer cb, vtex *x, int to_buffer, VkBuffer b, VkDeviceSize o, size_t row, size_t img, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h) {
-    if (!b10_blit_ok() || !w || !h || !nz) return 0;
-    VkImage ti = b10_tmp(cb, x->is3d, w, h, nz); if (!ti) return 0;
-    VkImageSubresourceLayers xs = { VK_IMAGE_ASPECT_COLOR_BIT, level, x->is3d ? 0 : z0, x->is3d ? 1 : nz }, ts = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, x->is3d ? 1 : nz };
-    VkOffset3D xa = { x0, y0, x->is3d ? (int32_t)z0 : 0 }, xb = { x0 + (int32_t)w, y0 + (int32_t)h, x->is3d ? (int32_t)(z0 + nz) : 1 }, ta = { 0, 0, 0 }, tb = { (int32_t)w, (int32_t)h, x->is3d ? (int32_t)nz : 1 };
-    VkBufferImageCopy bc = { .bufferOffset = o, .bufferRowLength = (uint32_t)(row / 4), .bufferImageHeight = (uint32_t)(img / row), .imageSubresource = ts, .imageExtent = { w, h, x->is3d ? nz : 1 } };
-    if (to_buffer) { VkImageBlit r = { xs, { xa, xb }, ts, { ta, tb } };
-        vkCmdBlitImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ti, VK_IMAGE_LAYOUT_GENERAL, 1, &r, VK_FILTER_NEAREST); barrier_all(cb);
-        vkCmdCopyImageToBuffer(cb, ti, VK_IMAGE_LAYOUT_GENERAL, b, 1, &bc); }
-    else { VkImageBlit r = { ts, { ta, tb }, xs, { xa, xb } };
-        vkCmdCopyBufferToImage(cb, b, ti, VK_IMAGE_LAYOUT_GENERAL, 1, &bc); barrier_all(cb);
-        vkCmdBlitImage(cb, ti, VK_IMAGE_LAYOUT_GENERAL, x->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, VK_FILTER_NEAREST); }
+// the game's packed texels (buffer kb at ko, row / img bytes apart) to or from the stand-in x (level, first layer / slice z0, nz of them, at x0, y0, w x h).
+//   1: done; 0: not here (nothing recorded)
+static int b10_copy_buf(VkCommandBuffer cb, vtex *x, int to_buffer, VkBuffer kb, VkDeviceSize ko, size_t row, size_t img, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h) {
+    if (!w || !h || !nz || (ko | row | img) & 3 || !g_sub || !b10c_init()) return 0;
+    VkDeviceSize kbytes = (VkDeviceSize)img * (nz - 1) + (VkDeviceSize)row * (h - 1) + (VkDeviceSize)w * 4;
+    VkBuffer hb; VkDeviceSize ho; arena_alloc(g_sub, (VkDeviceSize)w * h * nz * 8, &hb, &ho);
+    VkBufferImageCopy ic = { .bufferOffset = ho, .bufferRowLength = w, .bufferImageHeight = h, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, x->is3d ? 0 : z0, x->is3d ? 1 : nz },
+        .imageOffset = { x0, y0, x->is3d ? (int32_t)z0 : 0 }, .imageExtent = { w, h, x->is3d ? nz : 1 } };
+    if (to_buffer) {
+        vkCmdCopyImageToBuffer(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, hb, 1, &ic); barrier_all(cb);
+        if (!b10c_run(cb, 0, hb, ho, kb, ko, kbytes, w, h, nz, (uint32_t)(row / 4), (uint32_t)(img / 4))) { RED_ONCE(152, "b10 swap: a copy into the game's memory too big for one binding: left out"); return 1; }
+    } else {
+        if (!b10c_run(cb, 1, hb, ho, kb, ko, kbytes, w, h, nz, (uint32_t)(row / 4), (uint32_t)(img / 4))) return 0;
+        barrier_all(cb); vkCmdCopyBufferToImage(cb, hb, x->img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+    }
     barrier_all(cb);
+    return 1;
+}
+// a region of the stand-in as R11G11B10F stores it (its range and rounding, alpha 1): what a copy or blit from another format wrote into it
+static int b10_quantize_region(VkCommandBuffer cb, vtex *x, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h) {
+    if (!w || !h || !nz || !g_sub || !b10c_init()) return 0;
+    VkBuffer hb; VkDeviceSize ho; arena_alloc(g_sub, (VkDeviceSize)w * h * nz * 8, &hb, &ho);
+    VkBufferImageCopy ic = { .bufferOffset = ho, .bufferRowLength = w, .bufferImageHeight = h, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, x->is3d ? 0 : z0, x->is3d ? 1 : nz },
+        .imageOffset = { x0, y0, x->is3d ? (int32_t)z0 : 0 }, .imageExtent = { w, h, x->is3d ? nz : 1 } };
+    vkCmdCopyImageToBuffer(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, hb, 1, &ic); barrier_all(cb);
+    if (!b10c_run(cb, 2, hb, ho, VK_NULL_HANDLE, 0, 0, w, h, nz, 0, 0)) return 0;
+    barrier_all(cb); vkCmdCopyBufferToImage(cb, hb, x->img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); barrier_all(cb);
     return 1;
 }
 static void copy_b2t(const p_copy_b2t *c, int to_buffer) {
@@ -5150,31 +5183,8 @@ static void copy_t2t(const p_copy_t2t *c) {
           { static int said; if (!said++) VLOG("raw BC blocks copied between a %s texture (format %#x) and a %s one (format %#x), block for block", raw_in ? "uint" : "BC", c->src->d.format, raw_in ? "BC" : "uint", c->dst->d.format); }
           return;
       } }
-    // R11G11B10F's stand-in (DM_VK_B10_AS_RGBA16, see b10_on) on one side only. Into it from another image as into R11G11B10F (its range, its rounding, no alpha): the
-    //   game's copy or blit goes into a temporary R11G11B10F image, then a blit takes that into the stand-in. Out of it, the copy reads it as it is (alpha 1)
-    int b10done = 0;
-    if (b10_swapped_tex(s) != b10_swapped_tex(d)) {
-        uint32_t tw = (uint32_t)c->dr.width, th = (uint32_t)c->dr.height;
-        if (b10_swapped_tex(d) && s->samples == 1 && d->samples == 1 && s->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !fmt_int_class(s->fmt) && ss.layerCount == ds.layerCount && tw && th && b10_blit_ok()) {
-            VkImage ti = b10_tmp(CB(), 0, tw, th, ds.layerCount);
-            if (ti) {
-                int32_t sx0 = c->sr.xoffset, sy0 = c->sr.yoffset, sx1 = sx0 + c->sr.width, sy1 = sy0 + c->sr.height;
-                if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { int32_t t = sx0; sx0 = sx1; sx1 = t; }
-                if (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) { int32_t t = sy0; sy0 = sy1; sy1 = t; }
-                VkImageSubresourceLayers ts = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, ds.layerCount };
-                VkImageBlit r1 = { ss, {{sx0, sy0, 0}, {sx1, sy1, 1}}, ts, {{0, 0, 0}, {(int32_t)tw, (int32_t)th, 1}} }, r2 = { ts, {{0, 0, 0}, {(int32_t)tw, (int32_t)th, 1}}, ds, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + (int32_t)tw, c->dr.yoffset + (int32_t)th, 1}} };
-                vkCmdBlitImage(CB(), s->img, VK_IMAGE_LAYOUT_GENERAL, ti, VK_IMAGE_LAYOUT_GENERAL, 1, &r1, c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
-                barrier_all(CB());
-                vkCmdBlitImage(CB(), ti, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r2, VK_FILTER_NEAREST);
-                b10_note("a texture copy into the stand-in from another format: through R11G11B10F (its range and rounding)", d, s->fmt); b10done = 1;
-            }
-        }
-        if (!b10done) b10_note(b10_swapped_tex(s) ? "a texture copy out of the stand-in into another format: read as it is (alpha 1)" : "a texture copy into the stand-in that cannot go through R11G11B10F: copied as it is",
-                               b10_swapped_tex(s) ? s : d, b10_swapped_tex(s) ? d->fmt : s->fmt);
-    }
     int same = c->sr.width == c->dr.width && c->sr.height == c->dr.height && s->fmt == d->fmt && !(c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT)) && s->samples == d->samples;
-    if (b10done) {}
-    else if (same) { VkImageCopy r = { ss, { c->sr.xoffset, c->sr.yoffset, s->is3d ? c->sr.zoffset : 0 }, ds, { c->dr.xoffset, c->dr.yoffset, d->is3d ? c->dr.zoffset : 0 }, { (uint32_t)c->sr.width, (uint32_t)c->sr.height, s->is3d ? (uint32_t)nz : 1 } };
+    if (same) { VkImageCopy r = { ss, { c->sr.xoffset, c->sr.yoffset, s->is3d ? c->sr.zoffset : 0 }, ds, { c->dr.xoffset, c->dr.yoffset, d->is3d ? c->dr.zoffset : 0 }, { (uint32_t)c->sr.width, (uint32_t)c->sr.height, s->is3d ? (uint32_t)nz : 1 } };
         vkCmdCopyImage(CB(), s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r); }
     else {   // format change / scaling / mirroring: a blit (filtered when asked; depth and integer formats nearest)
         int32_t sx0 = c->sr.xoffset, sy0 = c->sr.yoffset, sx1 = sx0 + c->sr.width, sy1 = sy0 + c->sr.height;
@@ -5186,6 +5196,15 @@ static void copy_t2t(const p_copy_t2t *c) {
         else vkCmdBlitImage(CB(), s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
     barrier_all(CB());
+    // R11G11B10F's stand-in (DM_VK_B10_AS_RGBA16, see b10_on) on one side only. Into it from another format: what the copy or blit wrote is then made what R11G11B10F
+    //   would hold (its range and rounding, alpha 1: b10_quantize_region). Out of it: read as it is (its alpha is 1)
+    if (b10_swapped_tex(s) != b10_swapped_tex(d)) {
+        int q = b10_swapped_tex(d) && d->samples == 1 && c->dr.width > 0 && c->dr.height > 0 &&
+                b10_quantize_region(CB(), d, dl, d->is3d ? (uint32_t)c->dr.zoffset : ds.baseArrayLayer, d->is3d ? (uint32_t)nz : ds.layerCount, c->dr.xoffset, c->dr.yoffset, (uint32_t)c->dr.width, (uint32_t)c->dr.height);
+        b10_note(b10_swapped_tex(s) ? "a texture copy out of the stand-in into another format: read as it is (alpha 1)"
+                 : q ? "a texture copy into the stand-in from another format: made what R11G11B10F holds (its range and rounding)" : "a texture copy into the stand-in from another format: copied as it is",
+                 b10_swapped_tex(s) ? s : d, b10_swapped_tex(s) ? d->fmt : s->fmt);
+    }
     // A linear texture is plain rows in the game's memory, which its CPU reads: the copied area goes there too. Violet takes the player's ID photo so: the screen
     //   copied into a linear texture, read and compressed on the CPU, and uploaded again for the enrollment form; with the copy left in the GPU image the CPU
     //   read zeros and the photo came out black. DM_VK_NO_LINEAR_WB=1: the image only, as before
