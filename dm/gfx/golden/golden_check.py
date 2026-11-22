@@ -9,6 +9,12 @@
   golden_check.py synth [--out DIR] [--title ID] [--players DIR]
         The round trip without a phone: golden_synth draws two frames through the PC replay layer with the recorder on, golden_play replays the recording in a
         fresh process, the pictures must be identical; and with the recording's images from earlier frames (TEXI) or its start state (PROL) left out they must not be.
+  golden_check.py b10 [--out DIR] [--engine ID] [--players DIR] [--threshold N] [--max-diff PCT]
+        The Mali float-target tests on this PC (DM_VK_B10_AS_RGBA16: R11G11B10F drawn as RGBA16F; DM_VK_B10_NOCOMPRESS: R11G11B10F targets without framebuffer
+        compression): golden_synth with its R11G11B10F part (GOLDEN_SYNTH_B10=1: a lit pass into R11G11B10F with blending that reads the target's alpha, a copy
+        into the game's memory and back, a texture clear, a blit from RGBA8, CPU-filled textures, CPU reads) once with each setting, both, and neither. Each run:
+        its own round trip identical, its CPU reads exact ("b10 check" lines); each picture against the default run's within the tolerance; the test's recording
+        replayed without the test and the default's with it (the player converts the R11G11B10F images) within the tolerance. Exit 0 when everything passes.
 
 A recording's name is its file name without .nxgold. Tolerance: a pixel differs when any channel differs by more than --threshold (default 2 of 255); a recording
 fails when more than --max-diff percent of its pixels differ (default 0.1). <folder>/<name>.tolerance ("<threshold> <max-diff>") overrides both for one recording.
@@ -178,6 +184,49 @@ def cmd_synth(a):
     print('synthetic round trip: ' + ('PASS' if not fails else f'FAIL ({fails})'))
     return 1 if fails else 0
 
+def cmd_b10(a):
+    """The Mali float-target tests (DM_VK_B10_AS_RGBA16, DM_VK_B10_NOCOMPRESS) on golden_synth's R11G11B10F part: see the module's help"""
+    engine = a.engine; synth = os.path.join(a.players, f'pc-{engine}', 'golden_synth')
+    if not os.path.exists(synth): print(f'ERROR no {synth} (bash dm/pc/build.sh GAME={engine})'); return 2
+    if os.path.isdir(a.out): shutil.rmtree(a.out)
+    cfgs = [('default', {}), ('rgba16', {'DM_VK_B10_AS_RGBA16': '1'}), ('nocompress', {'DM_VK_B10_NOCOMPRESS': '1'}), ('both', {'DM_VK_B10_AS_RGBA16': '1', 'DM_VK_B10_NOCOMPRESS': '1'})]
+    fails = 0; live = {}; recs = {}
+    for name, sw in cfgs:
+        out = os.path.join(a.out, name); os.makedirs(out)
+        env = vk_env(); env.update(sw); env['GOLDEN_SYNTH_B10'] = '1'
+        r = subprocess.run([synth, out, engine], env=env, capture_output=True, text=True, timeout=900)
+        rec = os.path.join(out, f'{engine}-synth-p2.nxgold'); lp = rec[:-7] + '.phone.png'
+        open(os.path.join(out, 'golden_synth.log'), 'w').write(r.stderr)
+        checks = [l.split('] ', 1)[-1] for l in r.stderr.splitlines() if 'b10 check' in l]
+        notes = sorted({l.split('] ', 1)[-1].split(' (first:')[0] for l in r.stderr.splitlines() if 'b10 swap:' in l or 'b10 nocompress:' in l or 'formats: R11G11B10F' in l})
+        ok = r.returncode == 0 and os.path.exists(rec) and os.path.exists(lp) and len(checks) == 4 and not [c for c in checks if 'FAIL' in c]
+        print(f'{"PASS " if ok else "FAIL "} {name} ({" ".join(f"{k}={v}" for k, v in sw.items()) or "no test switch"}): golden_synth exit {r.returncode}')
+        for c in checks: print(f'        {c}')
+        for n in notes: print(f'        log: {n}')
+        if not ok: print(r.stderr[-3000:]); fails += 1; continue
+        live[name] = lp; recs[name] = rec
+        got = os.path.join(out, 'replay.png'); rc, log = play(rec, got, a.players, sw)
+        c = compare(png_read(got), png_read(lp), 0) if not rc and os.path.exists(got) else None
+        same = c is not None and c[0] == 0; fails += not same
+        print(f'{"PASS " if same else "FAIL "} {name}: its recording replayed with the same setting: ' + (f'{c[0]} of {c[1]} pixels differ from its live picture' if c else f'the player failed (exit {rc})\n{log}'))
+    def within(label, got, exp):
+        c = compare(png_read(got), png_read(exp), a.threshold)
+        if c is None: print(f'FAIL  {label}: size differs'); return 0
+        nd, tot, mx, img = c; pct = 100.0 * nd / tot; ok = pct <= a.max_diff
+        if img: png_write(got[:-4] + '.diff.png', png_read(exp)[0], png_read(exp)[1], img)
+        print(f'{"PASS " if ok else "FAIL "} {label}: {nd} of {tot} pixels differ ({pct:.3f}%, limit {a.max_diff}%), largest channel difference {mx} (threshold {a.threshold})')
+        return ok
+    if 'default' in live:
+        for name in ('rgba16', 'nocompress', 'both'):
+            if name in live: fails += not within(f'{name}: its picture against the default one', live[name], live['default'])
+        for src, sw, label in (('rgba16', {}, 'the rgba16 recording replayed without the test'), ('default', {'DM_VK_B10_AS_RGBA16': '1'}, 'the default recording replayed with DM_VK_B10_AS_RGBA16=1')):
+            if src not in recs: continue
+            got = os.path.join(a.out, src, 'cross.png'); rc, log = play(recs[src], got, a.players, sw)
+            if rc or not os.path.exists(got): print(f'FAIL  {label}: the player failed (exit {rc})\n{log}'); fails += 1; continue
+            fails += not within(label + ', against the default picture', got, live['default'])
+    print('float-target tests: ' + ('PASS' if not fails else f'FAIL ({fails})'))
+    return 1 if fails else 0
+
 def main():
     import argparse
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0], formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -187,9 +236,11 @@ def main():
     c = s.add_parser('accept'); c.add_argument('folder'); c.add_argument('names', nargs='*'); c.add_argument('--out')
     y = s.add_parser('synth'); y.add_argument('--out', default=os.path.join(PLAYERS, 'golden-synth')); y.add_argument('--engine', default='01008DB008C2C000'); y.add_argument('--title')
     y.add_argument('--players', default=PLAYERS)
+    b = s.add_parser('b10'); b.add_argument('--out', default=os.path.join(PLAYERS, 'golden-b10')); b.add_argument('--engine', default='01008DB008C2C000'); b.add_argument('--players', default=PLAYERS)
+    b.add_argument('--threshold', type=int, default=2); b.add_argument('--max-diff', type=float, default=0.1)
     a = p.parse_args()
     if a.cmd in ('run', 'accept') and not a.out: a.out = os.path.join(a.folder, 'out')
-    sys.exit({'run': cmd_run, 'accept': cmd_accept, 'synth': cmd_synth}[a.cmd](a))
+    sys.exit({'run': cmd_run, 'accept': cmd_accept, 'synth': cmd_synth, 'b10': cmd_b10}[a.cmd](a))
 
 if __name__ == '__main__':
     main()

@@ -46,6 +46,7 @@ bash build.sh                       # Sword / Shield engine (GAME=01008DB008C2C0
 bash build.sh GAME=01008F6008C5E000 # Scarlet / Violet engine
 cd ../gfx/golden
 python3 golden_check.py synth                                  # the round trip without a phone (Shield's title)
+python3 golden_check.py b10                                    # the Mali float-target tests (R11G11B10F), below
 python3 golden_check.py synth --title 0100ABF008968000 --out /tmp/gsyn-sword   # the same frame as Sword's
 python3 golden_check.py run   ~/galar-golden-data/swsh         # every recording in the folder: PASS / FAIL / NEW / ERROR, exit 0 / 1 / 2
 python3 golden_check.py accept ~/galar-golden-data/swsh [name] # this run's pictures become <name>.expected.png
@@ -77,6 +78,19 @@ draws a full-screen quad sampling frame 1's target, the CPU rewrites a uniform b
 textured, depth-tested cube. `golden_check.py synth` replays the recording in a fresh process and requires the identical picture, and a different one with
 `TEXI`, `PROL` or `MEM` left out. Result on lavapipe (Mesa 26, 2026-11-21): identical (0 of 76,800 pixels differ) for Shield, Sword and Scarlet titles; 67,641 /
 76,800 / 76,800 pixels differ without TEXI / PROL / MEM.
+
+## The float-target tests (R11G11B10F, no phone)
+
+`golden_check.py b10` runs `golden_synth` with `GOLDEN_SYNTH_B10=1`, which adds to the same two frames the R11G11B10F paths the Mali float-target tests change: a lit
+pass into an R11G11B10F target (a clear with a negative and a large channel, a draw writing alpha 0.25, then a white one blended by the target's alpha, which
+R11G11B10F reads as 1: it must stay invisible), that target copied into the game's memory and back into another one, a texture clear, an RGBA8 checker copied into
+R11G11B10F, a CPU-filled gradient and a CPU-filled texture holding every channel code; frame 2 shows four of them in the window's corners. One run with no test
+switch, one with `DM_VK_B10_AS_RGBA16=1` (R11G11B10F drawn as RGBA16F), one with `DM_VK_B10_NOCOMPRESS=1` (R11G11B10F targets without framebuffer compression) and
+one with both. Each run's own round trip must be identical and its four CPU reads bit for bit right (`b10 check` lines: the every-code texture read by the CPU, the
+GPU's copy of it into the game's memory, the lit pass's copy, the clear); each picture must match the default one within the tolerance, and so must the test's
+recording replayed without the test and the default's with it. Every colour shown is one R11G11B10F holds exactly, so the way a driver rounds into the format
+cannot show (lavapipe truncates, the stand-in rounds to nearest even). Result on lavapipe (2026-11-22): every picture identical to the default (0 of 76,800 pixels
+differ), every check exact; the engine before the stand-in's conversions (f0035ae) fails it.
 
 ## Recording on the phone (S25+)
 
