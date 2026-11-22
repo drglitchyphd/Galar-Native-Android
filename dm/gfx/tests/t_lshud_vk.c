@@ -15,11 +15,13 @@ static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 static int inbox(int x, int y) { return (x >= 20 && x < 120 && y >= 10 && y < 40) || (x >= 200 && x < 300 && y >= 150 && y < 190); }
 int main(void) {
-    VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_1 };   // (1.1: the sRGB frame's image takes a UNORM storage view, as on the phone)
+    // (1.3, as the engine's instance where Lossless Scaling runs: the sRGB frame's image takes a UNORM storage view, and the formats' STORAGE_WRITE_WITHOUT_FORMAT is asked)
+    VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app }; VkInstance inst;
     if (vkCreateInstance(&ici, NULL, &inst)) { printf("SKIP: no Vulkan instance\n"); return 0; }
     uint32_t n = 1; VkPhysicalDevice pd; vkEnumeratePhysicalDevices(inst, &n, &pd); if (!n) { printf("SKIP: no Vulkan device\n"); return 0; }
-    VkPhysicalDeviceFeatures f; vkGetPhysicalDeviceFeatures(pd, &f); if (!f.shaderStorageImageWriteWithoutFormat) { printf("SKIP: no storage writes without a format\n"); return 0; }
+    // the pass runs only where Lossless Scaling set up (nvn_lsfg.h ls_setup_work): its device needs, then each frame format's (below)
+    { const char *lack = ls_device_lacks(pd, 0); if (lack) { printf("SKIP: Lossless Scaling (and so its HUD pass) cannot run here: no %s\n", lack); return 0; } }
     VkPhysicalDeviceFeatures en = { .shaderStorageImageWriteWithoutFormat = VK_TRUE };
     uint32_t nq = 8; VkQueueFamilyProperties qp[8]; vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qp); uint32_t qf = 0; while (qf < nq && !(qp[qf].queueFlags & VK_QUEUE_COMPUTE_BIT)) qf++;
     float prio = 1; VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qf, .queueCount = 1, .pQueuePriorities = &prio };
@@ -44,6 +46,8 @@ int main(void) {
         vkCreateSampler(dev, &sci, NULL, &G.samp[LS_S_EDGE]);
         G.hbase = ls_hud_base(&G); CHECK(G.hbase, "the HUD pass's pipeline was not made"); if (!G.hbase) break;
         VkFormat fmt = fmts[fi & 1], u = ls_unorm(fmt); int ok = 1;
+        { const char *lack = ls_fmt_lacks(pd, u); if (!lack) lack = ls_fmt_lacks(pd, VK_FORMAT_R8_UNORM); if (!lack) lack = ls_fmt_lacks(pd, VK_FORMAT_R16G16B16A16_SFLOAT);
+          if (lack) { printf("%s: Lossless Scaling falls back to ours here (no %s), no HUD pass\n", fi == 1 ? "sRGB frame" : "UNORM frame", lack); ls_images_free(&G); continue; } }
         for (int k = 0; k < LS_MAXGEN; k++) ok = ok && ls_img_make(&G, &G.m[k], u, mw, mh, fmt);
         ok = ok && ls_img_make(&G, &G.c[0], u, mw, mh, fmt) && ls_img_make(&G, &G.c[1], u, mw, mh, fmt) && ls_img_make(&G, &G.hud, u, W, H, fmt) && ls_img_make(&G, &G.o, u, W, H, fmt);
         if (half) ok = ok && ls_img_make(&G, &G.sfull, u, W, H, fmt);

@@ -155,7 +155,7 @@ static int fg_setup(fgen *g, VkDevice dev, VkPhysicalDevice pd, VkFormat fmt, ui
     g->lw[0] = (w + 3) / 4; g->lh[0] = (h + 3) / 4;
     for (int l = 1; l < FG_LEVELS; l++) { g->lw[l] = (g->lw[l - 1] + 1) / 2; g->lh[l] = (g->lh[l - 1] + 1) / 2; }
     const VkImageUsageFlags smp = VK_IMAGE_USAGE_SAMPLED_BIT, att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    int ok = fg_img_make(g, &g->m, fmt, w, h, att | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, g->rp[2]) && fg_img_make(g, &g->st, VK_FORMAT_R16G16B16A16_SFLOAT, 1, 1, att, g->rp[1]);
+    int ok = fg_img_make(g, &g->m, fmt, w, h, att | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, g->rp[2]) && fg_img_make(g, &g->st, VK_FORMAT_R16G16B16A16_SFLOAT, 1, 1, att | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, g->rp[1]);   // (st: t_fgen_vk reads it back)
     for (int p = 0; p < 2 && ok; p++) { ok = fg_img_make(g, &g->c[p], fmt, w, h, smp | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_NULL_HANDLE);
         for (int l = 0; l < FG_LEVELS && ok; l++) ok = fg_img_make(g, &g->y[p][l], VK_FORMAT_R8_UNORM, g->lw[l], g->lh[l], att, g->rp[0]); }
     for (int l = 0; l < FG_LEVELS && ok; l++) ok = fg_img_make(g, &g->f[l], VK_FORMAT_R16G16B16A16_SFLOAT, g->lw[l], g->lh[l], att, g->rp[1]);
