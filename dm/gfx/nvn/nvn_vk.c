@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/uio.h>   // (process_vm_readv / writev: the pool mapping test)
 #include "nvn_mtl.h"
 #include "nvn_obj.h"
 #include "nvn_hmap.h"
@@ -1105,7 +1106,16 @@ void mtl_pool_add(const void *mem, uint64_t size) {
                 if (sscanf(ln, "%lx-%lx %7s", &s0, &e0, pr) == 3 && (uintptr_t)p >= s0 && (uintptr_t)p < e0) { vs = s0; ve = e0; rw = pr[0] == 'r' && pr[1] == 'w'; break; } }
             if (mf) fclose(mf);
             if (rw && ve >= (uintptr_t)p + n) break;
-            VLOG("[RED] memory pool %p+%#llx: the driver's mapping %p is not usable (%s): kept aside, allocating again", mem, (unsigned long long)size, p, rw ? "too short" : "not writable");
+            // Not in /proc/self/maps at all: the Android emulator's GPU (gfxstream, the app under arm64 translation) hands out mappings the listing does not show;
+            //   keeping each aside (313 MB) used up its memory window and the third allocation crashed inside gfxstream. Tried directly instead: the first and last
+            //   byte read and written back unchanged (process_vm_*: a fault is an error, not a signal). Usable then, mirrored (vs != p takes the shadow route below)
+            if (!vs) { unsigned char b0, b1; struct iovec l0 = { &b0, 1 }, l1 = { &b1, 1 }, r0 = { p, 1 }, r1 = { (uint8_t *)p + n - 1, 1 };
+                int ok = process_vm_readv(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_readv(getpid(), &l1, 1, &r1, 1, 0) == 1
+                      && process_vm_writev(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_writev(getpid(), &l1, 1, &r1, 1, 0) == 1;
+                static int said; if (!said++) VLOG("memory pools: the driver's mapping %p is not in /proc/self/maps; read / write test %s", p, ok ? "passed: used, mirrored" : "failed");
+                if (ok) break; }
+            else VLOG("memory pools: the driver's mapping %p lies in %lx-%lx (%s)", p, (unsigned long)vs, (unsigned long)ve, rw ? "rw, too short" : "not rw");
+            VLOG("[RED] memory pool %p+%#llx: the driver's mapping %p is not usable (%s): kept aside, allocating again", mem, (unsigned long long)size, p, rw ? "too short" : vs ? "not writable" : "not in the memory map, failed the read / write test");
             if (tries >= 16) VDIE("memory pool %p+%#llx: no usable GPU memory mapping after %d tries", mem, (unsigned long long)size, tries + 1);
         }
         {   // mremap moves whole mappings: the driver's must start at p, be page-aligned, and end exactly after the pool
