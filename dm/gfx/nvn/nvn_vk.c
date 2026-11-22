@@ -2275,7 +2275,7 @@ static void b10_note(const char *what, const vtex *x, int other) {
     static const char *seen[64]; static int n; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu); int i = 0; while (i < n && strcmp(seen[i], what)) i++;
     if (i < n || n == 64) { pthread_mutex_unlock(&mu); return; } seen[n++] = what; pthread_mutex_unlock(&mu);
-    VLOG("b10 swap: %s (first: image %ux%u, %u levels, %u layers%s; other side vk %d)", what, x ? x->w : 0, x ? x->h : 0, x ? x->levels : 0, x ? x->layers : 0, x && x->is3d ? ", 3D" : "", other);
+    VLOG("b10 swap: %s (first: image %ux%u, %u levels, %u layers%s; format or factor met: %d)", what, x ? x->w : 0, x ? x->h : 0, x ? x->levels : 0, x ? x->layers : 0, x && x->is3d ? ", 3D" : "", other);
 }
 static uint32_t vk_fmt_bytes(VkFormat f) {   // a colour format's texel size (0: not one the engine makes)
     int v = (int)f;
