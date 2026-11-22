@@ -454,6 +454,7 @@ static void boot_guard(const char *mods) {
         const char *drv = getenv("DM_VK_DRIVER"); int stock = !drv || !*drv;
         fprintf(stderr, "boot: the last run crashed (%s)\n", device ? "after the graphics device came up" : "before the graphics device came up");
         if (device) setenv("DM_LAST_CRASH_DEVICE", "1", 1);   // (nvn_vk.c: a start that went without the dma-buf heap route and crashed anyway sends the next one back to it)
+        if (device && strstr(prev, "in the game's code")) setenv("DM_LAST_CRASH_GAME", "1", 1);   // (nvn_vk.c's white-screen ladder: a crash in the game's own code is not its route's)
         if (had_mods) { int n = mods_off(mods); if (n) { char t[200]; snprintf(t, sizeof t, "The game closed while %d mod%s were on, so they are switched off. Switch them back on in the menu, Mods.", n, n == 1 ? "" : "s"); notice("mods", t); } }
         else if (stock && !strstr(prev, "playing") && !strstr(prev, "in the game's code") && !g_safe_advanced) {   // (a crash in the game's own code is the engine's to fix, not the driver's: no driver dialog; nor while safe_start has a safer level to try)
             char gpu[256] = ""; char gp[1200]; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "r"); if (g) { if (!fgets(gpu, sizeof gpu, g)) gpu[0] = 0; fclose(g); }
@@ -552,6 +553,21 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # comments; set o
     while (fgets(ln, sizeof ln, f)) { char *p = ln; while (*p == ' ' || *p == '\t') p++; if (*p == '#' || !*p) continue; char *eq = strchr(p, '='); if (!eq || eq == p) continue;
         *eq = 0; char *v = eq + 1; char *e = strpbrk(v, "\r\n"); if (e) *e = 0; if (!getenv(p)) { setenv(p, v, 0); fprintf(stderr, "boot: env %s=%s\n", p, v); } }
     fclose(f);
+}
+#include "mali_white.h"   // (mw_env_migrate: tested in dm/gfx/tests/t_mali_white.c)
+// env.txt's float-target switches as an older version's Mali tests menu left them ("1", its only choice; no line was its Off), taken out once per env.txt before it is
+//   read: the menu is Auto / On / Off now, and with the white-screen check (nvn_vk.c mali_white_vk.inc) such a leftover would hold the check's route for good. The
+//   marker line DM_MALI_ENV=2 (written here, and by the menu when it sets either) says it was done: a "1" after it is the player's On
+static void mali_env_migrate(const char *path) {
+    static char in[16384], out[16640]; size_t k = 0; FILE *f = fopen(path, "r");
+    if (f) { k = fread(in, 1, sizeof in - 1, f); fclose(f); if (k == sizeof in - 1) return; }   // (a file this long is not one the app wrote: left alone)
+    in[k] = 0; int rm = 0;
+    if (mw_env_migrate(in, out, sizeof out, &rm) != 1) return;
+    char t[1200]; snprintf(t, sizeof t, "%s.tmp", path); FILE *w = fopen(t, "w"); if (!w) return;
+    int ok = fputs(out, w) >= 0; ok &= fclose(w) == 0;
+    if (!ok || rename(t, path)) { unlink(t); fprintf(stderr, "boot: [mali-white] env.txt could not be rewritten (errno %d)\n", errno); return; }
+    if (rm) fprintf(stderr, "boot: [mali-white] env.txt: %s%s%s, left by an older version's Mali tests menu, taken out once: Auto (the white-screen check picks the route; the menu's On / Off win from now on)\n",
+                    rm & MW_ROUTE_A ? "DM_VK_B10_AS_RGBA16=1" : "", rm == (MW_ROUTE_A | MW_ROUTE_B) ? " and " : "", rm & MW_ROUTE_B ? "DM_VK_B10_NOCOMPRESS=1" : "");
 }
 // Device profiles: defaults by chip, from its model (ro.soc.manufacturer / ro.soc.model, Android 12+: SM8750, MT6989, s5e9945 ...). Set without overwriting, after env.txt,
 // so the player's own settings (the settings screen writes env.txt) always win; DM_PROFILE=<name> below picks one by hand, DM_PROFILE=none none.
@@ -1429,7 +1445,7 @@ static void host_start(void) {
     if (g_dl_note[0]) fprintf(stderr, "%s\n", g_dl_note);
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
-    snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p);
+    snprintf(p, sizeof p, "%s/env.txt", g_files); mali_env_migrate(p); env_file(p);
     // the Mali white-screen check's state (nvn_vk.c mali_white_vk.inc), one file per phone: in the app's files folder itself, which Sword and Shield share
     //   (MaliLadder.java reads it there for the PanVK offer); env.txt may name another
     { const char *root = g_app->activity->externalDataPath; snprintf(q, sizeof q, "%s/mali_ladder.txt", root ? root : g_files); setenv("DM_MALI_LADDER_FILE", q, 0); }
