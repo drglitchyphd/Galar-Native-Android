@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+// The Mali white-screen detector (nvn_vk.c mali_white_vk.inc): a 32 x 18 grid of texel fetches over the drawn part of the lit scene's target (R11G11B10F, or its
+//   RGBA16F stand-in), dispatched as 1 x 18 groups of 32. Per texel two words for the CPU, read once the pass's fence has signalled: its verdict (bit 0 a colour
+//   channel at or above the threshold, 60000 by default: R11G11B10F's largest value is 65024; bit 1 +infinity; bit 2 NaN) and its largest finite channel (float
+//   bits, for the log). Judged on the bits with integer operations only, so a compiler that takes infinities and NaN as absent cannot fold the checks away.
+//   Vulkan 1.0: a sampled image read without a sampler (OpImageFetch) and a storage buffer. Built into mali_white_spv.h by build_comp_spv.sh
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) uniform texture2D lit;
+layout(set = 0, binding = 1, std430) writeonly buffer Out { uint v[]; } o;
+layout(push_constant) uniform P { int x0, y0, w, h; uint base, thr; } p;   // the drawn rectangle (texels), the first word of this sample's slot, the threshold's bits
+void main() {
+    uint gx = gl_LocalInvocationID.x, gy = gl_WorkGroupID.y;
+    ivec2 c = ivec2(p.x0 + int((2u * gx + 1u) * uint(p.w) / 64u), p.y0 + int((2u * gy + 1u) * uint(p.h) / 36u));   // (each cell's centre)
+    vec4 t = texelFetch(lit, c, 0);
+    uint flags = 0u, mx = 0u;
+    for (int i = 0; i < 3; i++) {
+        uint b = floatBitsToUint(t[i]);
+        if ((b & 0x7f800000u) == 0x7f800000u) { flags |= (b & 0x007fffffu) != 0u ? 4u : (b >> 31) == 0u ? 2u : 0u; continue; }   // NaN; +inf (-inf: stored as 0)
+        if ((b >> 31) != 0u) continue;   // negative: R11G11B10F holds 0 there
+        if (b >= p.thr) flags |= 1u;
+        mx = max(mx, b);
+    }
+    uint k = p.base + 2u * (gy * 32u + gx);
+    o.v[k] = flags; o.v[k + 1u] = mx;
+}
