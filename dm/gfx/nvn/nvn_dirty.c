@@ -10,6 +10,9 @@
 #include <unistd.h>
 #include <mach/mach_time.h>
 #include <sched.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 // Order of page state and mprotect: the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
 //   set read-only: NONE -> BUSY -> mprotect(read-only) -> PROT; unprotect: PROT -> BUSY -> mprotect(writable) -> NONE.
@@ -120,7 +123,13 @@ static void prep_write(void *addr, size_t len) {
 void nvn_dirty_add_range(const void *mem, size_t size) {
     // DM_NO_DIRTY=1: no pool is tracked, so no page is write-protected and no write faults (the Android emulator's ARM translation cannot deliver them: "Cannot process signal 11");
     // untracked pools count as dirty, their textures uploaded again at every use (slower, never stale)
-    static int off = -1; if (off < 0) { const char *e = getenv("DM_NO_DIRTY"); off = e && atoi(e); }
+    // On by itself on the Android emulator (ro.kernel.qemu / ro.boot.qemu = 1: its arm64 translation aborts on these faults); DM_NO_DIRTY=0 / 1 decides anywhere
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_NO_DIRTY"); off = e && atoi(e);
+#ifdef __ANDROID__
+        if (!e) { char v[PROP_VALUE_MAX] = ""; __system_property_get("ro.kernel.qemu", v); if (v[0] != '1') __system_property_get("ro.boot.qemu", v);
+            if (v[0] == '1') { off = 1; LOG("dirty-page tracking off: the Android emulator (its arm64 translation cannot deliver the write faults; DM_NO_DIRTY=0 to try)"); } }
+#endif
+    }
     if (off) return;
     static int inited;
     if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
