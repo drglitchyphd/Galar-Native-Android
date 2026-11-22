@@ -105,7 +105,7 @@ static int tfst_run(int way, VkBuffer buf, const uint32_t *map, VkDescriptorSetL
 
 static void tf_selftest(void) {
     const char *e = getenv("DM_VK_TF_ATT"); if (e && *e) { g_tf_att = atoi(e) != 0; VLOG("transform feedback captures: %s (DM_VK_TF_ATT)", g_tf_att ? "with a 1x1 colour attachment" : "in passes with no attachments"); }
-    const char *on = getenv("DM_VK_TF_SELFTEST"); int run = on ? atoi(on) != 0 : g_arm_rel > 0;
+    const char *on = getenv("DM_VK_TF_SELFTEST"); int run = quirk_note(Q_TF_SELFTEST, on ? atoi(on) != 0 : quirk_default(Q_TF_SELFTEST, &g_gpuid), on != NULL);   // (vk_quirks.h: Arm's own driver)
     if (!run) return;
     if (!on && mark_file(drv_mark("tf_selftest_crashed"), "", 0)) { VLOG("[RED] transform feedback self-test: the driver crashed in it at an earlier start: skipped (DM_VK_TF_SELFTEST=1 runs it again)"); return; }
     mark_file(drv_mark("tf_selftest_crashed"), "running the transform feedback self-test; if this file is still here the driver crashed in it, and later starts skip it\n", 1);

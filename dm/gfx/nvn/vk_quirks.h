@@ -1,31 +1,54 @@
 // The unified driver layer's one table: what this engine does differently for each GPU and driver, decided in one place from one description of the GPU (gpu_id),
 // instead of a vendor test at every site. The translation itself (NVN → Vulkan, Maxwell → SPIR-V, BC → ETC2 / ASTC) is the same for every GPU; these are the
 // workarounds on top of it, each one found on real phones (the issue numbers are in the comments at each site in nvn_vk.c).
-//   quirk_default(q, g): the default for this GPU, a pure function (dm/gfx/tests/t_quirks.c pins it for the GPUs players reported). env.txt still wins at each
-//   site, as before (the DM_VK_* name in Q_INFO). quirk_note(): what was decided and why, printed together at start ("[quirk]" lines; DebugBundle copies them)
-//   so a log says at once which workarounds a phone runs with.
+//   quirk_default(q, g): the default for this GPU, a pure function. dm/gfx/tests/t_quirks.c checks it, for each of the three apps, against the per-site rules it
+//   replaced as beta-exit 6e0e1dd had them (the reviewed behaviour; docs/ENGINE_UNIFY.md), and pins it for the GPUs players reported. env.txt still wins at each
+//   site, as before (the DM_VK_* name in Q_INFO). quirk_note(): what was decided and why, printed together at start ("[quirk]" lines; DebugBundle copies them) so a
+//   log says at once which workarounds a phone runs with.
 // One table for every game (Galar Native: Sword / Shield, Arceus Native, Paldea Native: Scarlet / Violet; docs/ENGINE_UNIFY.md): no rule tests which game it is.
-//   Where the games were tuned apart on players' phones, the rule reads that game's own choice from its profile (game.tsv engine_quirks → gpu_id.eng), so the
-//   choice lives in the game's profile, not in this file.
+//   gpu_id.port (the profile's key port) only names the app in the log. Where the games were tuned apart on players' phones, the rule reads that game's own choice
+//   from gpu_id.eng: the profile's engine_quirks (game.tsv → game_profile.h DM_GAME_ENG_* → one bit each, ENG_* below), so the choice lives in the game's profile,
+//   not in this file, and a game takes another's rule by naming the quirk in its game.tsv. engine_quirks that decide nothing per GPU stay at their sites as
+//   #if DM_GAME_ENG_*: frame_hold_off (nvn_vk.c hold_on), gpu_time_auto_only (GPU timestamps only with Graphics Auto: a setting, not a GPU), nvn_async_never's
+//   refusal of the player's own Faster rendering setting (hle_nvn.c rq_on; its Auto is Q_NVN_ASYNC here); framegen_game_rate has had no reader since fg-plan
+//   (every game's frame generation floor is its own rate - 2).
 // DM_VK_BASELINE=1: the Vulkan 1.1 floor on any GPU (render passes instead of dynamic rendering, draw state in each pipeline, a fence per submission instead of a
 //   timeline semaphore): what a phone with an old driver runs, reproducible on a phone with a new one.
+// Deliberate raw checks (GPU tests that stay where they are, on purpose):
+//   - building gpu_id itself (nvn_vk.c mtl_init): Arm's release from driverVersion and driverInfo's "bet", Arm by vendor ID when the driver gives no driver
+//     properties, the driver's name in the log;
+//   - what is decided before any driver is open: android_main.c device_profile (Graphics level, filtering, texture size by chip model and memory: a performance
+//     tier, not a driver workaround), panvk_defaults and the driver check's copy of it (probe/jni/dprobe_jni.c: PanVK's own chip table, for that driver package),
+//     the safe-start ladder (safe_start.h: this phone's own failed starts, any GPU), the heat guard's kgsl clock limit (a sysfs file Adreno phones have);
+//   - the driver check's self-tests (probe/jni/selftest.c) run on every GPU; what the engine asks of a driver by default comes from this table there too
+//     (Q_FLOAT_CONTROLS);
+//   - the Java app: which test sections the menu shows (DriverPackages.gpu: Mali tests, Adreno tests), which driver packages fit the GPU (Turnip on Adreno only),
+//     and texts that describe these rules;
+//   - test switches that make a GPU act as another (DM_VK_AS_MALI) or pick a device by name (DM_VK_DEVICE), log and capture texts;
+//   - the frame hold's default (nvn_vk.c hold_on) follows the replay thread's decision (Q_NVN_ASYNC, or the player's setting), not a GPU test of its own.
+// Values the driver check (DriverCheck.java, libdmprobe) found for this driver come in as environment settings (driver-check.env, read under env.txt and over the
+//   phone profile): they win at each site as env.txt does, and their [quirk] line says "env.txt" (the debug report holds driver-check.env itself).
 #ifndef VK_QUIRKS_H
 #define VK_QUIRKS_H
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#define VKQ_UNUSED __attribute__((unused))   // (included where only part of it is used: hle_nvn.c, the probe)
 enum { VEN_QCOM = 0x5143, VEN_ARM = 0x13B5, VEN_SAMSUNG = 0x144D, VEN_IMG = 0x1010 };
-// The port: the released app this build is, from the game profile's key port (game_profile.h DM_PORT_*). Only the log names it: no rule tests it
+// The port: the released app this build is, from the game profile's key port (game_profile.h DM_PORT_*: Sword and Scarlet take Shield's and Violet's through
+//   tables_from). Only the log names it: no rule tests it
 enum { PORT_GALAR = 0, PORT_ARCEUS = 1, PORT_PALDEA = 2 };
 // The game's own per-GPU choices: the profile's engine_quirks that decide a GPU default (game.tsv → game_profile.h DM_GAME_ENG_*; nvn_vk.c mtl_init maps each one by
-//   name to its bit, so the order of game.py's list cannot move a bit). The other engine_quirks are no GPU rule and stay at their sites (docs/ENGINE_UNIFY.md)
+//   name to its bit, so the order of game.py's list cannot move a bit). Today Legends: Arceus sets all four and the other games none:
+//   qc11_no_eds → Q_NO_EDS, async_pso_off → Q_ASYNC_PSO, driver_selftests → Q_DRIVER_SELFTESTS, nvn_async_never → Q_NVN_ASYNC
 enum { ENG_QC11_NO_EDS = 1u << 0, ENG_ASYNC_PSO_OFF = 1u << 1, ENG_DRIVER_SELFTESTS = 1u << 2, ENG_NVN_ASYNC_NEVER = 1u << 3 };
 typedef struct {
     int port;               // PORT_* (nvn_vk.c: from the game profile, DM_PORT_*)
     unsigned eng;           // ENG_* (nvn_vk.c: from the game profile, DM_GAME_ENG_*)
     uint32_t api;           // the device's Vulkan version (VkPhysicalDeviceProperties.apiVersion)
     uint32_t vendor, driver_version;
-    int driver_id;          // VkDriverId; -1 when the driver gives no driver properties (Vulkan 1.1 without the extension)
+    int driver_id;          // VkDriverId where mtl_init reads the driver properties (Vulkan 1.2, or 1.1 with the float-controls and driver-properties extensions);
+                            //   -1 elsewhere (Arm's own driver is then told by its vendor ID)
     int arm_rel, arm_p, arm_beta;   // Arm's own Mali driver: r<rel>p<p> (0: another driver, PanVK included)
     int custom;             // a driver package (DM_VK_DRIVER: Turnip, PanVK...), opened past Android's loader
     int dynren;             // dynamic rendering in use (decided by Q_NO_DYNREN and the driver; read by Q_VIEW_QUARANTINE)
@@ -56,10 +79,21 @@ enum {
     Q_NO_EDS,            // draw state built into each pipeline: Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides, for a game whose profile says qc11_no_eds
                          //   (Arceus #34; Galar #209 reported the same)
     Q_BC_GPU_OFF,        // BC textures converted on the CPU, not the GPU: PowerVR's compute results differ, objects purple (Arceus #32; every game)
-    Q_QUERY_LOD,         // textureQueryLod's level as clamp (LOD, 0, levels - 1): Arm's own driver gives floor (LOD) (dEQP texturequerylod, Mali-G615 MC6)
+    Q_QUERY_LOD,         // textureQueryLod's level as clamp (LOD, 0, levels - 1): Arm's own driver gives floor (LOD) (dEQP texturequerylod, Mali-G615 MC6). New with the
+                         //   driver probes (galar-driver-probes / arceus-vk10-validation), every game: the one rule here that 6e0e1dd did not have
+    // the per-GPU tests 6e0e1dd still made at their sites (nvn_vk.c, hle_nvn.c, tf_selftest.h), moved here with the same rules
+    Q_IMPORT_MARK_OFF,   // a submission that failed with imported pools does not turn host import off at the next start: Adreno (its fallback, moving the driver's
+                         //   mappings, is the route that crashed it on area changes)
+    Q_BC_DECODE,         // BC textures decoded to RGBA, not transcoded to ETC2 / ASTC: PowerVR (Tensor G5, Arceus #32: static meshes flat lavender transcoded)
+    Q_GPU_TIME_OFF,      // no GPU timestamps by default: Mali and PowerVR, whose timestamps around tiler work are least trustworthy
+    Q_TF_CHECK,          // the first transform feedback capture checked once (a marker read back 60 frames later): Arm's own driver (#6)
+    Q_DRIVER_SELFTESTS,  // the start-up driver self-tests (vtx_canary.h vertex strides, tf_selftest.h transform feedback): a game whose profile says driver_selftests
+    Q_TF_SELFTEST,       // within those: the transform feedback self-test runs on Arm's own driver
+    Q_NVN_ASYNC,         // the replay on its own thread (Faster rendering's Auto, hle_nvn.c): Adreno by name (Turnip too), unless the game's profile says
+                         //   nvn_async_never (Arceus #3: crashed at loading screens with it)
     Q_N
 };
-static const struct { const char *env, *what; } Q_INFO[Q_N] = {
+static const struct { const char *env, *what; } Q_INFO[Q_N] VKQ_UNUSED = {
     [Q_NO_DYNREN] = { "DM_VK_NO_DYNREN", "render passes, not dynamic rendering" },
     [Q_HOST_IMPORT_OFF] = { "DM_VK_HOST_IMPORT", "pools not imported as host memory" },
     [Q_DMAHEAP] = { "DM_VK_DMAHEAP", "pools in dma-buf heap memory" },
@@ -83,27 +117,39 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] = {
     [Q_NO_EDS] = { "DM_VK_NO_EDS", "draw state built into each pipeline" },
     [Q_BC_GPU_OFF] = { "DM_VK_BC_GPU", "BC textures converted on the CPU" },
     [Q_QUERY_LOD] = { "DM_VK_QUERY_LOD", "texture LOD queries give the level clamped" },
+    [Q_IMPORT_MARK_OFF] = { "DM_VK_HOST_IMPORT", "a failed submission does not turn host import off" },
+    [Q_BC_DECODE] = { "DM_VK_BC_TRANSCODE", "BC textures decoded, not transcoded" },
+    [Q_GPU_TIME_OFF] = { "DM_VK_GPU_TIME", "no GPU timestamps" },
+    [Q_TF_CHECK] = { "DM_VK_TF_CHECK", "transform feedback captures checked" },
+    [Q_DRIVER_SELFTESTS] = { "", "driver self-tests at start" },
+    [Q_TF_SELFTEST] = { "DM_VK_TF_SELFTEST", "transform feedback self-test" },
+    [Q_NVN_ASYNC] = { "DM_NVN_ASYNC", "the replay on its own thread" },
 };
 // Arm's own driver: by driver ID where the driver gives one, else by vendor (PanVK reports Arm's vendor ID with its own driver ID)
-static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }
-static int gpu_is_samsung_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 21 /* VK_DRIVER_ID_SAMSUNG_PROPRIETARY */ : g->vendor == VEN_SAMSUNG; }
+VKQ_UNUSED static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }
+VKQ_UNUSED static int gpu_is_samsung_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 21 /* VK_DRIVER_ID_SAMSUNG_PROPRIETARY */ : g->vendor == VEN_SAMSUNG; }
 // Qualcomm's own driver before Vulkan 1.3 (Adreno 6xx / 7xx phones on driver 1.1.128 and the like): by the API's minor version and a name that starts "Adreno", so
 //   Turnip, which names itself "Turnip Adreno", is not one (was nvn_vk.c old_qcom_driver)
-static int gpu_is_old_qcom(const gpu_id *g) { return g->vendor == VEN_QCOM && (g->api >> 12 & 0x3ff) < 3 && !strncmp(g->name, "Adreno", 6); }   // (VK_API_VERSION_MINOR)
-static int quirk_default(int q, const gpu_id *g) {
+VKQ_UNUSED static int gpu_is_old_qcom(const gpu_id *g) { return g->vendor == VEN_QCOM && (g->api >> 12 & 0x3ff) < 3 && !strncmp(g->name, "Adreno", 6); }   // (VK_API_VERSION_MINOR)
+VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     int v = g->arm_rel * 100 + g->arm_p;
     switch (q) {
-    // Adreno, every game: render passes (#205: 27.5 → 17.3 ms on the S25+; Legends: Arceus since its v0.45), gathers nudged, passes kept open; barriers relaxed but on
-    //   Qualcomm's own drivers before Vulkan 1.3, where skinned models exploded with them (Galar #209, Arceus #34 #46 #59). Mali, Xclipse and PowerVR keep full
-    //   barriers for every game (Legends: Arceus flickered with them relaxed: #20 #31 #32)
-    case Q_NO_DYNREN: case Q_GATHER_BIAS: case Q_PASS_DEFER: return g->vendor == VEN_QCOM;
+    // Adreno, every game: render passes (#205: 27.5 → 17.3 ms on the S25+; Legends: Arceus since its v0.45), gathers nudged, passes kept open, a failed submission's
+    //   marker not read; barriers relaxed but on Qualcomm's own drivers before Vulkan 1.3, where skinned models exploded with them (Galar #209, Arceus #34 #46 #59).
+    //   Mali, Xclipse and PowerVR keep full barriers for every game (Legends: Arceus flickered with them relaxed: #20 #31 #32)
+    case Q_NO_DYNREN: case Q_GATHER_BIAS: case Q_PASS_DEFER: case Q_IMPORT_MARK_OFF: return g->vendor == VEN_QCOM;
     case Q_BARRIER_RELAXED: return g->vendor == VEN_QCOM && !gpu_is_old_qcom(g);
+    // the replay's own thread: by the GPU's name, as Faster rendering's Auto always tested it (Turnip names itself "Turnip Adreno")
+    case Q_NVN_ASYNC: return strstr(g->name, "Adreno") != NULL && !(g->eng & ENG_NVN_ASYNC_NEVER);
     // the games apart, each by its own profile (engine_quirks → gpu_id.eng): worker-built pipelines left objects missing for frames on an Adreno 710 (Arceus #34:
-    //   async_pso_off); Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34: qc11_no_eds; Sword / Shield answered #209 with full barriers instead)
+    //   async_pso_off); Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34: qc11_no_eds; Sword / Shield answered #209 with full barriers
+    //   instead); the driver self-tests at start (driver_selftests); the replay never on its own thread (nvn_async_never, above)
     case Q_ASYNC_PSO: return g->vendor == VEN_QCOM && !(g->eng & ENG_ASYNC_PSO_OFF);
     case Q_NO_EDS: return (g->eng & ENG_QC11_NO_EDS) && g->vendor == VEN_QCOM && (g->api >> 22 & 0x7f) == 1 && (g->api >> 12 & 0x3ff) < 2;   // (VK_API_VERSION_MAJOR / MINOR)
-    // PowerVR, every game: BC textures converted on the CPU, not by the BC layer (Tensor G5, Arceus #32: objects purple)
-    case Q_BC_GPU_OFF: return g->vendor == VEN_IMG;
+    case Q_DRIVER_SELFTESTS: return (g->eng & ENG_DRIVER_SELFTESTS) != 0;
+    // PowerVR, every game: BC textures converted on the CPU, not by the BC layer, and decoded, not transcoded (Tensor G5, Arceus #32: objects purple, meshes lavender)
+    case Q_BC_GPU_OFF: case Q_BC_DECODE: case Q_PCACHE_GAPS_OFF: return g->vendor == VEN_IMG;
+    case Q_GPU_TIME_OFF: return g->vendor == VEN_ARM || g->vendor == VEN_IMG;
     case Q_HOST_IMPORT_OFF: case Q_CLEAR_BY_PASS: return g->vendor == VEN_SAMSUNG;
     case Q_DMAHEAP: return g->vendor == VEN_ARM || g->vendor == VEN_SAMSUNG;
     case Q_DMABUF_TRY: case Q_ARM_FORMATS: return g->vendor == VEN_ARM;
@@ -111,23 +157,22 @@ static int quirk_default(int q, const gpu_id *g) {
     case Q_FLOAT_CONTROLS: return gpu_is_arm_driver(g) || gpu_is_samsung_driver(g);
     case Q_CLAMP_ZERO: return g->arm_rel && ((v >= 3801 && v < 4901) || (g->arm_beta && v >= 4901 && v < 4902) || (v >= 5000 && v < 5101));
     case Q_NAN_MINMAX: return g->arm_rel ? 2 : 0;
-    case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: return g->arm_rel != 0;
+    case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST: return g->arm_rel != 0;
     case Q_VIEW_QUARANTINE: return g->arm_rel && g->dynren ? 2048 : 0;
     case Q_TEX_HALF_UNSAFE: return g->arm_rel && g->arm_rel < 49;
     case Q_PIPE_KEEP: return g->vendor == VEN_ARM || (g->ram_kb > 0 && g->ram_kb < 7500000) ? 800 : 0;
-    case Q_PCACHE_GAPS_OFF: return g->vendor == VEN_IMG;
     }
     return 0;
 }
 // What was decided, for the start's summary: value and whether env.txt set it. A site calls this once, when it decides (some decide lazily, at first use)
-static int g_qval[Q_N], g_qenv[Q_N], g_qset[Q_N];
-static int quirk_note(int q, int value, int from_env) {
+static int g_qval[Q_N] VKQ_UNUSED, g_qenv[Q_N] VKQ_UNUSED, g_qset[Q_N] VKQ_UNUSED;
+VKQ_UNUSED static int quirk_note(int q, int value, int from_env) {
     if (q >= 0 && q < Q_N && !g_qset[q]) { g_qset[q] = 1; g_qval[q] = value; g_qenv[q] = from_env;
         if (value || from_env) fprintf(stderr, "[dm] [quirk] %s: %d (%s%s)\n", Q_INFO[q].what, value, from_env ? "env.txt " : "default for this GPU", from_env ? Q_INFO[q].env : ""); }
     return value;
 }
-static const char *gpu_port_app(int port) { return port == PORT_ARCEUS ? "Arceus Native" : port == PORT_PALDEA ? "Paldea Native" : port == PORT_GALAR ? "Galar Native" : "?"; }
-static void gpu_id_log(const gpu_id *g) {
+VKQ_UNUSED static const char *gpu_port_app(int port) { return port == PORT_ARCEUS ? "Arceus Native" : port == PORT_PALDEA ? "Paldea Native" : port == PORT_GALAR ? "Galar Native" : "?"; }
+VKQ_UNUSED static void gpu_id_log(const gpu_id *g) {
     fprintf(stderr, "[dm] [quirk] %s: GPU %s, Vulkan %u.%u, vendor %#x, driver id %d, driver version %#x, %s, memory %ld MB; the game's own GPU choices (engine_quirks) %#x\n",
             gpu_port_app(g->port), g->name, g->api >> 22 & 0x7f, g->api >> 12 & 0x3ff, g->vendor, g->driver_id, g->driver_version, g->custom ? "a driver package" : "the phone's own driver",
             g->ram_kb / 1024, g->eng);

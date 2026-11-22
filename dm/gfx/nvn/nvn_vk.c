@@ -268,6 +268,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL vk_shader_module_10(VkDevice d, const VkSh
     return r;
 }
 const char *nvn_vk_gpu_name(void) { return g_dev ? g_props.deviceName : NULL; }   // android_main.c boot_guard
+// The quirk table for code outside this file (hle_nvn.c rq_on: Faster rendering's Auto): this GPU's default, -1 before the device exists (as nvn_vk_gpu_name; gpu_id's
+//   name, API, vendor and the profile's port / eng are set before the device is made, the driver ID and Arm's release just after), and the start's [quirk] note
+int nvn_vk_quirk_default(int q) { return g_dev ? quirk_default(q, &g_gpuid) : -1; }
+int nvn_vk_quirk_note(int q, int value, int from_env) { return quirk_note(q, value, from_env); }
 void mtl_init(void) {
     if (g_dev) return;
     if (!vkGetInstanceProcAddr) {
@@ -428,8 +432,9 @@ void mtl_init(void) {
     // Decided before the fd route below: deciding it after left Xclipse without the fd route, on mirrored pools (every pool twice in memory, swapping, multi-second stalls: #41)
     if (g_host_import && !getenv("DM_VK_HOST_IMPORT")) {
         const char *why = quirk_note(Q_HOST_IMPORT_OFF, quirk_default(Q_HOST_IMPORT_OFF, &g_gpuid), 0) ? "Samsung Xclipse" : NULL;
-        // (never on Adreno, 0x5143: its fallback, moving the driver's mappings, is the route that crashed it on area changes; one failed submission must not switch it for good)
-        if (!why && g_props.vendorID != 0x5143 && host_import_mark(0)) why = "a submission failed with it last time";
+        // (never on Adreno, vk_quirks.h Q_IMPORT_MARK_OFF: its fallback, moving the driver's mappings, is the route that crashed it on area changes; one failed submission
+        //   must not switch it for good)
+        if (!why && !quirk_note(Q_IMPORT_MARK_OFF, quirk_default(Q_IMPORT_MARK_OFF, &g_gpuid), 0) && host_import_mark(0)) why = "a submission failed with it last time";
         if (why) { g_host_import = 0; VLOG("memory pools: host import off (%s): the driver's own memory backs the pools", why); }
     }
 #ifdef __linux__
@@ -577,7 +582,9 @@ void mtl_init(void) {
     // PowerVR (Imagination): BC textures decoded to plain RGBA, not transcoded to ETC2 / EAC / ASTC. On a Tensor G5 (PowerVR D-Series, Arceus-Native-Android #32)
     //   static world meshes came out flat lavender with the textures transcoded both ways (the BC layer's compute in v0.35-37, the CPU in v0.39); our encoders match
     //   an independent decoder (tests/etc_check.py), so what is left is how this driver samples them. The plain decode is Mali's path. DM_VK_BC_TRANSCODE=on: transcoded
-    if (g_props.vendorID == 0x1010) { const char *tc = getenv("DM_VK_BC_TRANSCODE");
+    //   (vk_quirks.h Q_BC_DECODE, every game)
+    if (quirk_default(Q_BC_DECODE, &g_gpuid)) { const char *tc = getenv("DM_VK_BC_TRANSCODE");
+        quirk_note(Q_BC_DECODE, !(tc && strcmp(tc, "off")), tc != NULL);
         if (!tc) setenv("DM_VK_BC_TRANSCODE", "off", 0);
         VLOG("PowerVR: BC textures %s (DM_VK_BC_TRANSCODE=%s, %s)", tc && strcmp(tc, "off") ? "transcoded to ETC2 / ASTC" : "decoded to RGBA", tc ? tc : "off", tc ? "env.txt" : "default here"); }
     { const char *tc = getenv("DM_VK_BC_TRANSCODE"); nvn_fmt_vk_etc(!f2.features.textureCompressionBC && f2.features.textureCompressionETC2 && !(tc && !strcmp(tc, "off")), f2.features.textureCompressionASTC_LDR); }
@@ -769,10 +776,12 @@ void mtl_init(void) {
          nvn_fmt_vk_transcode(0x46) ? "transcoded to ETC2 on upload" : nvn_fmt_vk_decode(0x46) ? "decoded on upload" : "sampled by the GPU");
     completion_start();
     dummies_init();
-#if DM_GAME_ENG_DRIVER_SELFTESTS   // (profile engine_quirks driver_selftests, Legends: Arceus: its releases run both at start; Sword / Shield / Scarlet / Violet not yet)
-    vtx_canary();    // (whether this driver reads vertex sizes given per draw right; if not, they go into each pipeline: vtx_canary.h)
-    tf_selftest();   // (Arm's driver: whether transform feedback captures write; tf_selftest.h)
-#endif
+    // the driver self-tests at start, for a game whose profile says driver_selftests (vk_quirks.h Q_DRIVER_SELFTESTS through gpu_id.eng; Legends: Arceus: its releases
+    //   run both at start; Sword / Shield / Scarlet / Violet not yet)
+    if (quirk_note(Q_DRIVER_SELFTESTS, quirk_default(Q_DRIVER_SELFTESTS, &g_gpuid), 0)) {
+        vtx_canary();    // (whether this driver reads vertex sizes given per draw right; if not, they go into each pipeline: vtx_canary.h)
+        tf_selftest();   // (Arm's driver, Q_TF_SELFTEST: whether transform feedback captures write; tf_selftest.h)
+    }
     tfp_decide();    // (and whether they go as points: tf_points.h)
     pcache_open();
     if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) { pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); }
@@ -1490,9 +1499,10 @@ static void completion_start(void) {
     }
     {   uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
         // Two timestamps a submission (the GPU's time per frame): on by default, as the frame-rate guard steers the resolution by it (android_main.c graphics_auto: GPU- or
-        //   CPU-bound), except on Mali and PowerVR, whose timestamps around work on a tiler are least trustworthy (they keep the old trial steps). DM_VK_GPU_TIME=0 / 1 decides
+        //   CPU-bound), except on Mali and PowerVR (vk_quirks.h Q_GPU_TIME_OFF), whose timestamps around work on a tiler are least trustworthy (they keep the old trial
+        //   steps). DM_VK_GPU_TIME=0 / 1 decides
         const char *gt = getenv("DM_VK_GPU_TIME"), *gg = getenv("DM_GRAPHICS");
-        int want_ts = gt ? atoi(gt) != 0 : (g_props.vendorID != 0x13B5 && g_props.vendorID != 0x1010); (void)gg;   // (the guard runs on most phones whatever the Graphics level: a top phone's profile says High)
+        int want_ts = !quirk_note(Q_GPU_TIME_OFF, gt ? atoi(gt) == 0 : quirk_default(Q_GPU_TIME_OFF, &g_gpuid), gt != NULL); (void)gg;   // (the guard runs on most phones whatever the Graphics level: a top phone's profile says High)
 #if DM_GAME_ENG_GPU_TIME_AUTO_ONLY   // (profile engine_quirks gpu_time_auto_only, Legends: Arceus: only where Graphics Auto steers by it, as its releases do)
         if (!gt) want_ts = want_ts && gg && !strcmp(gg, "auto");
 #endif
@@ -4758,8 +4768,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         desc_flush(VK_PIPELINE_BIND_POINT_GRAPHICS, pl, pr->dsl[0]);
         vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof tfpc, tfpc);
         // On Arm's own driver (or DM_VK_TF_CHECK=1): the first capture's output starts as a marker, read back 60 frames later (tf_check): still the marker = the captures
-        //   wrote nothing on this driver (#6). Written through the guest's memory before the submission runs, as a host write (mirrored pools take it in at submit)
-        { static int chk = -1; if (chk < 0) { const char *e = getenv("DM_VK_TF_CHECK"); chk = e ? atoi(e) != 0 : g_arm_rel > 0; }
+        //   wrote nothing on this driver (#6). Written through the guest's memory before the submission runs, as a host write (mirrored pools take it in at submit).
+        //   vk_quirks.h Q_TF_CHECK
+        { static int chk = -1; if (chk < 0) { const char *e = getenv("DM_VK_TF_CHECK"); chk = quirk_note(Q_TF_CHECK, e ? atoi(e) != 0 : quirk_default(Q_TF_CHECK, &g_gpuid), e != NULL); }
           extern uint64_t g_tfchk_at, g_tfchk_frame; extern uint32_t g_tfchk_n;
           if (chk == 1 && tfb[0] && pr->sh[0]->tf_stride[0]) { chk = 2; uint64_t at = S.tf[0].addr + S.tf_off[0], n = (uint64_t)dw->count * pr->sh[0]->tf_stride[0]; if (n > 64) n = 64;
               n &= ~3ull; if (n) { dm_guest_write_prepare((void *)(uintptr_t)at, n); for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(uintptr_t)(at + i) = 0x7fc0deadu;

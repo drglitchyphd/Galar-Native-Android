@@ -336,7 +336,13 @@ static void decisions_and_checks(const char *profile) {
       if (DV.fc_ok) CHECK(g_fctl == (DV.fc.shaderSignedZeroInfNanPreserveFloat32 && (arm_drv || sec_drv)), "float controls %d (Arm %d, Samsung %d, supported %d)", g_fctl, arm_drv, sec_drv, DV.fc.shaderSignedZeroInfNanPreserveFloat32);
       else CHECK(!g_fctl, "float controls asked for where the driver cannot say it has them"); }
     CHECK(g_dynren == 0 || DV.p.vendorID != 0x5143, "Adreno: render passes by default");
-    CHECK(pdef == (DV.p.vendorID == 0x5143) && apso == (DV.p.vendorID == 0x5143) && cbp == (DV.p.vendorID == 0x144D), "per-vendor pass / pipeline / clear defaults");
+    // (background pipelines: Adreno unless the game's profile says async_pso_off, Legends: Arceus #34)
+    CHECK(pdef == (DV.p.vendorID == 0x5143) && apso == (!DM_GAME_ENG_ASYNC_PSO_OFF && DV.p.vendorID == 0x5143) && cbp == (DV.p.vendorID == 0x144D), "per-vendor pass / pipeline / clear defaults");
+    // barriers before passes, every game: relaxed on Adreno but Qualcomm's own drivers before Vulkan 1.3 (a name starting "Adreno": Turnip is not one), full elsewhere
+    { int oldqc = DV.p.vendorID == 0x5143 && VK_API_VERSION_MINOR(DV.p.apiVersion) < 3 && !strncmp(DV.p.deviceName, "Adreno", 6);
+      CHECK(brel == (DV.p.vendorID == 0x5143 && !oldqc), "barriers relaxed %d (Adreno %d, Qualcomm's driver before 1.3 %d)", brel, DV.p.vendorID == 0x5143, oldqc); }
+    // draw state in each pipeline on Qualcomm's Vulkan 1.0 / 1.1 drivers for a game whose profile says qc11_no_eds (Legends: Arceus #34)
+    if (DM_GAME_ENG_QC11_NO_EDS && DV.p.vendorID == 0x5143 && VK_API_VERSION_MAJOR(DV.p.apiVersion) == 1 && VK_API_VERSION_MINOR(DV.p.apiVersion) < 2) CHECK(!g_eds, "Qualcomm 1.1: draw state per draw");
     if (DV.p.vendorID == 0x13B5) CHECK(pkeep == 800, "Mali: at most 800 pipelines kept (%d)", pkeep);
     if (DV.p.vendorID == 0x144D) CHECK(!g_host_import, "Xclipse: pools not imported as host memory (#39)");
     // the profile's own facts
@@ -373,14 +379,29 @@ static void quirk_checks(void) {
            g->driver_id, g->arm_rel, g->arm_p, g->arm_beta ? " beta" : "", g->api, g->dynren, g->custom, g->port, g->name);
     for (int q = 0; q < Q_N; q++) printf("QUIRK %-50s default %d, decided %d%s\n", Q_INFO[q].what, quirk_default(q, g), g_qval[q], g_qset[q] ? "" : " (not decided yet)");
     CHECK(g->vendor == DV.p.vendorID && g->driver_version == DV.p.driverVersion && !strcmp(g->name, DV.p.deviceName), "gpu_id: the device's identity");
-    CHECK(g->driver_id == (DV.drv_ok ? (int)DV.drv.driverID : -1), "gpu_id: driver id %d, the device's %d", g->driver_id, DV.drv_ok ? (int)DV.drv.driverID : -1);
+    // (the driver ID as mtl_init reads it: with the driver properties, where it reads them, Vulkan 1.2 or 1.1 with the float-controls extension; elsewhere -1, and
+    //   Arm's own driver is told by its vendor ID there, as before the table)
+    { int rd = (g_api >= VK_API_VERSION_1_2 || g_fctl_ext) && (g_api >= VK_API_VERSION_1_2 || g_drvprops_ext) && DV.drv_ok;
+      CHECK(g->driver_id == (rd ? (int)DV.drv.driverID : -1), "gpu_id: driver id %d, the device's %d (read by mtl_init: %d)", g->driver_id, DV.drv_ok ? (int)DV.drv.driverID : -1, rd); }
     CHECK(g->arm_rel == g_arm_rel && g->arm_p == g_arm_p && g->arm_beta == g_arm_beta && g->dynren == g_dynren && !g->custom, "gpu_id: complete after set-up");
     int arm = g->vendor == VEN_ARM, sec = g->vendor == VEN_SAMSUNG, img = g->vendor == VEN_IMG, qc = g->vendor == VEN_QCOM;
     CHECK(quirk_default(Q_DMAHEAP, g) == (arm || sec) && quirk_default(Q_HOST_IMPORT_OFF, g) == sec && quirk_default(Q_CLEAR_BY_PASS, g) == sec, "Mali / Xclipse memory and clear rules");
-    CHECK(quirk_default(Q_PCACHE_GAPS_OFF, g) == img && quirk_default(Q_ARM_FORMATS, g) == arm && quirk_default(Q_BARRIER_RELAXED, g) == qc, "PowerVR / Arm / Adreno rules");
+    int oldqc = qc && VK_API_VERSION_MINOR(g->api) < 3 && !strncmp(g->name, "Adreno", 6), qc11 = qc && VK_API_VERSION_MAJOR(g->api) == 1 && VK_API_VERSION_MINOR(g->api) < 2;
+    CHECK(quirk_default(Q_PCACHE_GAPS_OFF, g) == img && quirk_default(Q_ARM_FORMATS, g) == arm && quirk_default(Q_BARRIER_RELAXED, g) == (qc && !oldqc), "PowerVR / Arm / Adreno rules");
     CHECK(quirk_default(Q_TEX_HALF_UNSAFE, g) == (g->arm_rel && g->arm_rel < 49), "half textures unsafe before r49 (#82): %d for r%d", quirk_default(Q_TEX_HALF_UNSAFE, g), g->arm_rel);
     CHECK(quirk_default(Q_VIEW_QUARANTINE, g) == (g->arm_rel && g->dynren ? 2048 : 0), "view quarantine on Arm's driver with dynamic rendering");
     CHECK(!quirk_default(Q_G615_SAFE, g) || strstr(g->name, "G615"), "the G615 start-up set only on a G615");
+    CHECK(quirk_default(Q_BC_GPU_OFF, g) == img && quirk_default(Q_BC_DECODE, g) == img && quirk_default(Q_GPU_TIME_OFF, g) == (arm || img),
+          "PowerVR: BC converted on the CPU and decoded; no GPU timestamps on Mali and PowerVR (every game)");
+    // the game, from its profile (game.tsv port / engine_quirks → DM_PORT_* / DM_GAME_ENG_*), and the rules that read it, as 6e0e1dd's sites had them for this game
+    CHECK(g->port == (DM_PORT_ARCEUS ? PORT_ARCEUS : DM_PORT_PALDEA ? PORT_PALDEA : PORT_GALAR), "gpu_id: port %d, the profile's %s", g->port, DM_PORT_ARCEUS ? "arceus" : DM_PORT_PALDEA ? "paldea" : "galar");
+    CHECK(!!(g->eng & ENG_QC11_NO_EDS) == !!DM_GAME_ENG_QC11_NO_EDS && !!(g->eng & ENG_ASYNC_PSO_OFF) == !!DM_GAME_ENG_ASYNC_PSO_OFF
+          && !!(g->eng & ENG_DRIVER_SELFTESTS) == !!DM_GAME_ENG_DRIVER_SELFTESTS && !!(g->eng & ENG_NVN_ASYNC_NEVER) == !!DM_GAME_ENG_NVN_ASYNC_NEVER, "gpu_id: engine_quirks bits %#x, not the profile's", g->eng);
+    CHECK(quirk_default(Q_NO_DYNREN, g) == qc && quirk_default(Q_ASYNC_PSO, g) == (qc && !DM_GAME_ENG_ASYNC_PSO_OFF) && quirk_default(Q_NO_EDS, g) == (qc11 && DM_GAME_ENG_QC11_NO_EDS),
+          "Adreno rules for this game: render passes, background pipelines, draw state");
+    CHECK(quirk_default(Q_NVN_ASYNC, g) == (strstr(g->name, "Adreno") && !DM_GAME_ENG_NVN_ASYNC_NEVER) && quirk_default(Q_DRIVER_SELFTESTS, g) == !!DM_GAME_ENG_DRIVER_SELFTESTS,
+          "the replay thread's Auto and the start-up self-tests for this game");
+    if (!getenv("DM_VK_BARRIER")) CHECK(g_qset[Q_BARRIER_RELAXED] && g_qval[Q_BARRIER_RELAXED] == quirk_default(Q_BARRIER_RELAXED, g), "barriers decided as the table says");
 }
 #else
 static void quirk_checks(void) { printf("QUIRKS: this engine has no vk_quirks.h (the per-GPU choices are checked one by one above)\n"); }

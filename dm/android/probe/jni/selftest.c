@@ -28,6 +28,7 @@
 #include "probe_vk.h"
 #include "bc_gpu.h"
 #include "nvn_spv.h"
+#include "vk_quirks.h"   // (the engine's own per-GPU rules: what it asks of this driver by default)
 #include "selftest_spv.h"
 #include "overlay/zcopy_spv.h"
 
@@ -238,8 +239,9 @@ static void t_floatctl(void) {
     VkPhysicalDeviceFloatControlsProperties fc = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES, .pNext = drvp ? &dp : NULL };
     VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = fcp ? (void *)&fc : drvp ? (void *)&dp : NULL };
     if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(s_pd, &pp); else drvp = fcp = 0;   // (Vulkan 1.0: neither can be read)
-    int arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : s_props.vendorID == 0x13B5;
-    arm |= drvp ? dp.driverID == VK_DRIVER_ID_SAMSUNG_PROPRIETARY : s_props.vendorID == 0x144D;   // (the engine asks on Samsung's Xclipse driver too, since stock-driver-default)
+    // whether the engine asks for them here: its own rule (vk_quirks.h Q_FLOAT_CONTROLS: Arm's and Samsung's own drivers, by driver ID, else by vendor), not a copy of it
+    gpu_id gid; memset(&gid, 0, sizeof gid); gid.vendor = s_props.vendorID; gid.driver_id = drvp ? (int)dp.driverID : -1;
+    int arm = quirk_default(Q_FLOAT_CONTROLS, &gid);
     int support = fcp && fc.shaderSignedZeroInfNanPreserveFloat32;
     O("  driver %s (id %d)%s; SignedZeroInfNanPreserve float32: %s; the engine asks for it by default: %s\n", drvp ? dp.driverName : "(no driver properties)", (int)dp.driverID,
       arm ? ", ARM's own" : "", support ? "supported" : "not supported", arm && support ? "yes" : "no");

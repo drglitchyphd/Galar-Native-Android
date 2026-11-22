@@ -36,6 +36,12 @@ t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
+# The unified driver layer's table (vk_quirks.h) against beta-exit 6e0e1dd's per-site rules for each port (it reads ../../games/*/game.tsv), and the GPU breadcrumbs
+#   (vk_crumbs.h): plain C, any OS (gcc or clang)
+t_quirks: t_quirks.c ../nvn/vk_quirks.h
+	$(CC) -O2 -Wall -I../nvn -o $@ t_quirks.c
+t_crumbs: t_crumbs.c ../nvn/vk_crumbs.h
+	$(CC) -O2 -Wall -I../nvn -I../../third_party/vulkan-headers/include -o $@ t_crumbs.c -lpthread
 t_fgen: t_fgen.c ../nvn/nvn_fgen.h
 	$(CC) -O1 -Wall -o $@ t_fgen.c
 # Frame generation on a real Vulkan driver (Linux: Mesa's lavapipe is enough). VULKAN_INC: a folder holding vulkan/vulkan.h when the system has none
