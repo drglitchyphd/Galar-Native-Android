@@ -4209,6 +4209,7 @@ static void prewarm_compute(void) {
         if (fread(mg, 1, 4, f) == 4 && !memcmp(mg, PSO_MAGIC_C, 4)) while (fread(k, 8, 1, f) == 1) {
             if (nvn_hm_get(&seen, k)) continue;
             nvn_hm_put(&seen, k, (void *)1); n++;
+            prewarm_pace_play();   // (once the game plays: one build after each present, like the graphics pipelines)
             pthread_mutex_lock(&g_pw.mu);   // (prog_layout is not for two threads: the graphics prewarm's lock)
             vshader *cs = shader_get(k, 5); vprog *pr = cs ? calloc(1, sizeof *pr) : NULL; VkPipelineLayout pl = VK_NULL_HANDLE;
             if (pr) { pr->sh[5] = cs; pl = prog_layout(pr, 1); }   // (a program of its own, kept: its layout lives as long as the cache entry is useful)
