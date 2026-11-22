@@ -24,7 +24,7 @@ public final class MaliLadderTest {
         check("96".equals(f.get("app")) && "offer".equals(f.get("panvk")) && "Mali-G720-Immortalis MC12".equals(f.get("gpu")) && "A (both failed: unchecked)".equals(f.get("next")) && !f.containsKey("#"),
               "fields: every key=value line, the comment left out, a value with spaces and ':' kept whole");
         check(MaliLadder.due(f, 96, "") && MaliLadder.due(f, 96, null), "the offer is due: asked for, this app version, the phone's own driver");
-        check(!MaliLadder.due(f, 97, ""), "not due for another app version (the engine starts the check over there)");
+        check(!MaliLadder.due(f, 97, ""), "not due for another app version (until the engine has started on it: it writes app= at each start)");
         check(!MaliLadder.due(f, 96, "/data/user/0/com.nxnative.pokemonshield/files/drivers/panvk/libvulkan_panvk.so"), "not due once a driver package is in use");
         List<String> sh = MaliLadder.shown(offer); Map<String, String> fs = MaliLadder.fields(sh);
         check("shown".equals(fs.get("panvk")) && !MaliLadder.due(fs, 96, "") && sh.size() == offer.size() && sh.subList(0, sh.size() - 1).equals(offer.subList(0, offer.size() - 1)),

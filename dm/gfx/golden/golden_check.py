@@ -24,14 +24,15 @@
         target, 240 draws a frame: white at 65504, fine, black, fine then white, a white corner, drawn through two corner viewports only, NaN, NaN spots, or fine with
         the window then drawn white by a later pass, all of it or 60 %), run as successive starts of the game sharing the ladder's state file. Lavapipe is not Arm's
         driver, so with no switch nothing may happen; DM_MALI_LADDER=1 forces the ladder on: white moves it A -> B -> back to A with the PanVK offer, start by start,
-        and an app update starts it over; fine (made quick here: 5 samples, no span) is kept only after two starts, then re-checked in three starts, then not checked;
+        an app update keeps it and another code of the fixes (the file's code=) starts it over; fine (made quick here: 5 samples, no span) is kept only after two starts, then re-checked in three starts, then not checked;
         a route kept as fine that is re-checked on a white scene turns white; with the default rules a few fine samples then white end WHITE; a black target is
         never fine: 10 empty samples in a row are BROKEN, and a start capped with mostly empty ones makes the route broken; a white tenth is WHITE by the slow rule; a
         start capped with no verdict is counted, and the third makes the route broken; a lit target of NaN is BROKEN, NaN spots stay fine; a white window over a fine
         lit target is WHITE after 5 samples, a 60 % white one is bright (never fine, a start capped on it not counted); frames with too few draws into the lit
-        target, or whose draws cover little of the part they span, are not sampled; a start that crashes on a route (GOLDEN_SYNTH_LIT_ABORT) leaves the marker, and
-        the next start counts the route as closing the game after a
-        crash flag, or after two early ends in a row; starts that end before their first picture (GOLDEN_SYNTH_ABORT_LOADING) count only with the crash flag; a start
+        target, or whose draws cover little of the part they span, are not sampled, and a start whose lit frames are never sampled is counted as one without a verdict
+        (DM_MALI_NOSAMPLE_MS); a start that crashes on a route (GOLDEN_SYNTH_LIT_ABORT) leaves the marker, also after a stretch of frames without a lit target
+        (GOLDEN_SYNTH_PLAIN_FRAMES: the marker's 20 s run from the route's first lit frame), and the next start counts the route as closing the game after a
+        crash flag, or after two early ends in a row, never after crashes in the game's own code; starts that end before their first picture (GOLDEN_SYNTH_ABORT_LOADING) count only with the crash flag; a start
         that dies making the check's own compute pass (DM_MALI_WHITE_INIT_ABORT) blames no route, and the check is off on that driver after it; other white-screen
         tests (DM_VK_PROBE=f16target, DM_VK_FMZ=1) keep a fine verdict out of the file but not a white one, and a route set in env.txt keeps the verdict out, its
         note naming the switch; both fixes at once and white count as both white; DM_MALI_WHITE_SIM=1 makes a fine scene count as white; DM_MALI_LADDER=0 turns
@@ -343,9 +344,14 @@ def cmd_mali(a):
     L, st, rc, fmt, lg = start('white', 'white', L1)
     check(rc == 0 and plan(L) == ('A', 'not checked') and not samples(L) and A16 in fmt and st.get('panvk') == 'offer' and has(L, 'PanVK offer pending') and st.get('started') == '-',
           f'white, start 3: route A, not checked, {len(samples(L))} samples, no marker, the offer pending for the app: {plan(L)}, panvk={st.get("panvk")}')
+    L, st, rc, fmt, lg = start('white', 'white', L1, app='97')
+    check(rc == 0 and not has(L, 'ladder started over') and plan(L) == ('A', 'not checked') and not samples(L) and st.get('app') == '97' and st.get('panvk') == 'offer' and st.get('A') == 'white'
+          and st.get('B') == 'white' and st.get('code') == '1', f'white, start 4 after an app update (97): the ladder kept (both white: route A unchecked, the offer still pending), '
+          f'app={st.get("app")} code={st.get("code")}: {plan(L)}')
+    sp = os.path.join(a.out, 'white', 'mali_ladder.txt'); txt = open(sp).read(); open(sp, 'w').write(txt.replace('code=1\n', 'code=0\n'))   # (fixes of another code wrote it)
     L, st, rc, fmt, lg = start('white', 'white', L1, app='97'); v = verdict(L)
-    check(rc == 0 and has(L, 'ladder started over') and plan(L) == ('A', 'checked while playing') and v == (3, 'A', 'WHITE') and st.get('app') == '97' and st.get('panvk') == '-' and st.get('next') == 'B (checked)',
-          f'white, start 4 after an app update (97): started over at route A, checked, white again: {plan(L)}, {v}, app={st.get("app")} panvk={st.get("panvk")}')
+    check(rc == 0 and has(L, 'ladder started over: another driver, or another code of the fixes') and plan(L) == ('A', 'checked while playing') and v == (3, 'A', 'WHITE') and st.get('code') == '1'
+          and st.get('panvk') == '-' and st.get('next') == 'B (checked)', f'white, start 5, the file from fixes of another code: started over at route A, checked, white again: {plan(L)}, {v}, panvk={st.get("panvk")}')
     # 3. a white scene drawn into half of the target (a lower render scale): judged on the part drawn, still white
     L, st, rc, fmt, lg = start('half', 'white', dict(L1, GOLDEN_SYNTH_LIT_SCALE='0.5')); v = verdict(L); s = samples(L)
     check(rc == 0 and v == (3, 'A', 'WHITE') and s and all('the 640x360 part drawn of the 1280x720 target' in x and '576 of 576' in x for x in s), f'half scale: the 640x360 part drawn sampled, all saturated, verdict {v}')
@@ -412,10 +418,36 @@ def cmd_mali(a):
     L, st, rc, fmt, lg = start('early', 'white', L1)
     check(rc == 0 and has(L, 'route A closed the game at an earlier start (two starts in a row on it ended before 20 s of play') and plan(L) == ('B', 'checked while playing') and st.get('A') == 'crashed'
           and st.get('A_ends') == '1' and st.get('A_crashes') == '0', f'the second such start in a row: route A closed the game on early ends, route B: {plan(L)}, A={st.get("A")} A_ends={st.get("A_ends")} A_crashes={st.get("A_crashes")}')
+    GC = dict(L1, DM_LAST_CRASH_DEVICE='1', DM_LAST_CRASH_GAME='1')
     start('gamecrash', 'white', dict(L1, GOLDEN_SYNTH_LIT_ABORT='1'))
-    L, st, rc, fmt, lg = start('gamecrash', 'white', dict(L1, DM_LAST_CRASH_DEVICE='1', DM_LAST_CRASH_GAME='1'))
-    check(rc == 0 and has(L, 'ended before 20 s of play or a sample, without a crash') and plan(L) == ('A', 'checked while playing') and st.get('A') == 'white',
-          f'a crash in the game\'s own code (DM_LAST_CRASH_GAME): not the route\'s, counted as an early end only; route A again: {plan(L)}')
+    L, st, rc, fmt, lg = start('gamecrash', 'white', dict(GC, GOLDEN_SYNTH_LIT_ABORT='1'))
+    check(rc != 0 and has(L, "the last start on route A crashed in the game's own code (playing stage): not the route's, nothing counted (early ends in a row: 0)") and plan(L) == ('A', 'checked while playing')
+          and st.get('early_ends') == '0' and st.get('A') == '-' and st.get('started') == 'A', f'a crash in the game\'s own code (DM_LAST_CRASH_GAME): not the route\'s, nothing counted; route A again: {plan(L)}, '
+          f'early_ends={st.get("early_ends")}')
+    L, st, rc, fmt, lg = start('gamecrash', 'white', GC); v = verdict(L)
+    check(rc == 0 and has(L, "crashed in the game's own code (playing stage): not the route's, nothing counted (early ends in a row: 0)") and plan(L) == ('A', 'checked while playing')
+          and st.get('A_crashes') == '0' and st.get('A_ends') == '0' and v == (3, 'A', 'WHITE'), f'two in a row: still route A, nothing counted (A_crashes={st.get("A_crashes")} A_ends={st.get("A_ends")}), '
+          f'then judged: {v}')
+    # 11b. a crash on the route after a stretch of frames without a lit target (the logos, the title screen and the loads: DM_MALI_MARK_N=10 stands in for 20 s of
+    #   presents): the marker's 20 s run from the route's first lit frame, so it is still there and the next start counts the route; on lit frames that are never
+    #   sampled (sparse: their draws cover little) it goes after DM_MALI_MARK_N presents on the route
+    LATE = dict(L1, GOLDEN_SYNTH_PLAIN_FRAMES='24', DM_MALI_MARK_N='10')
+    L, st, rc, fmt, lg = start('latecrash', 'white', dict(LATE, GOLDEN_SYNTH_LIT_ABORT='1'))
+    check(rc != 0 and st.get('started') == 'A' and st.get('stage') == 'playing' and has(L, 'route A: its first frame with a lit target') and not has(L, 'start marker cleared') and not samples(L),
+          f'24 frames without a lit target (past DM_MALI_MARK_N=10), then a crash at the first lit frame: the marker stays (started={st.get("started")} stage={st.get("stage")})')
+    L, st, rc, fmt, lg = start('latecrash', 'white', dict(LATE, DM_LAST_CRASH_DEVICE='1'))
+    check(rc == 0 and has(L, 'route A closed the game at an earlier start (it crashed after the graphics device came up') and plan(L) == ('B', 'checked while playing') and st.get('A_crashes') == '1',
+          f'the next start: route A closed the game, route B: {plan(L)} (A_crashes={st.get("A_crashes")})')
+    L, st, rc, fmt, lg = start('latewindow', 'sparse', LATE, frames=16)
+    check(rc == 0 and not samples(L) and has(L, 'route A: 20 s of play on it (10 presents from its first frame with a lit target') and st.get('started') == '-',
+          f'lit frames never sampled after 24 without: the marker goes 10 presents into the lit ones (started={st.get("started")})')
+    # 11c. lit frames never sampled (40 lit draws of 240, under the floor) for DM_MALI_NOSAMPLE_MS: counted as a start without a verdict; three such starts: route A broken
+    NOS = dict(L1, GOLDEN_SYNTH_LIT_DRAWS='40', GOLDEN_SYNTH_OTHER_DRAWS='200', DM_MALI_NOSAMPLE_MS='1')
+    for i in range(3):
+        L, st, rc, fmt, lg = start('nosample', 'white', NOS)
+        check(rc == 0 and not samples(L) and any(re.search(r"no sample in \d+ s of frames with a lit target: not sampled \d+ times for the frame's draws \(120 needed\), \d+ for the lit target's \(60\)", l) and
+              'the most draws seen in a frame 240, into a lit target 40' in l for l in L) and (st.get('A_undecided') == str(i + 1) if i < 2 else st.get('A') == 'broken' and st.get('next') == 'B (checked)'),
+              f'no sample start {i + 1}: a summary line, counted as one without a verdict (A_undecided={st.get("A_undecided")} A={st.get("A")} next={st.get("next")})')
     # 12. other white-screen tests set in env.txt (the menu's White screen tests, left set): a white verdict still moves the ladder (the fix did not take with them),
     #   a fine one is not kept, and no start marker is left (DM_VK_PROBE=f16target under route B: B white too, so both white and the PanVK offer)
     start('others', 'white', L1)

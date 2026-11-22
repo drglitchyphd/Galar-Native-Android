@@ -30,7 +30,8 @@
 //   fine, then a pass that draws the window, the picture shown, all white: a white made after the lit scene) and postbright (the same over 60 % of the window).
 //   GOLDEN_SYNTH_OTHER_DRAWS adds that many small draws into the window (RGBA8) to each frame; GOLDEN_SYNTH_LIT_ABORT=<n> ends the program with abort() right
 //   after the n-th lit frame is presented (a crash on the route: the check's start marker stays in its file); GOLDEN_SYNTH_ABORT_LOADING=1 ends it with abort()
-//   before its first picture is presented (the device up, nothing shown yet: a start ended while loading)
+//   before its first picture is presented (the device up, nothing shown yet: a start ended while loading); GOLDEN_SYNTH_PLAIN_FRAMES=<n> presents n frames with
+//   no lit target before the lit ones (the logos, the title screen and the loads before the field)
 #define _GNU_SOURCE 1
 #include <errno.h>
 #include <math.h>
@@ -443,7 +444,8 @@ int main(int argc, char **argv) {
     }
     {   // GOLDEN_SYNTH_LIT: frames with a lit pass for the white-screen check to sample (the recording above is the same with or without them)
         const char *lm = getenv("GOLDEN_SYNTH_LIT"), *fe = getenv("GOLDEN_SYNTH_FRAMES"), *se = getenv("GOLDEN_SYNTH_LIT_SCALE"), *de = getenv("GOLDEN_SYNTH_LIT_DRAWS"),
-                   *oe = getenv("GOLDEN_SYNTH_OTHER_DRAWS"), *ae = getenv("GOLDEN_SYNTH_LIT_ABORT"), *ff = getenv("GOLDEN_SYNTH_LIT_FINE_FRAMES"), *ce = getenv("GOLDEN_SYNTH_LIT_CORNER");
+                   *oe = getenv("GOLDEN_SYNTH_OTHER_DRAWS"), *ae = getenv("GOLDEN_SYNTH_LIT_ABORT"), *ff = getenv("GOLDEN_SYNTH_LIT_FINE_FRAMES"), *ce = getenv("GOLDEN_SYNTH_LIT_CORNER"),
+                   *pe = getenv("GOLDEN_SYNTH_PLAIN_FRAMES");
         int nf = fe && atoi(fe) > 0 ? atoi(fe) : 16, nd = de && atoi(de) > 0 ? atoi(de) : 240, no = oe && atoi(oe) > 0 ? atoi(oe) : 0, ab = ae ? atoi(ae) : 0, nfine = ff && atoi(ff) >= 0 ? atoi(ff) : 8;
         float sc = se && atof(se) > 0 && atof(se) <= 1 ? (float)atof(se) : 1.0f, corner = ce && atof(ce) > 0 && atof(ce) <= 1 ? (float)atof(ce) : 0.316f;
         static const char *const kinds[] = { "white", "fine", "black", "finewhite", "partial", "sparse", "nan", "nanspots", "postwhite", "postbright" }; int kind = -1;
@@ -467,6 +469,11 @@ int main(int argc, char **argv) {
                  : kind == 5 ? "only through two small corner viewports (at 65504)" : kind == 6 ? "in NaN" : kind == 7 ? "fine with a NaN corner" : kind == 8 ? "fine, the window then drawn white"
                  : "fine, 60 % of the window then drawn white", nd, no, ab > 0 ? ", then abort()" : "");
             p_draw d; memset(&d, 0, sizeof d); d.prim = NVN_DRAW_PRIMITIVE_TRIANGLES; d.count = 3; d.instances = 1;
+            {   int np = pe && atoi(pe) > 0 ? atoi(pe) : 0;   // frames without a lit target first: the window cleared, a few draws into it, presented
+                for (int f = 0; f < np; f++) { g_cmd = lit_cmd; cmd_begin(); set_rt(Wt, NULL); viewport(WW, WH); clear(0.05f * (float)(f % 8), 0.1f, 0.2f);
+                    depth_state(0); program(flat); vlayout(2, fl_fmt, fl_off, 24); vbuf(SMALL, sizeof sm); for (int k = 0; k < 8; k++) cmd(OP_DRAW, &d, sizeof d);
+                    submit(cmd_end()); present(Wt); }
+                if (np) SLOG("%d frames without a lit target presented first", np); }
             for (int f = 0; f < nf; f++) {
                 int white = kind == 0 || (kind == 3 && f >= nfine);
                 g_cmd = lit_cmd; cmd_begin();

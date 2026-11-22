@@ -14,10 +14,12 @@
 //  - the verdict (mw_judge_obs: white quickly, fine slowly; a fine one is re-checked once a minute for the rest of the start) moves the ladder (mw_ladder_verdict),
 //    kept per phone in mali_ladder.txt in the app's files folder (DM_MALI_LADDER_FILE, set by android_main.c; else beside the pipeline cache): route A white or broken
 //    → route B from the next start, with a note over the game; B failed too → route A again and the app offers PanVK at its next start (MaliLadder.java); a route
-//    found fine at 2 starts is kept, re-checked in the 3 starts after, then not checked (until the driver or the app changes). A start that checks a route leaves a
-//    marker in the file until 20 s of play or its first sample read back, with how far it got (mali_white.h mw_marker_*): the check's own compute pass is made under
-//    a stage of its own before the marker goes to loading, so a driver that crashes making it (#89) is never taken for the route closing the game. Every sample,
-//    verdict and step is a "[mali-white]" line in the log; the state is in the frame capture's notes.
+//    found fine at 2 starts is kept, re-checked in the 3 starts after, then not checked (until the driver or the fixes' code changes: MW_ROUTE_CODE). A start
+//    that checks a route leaves a marker in the file until 20 s of play on the route (from its first frame with a lit target: the logos, the title screen and the
+//    loads before the field do not count) or its first sample read back, with how far it got (mali_white.h mw_marker_*): the check's own compute pass is made
+//    under a stage of its own before the marker goes to loading, so a driver that crashes making it (#89) is never taken for the route closing the game. A start
+//    whose lit frames never get sampled (all under the floors) is counted as one without a verdict after 10 minutes of them. Every sample, verdict and step is a
+//    "[mali-white]" line in the log; the state is in the frame capture's notes.
 // Nothing of this runs on any other driver, nor for Legends: Arceus / Scarlet / Violet, unless DM_MALI_LADDER=1 or DM_MALI_WHITE_SIM=1 asks (mali_white.h)
 #include "mali_white.h"
 #include "overlay/mali_white_spv.h"
@@ -33,7 +35,10 @@ static struct {
     int marker, rechecked;           // the start marker is up (mw_marker_set); a re-check start was counted
     char others[200], env_names[64]; // other white-screen tests set in env.txt (mw_other_tests); the route switches set there ("mali-env" note)
     mw_rules rules; mw_judge judge; mw_state st; mw_plan plan; char path[1100];
-    uint64_t last_ns, frame_d0, pd0, mark_ns; int32_t pr[4]; uint32_t pcov[MW_GY];   // the last sample's time; draws at the frame's / the open pass's start; the marker's first present; the open pass's part and cells
+    uint64_t last_ns, frame_d0, pd0, mark_ns, first_ns, mark_n; int32_t pr[4]; uint32_t pcov[MW_GY];   // the last sample's time; draws at the frame's / the open pass's start;
+                                                                                                         //   the marker's first frame on the route, the start's first present, presents
+                                                                                                         //   on the route since; the open pass's part and cells
+    uint64_t lit0_ns, max_fd, max_lit;   // the first frame with a lit-target candidate (the no-sample clock); the most draws seen in a frame and into a candidate
     int nsamples, nskip[4]; uint64_t quiet_ns; int qn[MW_NKIND];   // samples read; frames not sampled by why (the first 3 of each logged); past the first 30 samples one line a minute (qn: its kinds)
     int shown_said;                  // the picture shown could not be read (said once)
     mw_cand cand[MW_CAND]; int ncand;
@@ -132,18 +137,21 @@ static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b
         int have = mw_state_load(g_mw.path, &g_mw.st); was = g_mw.st;
         mw_plan p = mw_ladder_start(&g_mw.st, &g_mw.rules, have, g_drv_id, g_props.driverVersion, app); reset = p.reset;
         if (p.reset) MWLOG("ladder started over: %s", !have ? (g_mw.path[0] ? "no state file yet" : "no state file (DM_MALI_LADDER_FILE / DM_VK_PCACHE unset): this start's results stay in memory")
-                                                           : "another driver or app version than the state file's");
+                                                           : "another driver, or another code of the fixes (MW_ROUTE_CODE), than the state file's");
         // the marker an earlier start left on the route it checked: closed before 20 s of play or its first sample (mali_white.h mw_marker_check)
-        const char *lc = getenv("DM_LAST_CRASH_DEVICE"), *lg = getenv("DM_LAST_CRASH_GAME"); int crashed = lc && atoi(lc) > 0 && !(lg && atoi(lg) > 0), mr = 0;
+        const char *lc = getenv("DM_LAST_CRASH_DEVICE"), *lg = getenv("DM_LAST_CRASH_GAME"); int mr = 0;
+        int crashed = !(lc && atoi(lc) > 0) ? MW_CRASH_NONE : lg && atoi(lg) > 0 ? MW_CRASH_GAME : MW_CRASH_DEVICE;   // (android_main.c boot_guard)
         int mk = mw_marker_check(&g_mw.st, &g_mw.rules, crashed, &mr);
         if (mk == MW_MK_DETECTOR) MWLOG("the last start on route %s ended while making the check's own compute pass%s: the check's doing, not the route's (route %s not counted)", mw_route_name(mr),
                                         crashed ? " (it crashed there)" : "", mw_route_name(mr));
+        else if (mk == MW_MK_GAME) MWLOG("the last start on route %s crashed in the game's own code (%s stage): not the route's, nothing counted (early ends in a row: %d)", mw_route_name(mr),
+                                         mw_stage_name(was.stage), g_mw.st.early);
         else if (mk == MW_MK_LOADING) MWLOG("the last start on route %s ended at the loading stage, without a crash (before its first picture: closed during the pipeline builds or the load, or "
                                             "ended by the system; or with no check running): not counted", mw_route_name(mr));
         else if (mk == MW_MK_EARLY) MWLOG("the last start on route %s ended before 20 s of play or a sample, without a crash (closed, or ended by the system): route %s again; a second such start in a row counts as the route closing the game",
                                           mw_route_name(mr), mw_route_name(mr));
         else if (mk == MW_MK_CRASHED) MWLOG("route %s closed the game at an earlier start (%s): counted as failed (%d time%s with the crash flag, %d on early ends, on this driver); results now A %s, B %s",
-                                            mw_route_name(mr), crashed ? "it crashed after the graphics device came up, before 20 s of play or a sample" : "two starts in a row on it ended before 20 s of play or a sample",
+                                            mw_route_name(mr), crashed == MW_CRASH_DEVICE ? "it crashed after the graphics device came up, before 20 s of play or a sample" : "two starts in a row on it ended before 20 s of play or a sample",
                                             g_mw.st.crashes[mr], g_mw.st.crashes[mr] == 1 ? "" : "s", g_mw.st.ends[mr], mw_res_name(g_mw.st.res[MW_ROUTE_A]), mw_res_name(g_mw.st.res[MW_ROUTE_B]));
         else if (mk == MW_MK_BOTH) MWLOG("route %s closed the game at an earlier start, and route %s had before it: the crashes are not the routes' (both are checked again)", mw_route_name(mr),
                                          mw_route_name(mr == MW_ROUTE_A ? MW_ROUTE_B : MW_ROUTE_A));
@@ -191,8 +199,8 @@ static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b
         }
         mw_marker_set(&g_mw.st, mk, MW_STAGE_LOADING); g_mw.marker = mk != 0;
         if ((reset || memcmp(&was, &g_mw.st, sizeof was)) && g_mw.path[0]) mw_save();
-        if (mk) MWLOG("start marker: route %s in the state file until 20 s of play or its first sample read back (stage loading until the first picture%s; a start that finds it after a crash "
-                      "counts the route as closing the game)", mw_route_name(mk), g_mw.check ? ", then playing" : ": the check does not run, so an end without a crash is never counted");
+        if (mk) MWLOG("start marker: route %s in the state file until 20 s of play on the route (from its first frame with a lit target) or its first sample read back (stage loading until that "
+                      "frame%s; a start that finds it after a crash counts the route as closing the game)", mw_route_name(mk), g_mw.check ? ", then playing" : ": the check does not run, so an end without a crash is never counted");
         if (g_mw.check) MWLOG("rules: saturated = a channel at %d or more, or +infinity (NaN counted apart; the log also counts %d or more); white after %d white samples in a row (%d %% or more "
                               "saturated; %d in a row when it is mostly the picture shown, %d %% white), or when the last %d samples with content are %d %% saturated on average; broken after %d "
                               "samples in a row with %d %% or more NaN, or %d near-black ones in a row; fine at this start after %d fine samples (under %d %% saturated, %d %% NaN, %d %% of the "
@@ -213,7 +221,7 @@ static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b
 }
 // pass_begin: a colour target in R11G11B10F or its stand-in (lv: the attachment's level); the pass's largest one is its lit-target candidate
 static void mw_pass_target(vtex *x, uint32_t lv) {
-    if (!g_mw.check || P_tf || lv || !x || x->samples != 1 || x->is3d || !(x->usage & VK_IMAGE_USAGE_SAMPLED_BIT) || x->w < (uint32_t)g_mw.rules.min_w) return;
+    if ((!g_mw.check && !g_mw.marker) || P_tf || lv || !x || x->samples != 1 || x->is3d || !(x->usage & VK_IMAGE_USAGE_SAMPLED_BIT) || x->w < (uint32_t)g_mw.rules.min_w) return;
     if (g_mw_px && (uint64_t)g_mw_px->w * g_mw_px->h >= (uint64_t)x->w * x->h) return;
     g_mw_px = x; g_mw.pd0 = g_stat_draws; g_mw.pr[0] = g_mw.pr[1] = INT32_MAX; g_mw.pr[2] = g_mw.pr[3] = INT32_MIN; memset(g_mw.pcov, 0, sizeof g_mw.pcov);
 }
@@ -365,6 +373,7 @@ static void mw_act(int v) {
     if (g_mw.record && g_mw.others[0]) MWLOG("(kept although other white-screen tests are set in env.txt: %s; the fix did not take with them)", g_mw.others);
     mw_moved(ev, g_mw.record);
 }
+static void mw_undecided(void);
 static void mw_judged(int k, mw_count c, uint64_t now_present) {
     g_mw.nsamples++;
     if (g_mw.marker) { g_mw.marker = 0; mw_marker_clear(&g_mw.st); mw_save(); MWLOG("route %s: the first sample came back (start marker cleared)", mw_route_name(g_mw.route)); }
@@ -396,14 +405,20 @@ static void mw_judged(int k, mw_count c, uint64_t now_present) {
         MWLOG("re-check start %d of %d on route %s", g_mw.st.rechecks[g_mw.route], g_mw.rules.recheck_starts, mw_route_name(g_mw.route)); }
     if (v != prev) mw_act(v);
     else if (g_mw.check == MW_CHECK_FULL && mw_judge_capped(&g_mw.judge, &g_mw.rules)) {
-        const mw_judge *j = &g_mw.judge; int dark = mw_judge_mostly_empty(j), bright = !dark && mw_judge_mostly_bright(j);
-        g_mw.check = MW_CHECK_NONE;
+        const mw_judge *j = &g_mw.judge;
         MWLOG("no verdict after %d samples (%d white, %d nan, %d shown white, %d fine, %d between, %d empty: near black, %d bright: half the picture shown white; the last %d with content %.1f %% "
               "saturated on average): the check stops for this start, the next start checks again", j->samples, j->kinds[MW_K_WHITE], j->kinds[MW_K_NAN], j->kinds[MW_K_SHOWN],
               j->kinds[MW_K_FINE], j->kinds[MW_K_BETWEEN], j->kinds[MW_K_EMPTY], j->kinds[MW_K_BRIGHT], j->win_n, mw_win_mean());
+        mw_undecided();
+    }
+}
+// a start that ends its check without a verdict (the cap, or no sample in DM_MALI_NOSAMPLE_MS of lit frames): the check stops; remembered for the route:
+//   undecided_starts such starts make it broken, one that was mostly near black at once (other tests set: a black picture only); a start spent mostly in bright
+//   scenes (snow, white menus: the picture shown half white) says nothing and is not counted
+static void mw_undecided(void) {
+    {   const mw_judge *j = &g_mw.judge; int dark = mw_judge_mostly_empty(j), bright = !dark && mw_judge_mostly_bright(j);
+        g_mw.check = MW_CHECK_NONE;
         if (dark) MWLOG("[RED] the lit target was near black in %d of %d samples: it is not drawn on this route (a black picture)", j->kinds[MW_K_EMPTY], j->samples);
-        // remembered for the route: undecided_starts such starts make it broken, one that was mostly near black at once (other tests set: a black picture only); a start
-        //   spent mostly in bright scenes (snow, white menus: the picture shown half white) says nothing and is not counted
         int ev = MW_EV_NONE, kept = 0;
         if (bright) MWLOG("the picture shown was half white or more in %d of %d samples (a bright scene: no evidence either way): this start is not counted", j->kinds[MW_K_BRIGHT], j->samples);
         else if (g_mw.record_fine) { ev = mw_ladder_undecided(&g_mw.st, &g_mw.rules, g_mw.route, dark); kept = 1; }
@@ -431,16 +446,27 @@ static void mw_poll(uint64_t n) {   // the finished samples, oldest first (they 
         vtex_unref(x); if (sx) vtex_unref(sx);
     }
 }
-// the start marker: at the first picture of a start the check runs in, its stage becomes playing (an end without a crash from then on counts); it goes after 20 s of
-//   play on the route: 600 presents, or 20 s of wall time and 60 presents (as the heap route's marker)
-static void mw_marker_tick(uint64_t n) {
+// the start marker, at each present (lit: this frame drew DM_MALI_WHITE_LIT_DRAWS or more into a lit target, an R11G11B10F one or its stand-in: the route's own
+//   code at work, in the field). At the first such frame of a start the check runs in, its stage becomes playing (an end without a crash from then on counts),
+//   and the marker goes after 20 s of play on the route from there: DM_MALI_MARK_N (600) presents, or DM_MALI_MARK_MIN_N (60) over DM_MALI_MARK_MS (20 s). The
+//   logos, the title screen and the loads before it do not count (the route first draws its lit scene in the field, often more than 20 s into the start); with no
+//   such frame in DM_MALI_MARK_CAP_MS (10 minutes) the marker goes too
+static void mw_marker_tick(int lit) {
     if (!g_mw.marker) return;
     uint64_t t = mono_ns();
-    if (!g_mw.mark_ns) { g_mw.mark_ns = t;
+    if (!g_mw.first_ns) g_mw.first_ns = t;
+    if (!g_mw.mark_ns && lit) { g_mw.mark_ns = t;
         if (g_mw.check && g_mw.st.stage != MW_STAGE_PLAYING) { mw_marker_set(&g_mw.st, g_mw.st.started, MW_STAGE_PLAYING); mw_save();
-            MWLOG("route %s: its first picture (start marker: playing; an end before 20 s of play now counts)", mw_route_name(g_mw.route)); } }
-    if (n >= 600 || (n >= 60 && t - g_mw.mark_ns >= 20000000000ull)) { g_mw.marker = 0; mw_marker_clear(&g_mw.st); mw_save();
-        MWLOG("route %s: 20 s of play (%llu presents): start marker cleared", mw_route_name(g_mw.route), (unsigned long long)n); }
+            MWLOG("route %s: its first frame with a lit target, %.1f s into the start (start marker: playing; an end before 20 s of play on it now counts)", mw_route_name(g_mw.route),
+                  (t - g_mw.first_ns) / 1e9); } }
+    const mw_rules *r = &g_mw.rules;
+    if (g_mw.mark_ns) {
+        uint64_t n = ++g_mw.mark_n;
+        if (n >= (uint64_t)r->mark_n || (n >= (uint64_t)r->mark_min_n && t - g_mw.mark_ns >= (uint64_t)r->mark_ms * 1000000ull)) { g_mw.marker = 0; mw_marker_clear(&g_mw.st); mw_save();
+            MWLOG("route %s: 20 s of play on it (%llu presents from its first frame with a lit target, %.1f s): start marker cleared", mw_route_name(g_mw.route), (unsigned long long)n,
+                  (t - g_mw.mark_ns) / 1e9); } }
+    else if (t - g_mw.first_ns >= (uint64_t)r->mark_cap_ms * 1000000ull) { g_mw.marker = 0; mw_marker_clear(&g_mw.st); mw_save();
+        MWLOG("route %s: no frame with a lit target in %.0f s of presents: start marker cleared", mw_route_name(g_mw.route), (t - g_mw.first_ns) / 1e9); }
 }
 // mtl_present: the finished samples read; then this frame's lit target sampled when it is time, with the picture shown (st, its crop: x, y, width, height, 0 =
 //   all; its image looked up only for a sample); the frame's candidates let go
@@ -448,10 +474,20 @@ static void mw_present(uint64_t n, const tex_t *st, const int crop[4]) {
     if (!g_mw.on) return;
     uint64_t fd = g_stat_draws - g_mw.frame_d0; g_mw.frame_d0 = g_stat_draws;
     mw_poll(n);
-    mw_marker_tick(n);
     mw_cand *b = NULL;   // the lit target: the candidate the most draws went into (the larger on a tie)
     for (int i = 0; i < g_mw.ncand; i++) { mw_cand *c = &g_mw.cand[i];
         if (!b || c->draws > b->draws || (c->draws == b->draws && (uint64_t)c->x->w * c->x->h > (uint64_t)b->x->w * b->x->h)) b = c; }
+    mw_marker_tick(b && b->draws >= (uint64_t)g_mw.rules.lit_draws);
+    if (g_mw.check == MW_CHECK_FULL && b && !g_mw.seq) {   // (no sample taken yet: the frames' draws for the summary, and the no-sample clock)
+        uint64_t now = mono_ns(); if (!g_mw.lit0_ns) g_mw.lit0_ns = now;
+        if (fd > g_mw.max_fd) g_mw.max_fd = fd;
+        if (b->draws > g_mw.max_lit) g_mw.max_lit = b->draws;
+        if (now - g_mw.lit0_ns >= (uint64_t)g_mw.rules.nosample_ms * 1000000ull) {
+            MWLOG("[RED] no sample in %.0f s of frames with a lit target: not sampled %d times for the frame's draws (%d needed), %d for the lit target's (%d), %d for a part too small, %d for "
+                  "its cover (%d %%); the most draws seen in a frame %llu, into a lit target %llu: this start is counted as one without a verdict", (now - g_mw.lit0_ns) / 1e9, g_mw.nskip[0],
+                  g_mw.rules.min_draws, g_mw.nskip[1], g_mw.rules.lit_draws, g_mw.nskip[2], g_mw.nskip[3], g_mw.rules.cover_pct, (unsigned long long)g_mw.max_fd, (unsigned long long)g_mw.max_lit);
+            mw_undecided(); }
+    }
     if (g_mw.check && b) {
         uint64_t now = mono_ns(), iv = (uint64_t)(g_mw.check == MW_CHECK_RE ? g_mw.rules.recheck_ms : g_mw.rules.every_ms) * 1000000ull;
         if (!g_mw.last_ns || now - g_mw.last_ns >= iv) {

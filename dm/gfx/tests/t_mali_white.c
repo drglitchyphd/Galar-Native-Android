@@ -171,8 +171,13 @@ static void t_rules_env(void) {
     setenv("DM_MALI_WHITE_EVERY_MS", "0", 1); setenv("DM_MALI_RECHECK_MS", "0", 1); setenv("DM_MALI_RECHECK_STARTS", "1", 1); setenv("DM_MALI_WHITE_MIN_DRAWS", "8", 1);
     setenv("DM_MALI_WHITE_COVER_PCT", "10", 1); setenv("DM_MALI_WHITE_MIN_W", "64", 1); setenv("DM_MALI_WHITE_LEVEL", "60000", 1); setenv("DM_MALI_WHITE_LEVEL_LOW", "16", 1);
     setenv("DM_MALI_DARK_N", "4", 1); setenv("DM_MALI_NAN_PCT", "20", 1); setenv("DM_MALI_SHOWN_WHITE_PCT", "101", 1); setenv("DM_MALI_SHOWN_FINE_PCT", "70", 1); setenv("DM_MALI_UNDECIDED_STARTS", "1", 1);
-    setenv("DM_MALI_SHOWN_N", "2", 1);
+    setenv("DM_MALI_SHOWN_N", "2", 1); setenv("DM_MALI_NOSAMPLE_MS", "5", 1); setenv("DM_MALI_MARK_N", "10", 1); setenv("DM_MALI_MARK_MIN_N", "2", 1);
+    setenv("DM_MALI_MARK_MS", "0", 1); setenv("DM_MALI_MARK_CAP_MS", "7", 1);
     mw_rules e = mw_rules_default(); mw_rules_env(&e);
+    mw_rules d0 = mw_rules_default();
+    CHECK(d0.nosample_ms == 600000 && d0.mark_n == 600 && d0.mark_min_n == 60 && d0.mark_ms == 20000 && d0.mark_cap_ms == 600000,
+          "the defaults: 10 minutes of lit frames without a sample; the marker after 600 presents on the route, or 60 over 20 s; gone after 10 minutes without one");
+    CHECK(e.nosample_ms == 5 && e.mark_n == 10 && e.mark_min_n == 2 && e.mark_ms == 0 && e.mark_cap_ms == 7, "the no-sample time and the marker's numbers from the environment");
     CHECK(e.white_n == 1 && e.fine_n == 2 && e.white_pct == 50 && e.fine_pct == 10 && e.fine_span_ms == 0 && e.fine_starts == 1 && e.slow_n == 5 && e.slow_pct == 30 && e.dark_pct == 50
           && e.cap_n == 7 && e.every_ms == 0 && e.recheck_ms == 0 && e.recheck_starts == 1 && e.min_draws == 8 && e.lit_draws == 4 && e.cover_pct == 10 && e.min_w == 64
           && e.level == 60000 && e.level_low == 16 && e.dark_n == 4 && e.nan_pct == 20 && e.shown_white_pct == 101 && e.shown_fine_pct == 70 && e.undecided_starts == 1 && e.shown_n == 2,
@@ -289,8 +294,15 @@ static void t_ladder(void) {
     java_shows_offer();
     p = start(ARM, 0xc401000, 96, &s); CHECK(p.route == MW_ROUTE_A && !p.check && p.exhausted && !p.offer && s.panvk == MW_PANVK_SHOWN, "after the app showed it: no second offer, nothing checked");
     CHECK(verdict(MW_ROUTE_A, MW_WHITE) == MW_EV_EXHAUSTED, "a white verdict once the offer was shown: exhausted, no second offer");
-    p = start(ARM, 0xc401000, 97, &s); CHECK(p.reset && p.route == MW_ROUTE_A && p.check == MW_CHECK_FULL && !p.offer && s.panvk == MW_PANVK_NONE && strstr(file(), "app=97\n") && strstr(file(), "A=-\nB=-\n"),
-                                             "an app update (versionCode 97): started over at route A, checked");
+    p = start(ARM, 0xc401000, 97, &s); CHECK(!p.reset && p.route == MW_ROUTE_A && !p.check && p.exhausted && !p.offer && s.panvk == MW_PANVK_SHOWN && strstr(file(), "app=97\n")
+                                             && strstr(file(), "A=white\nB=white\n"), "an app update (versionCode 97): the ladder kept (both failed: route A unchecked, no second offer), app= follows");
+    CHECK(strstr(file(), "code=1\n") != NULL && MW_ROUTE_CODE == 1, "the file names the fixes' code (MW_ROUTE_CODE)");
+    { FILE *f = fopen(F, "w"); fputs("driver=9\ndriver_version=0xc401000\napp=96\nA=white\nB=fine\nB_fine_starts=2\n", f); fclose(f); }
+    p = start(ARM, 0xc401000, 97, &s); CHECK(!p.reset && p.route == MW_ROUTE_B && p.check == MW_CHECK_RE && strstr(file(), "code=1\n") && strstr(file(), "app=97\n"),
+                                             "a file without code= (written before the line was: code 1), after an app update: B kept as fine, re-checked");
+    { mw_state_load(F, &s); s.code = MW_ROUTE_CODE + 1; mw_state_save(F, &s, &R); }
+    p = start(ARM, 0xc401000, 97, &s); CHECK(p.reset && p.route == MW_ROUTE_A && p.check == MW_CHECK_FULL && !p.offer && s.panvk == MW_PANVK_NONE && strstr(file(), "A=-\nB=-\n")
+                                             && strstr(file(), "code=1\n"), "another code of the fixes (they changed): started over at route A, checked");
     // fine is slow: kept only after two starts that came out fine, then re-checked in three starts, then not checked
     CHECK(verdict(MW_ROUTE_A, MW_FINE) == MW_EV_FINE_ONCE && strstr(file(), "A=-\n") && strstr(file(), "A_fine_starts=1\n") && strstr(file(), "next=A (checked)\n"),
           "route A fine at one start: not kept yet (fine at 1 of 2 starts), checked again");
@@ -362,7 +374,7 @@ static void t_ladder(void) {
       for (int it = 0; it < 200000; it++) { int n = (int)((seed = seed * 1103515245 + 12345) >> 16) % 1023;
           for (int i = 0; i < n; i++) { seed = seed * 1103515245 + 12345; int c = (seed >> 16) & 0xff; const char *al = "driver=_version0x123app=A=B=panvk=offershownwhitefinecrashed_startsbroken_ends_undecidedstage=loadingdetectorplaying\n#-";
               txt[i] = (c & 1) ? al[c % 119] : (char)(c | 1); }
-          txt[n] = 0; mw_state q; int have = mw_state_parse(txt, &q); mw_plan qp = mw_ladder_start(&q, &R, have, 9, 1, 1); int r2; mw_marker_check(&q, &R, it & 1, &r2); qp = mw_plan_of(&q, &R);
+          txt[n] = 0; mw_state q; int have = mw_state_parse(txt, &q); mw_plan qp = mw_ladder_start(&q, &R, have, 9, 1, 1); int r2; mw_marker_check(&q, &R, it % 3, &r2); qp = mw_plan_of(&q, &R);
           for (int k = 1; k < 3; k++) bad += q.res[k] < 0 || q.res[k] > 4 || q.crashes[k] < 0 || q.ends[k] < 0 || q.undecided[k] < 0 || q.fine_starts[k] < 0 || q.rechecks[k] < 0;
           bad += qp.route < 0 || qp.route > 2 || q.panvk < 0 || q.panvk > 2 || q.stage < 0 || q.stage > 3 || mw_route_unchecked(&q, &qp) < 0 || mw_route_unchecked(&q, &qp) > 2;
           char out[2048]; bad += mw_state_format(&q, &R, out, sizeof out) <= 0; }
@@ -389,6 +401,18 @@ static void t_marker(void) {
     unlink(F); start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); marker_clear();
     p = start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); CHECK(mk == MW_MK_NONE && s.early == 0 && s.res[MW_ROUTE_A] == MW_UNDECIDED, "an early end, then a start that played 20 s: the count starts over");
     p = start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); CHECK(mk == MW_MK_EARLY && s.early == 1, "...so one more early end is the first again");
+    // a crash in the game's own code (android_main.c boot_guard: DM_LAST_CRASH_GAME): not the route's, nothing counted, however many in a row
+    unlink(F); start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk);
+    p = start_c(ARM, 0xc401000, 96, MW_CRASH_GAME, 1, &s, &mk);
+    CHECK(mk == MW_MK_GAME && p.route == MW_ROUTE_A && s.early == 0 && !s.res[MW_ROUTE_A] && !s.crashes[MW_ROUTE_A] && !s.ends[MW_ROUTE_A] && s.started == MW_ROUTE_A,
+          "a crash in the game's own code: route A again, nothing counted (not even an early end)");
+    p = start_c(ARM, 0xc401000, 96, MW_CRASH_GAME, 1, &s, &mk);
+    CHECK(mk == MW_MK_GAME && p.route == MW_ROUTE_A && s.early == 0 && !s.res[MW_ROUTE_A] && p.check == MW_CHECK_FULL, "two in a row: still route A, nothing counted");
+    p = start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); CHECK(mk == MW_MK_EARLY && s.early == 1, "then an early end without a crash: the first one in a row");
+    p = start_c(ARM, 0xc401000, 96, MW_CRASH_GAME, 1, &s, &mk); CHECK(mk == MW_MK_GAME && s.early == 1 && !s.res[MW_ROUTE_A], "a game crash between keeps the early count as it was");
+    p = start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk); CHECK(mk == MW_MK_CRASHED && s.res[MW_ROUTE_A] == MW_CRASHED && s.ends[MW_ROUTE_A] == 1, "...and the second early end counts as before");
+    unlink(F); start_s(ARM, 0xc401000, 96, 0, 1, MW_STAGE_LOADING, &s, &mk);
+    p = start_c(ARM, 0xc401000, 96, MW_CRASH_GAME, 1, &s, &mk); CHECK(mk == MW_MK_GAME && !s.res[MW_ROUTE_A], "a game crash while loading: nothing counted (a device crash there would be)");
     // both routes close the game: not the routes' fault, both checked again
     unlink(F); start_c(ARM, 0xc401000, 96, 0, 1, &s, &mk);
     p = start_c(ARM, 0xc401000, 96, 1, 1, &s, &mk); CHECK(p.route == MW_ROUTE_B && s.res[MW_ROUTE_A] == MW_CRASHED, "A closed the game: B");

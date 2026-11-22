@@ -65,7 +65,8 @@ final class MaliLadder {
         for (String l : lines) { if (l.startsWith("#")) continue; int e = l.indexOf('='); if (e > 0) m.put(l.substring(0, e).trim(), l.substring(e + 1).trim()); }
         return m;
     }
-    // the offer is due: the engine asked for it (panvk=offer) on this app version (another one starts the check over), and the phone's own driver is still the one
+    // the offer is due: the engine asked for it (panvk=offer) and its last start ran this app version (it writes app= at each start; an app update keeps the ladder,
+    //   so an offer pending from before the update is due once the engine has started on it), and the phone's own driver is still the one
     //   in use (no driver package chosen meanwhile)
     static boolean due(Map<String, String> f, long versionCode, String driverPackage) {
         String app = f.get("app"), pv = f.get("panvk");

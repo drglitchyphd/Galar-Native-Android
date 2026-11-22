@@ -15,18 +15,24 @@
 //    samples in a row (a lit target near black for 30 s of play: a black picture); FINE at this start only after 20 fine samples with nothing but empty or bright
 //    ones between, spread over 3 minutes of play (gaps capped: time in menus does not count). A fine verdict can still turn white or broken: after it the check goes
 //    on at one sample a minute for the rest of the start. A start that reaches 300 samples without a verdict stops checking (a summary line) and is counted for its
-//    route, unless most of its samples were bright; the next start checks again;
+//    route, unless most of its samples were bright; so is a start that took no sample at all in 10 minutes of frames that drew into a lit target (every frame
+//    under the floors below: a summary line); the next start checks again;
 //  - the ladder (mw_ladder_start at each start, mw_ladder_verdict on a verdict), kept per phone in one small text file (mw_state_format): route A first; A white or
 //    broken → route B from the next start; B failed too → back to route A, and the app offers the PanVK driver at its next start (once). A route is kept as fine only
 //    after 2 starts that came out fine, and re-checked (one sample a minute) in the 3 starts after; a failed re-check moves the ladder on as any failure does. A route
-//    is broken too after 3 starts that reached the cap with no verdict, or one whose samples were mostly empty (mw_ladder_undecided). Started over when the Vulkan
-//    driver (its ID or version) or the app (its versionCode) changes. Both fixes at once (route A by the ladder, B set in env.txt) and white: both count as white;
-//  - a route that closes the game (mw_marker_*): a start that checks a route leaves a marker in the file until 20 s of play or its first sample read back, with the
-//    stage it got to: detector (making the check's own compute pass: an end there is the check's, never the route's), loading (the device up, no picture yet: the
-//    pipeline builds, the load) and playing (its first picture shown, the check running). A start that finds it treats that route as failed when the start crashed
-//    after the graphics device came up (outside the game's own code: android_main.c boot_guard) at the loading or playing stage, or when two starts in a row on it
-//    ended at the playing stage without a crash (closed early by the player, or ended by the system); an end while loading without a crash (the player leaving
-//    during the pipeline builds, Android ending it in the background) counts for nothing. If the other route had failed that way too, the crashes are not the
+//    is broken too after 3 starts that reached the cap with no verdict (or took no sample), or one whose samples were mostly empty (mw_ladder_undecided). Started
+//    over when the Vulkan driver (its ID or version) or the fixes' own code (MW_ROUTE_CODE: raised when route A, route B or the check change) changes, not at
+//    every app update: a route found fine or white stays so (the file's app= follows the app's versionCode, for MaliLadder.java's offer). Both fixes at once
+//    (route A by the ladder, B set in env.txt) and white: both count as white;
+//  - a route that closes the game (mw_marker_*): a start that checks a route leaves a marker in the file until 20 s of play on the route or its first sample read
+//    back, with the stage it got to: detector (making the check's own compute pass: an end there is the check's, never the route's), loading (the device up, the
+//    route not drawn yet: the pipeline builds, the load, the logos and the title screen) and playing (the first frame that drew into the lit target, the check
+//    running). The 20 s run from that frame, not from the start's first picture (the route's code first runs there, in the field; without one in 10 minutes the
+//    marker goes). A start that finds it treats that route as failed when the start crashed after the graphics device came up at the loading or playing stage,
+//    or when two starts in a row on it ended at the playing stage without a crash (closed early by the player, or ended by the system: android_main.c boot_guard's
+//    crash flag lasts 30 s of play only, so a crash later on counts so); an end while loading without a crash (the player leaving during the pipeline builds,
+//    Android ending it in the background), and a crash in the game's own code at any stage (boot_guard: DM_LAST_CRASH_GAME), count for nothing. If the other
+//    route had failed that way too, the crashes are not the
 //    routes' and both are checked again. A route that closed the game once, with the other one white or broken, is tried once more before the ladder gives up on
 //    both. Given up on both, the start runs route A unless A closed the game with the crash flag (then B): a route left only on early ends is never traded for one
 //    known to be white; the same when the check cannot run on this driver (mw_route_unchecked)
@@ -41,8 +47,11 @@
 //   DM_MALI_FINE_STARTS (2), DM_MALI_SLOW_N (40), DM_MALI_SLOW_PCT (8), DM_MALI_DARK_PCT (95), DM_MALI_DARK_N (10), DM_MALI_NAN_PCT (8), DM_MALI_SHOWN_WHITE_PCT (90),
 //   DM_MALI_SHOWN_N (5), DM_MALI_SHOWN_FINE_PCT (50), DM_MALI_WHITE_CAP (300), DM_MALI_UNDECIDED_STARTS (3), DM_MALI_WHITE_EVERY_MS (3000: between samples), DM_MALI_RECHECK_MS (60000),
 //   DM_MALI_RECHECK_STARTS (3), DM_MALI_WHITE_MIN_DRAWS (120: a frame drawing fewer is a load or a menu, not sampled), DM_MALI_WHITE_LIT_DRAWS (half of that: the
-//   lit target's own draws), DM_MALI_WHITE_COVER_PCT (60: the part of the drawn region its draws cover), DM_MALI_WHITE_MIN_W (1280: the narrowest lit target
-//   sampled), DM_MALI_WHITE_LEVEL (1024) and DM_MALI_WHITE_LEVEL_LOW (64).
+//   lit target's own draws; a frame with as many is also the route's first frame for the start marker), DM_MALI_WHITE_COVER_PCT (60: the part of the drawn region
+//   its draws cover), DM_MALI_WHITE_MIN_W (1280: the narrowest lit target sampled), DM_MALI_WHITE_LEVEL (1024), DM_MALI_WHITE_LEVEL_LOW (64),
+//   DM_MALI_NOSAMPLE_MS (600000: frames with a lit target and no sample before the start counts as one without a verdict), DM_MALI_MARK_N (600: presents on the
+//   route that clear the start marker; or DM_MALI_MARK_MIN_N (60) of them over DM_MALI_MARK_MS, 20000 ms) and DM_MALI_MARK_CAP_MS (600000: the marker goes
+//   when no frame drew into the lit target that long).
 //   The draw floors are low on purpose: a Mali-G615 MC2 on Arm's r44p1 (the D7400 player's log, 2026-11-22) drew about 175-260 draws a frame in play, all passes
 //   together, so floors of 200 / 100 could leave the very phones the check is for never sampled; a menu's 3D model or a title screen stays under them, and a scene
 //   that gets through is judged by rules that do not call it fine on a few minutes of it
@@ -61,11 +70,15 @@ enum { MW_PANVK_NONE = 0, MW_PANVK_OFFER = 1, MW_PANVK_SHOWN = 2 };             
 enum { MW_CHECK_NONE = 0, MW_CHECK_FULL = 1, MW_CHECK_RE = 2 };                     // how a start checks: not at all, every few seconds, one sample a minute
 enum { MW_EV_NONE = 0, MW_EV_FINE_ONCE, MW_EV_FINE, MW_EV_TRY_B, MW_EV_USE_B, MW_EV_OFFER_PANVK, MW_EV_EXHAUSTED, MW_EV_USE_A, MW_EV_RETRY };   // what a verdict did
 enum { MW_RULE_RUN = 1, MW_RULE_SLOW = 2, MW_RULE_FINE = 3, MW_RULE_NAN = 4, MW_RULE_DARK = 5, MW_RULE_SHOWN = 6 };   // what decided a verdict
-enum { MW_MK_NONE = 0, MW_MK_EARLY, MW_MK_CRASHED, MW_MK_BOTH, MW_MK_DETECTOR, MW_MK_LOADING };   // what a start found of the marker an earlier start left (mw_marker_check)
+enum { MW_MK_NONE = 0, MW_MK_EARLY, MW_MK_CRASHED, MW_MK_BOTH, MW_MK_DETECTOR, MW_MK_LOADING, MW_MK_GAME };   // what a start found of the marker an earlier start left (mw_marker_check)
+enum { MW_CRASH_NONE = 0, MW_CRASH_DEVICE = 1, MW_CRASH_GAME = 2 };   // how the last start ended (android_main.c boot_guard): no crash flag; a crash after the graphics
+                                                                     //   device came up; one in the game's own code (not a route's)
 enum { MW_STAGE_NONE = 0, MW_STAGE_DETECTOR = 1, MW_STAGE_LOADING = 2, MW_STAGE_PLAYING = 3 };   // how far the start that left the marker got
 #define MW_DARK_BITS 0x3A800000u    // 1/1024 as a float's bits: a texel with every channel below it is near black
 #define MW_SHOWN_BITS 0x3F7D70A4u   // 0.99 as a float's bits: a texel of the picture shown with every colour channel at it or more is white
 #define MW_ENV_MARK "DM_MALI_ENV=2"   // env.txt's line once mw_env_migrate looked at it
+#define MW_ROUTE_CODE 1   // the fixes' own code (route A: b10_conv.h, spv_b10_outputs, b10_view_fmt; route B; the check and its rules): raise it when any of them changes
+                          //   what a start on a route draws or how it is judged, and every phone's ladder starts over (an app update alone keeps it)
 
 // ---- the verdict ----
 typedef struct {
@@ -79,11 +92,15 @@ typedef struct {
     int every_ms, recheck_ms, recheck_starts;        // between samples; one every recheck_ms after fine, and in the recheck_starts starts after a route is kept as fine
     int min_draws, lit_draws, cover_pct, min_w;      // a frame is sampled with min_draws+ draws, lit_draws+ of them into the lit target, their cells cover_pct % of the part drawn
     int level, level_low;                            // saturated: a channel at level or more, or +inf; the log's lower bucket: level_low or more
+    int nosample_ms;                                 // a start whose frames drew into a lit target this long without one sample: counted as one without a verdict
+    int mark_n, mark_min_n, mark_ms, mark_cap_ms;    // the start marker goes after mark_n presents on the route, or mark_min_n of them over mark_ms; or mark_cap_ms
+                                                     //   after the start's first picture with no frame on the route
 } mw_rules;
 static inline mw_rules mw_rules_default(void) {
     mw_rules r = { .white_n = 3, .white_pct = 25, .fine_n = 20, .fine_pct = 2, .fine_span_ms = 180000, .fine_starts = 2, .slow_n = 40, .slow_pct = 8, .dark_pct = 95,
                    .dark_n = 10, .nan_pct = 8, .shown_white_pct = 90, .shown_n = 5, .shown_fine_pct = 50, .cap_n = 300, .undecided_starts = 3, .every_ms = 3000, .recheck_ms = 60000,
-                   .recheck_starts = 3, .min_draws = 120, .lit_draws = 60, .cover_pct = 60, .min_w = 1280, .level = 1024, .level_low = 64 };
+                   .recheck_starts = 3, .min_draws = 120, .lit_draws = 60, .cover_pct = 60, .min_w = 1280, .level = 1024, .level_low = 64, .nosample_ms = 600000,
+                   .mark_n = 600, .mark_min_n = 60, .mark_ms = 20000, .mark_cap_ms = 600000 };
     return r;
 }
 static inline int mw_env_int(const char *name, int def, int lo, int hi) {   // an integer from the environment, def when unset, empty or out of range
@@ -105,6 +122,9 @@ static inline void mw_rules_env(mw_rules *r) {
     r->min_draws = mw_env_int("DM_MALI_WHITE_MIN_DRAWS", r->min_draws, 0, 1 << 24); r->lit_draws = mw_env_int("DM_MALI_WHITE_LIT_DRAWS", r->min_draws / 2, 0, 1 << 24);
     r->cover_pct = mw_env_int("DM_MALI_WHITE_COVER_PCT", r->cover_pct, 0, 100); r->min_w = mw_env_int("DM_MALI_WHITE_MIN_W", r->min_w, 1, 16384);
     r->level = mw_env_int("DM_MALI_WHITE_LEVEL", r->level, 2, 65504); r->level_low = mw_env_int("DM_MALI_WHITE_LEVEL_LOW", r->level_low, 1, 65504);
+    r->nosample_ms = mw_env_int("DM_MALI_NOSAMPLE_MS", r->nosample_ms, 0, 86400000);
+    r->mark_n = mw_env_int("DM_MALI_MARK_N", r->mark_n, 1, 1000000); r->mark_min_n = mw_env_int("DM_MALI_MARK_MIN_N", r->mark_min_n, 1, 1000000);
+    r->mark_ms = mw_env_int("DM_MALI_MARK_MS", r->mark_ms, 0, 86400000); r->mark_cap_ms = mw_env_int("DM_MALI_MARK_CAP_MS", r->mark_cap_ms, 0, 86400000);
 }
 static inline uint32_t mw_float_bits(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }   // (the detector's thresholds: compared as bits, positive floats order as integers)
 // one sample: of the lit target's total texels, sat saturated (a channel at the level or more, or +inf), nan NaN, dark near black; of the picture shown's shown_total
@@ -229,7 +249,9 @@ static inline int mw_env_migrate(const char *in, char *out, size_t n, int *remov
 
 // ---- the ladder's state (one file per phone) ----
 typedef struct {
-    int driver; uint32_t driver_version; long app; char gpu[128];   // whose state: the Vulkan driver's ID and version, the app's versionCode; the GPU's name (for the app's PanVK offer)
+    int driver; uint32_t driver_version; long app; char gpu[128];   // whose state: the Vulkan driver's ID and version (the app's versionCode: the last start's, for the
+                                                                     //   app's PanVK offer; the GPU's name, for that offer too)
+    int code;                                                        // MW_ROUTE_CODE of the fixes that found it (another: started over; a file without it: 1)
     int res[3], fine_starts[3], rechecks[3];                         // per route ([MW_ROUTE_A], [MW_ROUTE_B]): its result; starts that came out fine; re-check starts since it was kept as fine
     int crashes[3], ends[3], undecided[3];                           //   times it closed the game with the crash flag, times by two early ends in a row; starts on it that reached the cap
                                                                      //   with no verdict
@@ -237,7 +259,8 @@ typedef struct {
                                                                      //   (MW_STAGE_*); starts on it in a row that ended early while playing, without a crash
     int panvk;
 } mw_state;
-static inline void mw_state_reset(mw_state *s, int driver, uint32_t driver_version, long app) { memset(s, 0, sizeof *s); s->driver = driver; s->driver_version = driver_version; s->app = app; }
+static inline void mw_state_reset(mw_state *s, int driver, uint32_t driver_version, long app) {
+    memset(s, 0, sizeof *s); s->driver = driver; s->driver_version = driver_version; s->app = app; s->code = MW_ROUTE_CODE; }
 static inline int mw_failed(int r) { return r == MW_WHITE || r == MW_CRASHED || r == MW_BROKEN; }
 static inline int mw_crash_flagged(const mw_state *s, int rt) { return s->res[rt] == MW_CRASHED && s->crashes[rt] > 0; }   // (it closed the game with the crash flag, not only on early ends)
 // the route a start with this state runs, and how it checks: a route kept as fine is re-checked for recheck_starts starts, then not at all; A failed → B, checked;
@@ -263,11 +286,12 @@ static inline int mw_route_unchecked(const mw_state *s, const mw_plan *p) {
     if (p->route == MW_ROUTE_B && !p->exhausted && s->res[MW_ROUTE_A] == MW_CRASHED && !s->crashes[MW_ROUTE_A] && s->res[MW_ROUTE_B] != MW_FINE) return MW_ROUTE_A;
     return p->route;
 }
-// at a start: the state read from the file (have = 0: none) is this driver's and this app's, else started over (plan.reset); the ladder exhausted and no offer made
-//   yet: the offer is made now (shown by the app at its next start)
+// at a start: the state read from the file (have = 0: none) is this driver's and these fixes' (MW_ROUTE_CODE), else started over (plan.reset); the app's
+//   versionCode noted (an app update keeps the state); the ladder exhausted and no offer made yet: the offer is made now (shown by the app at its next start)
 static inline mw_plan mw_ladder_start(mw_state *s, const mw_rules *r, int have, int driver, uint32_t driver_version, long app) {
-    int reset = !have || s->driver != driver || s->driver_version != driver_version || s->app != app;
+    int reset = !have || s->driver != driver || s->driver_version != driver_version || s->code != MW_ROUTE_CODE;
     if (reset) mw_state_reset(s, driver, driver_version, app);
+    s->app = app;
     mw_plan p = mw_plan_of(s, r);
     if (p.exhausted && s->panvk == MW_PANVK_NONE) { s->panvk = MW_PANVK_OFFER; p.offer = 1; }
     p.reset = reset;
@@ -307,14 +331,16 @@ static inline int mw_ladder_undecided(mw_state *s, const mw_rules *r, int route,
     return mostly_empty || s->undecided[route] >= r->undecided_starts ? mw_ladder_verdict(s, r, route, MW_BROKEN) : MW_EV_NONE;
 }
 // The start marker. At a start (after mw_ladder_start): the marker an earlier start left. Left at the detector stage: the end was the check's own (MW_MK_DETECTOR,
-//   nobody blamed). No crash: left while loading, nothing counted (MW_MK_LOADING); left while playing, the first such start in a row is counted (early) and the route
-//   runs again (MW_MK_EARLY). A crash after the device came up (crashed) while loading or playing, or the second early end in a row: the route closed the game
+//   nobody blamed). A crash in the game's own code (crashed MW_CRASH_GAME): not the route's, nothing counted, the early count as it was (MW_MK_GAME). No crash:
+//   left while loading, nothing counted (MW_MK_LOADING); left while playing, the first such start in a row is counted (early) and the route runs again
+//   (MW_MK_EARLY). A crash after the device came up (crashed MW_CRASH_DEVICE) while loading or playing, or the second early end in a row: the route closed the game
 //   (MW_MK_CRASHED, the ladder moves); when the other route had closed it before, the crashes are not the routes': both are checked again (MW_MK_BOTH). The route
 //   and the early count stay for this start's marker (mw_marker_set keeps the count for the same route). *route: the marker's route (0: none)
 static inline int mw_marker_check(mw_state *s, const mw_rules *r, int crashed, int *route) {
     int rt = s->started, st = s->stage; *route = rt == MW_ROUTE_A || rt == MW_ROUTE_B ? rt : 0;
     if (!*route) { s->started = s->early = s->stage = 0; return MW_MK_NONE; }
     if (st == MW_STAGE_DETECTOR) { s->stage = 0; return MW_MK_DETECTOR; }
+    if (crashed == MW_CRASH_GAME) { s->stage = 0; return MW_MK_GAME; }
     if (!crashed && st == MW_STAGE_LOADING) { s->stage = 0; return MW_MK_LOADING; }
     if (!crashed && s->early < 1) { s->early++; s->stage = 0; return MW_MK_EARLY; }
     s->started = s->early = s->stage = 0;
@@ -342,9 +368,9 @@ static inline int mw_state_format(const mw_state *s, const mw_rules *r, char *ou
     mw_plan p = mw_plan_of(s, r);
     const char *how = p.exhausted ? " (both failed: unchecked)" : p.retry ? " (once more: it closed the game once; checked)" : p.check == MW_CHECK_RE ? " (fine: re-checked once a minute)"
                     : p.check == MW_CHECK_NONE ? " (fine: unchecked)" : " (checked)";
-    return snprintf(out, n, "# Galar Native: the white-screen check on this phone's Mali driver (nvn_vk.c, mali_white.h). Started over when the driver or the app changes\n"
-                    "driver=%d\ndriver_version=%#x\napp=%ld\ngpu=%s\nA=%s\nB=%s\nA_fine_starts=%d\nB_fine_starts=%d\nA_rechecks=%d\nB_rechecks=%d\nA_crashes=%d\nB_crashes=%d\n"
-                    "A_ends=%d\nB_ends=%d\nA_undecided=%d\nB_undecided=%d\nstarted=%s\nstage=%s\nearly_ends=%d\nnext=%s%s\npanvk=%s\n", s->driver, s->driver_version, s->app, s->gpu,
+    return snprintf(out, n, "# Galar Native: the white-screen check on this phone's Mali driver (nvn_vk.c, mali_white.h). Started over when the driver or the fixes' code changes\n"
+                    "driver=%d\ndriver_version=%#x\napp=%ld\ncode=%d\ngpu=%s\nA=%s\nB=%s\nA_fine_starts=%d\nB_fine_starts=%d\nA_rechecks=%d\nB_rechecks=%d\nA_crashes=%d\nB_crashes=%d\n"
+                    "A_ends=%d\nB_ends=%d\nA_undecided=%d\nB_undecided=%d\nstarted=%s\nstage=%s\nearly_ends=%d\nnext=%s%s\npanvk=%s\n", s->driver, s->driver_version, s->app, s->code, s->gpu,
                     mw_res_name(s->res[MW_ROUTE_A]), mw_res_name(s->res[MW_ROUTE_B]), s->fine_starts[MW_ROUTE_A], s->fine_starts[MW_ROUTE_B], s->rechecks[MW_ROUTE_A],
                     s->rechecks[MW_ROUTE_B], s->crashes[MW_ROUTE_A], s->crashes[MW_ROUTE_B], s->ends[MW_ROUTE_A], s->ends[MW_ROUTE_B], s->undecided[MW_ROUTE_A],
                     s->undecided[MW_ROUTE_B], s->started == MW_ROUTE_A ? "A" : s->started == MW_ROUTE_B ? "B" : "-", mw_stage_name(s->stage), s->early, mw_route_name(p.route), how,
@@ -352,7 +378,7 @@ static inline int mw_state_format(const mw_state *s, const mw_rules *r, char *ou
 }
 static inline int mw_count_parse(const char *v) { long x = strtol(v, NULL, 10); return x < 0 ? 0 : x > 1000 ? 1000 : (int)x; }
 static inline int mw_state_parse(const char *text, mw_state *s) {   // 1 when the text has the three key fields (driver, driver_version, app)
-    mw_state_reset(s, -1, 0, -1); int have = 0, stage = -1;
+    mw_state_reset(s, -1, 0, -1); s->code = 1; int have = 0, stage = -1;   // (a file without code=: written by the fixes of code 1, before the line was)
     for (const char *l = text; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
         if (*l == '#') continue;
         const char *eq = strchr(l, '='), *nl = strchr(l, '\n'); if (!eq || (nl && eq > nl) || eq == l || eq - l > 31) continue;
@@ -363,6 +389,7 @@ static inline int mw_state_parse(const char *text, mw_state *s) {   // 1 when th
         if (!strcmp(k, "driver")) { s->driver = (int)strtol(v, NULL, 0); have |= 1; }
         else if (!strcmp(k, "driver_version")) { s->driver_version = (uint32_t)strtoul(v, NULL, 0); have |= 2; }
         else if (!strcmp(k, "app")) { s->app = strtol(v, NULL, 0); have |= 4; }
+        else if (!strcmp(k, "code")) s->code = (int)strtol(v, NULL, 10);
         else if (!strcmp(k, "gpu")) { size_t gl = vl < sizeof s->gpu - 1 ? vl : sizeof s->gpu - 1; memcpy(s->gpu, v, gl); s->gpu[gl] = 0; }   // (a longer name cut)
         else if (!strcmp(k, "A") || !strcmp(k, "B")) s->res[k[0] == 'A' ? MW_ROUTE_A : MW_ROUTE_B] = mw_res_parse(v);
         else if ((k[0] == 'A' || k[0] == 'B') && k[1] == '_') {
