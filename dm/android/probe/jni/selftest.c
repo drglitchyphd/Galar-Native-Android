@@ -8,7 +8,11 @@
 //   3d-render-target    att_view: a 3D image's slices attached as a layered 2D array (the colour-grading tables; black 3D scenes when only slice 0 drew)
 //   dmabuf-heap         the heap route: /dev/dma_heap memory mapped at a fixed address and imported into the driver (the Mali / Xclipse memory pools)
 //   bc-textures         the BC layer (gfx/tex/bc_gpu.c, linked as is): BC1-BC7 converted on the GPU only where it matches the CPU bit for bit
+//   depth-copy          nvn_vk.c zcopy_draw: a scaled copy into a depth / stencil image drawn (gl_FragDepth, the stencil one bit a draw), read back
+//   int-view            nvn_vk.c tex_view_for / fmt_as_class: integer textures read through a view of the shader's class (the same bits)
 // A crash inside the driver (SIGSEGV / SIGBUS / SIGABRT) is caught: that test reports it and the remaining GPU tests are skipped.
+// The same tests run inside the games (dprobe_jni.c, the app's driver check before Play): there in a process of their own, on the driver the game will use
+//   (probe_vk.h), each one noted in a journal before it starts, so one that takes the process down is known; a test names the setting that avoids what it found
 #include <errno.h>
 #include <fcntl.h>
 #include <setjmp.h>
@@ -21,20 +25,34 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <vulkan/vulkan.h>
+#include "probe_vk.h"
 #include "bc_gpu.h"
 #include "nvn_spv.h"
 #include "selftest_spv.h"
+#include "overlay/zcopy_spv.h"
 
-void probe_vout(const char *fmt, va_list ap);   // probe.c
+void probe_vout(const char *fmt, va_list ap);   // probe.c (the probe app) / dprobe_jni.c (the games)
 static void O(const char *fmt, ...) { va_list ap; va_start(ap, fmt); probe_vout(fmt, ap); va_end(ap); }
+
+// The journal (the games' driver check): "begin <test> [crash fix]" before a test, "result <test> <TAG> <text>" after, "fix <test> KEY=VALUE" for a setting it asks
+//   for, "done" at the end; written straight to the file (no buffering) so whatever the process managed to say survives it. -1: none (the probe app)
+static int g_jfd = -1;
+static void J(const char *fmt, ...) {
+    if (g_jfd < 0) return;
+    char b[1024]; va_list ap; va_start(ap, fmt); int n = vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    if (n < 0) return; if (n >= (int)sizeof b) n = sizeof b - 1;
+    for (int i = 0; i < n - 1; i++) if (b[i] == '\n') b[i] = ' ';   // (one line each)
+    if (write(g_jfd, b, (size_t)n) < 0) { } fsync(g_jfd);
+}
+static void FIX(const char *name, const char *kv) { O("    -> %s\n", kv); J("fix %s %s\n", name, kv); }
 
 enum { PASS, WARN, FAIL, SKIP, INFO };
 static int g_count[5];
 static void R(int st, const char *name, const char *fmt, ...) {
     static const char *tag[] = { "PASS", "WARN", "FAIL", "SKIP", "INFO" };
-    g_count[st]++; O("[%s] %s: ", tag[st], name);
-    va_list ap; va_start(ap, fmt); probe_vout(fmt, ap); va_end(ap); O("\n");
+    char b[900]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    g_count[st]++; O("[%s] %s: %s\n", tag[st], name, b);
+    J("result %s %s %s\n", name, tag[st], b);
 }
 
 // ---- crash guard ----
@@ -61,17 +79,32 @@ static int mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyF
     return -1;
 }
 
+// Vulkan 1.0 drivers take SPIR-V 1.0 only: every test shader goes through the engine's spv_to_10 there (nvn_vk.c vk_shader_module_10)
+static PFN_vkCreateShaderModule s_csm_real;
+static VKAPI_ATTR VkResult VKAPI_CALL csm_10(VkDevice d, const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *a, VkShaderModule *m) {
+    size_t nw; uint32_t *c = spv_to_10(ci->pCode, ci->codeSize / 4, &nw);
+    if (!c) return s_csm_real(d, ci, a, m);
+    VkShaderModuleCreateInfo c2 = *ci; c2.codeSize = nw * 4; c2.pCode = c; VkResult r = s_csm_real(d, &c2, a, m); free(c); return r;
+}
+static const char *s_driver;   // DM_VK_DRIVER of the game (NULL: the system's driver)
 static int st_device(void) {
-    uint32_t iv = VK_API_VERSION_1_0; vkEnumerateInstanceVersion(&iv);
-    if (iv < VK_API_VERSION_1_1) { R(SKIP, "device", "the Vulkan loader is %u.%u; Galar Native needs Vulkan 1.1", VK_API_VERSION_MAJOR(iv), VK_API_VERSION_MINOR(iv)); return -1; }
+    const char *how = NULL;
+    if (pv_load(s_driver, &how)) { R(FAIL, "device", "no Vulkan driver could be opened (%s)", s_driver && *s_driver ? s_driver : "the system's libvulkan"); return -1; }
+    O("  driver: %s%s%s\n", how, s_driver && *s_driver ? " " : "", s_driver && *s_driver ? s_driver : "");
+    uint32_t iv = VK_API_VERSION_1_0; if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&iv);   // (a Vulkan 1.0 loader has no vkEnumerateInstanceVersion)
+    if (getenv("DM_PROBE_API10")) iv = VK_API_VERSION_1_0;   // (testing: the Vulkan 1.0 route on any driver: no 1.1 functions, shaders through spv_to_10)
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "Galar Native self-test", .apiVersion = iv < VK_API_VERSION_1_3 ? iv : VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai };
     VkResult vr = vkCreateInstance(&ici, NULL, &s_inst);
     if (vr) { R(FAIL, "device", "vkCreateInstance %d", vr); return -1; }
+    pv_load_instance(s_inst);
+    if (!vkEnumeratePhysicalDevices || !vkCreateDevice) { R(FAIL, "device", "the driver did not give its functions"); return -1; }
     uint32_t n = 1; vkEnumeratePhysicalDevices(s_inst, &n, &s_pd);
     if (!n) { R(FAIL, "device", "no Vulkan GPU"); return -1; }
     vkGetPhysicalDeviceProperties(s_pd, &s_props); vkGetPhysicalDeviceMemoryProperties(s_pd, &s_mp); vkGetPhysicalDeviceFeatures(s_pd, &s_feat);
     s_api = s_props.apiVersion < ai.apiVersion ? s_props.apiVersion : ai.apiVersion;
+    if (s_api < VK_API_VERSION_1_1) { vkGetPhysicalDeviceProperties2 = NULL; pv_vkGetPhysicalDeviceExternalBufferProperties = NULL;   // (1.1 functions: not there to call)
+        if (!s_csm_real) { s_csm_real = pv_vkCreateShaderModule; pv_vkCreateShaderModule = csm_10; } }
     uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(s_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(s_pd, &nq, qp);
     for (s_qf = 0; s_qf < nq && (qp[s_qf].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT); s_qf++) { }
     if (s_qf == nq) { R(FAIL, "device", "no queue family with graphics and compute"); return -1; }
@@ -204,7 +237,7 @@ static void t_floatctl(void) {
     VkPhysicalDeviceDriverProperties dp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
     VkPhysicalDeviceFloatControlsProperties fc = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES, .pNext = drvp ? &dp : NULL };
     VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = fcp ? (void *)&fc : drvp ? (void *)&dp : NULL };
-    vkGetPhysicalDeviceProperties2(s_pd, &pp);
+    if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(s_pd, &pp); else drvp = fcp = 0;   // (Vulkan 1.0: neither can be read)
     int arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : s_props.vendorID == 0x13B5;
     arm |= drvp ? dp.driverID == VK_DRIVER_ID_SAMSUNG_PROPRIETARY : s_props.vendorID == 0x144D;   // (the engine asks on Samsung's Xclipse driver too, since stock-driver-default)
     int support = fcp && fc.shaderSignedZeroInfNanPreserveFloat32;
@@ -230,6 +263,7 @@ static void t_floatctl(void) {
     else if (!bad) R(PASS, N, "right with and without float controls");
     else if (arm) R(PASS, N, "needs float controls (without: %s); the engine asks for them on this driver", wrong);
     else R(WARN, N, "needs float controls (without: %s), but the engine only asks on ARM's and Samsung's drivers: this driver's profile should turn them on (DM_VK_FLOAT_CONTROLS=1)", wrong);
+    if (bad && !bad2 && !arm) FIX(N, "DM_VK_FLOAT_CONTROLS=1");   // (the WARN above: right only with them, and the engine would not ask)
 }
 
 // ---- shader maths: NaN in min / max / saturate, pow as exp2(log2), integers carried in floats ----
@@ -263,7 +297,7 @@ static void t_shmath(void) {
     static const char *WAY[4] = { "as compiled", "float controls", "float controls + NMin / NMax / NClamp", "float controls + NMin / NMax / NClamp + isnan written out" };
     int fcp = (s_api >= VK_API_VERSION_1_2 || s_ext_fctl), bad[4] = { -1, -1, -1, -1 }; char wrong[4][768]; VkResult rr[4] = { 0 };
     if (fcp) { VkPhysicalDeviceFloatControlsProperties fc = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES };
-        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &fc }; vkGetPhysicalDeviceProperties2(s_pd, &pp); fcp = fc.shaderSignedZeroInfNanPreserveFloat32; }
+        VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &fc }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(s_pd, &pp); fcp = vkGetPhysicalDeviceProperties2 && fc.shaderSignedZeroInfNanPreserveFloat32; }
     for (int way = 0; way < 4; way++) {
         if (way && !fcp) break;
         size_t words = sizeof spv_shmath / 4, nw; uint32_t *code = malloc(4 * words), *c2; if (!code) return; memcpy(code, spv_shmath, 4 * words);
@@ -617,7 +651,7 @@ static const char *roundtrip(VkBuffer a, VkDeviceSize size, volatile uint32_t *v
 }
 static void t_dmabuf(void) {
     const char *N = "dmabuf-heap";
-    if (!s_ext_fd || !s_ext_dmabuf || !p_fdprops) { R(SKIP, N, "the driver imports no dma-bufs (VK_EXT_external_memory_dma_buf missing): the engine moves the driver's own mappings instead"); return; }
+    if (!s_ext_fd || !s_ext_dmabuf || !p_fdprops || !vkGetPhysicalDeviceExternalBufferProperties) { R(SKIP, N, "the driver imports no dma-bufs (VK_EXT_external_memory_dma_buf missing): the engine moves the driver's own mappings instead"); return; }
     VkPhysicalDeviceExternalBufferInfo xi = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
     VkExternalBufferProperties xp = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES };
@@ -703,7 +737,8 @@ static void t_requirements(void) {
     int dynren = has_ext(ex, ne, "VK_KHR_dynamic_rendering"), eds = has_ext(ex, ne, "VK_EXT_extended_dynamic_state");
     free(ex);
     unsigned ma = VK_API_VERSION_MAJOR(s_api), mi = VK_API_VERSION_MINOR(s_api);
-    if (!timeline) { R(FAIL, N, "Vulkan %u.%u driver without timeline semaphores: Galar Native cannot run on this driver (no fallback)", ma, mi); return; }
+    if (!timeline) { R(WARN, N, "Vulkan %u.%u driver without timeline semaphores (and%s%s): the engine runs its Vulkan 1.0 path here (fences, render passes, pipelines with their draw state; slower)", ma, mi,
+                       dynren ? "" : " without dynamic rendering", eds ? "" : ", extended dynamic state"); return; }
     if (dynren && eds) { R(PASS, N, "Vulkan %u.%u driver with every extension the engine needs", ma, mi); return; }
     // Since the stock-driver fallbacks (render passes; draw state built into pipelines) the engine runs without these two; v0.53 and older stopped at start
     R(WARN, N, "Vulkan %u.%u driver without%s%s%s: the engine uses its fallback%s (%s%s%s); Galar Native v0.53 and older stop at start here", ma, mi,
@@ -711,26 +746,246 @@ static void t_requirements(void) {
       dynren ? "" : "render passes", !dynren && !eds ? ", " : "", eds ? "" : "draw state built into each pipeline: no pipeline prewarm, more pipelines");
 }
 
+// ---- helpers for the image tests ----
+static void img_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags asp, VkImageLayout from) {   // to GENERAL, ordered after everything before
+    VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .oldLayout = from, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = img,
+        .subresourceRange = { asp, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+}
+static void all_barrier(VkCommandBuffer cb) { barrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT); }
+static int fmt_has(VkFormat f, VkFormatFeatureFlags want) { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(s_pd, f, &fp); return (fp.optimalTilingFeatures & want) == want; }
+
+// ---- depth / stencil copy drawn (nvn_vk.c zcopy_draw, its own shaders: overlay/zcopy_*): a 16x16 source scaled to 8x8 ----
+static void t_depth_copy(void) {
+    const char *N = "depth-copy"; enum { S = 16, D = 8 };
+    VkFormat f = VK_FORMAT_UNDEFINED; static const VkFormat cand[2] = { VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT };
+    for (int i = 0; i < 2 && !f; i++) if (fmt_has(cand[i], VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) f = cand[i];
+    if (!f) { R(SKIP, N, "no depth / stencil format that can be both sampled and drawn into: the engine blits such copies"); return; }
+    int d24 = f == VK_FORMAT_D24_UNORM_S8_UINT;
+    VkImage si = VK_NULL_HANDLE, di = VK_NULL_HANDLE; VkDeviceMemory sm = VK_NULL_HANDLE, dm = VK_NULL_HANDLE; VkImageView sdv = VK_NULL_HANDLE, ssv = VK_NULL_HANDLE, dv = VK_NULL_HANDLE;
+    VkRenderPass rp = VK_NULL_HANDLE; VkFramebuffer fb = VK_NULL_HANDLE; VkSampler smp = VK_NULL_HANDLE; VkDescriptorSetLayout dsl = VK_NULL_HANDLE; VkPipelineLayout pl = VK_NULL_HANDLE;
+    VkDescriptorPool dp = VK_NULL_HANDLE; VkShaderModule vm = VK_NULL_HANDLE, fdm = VK_NULL_HANDLE, fsm = VK_NULL_HANDLE; VkPipeline pd = VK_NULL_HANDLE, ps = VK_NULL_HANDLE;
+    hbuf up = { 0 }, rb = { 0 }; VkResult r;
+    g_step = "making the images";
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f, .extent = { S, S, 1 }, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+    if (vkCreateImage(s_dev, &ii, NULL, &si) || !(sm = image_mem(si))) { R(FAIL, N, "the source depth / stencil texture could not be made"); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    ii.extent = (VkExtent3D){ D, D, 1 }; ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (vkCreateImage(s_dev, &ii, NULL, &di) || !(dm = image_mem(di))) { R(FAIL, N, "the destination depth / stencil target could not be made"); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = si, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = f, .subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 } };
+    if ((r = vkCreateImageView(s_dev, &vi, NULL, &sdv))) { R(FAIL, N, "a depth view for sampling was refused (%d)", r); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+    if ((r = vkCreateImageView(s_dev, &vi, NULL, &ssv))) { R(FAIL, N, "a stencil view for sampling was refused (%d)", r); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    vi.image = di; vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT; vkCreateImageView(s_dev, &vi, NULL, &dv);
+    {   // the engine's pass: depth / stencil attachment only, GENERAL (cleared here: in the engine it loads, the target's contents being the game's)
+        VkAttachmentDescription a = { 0, f, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
+                                      VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL };
+        VkAttachmentReference dr = { 0, VK_IMAGE_LAYOUT_GENERAL };
+        VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .pDepthStencilAttachment = &dr };
+        VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &a, .subpassCount = 1, .pSubpasses = &sp };
+        if ((r = vkCreateRenderPass(s_dev, &rci, NULL, &rp))) { R(FAIL, N, "the depth-only render pass was refused (%d)", r); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+        VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 1, .pAttachments = &dv, .width = D, .height = D, .layers = 1 };
+        if ((r = vkCreateFramebuffer(s_dev, &fi, NULL, &fb))) { R(FAIL, N, "the framebuffer was refused (%d)", r); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    }
+    VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+    VkDescriptorSetLayoutBinding lb[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL }, { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };
+    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = lb };
+    VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
+    VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
+    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &dps };
+    if (vkCreateSampler(s_dev, &sci, NULL, &smp) || vkCreateDescriptorSetLayout(s_dev, &dli, NULL, &dsl) || vkCreateDescriptorPool(s_dev, &dpi, NULL, &dp)) { R(FAIL, N, "sampler / descriptor setup"); goto out; }
+    VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+    if (vkCreatePipelineLayout(s_dev, &pli, NULL, &pl)) { R(FAIL, N, "pipeline layout"); goto out; }
+    VkDescriptorSet set; VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dp, .descriptorSetCount = 1, .pSetLayouts = &dsl };
+    if (vkAllocateDescriptorSets(s_dev, &dai, &set)) { R(FAIL, N, "descriptor set"); goto out; }
+    VkDescriptorImageInfo dii[2] = { { smp, sdv, VK_IMAGE_LAYOUT_GENERAL }, { smp, ssv, VK_IMAGE_LAYOUT_GENERAL } };
+    VkWriteDescriptorSet wr[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0] },
+                                   { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1] } };
+    vkUpdateDescriptorSets(s_dev, 2, wr, 0, NULL);
+    g_step = "building the copy's pipelines";
+    VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof zcopy_vert_spv, .pCode = zcopy_vert_spv };
+    vkCreateShaderModule(s_dev, &mci, NULL, &vm); mci.codeSize = sizeof zcopy_d_frag_spv; mci.pCode = zcopy_d_frag_spv; vkCreateShaderModule(s_dev, &mci, NULL, &fdm);
+    mci.codeSize = sizeof zcopy_s_frag_spv; mci.pCode = zcopy_s_frag_spv; vkCreateShaderModule(s_dev, &mci, NULL, &fsm);
+    if (!vm || !fdm || !fsm) { R(FAIL, N, "the copy's shaders were refused"); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    for (int k = 0; k < 2; k++) {   // as nvn_vk.c zc_pipe
+        VkPipelineShaderStageCreateInfo sg[2] = { { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vm, .pName = "main" },
+                                                  { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = k ? fsm : fdm, .pName = "main" } };
+        VkPipelineVertexInputStateCreateInfo vis = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+        VkPipelineViewportStateCreateInfo vp = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
+        VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1 };
+        VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+        VkStencilOpState so = { VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS, 0xff, 0, 0 };
+        VkPipelineDepthStencilStateCreateInfo dss = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = !k, .depthWriteEnable = !k,
+            .depthCompareOp = VK_COMPARE_OP_ALWAYS, .stencilTestEnable = VK_TRUE, .front = so, .back = so, .maxDepthBounds = 1 };
+        VkPipelineColorBlendStateCreateInfo cbs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        VkDynamicState dyn[4] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE };
+        VkPipelineDynamicStateCreateInfo dy = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 4, .pDynamicStates = dyn };
+        VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = sg, .pVertexInputState = &vis, .pInputAssemblyState = &ia,
+            .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &dss, .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = pl, .renderPass = rp };
+        if ((r = vkCreateGraphicsPipelines(s_dev, VK_NULL_HANDLE, 1, &gi, NULL, k ? &ps : &pd))) { R(FAIL, N, "the copy's %s pipeline was refused (%d)", k ? "stencil" : "depth", r); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    }
+    // the source: depth (x + y * 16 + 1) / 300, stencil (x * 13 + y * 7 + 5) & 255
+    if (hbuf_make(&up, S * S * 4 + S * S, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0 ||
+        hbuf_make(&rb, D * D * 4 + D * D, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0) { R(FAIL, N, "buffers"); goto out; }
+    for (int y = 0; y < S; y++) for (int x = 0; x < S; x++) {
+        double v = (x + y * S + 1) / 300.0; uint32_t w;
+        if (d24) w = (uint32_t)(v * 16777215.0 + 0.5); else { float fv = (float)v; memcpy(&w, &fv, 4); }
+        ((uint32_t *)up.p)[y * S + x] = w; ((uint8_t *)up.p)[S * S * 4 + y * S + x] = (uint8_t)((x * 13 + y * 7 + 5) & 255); }
+    hbuf_sync(&up, 1); memset(rb.p, 0xcd, D * D * 5); hbuf_sync(&rb, 1);
+    g_step = "drawing the copy";
+    VkCommandBuffer cb = cb_begin();
+    img_barrier(cb, si, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+    img_barrier(cb, di, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+    VkBufferImageCopy bc[2] = { { .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, .imageExtent = { S, S, 1 } },
+                                { .bufferOffset = S * S * 4, .imageSubresource = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 }, .imageExtent = { S, S, 1 } } };
+    vkCmdCopyBufferToImage(cb, up.b, si, VK_IMAGE_LAYOUT_GENERAL, 2, bc);
+    all_barrier(cb);
+    VkClearValue cv; memset(&cv, 0, sizeof cv); cv.depthStencil.depth = 1.0f;
+    VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = { { 0, 0 }, { D, D } }, .clearValueCount = 1, .pClearValues = &cv };
+    vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport v = { 0, 0, D, D, 0, 1 }; VkRect2D sc = { { 0, 0 }, { D, D } };
+    vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &set, 0, NULL);
+    struct { float m[4]; int32_t lim[4]; } pc = { { (float)S / D, (float)S / D, 0, 0 }, { S - 1, S - 1, 0, 0 } };
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pd);
+    vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff); vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc); vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ps); vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    for (int bit = 0; bit < 8; bit++) { pc.lim[2] = bit; vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 1u << bit);
+        vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc); vkCmdDraw(cb, 3, 1, 0, 0); }
+    vkCmdEndRenderPass(cb);
+    all_barrier(cb);
+    VkBufferImageCopy rc[2] = { { .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, .imageExtent = { D, D, 1 } },
+                                { .bufferOffset = D * D * 4, .imageSubresource = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 }, .imageExtent = { D, D, 1 } } };
+    vkCmdCopyImageToBuffer(cb, di, VK_IMAGE_LAYOUT_GENERAL, rb.b, 2, rc);
+    barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+    if ((r = cb_submit(cb))) { R(FAIL, N, "submission failed (%d)", r); FIX(N, "DM_VK_ZCOPY=0"); goto out; }
+    hbuf_sync(&rb, 0);
+    {   // each destination texel holds the source's at (2x + 1, 2y + 1): nearest, as the shader's floor(pixel centre * 2)
+        int bad_d = 0, bad_s = 0; uint32_t got_d = 0, want_d = 0; unsigned got_s = 0, want_s = 0;
+        for (int y = 0; y < D; y++) for (int x = 0; x < D; x++) {
+            int sx = 2 * x + 1, sy = 2 * y + 1; uint32_t w = ((uint32_t *)up.p)[sy * S + sx], g = ((uint32_t *)rb.p)[y * D + x];
+            int ok = d24 ? (int)((g & 0xffffff) - w) >= -2 && (int)((g & 0xffffff) - w) <= 2 : g == w;
+            if (!ok && !bad_d++) { got_d = d24 ? g & 0xffffff : g; want_d = w; }
+            unsigned ws = (unsigned)((sx * 13 + sy * 7 + 5) & 255), gs = ((uint8_t *)rb.p)[D * D * 4 + y * D + x];
+            if (gs != ws && !bad_s++) { got_s = gs; want_s = ws; } }
+        if (!bad_d && !bad_s) R(PASS, N, "a scaled copy into %s drawn with the depth from the shader and the stencil bit by bit reads back right: the engine's way for depth copies a blit cannot take works here", d24 ? "D24S8" : "D32S8");
+        else { R(FAIL, N, "the drawn copy into %s is wrong: depth %d of %d texels (first %#x, wanted %#x), stencil %d (first %u, wanted %u): such copies go back to the blit", d24 ? "D24S8" : "D32S8",
+                 bad_d, D * D, got_d, want_d, bad_s, got_s, want_s); FIX(N, "DM_VK_ZCOPY=0"); }
+    }
+out:
+    if (pd) vkDestroyPipeline(s_dev, pd, NULL); if (ps) vkDestroyPipeline(s_dev, ps, NULL);
+    if (vm) vkDestroyShaderModule(s_dev, vm, NULL); if (fdm) vkDestroyShaderModule(s_dev, fdm, NULL); if (fsm) vkDestroyShaderModule(s_dev, fsm, NULL);
+    if (pl) vkDestroyPipelineLayout(s_dev, pl, NULL); if (dp) vkDestroyDescriptorPool(s_dev, dp, NULL); if (dsl) vkDestroyDescriptorSetLayout(s_dev, dsl, NULL); if (smp) vkDestroySampler(s_dev, smp, NULL);
+    if (fb) vkDestroyFramebuffer(s_dev, fb, NULL); if (rp) vkDestroyRenderPass(s_dev, rp, NULL);
+    if (sdv) vkDestroyImageView(s_dev, sdv, NULL); if (ssv) vkDestroyImageView(s_dev, ssv, NULL); if (dv) vkDestroyImageView(s_dev, dv, NULL);
+    if (si) vkDestroyImage(s_dev, si, NULL); if (di) vkDestroyImage(s_dev, di, NULL); if (sm) vkFreeMemory(s_dev, sm, NULL); if (dm) vkFreeMemory(s_dev, dm, NULL);
+    hbuf_free(&up); hbuf_free(&rb);
+}
+
+// ---- integer textures through a view of another class (nvn_vk.c fmt_as_class): R32_UINT as R32_SFLOAT, R16G16B16A16_UINT as _SINT ----
+static void t_int_view(void) {
+    const char *N = "int-view"; enum { W = 4 };
+    if (!fmt_has(VK_FORMAT_R32_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !fmt_has(VK_FORMAT_R32_SFLOAT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ||
+        !fmt_has(VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !fmt_has(VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { R(SKIP, N, "the formats cannot be sampled here"); return; }
+    VkImage im[2] = { 0 }; VkDeviceMemory mem[2] = { 0 }; VkImageView vw[2] = { 0 }; VkSampler smp = VK_NULL_HANDLE; comp c = { 0 }; hbuf up = { 0 }, out = { 0 }; VkResult r;
+    static const VkFormat own[2] = { VK_FORMAT_R32_UINT, VK_FORMAT_R16G16B16A16_UINT }, as[2] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R16G16B16A16_SINT };
+    for (int k = 0; k < 2; k++) {
+        VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, .imageType = VK_IMAGE_TYPE_2D, .format = own[k], .extent = { W, 1, 1 },
+            .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+        if (vkCreateImage(s_dev, &ii, NULL, &im[k]) || !(mem[k] = image_mem(im[k]))) { R(FAIL, N, "a MUTABLE_FORMAT integer texture could not be made"); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = im[k], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = as[k], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if ((r = vkCreateImageView(s_dev, &vi, NULL, &vw[k]))) { R(FAIL, N, "a view in another class was refused (%d)", r); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
+    }
+    VkSamplerCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+    if (vkCreateSampler(s_dev, &si, NULL, &smp)) { R(FAIL, N, "sampler"); goto out; }
+    VkDescriptorType ts[3] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER };
+    if ((r = comp_make(&c, spv_intview, sizeof spv_intview / 4, ts, 3, 0))) { R(FAIL, N, "the test shader did not build (%d)", r); goto out; }
+    static const uint32_t f32[W] = { 0x3f800000u, 0xc2c80000u, 0x12345678u, 0x40490fdbu };   // 1, -100, a small normal, pi: plain floats, so the texture unit has nothing to flush
+    static const uint16_t i16[W][4] = { { 1, 0x7fff, 0x8000, 0xffff }, { 0, 2, 0xfffe, 0x1234 }, { 0x8001, 0x7ffe, 3, 0xabcd }, { 0xffff, 0, 0x4000, 0xc000 } };
+    if (hbuf_make(&up, 256, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0 ||
+        hbuf_make(&out, 20 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0) < 0) { R(FAIL, N, "buffers"); goto out; }
+    memcpy(up.p, f32, sizeof f32); memcpy((uint8_t *)up.p + 64, i16, sizeof i16); hbuf_sync(&up, 1); memset(out.p, 0xcd, 80); hbuf_sync(&out, 1);
+    VkDescriptorImageInfo dii[2] = { { smp, vw[0], VK_IMAGE_LAYOUT_GENERAL }, { smp, vw[1], VK_IMAGE_LAYOUT_GENERAL } };
+    VkWriteDescriptorSet w[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c.ds, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0] },
+                                  { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c.ds, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1] } };
+    vkUpdateDescriptorSets(s_dev, 2, w, 0, NULL); ds_buffer(&c, 2, out.b);
+    g_step = "reading the views";
+    VkCommandBuffer cb = cb_begin();
+    for (int k = 0; k < 2; k++) img_barrier(cb, im[k], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+    VkBufferImageCopy bc0 = { .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { W, 1, 1 } }, bc1 = bc0; bc1.bufferOffset = 64;
+    vkCmdCopyBufferToImage(cb, up.b, im[0], VK_IMAGE_LAYOUT_GENERAL, 1, &bc0); vkCmdCopyBufferToImage(cb, up.b, im[1], VK_IMAGE_LAYOUT_GENERAL, 1, &bc1);
+    all_barrier(cb);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c.pipe); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.ds, 0, NULL);
+    vkCmdDispatch(cb, 1, 1, 1); barrier_host(cb);
+    if ((r = cb_submit(cb))) { R(FAIL, N, "submission failed (%d)", r); FIX(N, "DM_VK_INT_TEX=keep"); goto out; }
+    hbuf_sync(&out, 0);
+    {   const uint32_t *o = out.p; int bad32 = 0, bad16 = 0; char why[160] = "";
+        for (int i = 0; i < W; i++) if (o[i] != f32[i] && !bad32++) snprintf(why, sizeof why, "R32_UINT as float: %#x read %#x", f32[i], o[i]);
+        for (int i = 0; i < W; i++) for (int ch = 0; ch < 4; ch++) { uint32_t want = (uint32_t)(int32_t)(int16_t)i16[i][ch], got = o[4 + i * 4 + ch];
+            if (got != want && !bad16++ && !why[0]) snprintf(why, sizeof why, "R16G16B16A16_UINT as SINT: %#x read %#x", want, got); }
+        if (!bad32 && !bad16) R(PASS, N, "integer textures read through float / other-signedness views give their own bits: the engine's fix for shaders that read them so is right here");
+        else { R(FAIL, N, "%d of %d 32-bit and %d of %d 16-bit reads wrong (%s): such textures are read in their own format as before", bad32, W, bad16, W * 4, why); FIX(N, "DM_VK_INT_TEX=keep"); }
+    }
+out:
+    comp_free(&c); hbuf_free(&up); hbuf_free(&out); if (smp) vkDestroySampler(s_dev, smp, NULL);
+    for (int k = 0; k < 2; k++) { if (vw[k]) vkDestroyImageView(s_dev, vw[k], NULL); if (im[k]) vkDestroyImage(s_dev, im[k], NULL); if (mem[k]) vkFreeMemory(s_dev, mem[k], NULL); }
+}
+
+// ---- the test list. crash: the setting that keeps the game off the path a test crashed the driver on (the games' driver check applies it) ----
 typedef void (*test_fn)(void);
-void probe_selftests(void) {
-    O("\n== Galar Native GPU self-tests (synthetic data: no game files)\n");
-    memset(g_count, 0, sizeof g_count);
-    meminfo();
-    if (st_device()) return;
-    O("  GPU %s, Vulkan %u.%u.%u, driver version %#x, vendor %#x device %#x\n", s_props.deviceName, VK_API_VERSION_MAJOR(s_props.apiVersion), VK_API_VERSION_MINOR(s_props.apiVersion),
-      VK_API_VERSION_PATCH(s_props.apiVersion), s_props.driverVersion, s_props.vendorID, s_props.deviceID);
-    static const struct { test_fn f; const char *n; } T[] = { { t_requirements, "engine-requirements" }, { t_floatctl, "float-controls" }, { t_shmath, "shader-maths" }, { t_barrier, "end-of-submit-barrier" }, { t_reinterp, "reinterpreted-format" },
-                                                            { t_fallback, "fallback-draw" }, { t_dmabuf, "dmabuf-heap" }, { t_bc, "bc-textures" },
-                                                            { t_3d_slices, "3d-slices" }, { t_3d_layered, "3d-layered" } };   // (3D last: it crashed Xclipse 540's driver)
-    size_t nt = sizeof T / sizeof *T, i;
+static const struct { test_fn f; const char *n, *crash; } T[] = {
+    { t_requirements, "engine-requirements", NULL }, { t_floatctl, "float-controls", NULL }, { t_shmath, "shader-maths", NULL }, { t_barrier, "end-of-submit-barrier", NULL },
+    { t_reinterp, "reinterpreted-format", NULL }, { t_fallback, "fallback-draw", NULL }, { t_dmabuf, "dmabuf-heap", "DM_VK_DMAHEAP=0" }, { t_bc, "bc-textures", "DM_VK_BC_GPU=0" },
+    { t_depth_copy, "depth-copy", "DM_VK_ZCOPY=0" }, { t_int_view, "int-view", "DM_VK_INT_TEX=keep" },
+    { t_3d_slices, "3d-slices", NULL }, { t_3d_layered, "3d-layered", "DM_VK_NO_LAYERED_3D=1" } };   // (3D last: it crashed Xclipse 540's driver)
+static int skipped(const char *skip, const char *name) {   // skip: names separated by commas
+    size_t n = strlen(name);
+    for (const char *p = skip; p && (p = strstr(p, name)); p += n) if ((p == skip || p[-1] == ',') && (p[n] == ',' || !p[n])) return 1;
+    return 0;
+}
+static int s_dev_ok = -1;
+static void run_tests(const char *skip) {
+    size_t nt = sizeof T / sizeof *T; volatile size_t i;
     guard(1);
     for (i = 0; i < nt; i++) {
-        if (sigsetjmp(g_jb, 1)) { const char *st = g_step; R(FAIL, T[i].n, "the driver crashed during this test (signal %d%s%s): the game would close at the same point", (int)g_sig, st ? ", while " : "", st ? st : ""); break; }
+        if (skipped(skip, T[i].n)) { R(SKIP, T[i].n, "left out: it took the driver down in an earlier attempt"); continue; }
+        if (sigsetjmp(g_jb, 1)) { const char *st = g_step; R(FAIL, T[i].n, "the driver crashed during this test (signal %d%s%s): the game would close at the same point", (int)g_sig, st ? ", while " : "", st ? st : "");
+            if (T[i].crash) FIX(T[i].n, T[i].crash);
+            break; }
         g_step = NULL;
+        J("begin %s%s%s\n", T[i].n, T[i].crash ? " " : "", T[i].crash ? T[i].crash : "");
         T[i].f();
     }
     guard(0);
     for (size_t j = i + 1; j < nt && i < nt; j++) R(SKIP, T[j].n, "not run: the driver crashed in an earlier test");
     O("Self-tests: %d pass, %d warn, %d fail, %d skip\n", g_count[PASS], g_count[WARN], g_count[FAIL], g_count[SKIP]);
+}
+void probe_selftests(void) {   // the probe app: the system's driver, every test
+    O("\n== Galar Native GPU self-tests (synthetic data: no game files)\n");
+    memset(g_count, 0, sizeof g_count);
+    meminfo();
+    if (s_dev_ok < 0) s_dev_ok = !st_device();
+    if (!s_dev_ok) return;
+    O("  GPU %s, Vulkan %u.%u.%u, driver version %#x, vendor %#x device %#x\n", s_props.deviceName, VK_API_VERSION_MAJOR(s_props.apiVersion), VK_API_VERSION_MINOR(s_props.apiVersion),
+      VK_API_VERSION_PATCH(s_props.apiVersion), s_props.driverVersion, s_props.vendorID, s_props.deviceID);
+    run_tests(NULL);
     // the device stays alive for the rest of the probe: the BC layer keeps its objects for the process, as in the engine
+}
+// The games' driver check (dprobe_jni.c), in a process of its own: journal_fd = the file the app reads, driver = the game's DM_VK_DRIVER (NULL / "": the system's),
+//   skip = tests that took the driver down in an earlier attempt. 0: ran to the end ("done" in the journal)
+int dprobe_run(int journal_fd, const char *driver, const char *skip) {
+    g_jfd = journal_fd; s_driver = driver;
+    memset(g_count, 0, sizeof g_count);
+    J("probe 1\n");
+    if (st_device()) { J("nodevice\n"); return -1; }
+    J("gpu %#x %#x %#x %u.%u.%u %s\n", s_props.vendorID, s_props.deviceID, s_props.driverVersion, VK_API_VERSION_MAJOR(s_props.apiVersion), VK_API_VERSION_MINOR(s_props.apiVersion),
+      VK_API_VERSION_PATCH(s_props.apiVersion), s_props.deviceName);
+    run_tests(skip);
+    J("done %d %d %d %d\n", g_count[PASS], g_count[WARN], g_count[FAIL], g_count[SKIP]);
+    return 0;
 }

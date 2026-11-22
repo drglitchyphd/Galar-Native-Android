@@ -1296,6 +1296,10 @@ static void *log_mirror(void *p) {
         if (!n) { char t0[64]; thermal_text(t0, sizeof t0); }   // looks the thermal functions up
         graphics_auto(); pin_update();
         if (n % 12 == 6) mem_by();
+        // DM_TEST_CRASH=<seconds> (a test of the crash path only: crash.c's record, Android's tombstone, the debug report offered at the next start): a native crash
+        //   that many seconds after the start. A release app cannot be signalled from adb, so this is the way to make one on purpose. Unset: nothing
+        { static int at = -2; if (at == -2) { const char *e = getenv("DM_TEST_CRASH"); at = e && atoi(e) > 0 ? atoi(e) : -1; }
+          if (at > 0 && (n + 1) * 5 >= at) { fprintf(stderr, "[RED] DM_TEST_CRASH: crashing on purpose now (a test of the crash path)\n"); fflush(stderr); *(volatile int *)16 = 1; } }
         if (n % 6 == 0) fprintf(stderr, "[mem] app %ld MB resident (%ld MB swapped), phone %ld MB available of %ld MB; heat %s\n", kb_of("/proc/self/status", "VmRSS:") / 1024,
                                 kb_of("/proc/self/status", "VmSwap:") / 1024, kb_of("/proc/meminfo", "MemAvailable:") / 1024, kb_of("/proc/meminfo", "MemTotal:") / 1024, thermal_text(th, sizeof th));
         // A freeze report: no frame shown for two of these 5 s looks (5 to 10 s) while the game is in the foreground with its window: what each guest thread waits on is
@@ -1308,6 +1312,12 @@ static void *log_mirror(void *p) {
               fprintf(stderr, "[RED] freeze: no frame shown for 10 s in the foreground (frame %llu); what each thread waits on follows\n", (unsigned long long)f); crash_dump_now("no frame for 10 s"); } }
           else still = 0;
           lastf = f; }
+        // what the resident memory is (cheap: /proc/self/status, no smaps walk that would stall the game's page faults): anonymous (the game's heaps, the driver's
+        //   own allocations), file-backed (libraries, mapped game files), shared (buffers shared with the GPU driver), and the device memory this engine holds.
+        //   A run Android ends for memory leaves these lines as the record of what grew (DebugBundle.java's report: logs/log.prev.txt)
+        if (n % 6 == 0) { extern long nvn_vk_device_mb(void) __attribute__((weak));
+            fprintf(stderr, "[mem-by] anonymous %ld MB, files %ld MB, shared %ld MB, engine GPU blocks %ld MB, peak resident %ld MB\n", kb_of("/proc/self/status", "RssAnon:") / 1024,
+                    kb_of("/proc/self/status", "RssFile:") / 1024, kb_of("/proc/self/status", "RssShmem:") / 1024, nvn_vk_device_mb ? nvn_vk_device_mb() : -1, kb_of("/proc/self/status", "VmHWM:") / 1024); }
         { static char d[256]; if (!d[0]) dl_name(d, sizeof d, "log"); copy_file(src, d); }
     }
     return NULL;
@@ -1394,6 +1404,8 @@ static void host_start(void) {
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
     snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p);
+    // the driver check's settings for this driver (DriverCheck.java, the app's self-tests before Play): under env.txt, over the phone profile; DM_DRIVER_CHECK=0: not read
+    if (!(getenv("DM_DRIVER_CHECK") && !atoi(getenv("DM_DRIVER_CHECK")))) { snprintf(p, sizeof p, "%s/driver-check.env", g_files); env_file(p); }
     // The allocator's cache of large blocks, made big enough for the GPU driver's: on a Galaxy S25+ (Adreno 830) a third of the game thread's time went to the driver
     //   mapping and unmapping memory, calloc → mmap and free → munmap in every vkCmdBeginRendering (about 250 a frame) and in every command pool reset, because its
     //   blocks were larger than scudo's secondary cache keeps (simpleperf, 2026-11-09). Cached, they are reused; the pages go back to the system on Android's own

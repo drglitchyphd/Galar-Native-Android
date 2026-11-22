@@ -73,6 +73,8 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 // ================= Device =================
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperties g_memp;
+#include "vk_quirks.h"   // the unified driver layer's table: every per-GPU workaround's default, from one description of the GPU
+static gpu_id g_gpuid = { .driver_id = -1 };
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
 static int g_mclamp;   // MIRROR_CLAMP_TO_EDGE samplers allowed (VK_KHR_sampler_mirror_clamp_to_edge, or Vulkan 1.2's samplerMirrorClampToEdge); else wrapm falls back
 static int g_inst_xmemcaps;   // VK_KHR_external_memory_capabilities enabled on the instance
@@ -186,6 +188,7 @@ static int g_arm_beta;           // ... a beta build of it (driverInfo "v1.r49p1
 static int g_clampzero; static _Atomic int g_clampzero_n;   // shaders get spv_clamp_zero (Arm erratum 3779215: mtl_init decides); how many it changed
 static int g_fmz; static _Atomic int g_fmz_n;   // shaders get spv_fmz (every multiply by 0 gives 0, as Maxwell's FMZ: DM_VK_FMZ=1, a test); how many it changed
 static unsigned g_exact; static _Atomic int g_exact_n;
+static int g_qlod; static _Atomic int g_qlod_n;   // shaders get spv_query_lod (textureQueryLod's level clamped: mtl_init decides)
 static int g_initloc; static _Atomic int g_initloc_n;   // shaders get spv_init_locals (the translator's registers start at zero, as Mesa's compilers treat undefined values: mtl_init decides)   // shaders get spv_exact_math (Maxwell's log2 / exp2 / inversesqrt / sqrt / F2I at their edge cases: mtl_init decides)
 static int g_nanmm; static _Atomic int g_nanmm_n;           // shaders get spv_nan_minmax (min / max / saturate drop NaN as on Maxwell: mtl_init decides; 2: spv_nan_select too); how many it changed
 static int g_dualsrc = 1;        // the device blends with a second shader output (dualSrcBlend): Arm's own Mali driver has none (r44p1)
@@ -409,13 +412,22 @@ void mtl_init(void) {
     }   // to read whether render targets stay compressed
     if (getenv("DM_VK_YFLIP")) g_yflip = atoi(getenv("DM_VK_YFLIP")) != 0;   // (tries the route on a driver that has maintenance1)
     if (g_yflip) VLOG("no flipped viewports (Vulkan 1.0 without VK_KHR_maintenance1): the upper-left origin is made in the vertex shaders");
+    // the GPU described once for the quirk table (vk_quirks.h); the driver ID and Arm's release are added below, where the driver properties are read
+    g_gpuid.vendor = g_props.vendorID; g_gpuid.driver_version = g_props.driverVersion; snprintf(g_gpuid.name, sizeof g_gpuid.name, "%s", g_props.deviceName);
+    g_gpuid.custom = getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"); g_gpuid.api = g_props.apiVersion;
+    // the game, from its profile (game_profile.h, generated from game.tsv): the app (key port → DM_PORT_*, named in the log) and the game's own per-GPU choices (key
+    //   engine_quirks → DM_GAME_ENG_*, one gpu_id.eng bit each, mapped by name here so the order of game.py's list cannot move them; the table's rules read only these bits)
+    g_gpuid.port = DM_PORT_ARCEUS ? PORT_ARCEUS : DM_PORT_PALDEA ? PORT_PALDEA : PORT_GALAR;
+    g_gpuid.eng = (DM_GAME_ENG_QC11_NO_EDS ? ENG_QC11_NO_EDS : 0u) | (DM_GAME_ENG_ASYNC_PSO_OFF ? ENG_ASYNC_PSO_OFF : 0u) | (DM_GAME_ENG_DRIVER_SELFTESTS ? ENG_DRIVER_SELFTESTS : 0u)
+                | (DM_GAME_ENG_NVN_ASYNC_NEVER ? ENG_NVN_ASYNC_NEVER : 0u);
+    { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); g_gpuid.ram_kb = kb; }
     if (getenv("DM_VK_NO_HOST_IMPORT")) g_host_import = 0;
     // Imported host memory pins the game's pools (about 3 GB) for every submission. Samsung's Xclipse driver of the late-2026 One UI update refuses that a few frames into play
     // (vkQueueSubmit: VK_ERROR_OUT_OF_HOST_MEMORY with a gigabyte free, #39), so on Xclipse the driver's own memory backs the pools instead (as on Mali); elsewhere a
     // submission that fails while pools are imported leaves a marker (host_import_failed, next to the pipeline cache) and the next start does the same. DM_VK_HOST_IMPORT=1 forces import.
     // Decided before the fd route below: deciding it after left Xclipse without the fd route, on mirrored pools (every pool twice in memory, swapping, multi-second stalls: #41)
     if (g_host_import && !getenv("DM_VK_HOST_IMPORT")) {
-        const char *why = g_props.vendorID == 0x144D ? "Samsung Xclipse" : NULL;
+        const char *why = quirk_note(Q_HOST_IMPORT_OFF, quirk_default(Q_HOST_IMPORT_OFF, &g_gpuid), 0) ? "Samsung Xclipse" : NULL;
         // (never on Adreno, 0x5143: its fallback, moving the driver's mappings, is the route that crashed it on area changes; one failed submission must not switch it for good)
         if (!why && g_props.vendorID != 0x5143 && host_import_mark(0)) why = "a submission failed with it last time";
         if (why) { g_host_import = 0; VLOG("memory pools: host import off (%s): the driver's own memory backs the pools", why); }
@@ -462,7 +474,7 @@ void mtl_init(void) {
         // Samsung Xclipse without export (its export crashed the driver: Xclipse 530 / 540, #45 / #57 / #59) took the mremap route, where its driver handed out
         //   mappings the pools had taken and the game crashed on scene changes: it takes the heap route too
         {   const char *he = getenv("DM_VK_DMAHEAP"), *sh = getenv("DM_VK_POOL_SHADOW");
-            int want = he ? atoi(he) : (!g_fdmap && !heap_crashed && (g_props.vendorID == 0x13B5 || g_props.vendorID == 0x144D));
+            int want = he ? atoi(he) : (!g_fdmap && !heap_crashed && quirk_default(Q_DMAHEAP, &g_gpuid)); quirk_note(Q_DMAHEAP, want, he != NULL);
             if (sh && atoi(sh)) want = 0;   // (a forced mirror leaves it out too)
             VkPhysicalDeviceExternalBufferInfo xi = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO, .usage = BUF_ALL, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
             VkExternalBufferProperties xp = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES };
@@ -479,7 +491,7 @@ void mtl_init(void) {
                 else VLOG("memory pools: no dma-buf heap could be opened (errno %d)", errno);
             } else if (want) VLOG("memory pools: the driver does not import dma-buf buffers (features %#x)", (unsigned)xp.externalMemoryProperties.externalMemoryFeatures);
         }
-        if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && g_props.vendorID == 0x13B5) { g_fdtype = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; g_fdmap = -1;
+        if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && quirk_note(Q_DMABUF_TRY, quirk_default(Q_DMABUF_TRY, &g_gpuid), 0)) { g_fdtype = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; g_fdmap = -1;
             VLOG("memory pools: Mali lists no exportable buffer: the dma-buf route tried anyway (it falls back by itself)"); }
         if ((g_heapmap || g_fdmap) && dev10) dext[ndext++] = "VK_KHR_external_memory";   // (core from 1.1)
         if (g_heapmap) { dext[ndext++] = "VK_KHR_external_memory_fd"; dext[ndext++] = "VK_EXT_external_memory_dma_buf"; }
@@ -522,19 +534,27 @@ void mtl_init(void) {
     int dynren = old ? x_dynren && fdr.dynamicRendering : f13.dynamicRendering, timeline = old11 ? fts.timelineSemaphore : f12.timelineSemaphore;
     int eds = old ? x_eds && fed.extendedDynamicState : 1;
     if (!timeline && g_tlsem) { g_tlsem = 0; VLOG("timeline semaphores listed but not supported: a fence for each submission instead"); }
-    // Adreno: render passes by default (Galar Native #205). Its vkCmdBeginRendering callocs a large block at every pass begin (freed again when the command pool is
-    //   reset): on a Galaxy S25+ that was a third of the replay's CPU time in Sword / Shield, and with render passes and their framebuffers kept (fb_cache.h, FBC_N
-    //   1024) the replay went from 27.5 to 17.3 ms a frame. DM_VK_NO_DYNREN=0 / 1 decides on any GPU; Mali and the rest as before
-    { const char *e = getenv("DM_VK_NO_DYNREN"); int no = e ? atoi(e) != 0 : g_props.vendorID == 0x5143;
+    // Adreno: render passes by default (Galar Native #205), for every game (vk_quirks.h Q_NO_DYNREN; Legends: Arceus too since its v0.45). Its vkCmdBeginRendering
+    //   callocs a large block at every pass begin (freed again when the command pool is reset): on a Galaxy S25+ that was a third of the replay's CPU time in Sword /
+    //   Shield, and with render passes and their framebuffers kept (fb_cache.h, FBC_N 1024) the replay went from 27.5 to 17.3 ms a frame. DM_VK_NO_DYNREN=0 / 1 decides
+    //   on any GPU; Mali and the rest as before
+    { const char *e = getenv("DM_VK_NO_DYNREN"); int no = quirk_note(Q_NO_DYNREN, e ? atoi(e) != 0 : quirk_default(Q_NO_DYNREN, &g_gpuid), e != NULL);
       g_dynren = dynren && !no; }
     // Qualcomm's Vulkan 1.1 drivers (Adreno 6xx / 710 stock, API 1.1.x) misread vertex strides passed per draw (vkCmdBindVertexBuffers2): exploded, stretched
-    //   polygons across the view (Arceus #34, Galar #209). Built into each pipeline there unless DM_VK_NO_EDS=0. Per game (profile engine_quirks qc11_no_eds:
-    //   Legends: Arceus); Sword / Shield answered #209 with full barriers instead (old_qcom_driver) and keep per-draw state there
+    //   polygons across the view (Arceus #34, Galar #209). Built into each pipeline there unless DM_VK_NO_EDS=0. Per game (vk_quirks.h Q_NO_EDS reads the profile's
+    //   engine_quirks qc11_no_eds through gpu_id.eng: Legends: Arceus); Sword / Shield answered #209 with full barriers instead (Q_BARRIER_RELAXED, old Qualcomm
+    //   drivers) and keep per-draw state there
     const char *ne = getenv("DM_VK_NO_EDS");
-    int old_qc = DM_GAME_ENG_QC11_NO_EDS && g_props.vendorID == 0x5143 && VK_API_VERSION_MINOR(g_props.apiVersion) < 2 && VK_API_VERSION_MAJOR(g_props.apiVersion) == 1;
-    g_eds = eds && !(ne ? atoi(ne) != 0 : old_qc);
-    VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : dynren ? (g_props.vendorID == 0x5143 && !getenv("DM_VK_NO_DYNREN") ? "render passes (Adreno's default: DM_VK_NO_DYNREN=0 for dynamic rendering)" : "render passes (DM_VK_NO_DYNREN)") : "render passes (the driver has no dynamic rendering)",
-         g_eds ? "set per draw (extended dynamic state)" : !eds ? "built into each pipeline (the driver has no extended dynamic state)"
+    g_eds = eds && !quirk_note(Q_NO_EDS, ne ? atoi(ne) != 0 : quirk_default(Q_NO_EDS, &g_gpuid), ne != NULL);
+    // DM_VK_BASELINE=1 (vk_quirks.h): the Vulkan 1.1 floor on any GPU, each feature's own fallback, as a phone with an old driver runs: render passes, the draw state in
+    //   each pipeline, a fence per submission. For reproducing a low-end driver's problem on a phone with a new one
+    int baseline = 0;
+    { const char *e = getenv("DM_VK_BASELINE"); if (e && atoi(e) > 0) { baseline = 1; g_dynren = 0; g_eds = 0; g_tlsem = 0;
+        VLOG("[quirk] Vulkan 1.1 baseline (DM_VK_BASELINE): render passes, draw state in each pipeline, a fence per submission, whatever this driver offers"); } }
+    g_gpuid.dynren = g_dynren;   // (Q_VIEW_QUARANTINE reads it)
+    VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : !dynren ? "render passes (the driver has no dynamic rendering)" : baseline ? "render passes (DM_VK_BASELINE)"
+         : quirk_default(Q_NO_DYNREN, &g_gpuid) && !getenv("DM_VK_NO_DYNREN") ? "render passes (Adreno's default: DM_VK_NO_DYNREN=0 for dynamic rendering)" : "render passes (DM_VK_NO_DYNREN)",
+         g_eds ? "set per draw (extended dynamic state)" : !eds ? "built into each pipeline (the driver has no extended dynamic state)" : baseline ? "built into each pipeline (DM_VK_BASELINE)"
                : ne ? "built into each pipeline (DM_VK_NO_EDS)" : "built into each pipeline (Qualcomm Vulkan 1.1 driver: per-draw vertex strides drawn wrong; DM_VK_NO_EDS=0 to try)");
     if (!fcc.depthClipControl) g_clipctl = 0;
     // custom border colours are made without a format (sampler_get), which needs customBorderColorWithoutFormat: a driver without it gets the nearest standard colour
@@ -543,7 +563,7 @@ void mtl_init(void) {
     //   uniform buffers were copied at record time (DM_VK_UBO_SNAPSHOT) and its BC textures decoded, not transcoded to ETC2 (DM_VK_BC_TRANSCODE=off): the two logs that play
     //   on v0.5x (#77, #110) have both, and every crash lacks one of them. Both from the first start there (the safe-start ladder took four crashes to reach them);
     //   env.txt still wins
-    if (g_props.vendorID == 0x13B5 && (g_props.driverVersion >> 22) < 49 && strstr(g_props.deviceName, "G615") && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) {
+    if (quirk_note(Q_G615_SAFE, quirk_default(Q_G615_SAFE, &g_gpuid), 0)) {
         int u = !getenv("DM_VK_UBO_SNAPSHOT"), b = !getenv("DM_VK_BC_TRANSCODE");
         setenv("DM_VK_UBO_SNAPSHOT", "1", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
         VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110)",
@@ -596,10 +616,10 @@ void mtl_init(void) {
         VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &fc }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (!drvp) snprintf(dp.driverName, sizeof dp.driverName, "%s", g_props.vendorID == 0x13B5 ? "Mali (no driver properties: taken as ARM's)" : "unknown");
         // Samsung's Xclipse driver too: the probe self-test (float-controls) found inf - inf not NaN without them on Xclipse 540 and 940, and every check right with them
-        const char *e = getenv("DM_VK_FLOAT_CONTROLS"); int arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : g_props.vendorID == 0x13B5;
-        int sec = drvp ? dp.driverID == VK_DRIVER_ID_SAMSUNG_PROPRIETARY : g_props.vendorID == 0x144D;
+        const char *e = getenv("DM_VK_FLOAT_CONTROLS"); g_gpuid.driver_id = drvp ? (int)dp.driverID : -1;
+        int arm = gpu_is_arm_driver(&g_gpuid), sec = gpu_is_samsung_driver(&g_gpuid);
         arm_known = 1; if (arm) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); g_arm_beta = drvp && strstr(dp.driverInfo, "bet") != NULL; }
-        g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : arm || sec);
+        g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : quirk_default(Q_FLOAT_CONTROLS, &g_gpuid));
         // The test shader below crashed a driver (#89: Mali-G57, the start ended right after this line): a start that dies there leaves the marker, and later starts on
         //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 tries again)
         int fc_crashed = g_fctl && mark_file(drv_mark("float_controls_crashed"), "", 0) && !e;
@@ -627,10 +647,12 @@ void mtl_init(void) {
     }
     // A driver without Vulkan 1.2 or the float-controls extension: Arm's own when it is ARM's vendor ID and not a driver package (PanVK reports ARM's ID too)
     if (!arm_known && g_props.vendorID == 0x13B5 && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); }
+    g_gpuid.arm_rel = g_arm_rel; g_gpuid.arm_p = g_arm_p; g_gpuid.arm_beta = g_arm_beta;   // (the quirk table's description complete from here)
+    gpu_id_log(&g_gpuid); quirk_note(Q_FLOAT_CONTROLS, g_fctl, getenv("DM_VK_FLOAT_CONTROLS") != NULL);
     // Arm erratum 3779215 (r38p1 to r49p0 and r50p0 to r51p0, fixed in r49p1 and r52p0; a beta r49p1, the G925's, is not known to have the fix): a clamp to zero of a value
     //   selected between constants compiled as a plain min or max. Shaders on those drivers get spv_clamp_zero; DM_VK_CLAMP_ZERO=0 / 1 decides on any driver
-    { int v = g_arm_rel * 100 + g_arm_p; const char *e = getenv("DM_VK_CLAMP_ZERO");
-      g_clampzero = e ? atoi(e) != 0 : g_arm_rel && ((v >= 3801 && v < 4901) || (g_arm_beta && v >= 4901 && v < 4902) || (v >= 5000 && v < 5101));
+    { const char *e = getenv("DM_VK_CLAMP_ZERO");
+      g_clampzero = quirk_note(Q_CLAMP_ZERO, e ? atoi(e) != 0 : quirk_default(Q_CLAMP_ZERO, &g_gpuid), e != NULL);
       if (g_clampzero) VLOG("shaders: a clamp to zero of a value selected between constants gets a zero the compiler cannot fold (Arm erratum 3779215%s)", e ? ", DM_VK_CLAMP_ZERO" : g_arm_beta ? ", a beta driver" : ""); }
     // NaN in min / max / saturate (spv_nan_minmax): the frame capture of a white scene on Arm's own driver (#110, Mali-G615 MC2 r44p1; #111 the G925 on r49p1 too) has
     //   every lit surface's first draw put the format's maximum in the lit scene, with float controls on; PanVK on the same GPUs draws it right. Maxwell's min / max / saturate
@@ -661,20 +683,24 @@ void mtl_init(void) {
                         g_probe & PROBE_INPUTS ? " every input from the vertex shader" : "", g_probe & PROBE_DIV ? " every division" : "", g_probe & PROBE_OUTPUT ? " what they write (±64)" : "", e);
       if (g_probe & (PROBE_MUL | PROBE_ADD | PROBE_FMA)) VLOG("shaders: DIAGNOSTIC, fragment shaders clamp every%s%s%s result (±16384)", g_probe & PROBE_MUL ? " multiply" : "",
                         g_probe & PROBE_ADD ? " add / subtract" : "", g_probe & PROBE_FMA ? " fused multiply-add" : ""); } }
-    { const char *e = getenv("DM_VK_NAN_MINMAX"); g_nanmm = e ? atoi(e) : g_arm_rel ? 2 : 0; if (g_nanmm < 0 || g_nanmm > 2) g_nanmm = 1;
+    { const char *e = getenv("DM_VK_NAN_MINMAX"); g_nanmm = e ? atoi(e) : quirk_default(Q_NAN_MINMAX, &g_gpuid); if (g_nanmm < 0 || g_nanmm > 2) g_nanmm = 1; quirk_note(Q_NAN_MINMAX, g_nanmm, e != NULL);
       if (g_nanmm) VLOG("shaders: min / max / saturate give the operand that is not NaN, as on the Switch's GPU (NMin / NMax / NClamp%s%s)", g_nanmm == 2 ? " and the rule written out with isnan" : "",
                         e ? ", DM_VK_NAN_MINMAX" : ", Arm's own driver"); }
     // Maxwell's special functions at their edge cases (spv_exact_math): log2 (0) = -inf, exp2 below 2^-126 = 0, inversesqrt (0) = +inf, a negative root NaN, F2I clamped
     //   with NaN 0, where SPIR-V leaves the answer to the driver. The translated lighting takes pow (max (0, x), y) as exp2 (log2 (x) * y), so x = 0 on every surface facing
     //   away from a light, and still white on Arm's own driver in v0.67 with every switch above (#47: Mali-G615 MC6, r44p1); PanVK draws the same shaders right.
     //   On by default with Arm's own driver; DM_VK_EXACT_MATH=<mask> chooses (1 log2, 2 exp2, 4 inversesqrt, 8 sqrt, 16 float to int; 31 all, 0 none) on any driver
-    { const char *e = getenv("DM_VK_EXACT_MATH"); g_exact = e ? (unsigned)atoi(e) & EXACT_ALL : g_arm_rel ? EXACT_ALL : 0;
+    { const char *e = getenv("DM_VK_EXACT_MATH"); g_exact = e ? (unsigned)atoi(e) & EXACT_ALL : quirk_default(Q_EXACT_MATH, &g_gpuid) ? EXACT_ALL : 0; quirk_note(Q_EXACT_MATH, (int)g_exact, e != NULL);
       if (g_exact) VLOG("shaders: Maxwell's answers for log2 / exp2 / inversesqrt / sqrt / float-to-int at their edge cases (mask %u%s)", g_exact, e ? ", DM_VK_EXACT_MATH" : ", Arm's own driver"); }
     // The translator's registers start at zero (spv_init_locals): a register read on a path that did not write it is undefined in SPIR-V; Mesa's compilers make it 0 (PanVK
     //   drew the lit scene right on the phones where Arm's driver drew it at the format's maximum), Arm's driver may keep anything. Still white with spv_exact_math on all
     //   five classes (#47, mali-white-test1). On by default with Arm's own driver; DM_VK_INIT_LOCALS=0 / 1 decides on any driver
-    { const char *e = getenv("DM_VK_INIT_LOCALS"); g_initloc = e ? atoi(e) != 0 : g_arm_rel != 0;
+    { const char *e = getenv("DM_VK_INIT_LOCALS"); g_initloc = quirk_note(Q_INIT_LOCALS, e ? atoi(e) != 0 : quirk_default(Q_INIT_LOCALS, &g_gpuid), e != NULL);
       if (g_initloc) VLOG("shaders: the translator's registers start at zero (undefined values as Mesa's compilers make them%s)", e ? ", DM_VK_INIT_LOCALS" : ", Arm's own driver"); }
+    // textureQueryLod's level (spv_query_lod): Arm's own driver returns floor (LOD) for it, ignoring the texture's level count (dEQP-VK texturequerylod on a Mali-G615 MC6
+    //   stock driver: 63 of 190 failed, the LOD component right in all); the game's TMML reads only that component. On by default with Arm's own driver; DM_VK_QUERY_LOD=0 / 1
+    { const char *e = getenv("DM_VK_QUERY_LOD"); g_qlod = quirk_note(Q_QUERY_LOD, e ? atoi(e) != 0 : quirk_default(Q_QUERY_LOD, &g_gpuid), e != NULL);
+      if (g_qlod) VLOG("shaders: texture LOD queries give the level as clamp (LOD, 0, levels - 1)%s", e ? " (DM_VK_QUERY_LOD)" : " (Arm's own driver)"); }
     // Dual-source blending (the game's blend factors SRC1_*) needs dualSrcBlend; Arm's own driver has none (r44p1), and a pipeline using it there is undefined: those
     //   factors become the first output's (bfac_dev), named once in the log. DM_VK_DUALSRC=keep passes them as they are
     // Transform feedback (Legends: Arceus skins its characters and sways its trees with it) is captured by the vertex shader storing into buffers: that needs
@@ -835,6 +861,12 @@ static void vk_trim(void) {
     pthread_mutex_unlock(&g_amu);
     if (nf) { g_trim_bytes += freed; g_trim_n += nf; static int said; if (said++ < 30) VLOG("device memory: %d empty block%s given back (%.0f MB; %.0f MB in all so far)", nf, nf == 1 ? "" : "s", freed / 1048576.0, g_trim_bytes / 1048576.0); }
 }
+// The device memory this engine holds in its blocks (MB), for the log's memory line (android_main.c log_mirror): a run Android ends for memory then shows whether
+//   the growth was the engine's GPU memory or something else
+long nvn_vk_device_mb(void) {
+    double t = 0; pthread_mutex_lock(&g_amu); for (int k = 0; k < g_nblocks; k++) t += g_blocks[k]->size; pthread_mutex_unlock(&g_amu);
+    return (long)(t / 1048576);
+}
 
 // ================= Deferred destruction: objects the GPU may still use go when the submissions recorded so far are done =================
 enum { DF_IMAGE, DF_VIEW, DF_BUFFER, DF_BUFVIEW, DF_ALLOC, DF_PIPELINE, DF_FRAMEBUFFER };
@@ -856,7 +888,7 @@ static void fbc_forget(VkImageView v);   // (the framebuffers naming a view, des
 typedef struct { uint64_t h; uint8_t img; } qent;
 static qent *g_vq; static int g_vqcap = -1; static size_t g_vqhead, g_vqcount;
 static int quarantine_on(void) {
-    if (g_vqcap < 0) { const char *e = getenv("DM_VK_VIEW_QUARANTINE"); g_vqcap = e ? atoi(e) : g_arm_rel && g_dynren ? 2048 : 0;
+    if (g_vqcap < 0) { const char *e = getenv("DM_VK_VIEW_QUARANTINE"); g_vqcap = quirk_note(Q_VIEW_QUARANTINE, e ? atoi(e) : quirk_default(Q_VIEW_QUARANTINE, &g_gpuid), e != NULL);
         if (g_vqcap > 0 && !(g_vq = calloc((size_t)g_vqcap, sizeof *g_vq))) g_vqcap = 0;
         if (g_vqcap > 0) VLOG("image views: the last %d destroyed views and images kept back (Arm's driver: a reused view handle hits stale rendering state)", g_vqcap); }
     return g_vqcap > 0;
@@ -1330,6 +1362,8 @@ static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 static sub_t *g_inflight[NSUB * 2]; static int g_nin;   // submitted, not yet completed, in submission order (under g_cmu)
 static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
 static int on_sub_thread(void) { return atomic_load(&g_sub_thread_set) && pthread_equal(pthread_self(), g_sub_thread); }
+static uint64_t g_frame_no;   // (defined again below, where it is used most: a tentative definition)
+#include "vk_crumbs.h"   // GPU breadcrumbs: what each submission held, printed when the GPU fails
 
 int dm_gpu_ts614(void);   // (hle_nvn.c: DM_GPU_TS=614, the Switch GPU's 614.4 MHz ticks)
 static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) g = mono_ns(); return dm_gpu_ts614() ? g * 384 / 625 : g * 12 / 625; }
@@ -1422,9 +1456,12 @@ static void *completion_main(void *unused) { DM_THREAD_NAME("dm-complete");
         pthread_mutex_unlock(&g_cmu);
         VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_tl, .pValues = &want };
         VkResult r = g_tlsem ? vk_wait(&wi, VK_NULL_HANDLE, 2000000000ull) : vk_wait(NULL, vf, 2000000000ull);
-        if (r == VK_TIMEOUT) continue;
-        if (r) VDIE("%s failed: %d (device lost?)", g_tlsem ? "vkWaitSemaphores" : "vkWaitForFences", r);
-        post_apply(s); gpu_ts_done(s);
+        if (r == VK_TIMEOUT) {   // a submission 10 s late: the GPU hangs (no device lost yet); its breadcrumbs printed once
+            static uint64_t late, late_t, told; uint64_t now = mono_ns();
+            if (late != want) { late = want; late_t = now; } else if (told != want && now - late_t > 10000000000ull) { told = want; nvn_vk_crumbs_dump("GPU hang: a submission more than 10 s late"); }
+            continue; }
+        if (r) { nvn_vk_crumbs_dump("device lost"); VDIE("%s failed: %d (device lost?)", g_tlsem ? "vkWaitSemaphores" : "vkWaitForFences", r); }
+        cr_completed(s); post_apply(s); gpu_ts_done(s);
         pthread_mutex_lock(&g_cmu);
         memmove(g_inflight, g_inflight + 1, (size_t)--g_nin * sizeof *g_inflight);
         atomic_store(&g_done, want);
@@ -1537,6 +1574,7 @@ void mtl_sub_begin(void) {
         if (atomic_load(&g_gpu[k].frame) != s->frame) { atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].frame, s->frame); }
         atomic_fetch_add(&g_gpu[k].pending, 1);
         vkCmdResetQueryPool(s->cb, g_tsq, (uint32_t)i * 2, 2); vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_tsq, (uint32_t)i * 2); }
+    cr_sub_begin(s);
     g_sub = s;
     g_bar_clean = g_after_pass = 0;
     static int inited; if (!inited) { inited = 1; state_reset(); }
@@ -1590,10 +1628,11 @@ static int barrier_bits_on(void) { static int v = -1; if (v < 0) { const char *e
 // Qualcomm's own driver before Vulkan 1.3 (Adreno 6xx / 7xx phones on driver 1.1.128 and the like; not Turnip, which names itself "Turnip Adreno"): skinned and
 //   swaying models explode into spikes there with barriers narrowed between draw passes (Arceus-Native-Android #34 #46 #59 on the Adreno 710, Galar #209 on the
 //   Adreno 650), as on Xclipse until v0.39 made its barriers full (#31 → #48 #78). The vertex-stride fix and the stride canary did not change it; Turnip on the same
-//   phone draws them right. So these drivers get a full barrier before each pass, as Xclipse, PowerVR and Mali (DM_VK_BARRIER=relaxed: narrowed again)
-static int old_qcom_driver(void) { return g_props.vendorID == 0x5143 && VK_API_VERSION_MINOR(g_props.apiVersion) < 3 && !strncmp(g_props.deviceName, "Adreno", 6); }
+//   phone draws them right. So these drivers get a full barrier before each pass, as Xclipse, PowerVR and Mali (DM_VK_BARRIER=relaxed: narrowed again).
+//   The rule is vk_quirks.h's Q_BARRIER_RELAXED (with gpu_is_old_qcom, which was old_qcom_driver here), the same for every game
 static int barrier_relaxed(void) { static int v = -1; if (v < 0) { { const char *e = getenv("DM_VK_BARRIER");   // (relaxed by default on Adreno (Qualcomm, vendor 0x5143) for every game; Mali, Xclipse, PowerVR keep full barriers: on those, Legends: Arceus flickered with them relaxed, Arceus-Native-Android #20 #31 #32)
-        v = e && (!strcmp(e, "full") || !strcmp(e, "relaxed")) ? !strcmp(e, "relaxed") : g_props.vendorID == 0x5143 && !old_qcom_driver(); } VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
+        int set = e && (!strcmp(e, "full") || !strcmp(e, "relaxed"));
+        v = quirk_note(Q_BARRIER_RELAXED, set ? !strcmp(e, "relaxed") : quirk_default(Q_BARRIER_RELAXED, &g_gpuid), set); } VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
 static void barrier_all(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
@@ -1710,6 +1749,7 @@ static void seg_pass_begin(const VkRenderingInfo *ri, const uint32_t *cf, uint32
     VKCHECK(vkBeginCommandBuffer(cb, &bi)); g->cb = cb; s->cb = cb; g_seg_in = 1;
 }
 static void rend_begin(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain) {
+    cr_pass_begin(cb, ri, cf, dsfmt);   // (breadcrumbs: the pass noted for its submission)
     if (g_sub && g_sub->dec && cb == g_sub->cb && !g_seg_in && !swapchain) { seg_pass_begin(ri, cf, dsfmt, samples); g_seg_fgp = -1; return; }
     g_seg_fgp = -1;
     rend_begin_ex(cb, ri, cf, dsfmt, samples, swapchain, 0);
@@ -1756,6 +1796,7 @@ static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const u
 static void rend_end(VkCommandBuffer cb) {
     if (g_sub && g_sub->dec && g_seg_in && cb == g_sub->cb) { VKCHECK(vkEndCommandBuffer(cb)); seg_push(g_sub, g_sub->cur); g_seg_in = 0; seg_gap_begin(g_sub); return; }   // (the pass's secondary ends; a new gap)
     if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb);
+    cr_pass_end(cb);   // (breadcrumbs: with DM_VK_BREADCRUMBS the GPU marks the pass done; not in a recorded segment above: a fill is not allowed inside a pass)
 }
 // the render pass a secondary's contents are recorded against: the one rend_begin_ex would begin for ri (compatibility leaves the load / store ops out)
 static VkRenderPass rp_compat(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples) {
@@ -1805,7 +1846,7 @@ static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFe
     pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, g_tlsem ? VK_NULL_HANDLE : vf); pthread_mutex_unlock(&g_qmu);
     if (r && g_host_import && host_import_mark(1)) VLOG("[RED] vkQueueSubmit failed with imported host memory: the next start will not import it");
     if (r && g_heapmap > 0 && heap_import_mark(1)) VLOG("[RED] vkQueueSubmit failed with dma-buf pools: the next start moves the driver's mappings instead");
-    if (r) VDIE("vkQueueSubmit failed: %d", r);
+    if (r) { nvn_vk_crumbs_dump("vkQueueSubmit failed"); VDIE("vkQueueSubmit failed: %d", r); }
 }
 // ================= The whole frame held (renderer phase 2, DM_VK_FRAME_HOLD=1; off by default until measured on phones) =================
 // A finished submission is not handed to the GPU at once: the frame's submissions wait until the frame is presented, so the frame is known whole before any of it runs
@@ -1835,7 +1876,7 @@ static void hold_flush(int why) { if (!atomic_load(&g_nheld)) return; pthread_mu
 // Fence values are handed out under g_cmu so the present thread's submissions (screenshots) and the game's stay in order on the timeline
 static uint64_t submit_tracked(sub_t *s, VkCommandBuffer *cbs, uint32_t n) {
     pthread_mutex_lock(&g_cmu);
-    uint64_t f = ++g_fence; s->fence = f;
+    uint64_t f = ++g_fence; s->fence = f; cr_submitted(s);
     if (!g_tlsem) {   // a new fence for this submission (the slot is reused only after its last submission completed, so the old fence is no longer waited on)
         if (s->vf) vkDestroyFence(g_dev, s->vf, NULL);
         VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; s->vf = VK_NULL_HANDLE; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &s->vf));
@@ -2201,6 +2242,19 @@ static int fmt_int_class(VkFormat f) {   // 0 float / normalized, 1 uint, 2 sint
         default: return 0;
     }
 }
+// The same bits in a format of another numeric class (want: 0 float, 1 uint, 2 sint), the channel layout kept: 32-bit channels in all three, the narrower integer ones
+//   in the other signedness only (a float format of their size would convert, not reinterpret); 0: none
+static VkFormat fmt_as_class(VkFormat f, int want) {
+    static const VkFormat T[][3] = {
+        { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT }, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT },
+        { VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT },
+        { 0, VK_FORMAT_R8_UINT, VK_FORMAT_R8_SINT }, { 0, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_SINT }, { 0, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_SINT },
+        { 0, VK_FORMAT_R16_UINT, VK_FORMAT_R16_SINT }, { 0, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT }, { 0, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_SINT },
+        { 0, VK_FORMAT_A2B10G10R10_UINT_PACK32, VK_FORMAT_A2B10G10R10_SINT_PACK32 } };
+    if (want < 0 || want > 2) return (VkFormat)0;
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) for (int c = 0; c < 3; c++) if (T[i][c] && T[i][c] == f) return T[i][want];
+    return (VkFormat)0;
+}
 static VkClearColorValue clear_for(VkFormat f, const float rgba[4]) {
     VkClearColorValue v; int k = fmt_int_class(f);
     for (int i = 0; i < 4; i++) { if (k == 1) v.uint32[i] = rgba[i] <= 0 ? 0 : (uint32_t)rgba[i]; else if (k == 2) v.int32[i] = (int32_t)rgba[i]; else v.float32[i] = rgba[i]; }
@@ -2230,7 +2284,7 @@ static uint64_t g_drop_n, g_drop_saved;   // textures stored without their large
 static int tex_quality_half(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_TEX_QUALITY"); v = e && !strcmp(e, "half");
-        if (v && g_arm_rel && g_arm_rel < 49 && getenv("DM_VK_TEX_QUALITY_AUTO")) { v = 0;
+        if (v && quirk_default(Q_TEX_HALF_UNSAFE, &g_gpuid) && getenv("DM_VK_TEX_QUALITY_AUTO")) { v = 0; quirk_note(Q_TEX_HALF_UNSAFE, 1, 0);
             VLOG("texture quality full, not the phone profile's half: Arm's driver r%dp%d closed the game with half textures (Mali-G615 MC2, #82); DM_VK_TEX_QUALITY=half in env.txt uses it anyway", g_arm_rel, g_arm_p); }
         else if (v) VLOG("texture quality half: the game's large textures without their largest mip level"); }
     return v;
@@ -2276,7 +2330,7 @@ static vtex *tex_new(const tex_t *t, int pkg) {
     VkFormat fl[2] = { x->fmt, twin }; VkImageFormatListCreateInfo fli = { .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, .viewFormatCount = twin != x->fmt ? 2 : 1, .pViewFormats = fl };
     // Mali (Arm) keeps AFBC only on images that are not mutable (Bifrost) or list their view formats (Valhall): there every colour image that is not block-compressed
     // gets the same treatment as render targets do on Adreno, and one with no sRGB / linear twin is not mutable at all
-    static int arm = -1; if (arm < 0) arm = g_props.vendorID == 0x13B5 || getenv("DM_VK_ARM_FORMATS") != NULL;
+    static int arm = -1; if (arm < 0) arm = quirk_note(Q_ARM_FORMATS, quirk_default(Q_ARM_FORMATS, &g_gpuid) || getenv("DM_VK_ARM_FORMATS") != NULL, getenv("DM_VK_ARM_FORMATS") != NULL);
     int plain = !fmt_compressed(t->d.format) || nvn_fmt_vk_decode(t->d.format);
     if (!nolist && !x->is3d) {
         if (fmt_is_depth(x->fmt) || x->fmt == VK_FORMAT_S8_UINT) { ci.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; x->fixed_fmt = 1; }
@@ -2836,6 +2890,22 @@ static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
         if (s >= NVN_SWZ_R && !nofmt) s = fsw[s - NVN_SWZ_R];
         vk[c] = (uint8_t)(s + 1);   // NVN_SWZ_ZERO 0 → VK_COMPONENT_SWIZZLE_ZERO 1, ONE → 2, R → 3 …
     }
+    // A shader that reads the texture as another numeric class than its format (Shield: an R16G16B16A16_UINT texture under a float sampler, binding fp_t_tcb_8;
+    //   VUID-vkCmdDrawIndexed-format-07753, the Khronos layer 2026-11-20; undefined in Vulkan). The Switch's texture unit returns the channels' integer bits and the shader
+    //   takes them as floats: 32-bit channels, or the other signedness, are the same bits in a view of the shader's class; 8 / 16-bit integers are denormals there, which
+    //   flush to 0, so a float read of them reads the empty texture of its class. DM_VK_INT_TEX=keep: the texture's own format, as before
+    if (!storage && !(x->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && r->sclass < 3) {
+        static int keep = -1; if (keep < 0) { const char *e = getenv("DM_VK_INT_TEX"); keep = e && !strcmp(e, "keep"); }
+        int have = fmt_int_class(f);
+        if (have != r->sclass && !keep) {
+            VkFormat nf = fmt_as_class(f, r->sclass);
+            int ok = nf && (!x->fixed_fmt || nf == x->fmt || nf == x->twin);   // (fmt_as_class keeps the channel layout: the same size, a compatible view format)
+            static int said; if (said++ < 8) VLOG("texture ID %d (vk format %d) read as %s by a shader: %s", tid, f, r->sclass == 0 ? "float" : r->sclass == 1 ? "uint" : "sint",
+                                                  ok ? "the same bits in a view of that class" : "reads the empty texture of that class (0, as the Switch's flushed denormals)");
+            if (!ok) return VK_NULL_HANDLE;
+            f = nf;
+        }
+    }
     VkImageAspectFlags asp = x->aspect;
     if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) asp = rg.has_v && rg.v.set_dsmode && rg.v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL && fmt_has_stencil(x->fmt) ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
     if (storage) { if (!(x->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { RED_ONCE(16, "texture ID %d bound as an image lacks storage usage", tid); return VK_NULL_HANDLE; } memcpy(vk, SW_ID, 4); }
@@ -3067,9 +3137,10 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     free(c1); free(meta);
     if (s->shift) spv_rebind(code, ns / 4, s->shift);
     ns = spv_strip_unused(code, ns / 4) * 4;   // capabilities declared but unused (Float64, fragment interlock): strict drivers refuse or mis-handle them
+    ns = spv_strip_clipcull(code, ns / 4) * 4;   // unused ClipDistance[8] + CullDistance[1]: over the limit of 8 (VUID-RuntimeSpirv-00710), CullDistance optional
     { size_t nw; uint32_t *c2 = spv_image_caps(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }   // and the format-less storage image ones they need
     // Adreno picks another 2x2 block than Maxwell for a gather on a texel centre: its gathers are nudged by 1/512 of a texel (spv_gather_bias). DM_VK_GATHER_BIAS=0 / 1 decides
-    static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = e ? atoi(e) != 0 : g_props.vendorID == 0x5143; if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
+    static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = quirk_note(Q_GATHER_BIAS, e ? atoi(e) != 0 : quirk_default(Q_GATHER_BIAS, &g_gpuid), e != NULL); if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
     if (gbias) { size_t nw; uint32_t *c2 = spv_gather_bias(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_fctl) { size_t nw; uint32_t *c2 = spv_float_controls(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_nanmm) { size_t nw; uint32_t *c2 = spv_nan_minmax(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_nanmm_n, 1); } }   // (before spv_clamp_zero, which knows both)
@@ -3079,11 +3150,13 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     if (g_probe && spst == 4) { size_t nw; uint32_t *c2 = spv_probe(code, ns / 4, &nw, (unsigned)g_probe); if (c2) { free(code); code = c2; ns = nw * 4; } }   // (DM_VK_PROBE, fragment shaders)
     if (g_exact) { size_t nw; uint32_t *c2 = spv_exact_math(code, ns / 4, &nw, g_exact); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_exact_n, 1); } }
     if (g_initloc) { size_t nw; uint32_t *c2 = spv_init_locals(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_initloc_n, 1); } }
+    if (g_qlod) { size_t nw; uint32_t *c2 = spv_query_lod(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_qlod_n, 1); } }
     if (spst == 0 || spst == 2) { size_t nw; uint32_t *c2 = spv_init_outputs(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }   // outputs start at (0, 0, 0, 1) as on the hardware
     if (st == 0 && glcode) {
         size_t nw;
         if (s->shift) spv_rebind(glcode, ngl / 4, s->shift);
         ngl = spv_strip_unused(glcode, ngl / 4) * 4;
+        ngl = spv_strip_clipcull(glcode, ngl / 4) * 4;
         uint32_t *c2 = spv_image_caps(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (gbias && (c2 = spv_gather_bias(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_fctl && (c2 = spv_float_controls(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
@@ -3093,6 +3166,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         if (g_fmz && (c2 = spv_fmz(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_exact && (c2 = spv_exact_math(glcode, ngl / 4, &nw, g_exact))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_initloc && (c2 = spv_init_locals(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
+        if (g_qlod && (c2 = spv_query_lod(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         c2 = spv_init_outputs(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_yflip && (c2 = spv_flip_y(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         { spv_res gres[64]; int gnr = 0, gst; uint32_t gls[3]; if (spv_reflect(glcode, ngl / 4, gres, 64, &gnr, s->glin, 32, &s->nglin, &gst, gls)) s->nglin = 0; }
@@ -3570,7 +3644,7 @@ static void pass_writes(int depth, int stencil) {
 //   in vkCmdBeginRendering). A change while a pass is open now only records the new targets (g_rt_stale); the next draw or clear goes on in the open pass when they
 //   are the ones it was begun with (g_pass_resumed), and ends it as before when they are not. Pending clears belong to the old targets: then the change ends the pass at once
 static p_set_rt g_pass_rt; static uint64_t g_pass_resumed;
-static int pass_defer_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_DEFER"); v = e ? atoi(e) != 0 : g_props.vendorID == 0x5143;   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before)
+static int pass_defer_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_DEFER"); v = quirk_note(Q_PASS_DEFER, e ? atoi(e) != 0 : quirk_default(Q_PASS_DEFER, &g_gpuid), e != NULL);   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before)
     if (v) VLOG("target changes that need no new pass keep it open (DM_VK_PASS_DEFER)"); } return v; }
 static int rt_same(const p_set_rt *a, const p_set_rt *b);
 static void sub_split_at_target(void);
@@ -3845,9 +3919,8 @@ static nvn_hmap g_pso_used = {.klen = sizeof(VkPipeline)}, g_pso_rec = {.klen = 
 static uint64_t g_pso_evicted;
 static int pso_cap(void) {
     static int cap = -2; if (cap > -2) return cap;
-    const char *e = getenv("DM_VK_PIPE_KEEP"); long kb = 0;
-    if (!e) { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); }
-    cap = e ? atoi(e) : (g_props.vendorID == 0x13B5 || (kb > 0 && kb < 7500000)) ? 800 : 0;
+    const char *e = getenv("DM_VK_PIPE_KEEP");
+    cap = quirk_note(Q_PIPE_KEEP, e ? atoi(e) : quirk_default(Q_PIPE_KEEP, &g_gpuid), e != NULL);   // (the phone's memory: g_gpuid.ram_kb, read with the GPU's description)
     if (cap > 0) VLOG("pipelines kept: at most %d (the least recently used ones destroyed when unused for 30 s)", cap); else cap = 0;
     return cap;
 }
@@ -3922,8 +3995,8 @@ static void *apso_main(void *a) { DM_THREAD_NAME("dm-pipelines");
 }
 static int apso_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = e ? atoi(e) != 0 : !DM_GAME_ENG_ASYNC_PSO_OFF && g_props.vendorID == 0x5143;   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before. Profile engine_quirks
-        //   async_pso_off (Legends: Arceus): off unless DM_VK_ASYNC_PSO=1, on a slower Adreno (710, #34) its skipped draws were objects missing for frames)
+    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = quirk_note(Q_ASYNC_PSO, e ? atoi(e) != 0 : quirk_default(Q_ASYNC_PSO, &g_gpuid), e != NULL);   // (vk_quirks.h: on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before. Profile
+        //   engine_quirks async_pso_off through gpu_id.eng (Legends: Arceus): off unless DM_VK_ASYNC_PSO=1, on a slower Adreno (710, #34) its skipped draws were objects missing for frames)
    
         if (v) { int nw = 0; for (int i = 0; i < APSO_WORKERS; i++) { pthread_t t; if (!pthread_create(&t, NULL, apso_main, NULL)) { pthread_detach(t); nw++; } }
             const char *w = getenv("DM_VK_ASYNC_WAIT_MS"); if (w && *w) { int ms = atoi(w); if (ms < 0) ms = 0; if (ms > 33) ms = 33; g_apso_frame_ns = ms * 1000000LL; g_apso_budget_ns = g_apso_frame_ns; }
@@ -4191,7 +4264,7 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     //   (VK_ATTACHMENT_UNUSED: a target with a gap): found and isolated by the Persona 5 Royal Android port (Brandon04Gonzalez/p5r-android, MIT). Such a pipeline
     //   is made without the cache on PowerVR; every other pipeline, and every other GPU, keeps it
     VkPipelineCache pc_ = g_pcache;
-    if (g_props.vendorID == 0x1010 && !g_dynren) for (uint32_t i = 0; i < ncb; i++) if (!cf[i]) { pc_ = VK_NULL_HANDLE; break; }
+    if (quirk_default(Q_PCACHE_GAPS_OFF, &g_gpuid) && !g_dynren) for (uint32_t i = 0; i < ncb; i++) if (!cf[i]) { pc_ = VK_NULL_HANDLE; break; }
     VkResult r = vkCreateGraphicsPipelines(g_dev, pc_, 1, &gi, NULL, &p);
     if (r == VK_INCOMPLETE && p) { RED_ONCE(107, "graphics pipeline creation answered VK_INCOMPLETE (out of spec; Mali, Adreno 5xx): the pipeline it made is used"); r = VK_SUCCESS; }
     if (r) { VLOG("[RED] graphics pipeline (vertex %s fragment %s) failed: %d", vs->key, fs ? fs->key : "-", r); return VK_NULL_HANDLE; }
@@ -4625,7 +4698,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     VkCommandBuffer cb = CB(); if (mark) mark[1] = mono_ns();
     { static VkCommandBuffer bcb; static VkPipeline bp; static uint64_t bfence;   // the same pipeline already bound in this command buffer: no rebind (Vulkan keeps it across passes)
       static int off = -1; if (off < 0) off = getenv("DM_VK_BIND_ALWAYS") != NULL;
-      if (off || cb != bcb || bp != p || bfence != g_sub->fence) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; if (pso_cap()) pso_used(p); } }
+      if (off || cb != bcb || bp != p || bfence != g_sub->fence) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; if (pso_cap()) pso_used(p);
+          cr_pipe(pr->sh[0] ? pr->sh[0]->key : NULL, pr->sh[1] ? pr->sh[1]->key : NULL); } }   // (breadcrumbs: the shaders bound, in this pass)
     // dynamic state
     float vx = 0, vy = 0, vw = (float)P.tw, vh = (float)P.th;
     if (S.has_vp) { vx = S.vp[0][0]; vy = S.vp[0][1]; vw = S.vp[0][2]; vh = S.vp[0][3]; }
@@ -4810,6 +4884,111 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 }
 
 // ================= Texture copies and clears =================
+// A scaled / mirrored / format-changing copy into a depth / stencil image whose format is no blit destination (D24S8 on the Adreno 830: vkCmdBlitImage into it is
+//   invalid, VUID-vkCmdBlitImage-dstImage-02000, found by the Khronos layer 2026-11-20): drawn instead. One pass with the destination as its depth / stencil attachment:
+//   the depth from the source's depth (zcopy_d.frag, gl_FragDepth, nearest like a depth blit), then the stencil one bit a draw (zcopy_s.frag discards where the source's
+//   bit is clear; write mask = that bit; Vulkan 1.0 has no stencil export), after the depth draw set it to 0. Plain descriptor sets (no push descriptors), Vulkan 1.0.
+//   Anything it cannot take (the same image, multisample, 3D, an image not made for this) keeps the blit. DM_VK_ZCOPY=0: the blit always, as before
+#include "overlay/zcopy_spv.h"
+typedef struct { float m[4]; int32_t lim[4]; } zcopy_pc;   // source texel = pixel * m.xy + m.zw; lim.xy: the source level's last texel, lim.z: the stencil bit
+static struct { VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkSampler samp; int failed, n; VkFormat fmt[6]; VkPipeline pd[6], ps[6]; } ZC;
+static int fmt_feat(VkFormat f, VkFormatFeatureFlags want) { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, f, &fp); return (fp.optimalTilingFeatures & want) == want; }
+static VkPipeline zc_pipe(VkFormat fmt, int sbits) {
+    VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE; VkPipeline p = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo mv = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof zcopy_vert_spv, .pCode = zcopy_vert_spv },
+                             mf = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sbits ? sizeof zcopy_s_frag_spv : sizeof zcopy_d_frag_spv, .pCode = sbits ? zcopy_s_frag_spv : zcopy_d_frag_spv };
+    if (vkCreateShaderModule(g_dev, &mv, NULL, &vm) || vkCreateShaderModule(g_dev, &mf, NULL, &fm)) goto out;
+    int st = fmt_has_stencil(fmt);
+    VkPipelineShaderStageCreateInfo sg[2] = { { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vm, .pName = "main" },
+                                              { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fm, .pName = "main" } };
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkPipelineViewportStateCreateInfo vp = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1 };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+    VkStencilOpState so = { VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS, 0xff, 0, 0 };   // (write mask and reference: dynamic)
+    VkPipelineDepthStencilStateCreateInfo dss = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = !sbits, .depthWriteEnable = !sbits,
+        .depthCompareOp = VK_COMPARE_OP_ALWAYS, .stencilTestEnable = st, .front = so, .back = so, .maxDepthBounds = 1 };
+    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    VkDynamicState dyn[4] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE };
+    VkPipelineDynamicStateCreateInfo dy = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 4, .pDynamicStates = dyn };
+    VkPipelineRenderingCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .depthAttachmentFormat = fmt, .stencilAttachmentFormat = st ? fmt : VK_FORMAT_UNDEFINED };
+    VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rci, .stageCount = 2, .pStages = sg, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+        .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &dss, .pColorBlendState = &cb, .pDynamicState = &dy, .layout = ZC.pl };
+    if (!g_dynren) { gi.pNext = NULL; gi.renderPass = rp_for_pipeline(0, NULL, (uint32_t)fmt, 1, 0); }
+    if (vkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gi, NULL, &p)) p = VK_NULL_HANDLE;
+out:
+    if (vm) vkDestroyShaderModule(g_dev, vm, NULL); if (fm) vkDestroyShaderModule(g_dev, fm, NULL);
+    return p;
+}
+static int zc_setup(VkFormat fmt, VkPipeline *pd, VkPipeline *ps) {   // the two pipelines for a destination format (ps: none without stencil)
+    if (ZC.failed) return 0;
+    if (!ZC.pl) {
+        VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+        VkDescriptorSetLayoutBinding b[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL }, { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };
+        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = b };
+        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(zcopy_pc) };
+        VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &ZC.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+        if (vkCreateSampler(g_dev, &sci, NULL, &ZC.samp) || vkCreateDescriptorSetLayout(g_dev, &dli, NULL, &ZC.dsl) || vkCreatePipelineLayout(g_dev, &pli, NULL, &ZC.pl)) {
+            ZC.failed = 1; ZC.pl = VK_NULL_HANDLE; RED_ONCE(137, "depth / stencil texture copy: cannot make its sampler / layouts: blitted as before"); return 0; }
+    }
+    for (int i = 0; i < ZC.n; i++) if (ZC.fmt[i] == fmt) { *pd = ZC.pd[i]; *ps = ZC.ps[i]; return !!*pd; }
+    if (ZC.n == 6) return 0;
+    VkPipeline a = zc_pipe(fmt, 0), b = fmt_has_stencil(fmt) ? zc_pipe(fmt, 1) : VK_NULL_HANDLE;
+    if (!a || (fmt_has_stencil(fmt) && !b)) { if (a) vkDestroyPipeline(g_dev, a, NULL); if (b) vkDestroyPipeline(g_dev, b, NULL); a = b = VK_NULL_HANDLE;
+        RED_ONCE(138, "depth / stencil texture copy: its pipelines failed for format %d: blitted as before", fmt); }
+    else VLOG("depth / stencil texture copy ready (format %d%s)", fmt, b ? ", with stencil" : "");
+    ZC.fmt[ZC.n] = fmt; ZC.pd[ZC.n] = a; ZC.ps[ZC.n++] = b; *pd = a; *ps = b;
+    return !!a;
+}
+// Draws the copy (outside a pass; the caller orders it after); 0: not taken (blit it). s0 / s1: the source box's corners as a blit's (s1 < s0: mirrored)
+static int zcopy_draw(vtex *s, vtex *d, const VkImageSubresourceLayers *ss, const VkImageSubresourceLayers *ds, VkOffset2D s0, VkOffset2D s1, VkOffset2D d0, VkExtent2D de) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_ZCOPY"); on = !e || atoi(e) != 0; }
+    if (!on || s == d || s->img == d->img || s->samples > 1 || d->samples > 1 || s->is3d || d->is3d || !de.width || !de.height) return 0;
+    if (!(s->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || !(d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || !(s->usage & VK_IMAGE_USAGE_SAMPLED_BIT) || !(d->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return 0;
+    if (!fmt_feat(s->fmt, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || ss->layerCount != ds->layerCount) return 0;
+    VkPipeline pd, ps; if (!zc_setup(d->fmt, &pd, &ps)) return 0;
+    int stencil = (s->aspect & d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) && ps;
+    uint32_t sw = s->w >> ss->mipLevel, sh = s->h >> ss->mipLevel, dw = d->w >> ds->mipLevel, dh = d->h >> ds->mipLevel; if (!sw) sw = 1; if (!sh) sh = 1; if (!dw) dw = 1; if (!dh) dh = 1;
+    int32_t x0 = d0.x > 0 ? d0.x : 0, y0 = d0.y > 0 ? d0.y : 0, x1 = d0.x + (int32_t)de.width, y1 = d0.y + (int32_t)de.height;
+    if (x1 > (int32_t)dw) x1 = (int32_t)dw; if (y1 > (int32_t)dh) y1 = (int32_t)dh;
+    if (x1 <= x0 || y1 <= y0) return 1;   // (nothing of it inside the image)
+    zcopy_pc pc; pc.m[0] = (float)(s1.x - s0.x) / (float)de.width; pc.m[1] = (float)(s1.y - s0.y) / (float)de.height;
+    pc.m[2] = (float)s0.x - (float)d0.x * pc.m[0]; pc.m[3] = (float)s0.y - (float)d0.y * pc.m[1]; pc.lim[0] = (int32_t)sw - 1; pc.lim[1] = (int32_t)sh - 1; pc.lim[2] = pc.lim[3] = 0;
+    VkCommandBuffer cb = CB();
+    VkViewport vpt = { (float)d0.x, (float)d0.y, (float)de.width, (float)de.height, 0, 1 }; VkRect2D sc = { { x0, y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
+    for (uint32_t z = 0; z < ss->layerCount; z++) {
+        VkImageView sv = view_get(s, VK_IMAGE_VIEW_TYPE_2D, s->fmt, ss->mipLevel, 1, ss->baseArrayLayer + z, 1, SW_ID, VK_IMAGE_ASPECT_DEPTH_BIT),
+                    stv = stencil ? view_get(s, VK_IMAGE_VIEW_TYPE_2D, s->fmt, ss->mipLevel, 1, ss->baseArrayLayer + z, 1, SW_ID, VK_IMAGE_ASPECT_STENCIL_BIT) : VK_NULL_HANDLE,
+                    dv = view_get(d, VK_IMAGE_VIEW_TYPE_2D, d->fmt, ds->mipLevel, 1, ds->baseArrayLayer + z, 1, SW_ID, d->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT));
+        if (!sv || !dv || (stencil && !stv)) return z ? 1 : 0;
+        VkDescriptorSet set = desc_set_alloc(ZC.dsl);
+        VkDescriptorImageInfo ii[2] = { { ZC.samp, sv, VK_IMAGE_LAYOUT_GENERAL }, { ZC.samp, stv, VK_IMAGE_LAYOUT_GENERAL } };
+        VkWriteDescriptorSet wr[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0] },
+                                       { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[1] } };
+        vkUpdateDescriptorSets(g_dev, stencil ? 2 : 1, wr, 0, NULL);
+        VkRenderingAttachmentInfo za = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dv, .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = sc, .layerCount = 1, .pDepthAttachment = &za, .pStencilAttachment = fmt_has_stencil(d->fmt) ? &za : NULL };
+        rend_begin_ex(cb, &ri, NULL, (uint32_t)d->fmt, 1, 0, 0);
+        vkCmdSetViewport(cb, 0, 1, &vpt); vkCmdSetScissor(cb, 0, 1, &sc);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ZC.pl, 0, 1, &set, 0, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pd);
+        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, stencil ? 0xff : 0); vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);   // (the stencil to 0, its bits drawn next)
+        vkCmdPushConstants(cb, ZC.pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+        vkCmdDraw(cb, 3, 1, 0, 0);
+        if (stencil) {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ps); vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+            for (int bit = 0; bit < 8; bit++) { pc.lim[2] = bit; vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 1u << bit);
+                vkCmdPushConstants(cb, ZC.pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc); vkCmdDraw(cb, 3, 1, 0, 0); }
+            pc.lim[2] = 0;
+        }
+        if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb);
+        if (z + 1 < ss->layerCount) barrier_all(cb);
+    }
+    static int said; if (!said++) VLOG("a texture copy into a depth / stencil image (format %d, no blit destination on this GPU) drawn instead (%s)", d->fmt, stencil ? "depth and stencil" : "depth");
+    return 1;
+}
 // DM_VK_LOG_COPY (diagnosis): each distinct copy (source / destination serials) once, up to 400
 static int log_copy_pair(uint64_t a, uint64_t b) { static int on = -1, n; static uint64_t seen[400][2]; if (on < 0) on = getenv("DM_VK_LOG_COPY") != NULL;
     if (!on) return 0; for (int i = 0; i < n; i++) if (seen[i][0] == a && seen[i][1] == b) return 0;
@@ -4902,6 +5081,8 @@ static void copy_t2t(const p_copy_t2t *c) {
         VkImageBlit r = { ss, {{sx0, sy0, 0}, {sx1, sy1, 1}}, ds, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}} };
         int lin = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) && !(s->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT);
         if (s->samples > 1 || d->samples > 1) RED_ONCE(49, "multisample texture blit not supported");
+        else if ((d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !fmt_feat(d->fmt, VK_FORMAT_FEATURE_BLIT_DST_BIT)
+                 && zcopy_draw(s, d, &ss, &ds, (VkOffset2D){ sx0, sy0 }, (VkOffset2D){ sx1, sy1 }, (VkOffset2D){ c->dr.xoffset, c->dr.yoffset }, (VkExtent2D){ (uint32_t)c->dr.width, (uint32_t)c->dr.height })) {}
         else vkCmdBlitImage(CB(), s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
     barrier_all(CB());
@@ -4944,7 +5125,7 @@ static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
 //   pass's layer 0, that rectangle) is a pass of its own on that slice, cleared by its load op; the game's pass then opens again on its next draw (loading what is there).
 //   DM_VK_CLEAR_BY_PASS=1 / 0 decides on any driver
 static int clear_by_pass(void) {
-    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = e ? atoi(e) != 0 : g_props.vendorID == 0x144D;
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = quirk_note(Q_CLEAR_BY_PASS, e ? atoi(e) != 0 : quirk_default(Q_CLEAR_BY_PASS, &g_gpuid), e != NULL);
                                     if (v) VLOG("clears inside a layered pass over a 3D target: a pass of their own on the slice (Samsung Xclipse driver, or DM_VK_CLEAR_BY_PASS)"); }
     return v;
 }

@@ -62,7 +62,8 @@ body:
     attributes:
       label: Logs
       description: |
-        Attach `Download/PokemonShield-log-previous.txt` (or the Sword one) **from the run where the problem happened**, and `PokemonShield-log.txt` too.
+        Easiest: ☰ → Bug reports → **Make a debug report** (also offered after a crash), and attach the `...-debug-report.zip` from Download. It holds both logs, Android's crash record and your phone's GPU and driver details.
+        Otherwise attach `Download/PokemonShield-log-previous.txt` (or the Sword one) **from the run where the problem happened**, and `PokemonShield-log.txt` too.
         For a picture problem, ☰ → Bug reports → **Capture a frame** where it shows, and attach the `...-frame-capture.zip` from Download.
       placeholder: Drag the files here
     validations:

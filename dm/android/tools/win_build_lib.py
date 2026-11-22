@@ -94,3 +94,8 @@ open(rsp, "w").write("\n".join(objs))
 run(CXX + (["-flto=thin", "-O2"] if LTO else []) + ["-shared", "-static-libstdc++", "-o", OUT + "/lib/libnxnative.so", "@" + rsp, lib, dlib, "-lm", "-ldl", "-llog", "-lz", "-laaudio", "-lmediandk", "-lvulkan", "-landroid",
           "-Wl,-Bsymbolic", "-Wl,--no-undefined", "-Wl,-z,max-page-size=16384", "-u", "ANativeActivity_onCreate"])
 print("built", OUT + "/lib/libnxnative.so")
+# The driver check's library (as Makefile.host libdmprobe.so: the probe app's GPU self-tests, run by DriverCheckService before Play; no libvulkan link)
+DPROBE = ["probe/jni/dprobe_jni.c", "probe/jni/selftest.c", "probe/jni/probe_vk.c", GFXD + "/tex/bc_gpu.c", GFXD + "/tex/bc_decode.c", GFXD + "/tex/etc_encode.c", GFXD + "/nvn/nvn_spv.c"]
+run(CC + ["-O2", "-g", "-fPIC", "-shared", "-Wall", "-Wno-unused-function", "-I" + GFXD + "/tex", "-I" + GFXD + "/nvn", "-Iprobe/jni", "-o", OUT + "/lib/libdmprobe.so"] + DPROBE
+    + ["-ldl", "-llog", "-lm", "-Wl,--no-undefined", "-Wl,-z,max-page-size=16384"])
+print("built", OUT + "/lib/libdmprobe.so")
