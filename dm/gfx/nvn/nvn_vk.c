@@ -55,6 +55,7 @@
 #include "dmsh_chain.h"
 #include "game_profile.h"
 #include "../../host/dm.h"
+#include "golden_rec.h"   // golden-frame recordings (golden_rec.c; the backend side: golden_vk.inc at the end)
 
 #define VLOG(...) do { fprintf(stderr, "[dm] [nvn-vk] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 // A fatal Vulkan error (VDIE) aborts, and SIGABRT is not one of the signals the crash handler takes (crash.c), so boot_state never said "crashed": the next start
@@ -317,6 +318,13 @@ void mtl_init(void) {
         VDIE("no Vulkan device");
     }
     VkPhysicalDevice pds[8]; if (npd > 8) npd = 8; vkEnumeratePhysicalDevices(g_inst, &npd, pds); g_pd = pds[0];
+    {   // DM_VK_DEVICE=<index> or <part of the name>: the device to use where the loader lists several (PC tools: lavapipe beside a real GPU, a profile layer's device)
+        const char *dv = getenv("DM_VK_DEVICE");
+        if (dv && *dv) { char *x; long k = strtol(dv, &x, 10); int found = 0;
+            if (!*x && k >= 0 && k < (long)npd) { g_pd = pds[k]; found = 1; }
+            else for (uint32_t i = 0; i < npd && !found; i++) { VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pds[i], &pp); if (strcasestr(pp.deviceName, dv)) { g_pd = pds[i]; found = 1; } }
+            if (!found) VLOG("[RED] DM_VK_DEVICE=%s: no such device among %u: the first one", dv, npd); }
+    }
     vkGetPhysicalDeviceProperties(g_pd, &g_props); vkGetPhysicalDeviceMemoryProperties(g_pd, &g_memp);
     uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
     for (g_qf = 0; g_qf < nq && (qp[g_qf].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT); g_qf++) {}
@@ -1260,6 +1268,7 @@ static int pool_find(uint64_t addr, uint64_t len) {   // caller holds g_mu
 }
 // GPU buffer + offset of [addr, addr + len); 0 when it is in no pool
 static int pool_buf(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceSize *left) {
+    GOLDEN_MEM(addr, len);
     pthread_mutex_lock(&g_mu); int i = pool_find(addr, len ? len : 1);
     if (i >= 0) { *buf = g_pools[i].buf; *off = addr - g_pools[i].base; if (left) *left = g_pools[i].base + g_pools[i].size - addr; }
     pthread_mutex_unlock(&g_mu);
@@ -2563,8 +2572,10 @@ void mtl_alias_drop_pool(const void *pool) {
 }
 // Texture object → its image (nvn_mtl.m tex_mtl_): CPU-filled ones (packaged layout, CPU-written, linear) uploaded and re-uploaded when their pages change; buffer textures as views of
 // their pool; the rest are GPU images shared by storage + description. The returned image is valid until the submission completes (tables hold it, replacements are deferred)
+static void golden_vk_tex_ref(const tex_t *t);   // (golden_vk.inc)
 static vtex *tex_res(const tex_t *t) {
     if (!t || !t->serial) return NULL;
+    if (__builtin_expect(g_golden == 2, 0)) golden_vk_tex_ref(t);
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(6, "texture object no longer valid (magic %#x, ser=%llu)", t->magic, (unsigned long long)t->serial); return NULL; }
     pthread_mutex_lock(&g_smu);
     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && t->d.target != NVN_TEXTURE_TARGET_BUFFER && t->pool && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
@@ -4370,6 +4381,7 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
                     else if (h->what == W_SSBO) u = h->reg < 16 ? &S.ssbo[st][h->reg] : NULL;
                     if (u) { addr = u->addr; size = u->size; }
                     if (h->what == W_SBUFU) { uint32_t lo = ubo_word(st, h->reg, h->off), hi = ubo_word(st, h->reg, h->off + 4); addr = (uint64_t)hi << 32 | lo; size = 0; }
+                    if (addr) GOLDEN_MEM(addr, r->kind == SPV_RES_UBO ? 65536 : size ? size + 4096 : (1u << 20));   // (what the shader can reach: bound below as the pool's rest)
                     if (TD_TRACE) { float f[8] = {0}; if (addr) memcpy(f, (const void *)(uintptr_t)addr, sizeof f);
                         VLOG("[trace]   %s %s stage %d reg %d at %#llx size %llu: %g %g %g %g %g %g %g %g", r->kind == SPV_RES_UBO ? "uniform" : "storage", r->name, st, h->reg, (unsigned long long)addr, (unsigned long long)size, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]); }
                     int shadowed = 0;   // written by uniform updates deferred in this pass (ubd_conflict ended the pass if they cover it only in part)
@@ -6476,3 +6488,4 @@ void mtl_ubd_stats(uint64_t *deferred, uint64_t *conflicts) { *deferred = g_ubd_
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full) { *skip = g_bar_none + g_bar_narrow; *full = g_bar_full; }
 uint64_t mtl_blit_splits(void) { return 0; }
 uint64_t mtl_cut_count(void) { return 0; }
+#include "golden_vk.inc"   // golden-frame recordings: the backend side (golden_rec.h golden_be_*)
