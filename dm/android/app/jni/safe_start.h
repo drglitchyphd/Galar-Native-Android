@@ -40,6 +40,7 @@ static int safe_start(const char *files) {
     if (level >= 3) setenv("DM_VK_BC_GPU", "0", 0);
     if (level >= 4) setenv("DM_VK_BC_TRANSCODE", "off", 0);
     if (level >= 5) setenv("DM_VK_FLOAT_CONTROLS", "0", 0);
+    { char lv[8]; snprintf(lv, sizeof lv, "%d", level); setenv("DM_SAFE_START_LEVEL", lv, 1); }   // (nvn_vk.c's white-screen check: these fallbacks are the app's own, not the player's tests)
     char t[256]; size_t n = 0; for (int i = 1; i <= level && n < sizeof t; i++) n += (size_t)snprintf(t + n, sizeof t - n, "%s%s", i > 1 ? ", " : "", what[i]);
     fprintf(stderr, "boot: safe start level %d for %s: %s (the player's own settings in env.txt win)\n", level, *gpu ? gpu : "this GPU", t);
     return up;

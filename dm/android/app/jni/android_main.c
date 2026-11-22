@@ -125,6 +125,26 @@ static void *open_menu_main(void *p) {
     (*vm)->DetachCurrentThread(vm);
     return NULL;
 }
+// A one-line note over the game, by its key (nvn_vk.c's Mali white-screen check: front_note): com.nxnative.MaliLadder.note shows it, translated, as a toast. Called
+//   from the replay's thread; the Java call runs on a thread of its own (as open_menu_main) and front_note returns at once
+static void *note_main(void *p) {
+    char *key = p; JavaVM *vm = g_app->activity->vm; JNIEnv *e;
+    if ((*vm)->AttachCurrentThread(vm, &e, NULL)) { free(key); return NULL; }
+    jobject act = g_app->activity->clazz; jclass ac = (*e)->GetObjectClass(e, act);
+    jobject cl = (*e)->CallObjectMethod(e, act, (*e)->GetMethodID(e, ac, "getClassLoader", "()Ljava/lang/ClassLoader;"));
+    jclass clc = (*e)->FindClass(e, "java/lang/ClassLoader");
+    jclass ml = (jclass)(*e)->CallObjectMethod(e, cl, (*e)->GetMethodID(e, clc, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;"), (*e)->NewStringUTF(e, "com.nxnative.MaliLadder"));
+    jmethodID m = NULL;
+    if (!(*e)->ExceptionCheck(e) && ml) m = (*e)->GetStaticMethodID(e, ml, "note", "(Landroid/app/Activity;Ljava/lang/String;)V");
+    if ((*e)->ExceptionCheck(e) || !m) { (*e)->ExceptionClear(e); fprintf(stderr, "[RED] note: com.nxnative.MaliLadder.note missing\n"); }
+    else { (*e)->CallStaticVoidMethod(e, ml, m, act, (*e)->NewStringUTF(e, key)); if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionDescribe(e); (*e)->ExceptionClear(e); } }
+    (*vm)->DetachCurrentThread(vm); free(key);
+    return NULL;
+}
+void front_note(const char *key) {
+    char *k = strdup(key ? key : ""); pthread_t th;
+    if (k && !pthread_create(&th, NULL, note_main, k)) pthread_detach(th); else free(k);
+}
 void front_open_menu(int what) {
     static _Atomic long long last_ms; struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); long long t = ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
     if (t - atomic_load(&last_ms) < 500) return;   // one dialog per press
@@ -434,6 +454,7 @@ static void boot_guard(const char *mods) {
         const char *drv = getenv("DM_VK_DRIVER"); int stock = !drv || !*drv;
         fprintf(stderr, "boot: the last run crashed (%s)\n", device ? "after the graphics device came up" : "before the graphics device came up");
         if (device) setenv("DM_LAST_CRASH_DEVICE", "1", 1);   // (nvn_vk.c: a start that went without the dma-buf heap route and crashed anyway sends the next one back to it)
+        if (device && strstr(prev, "in the game's code")) setenv("DM_LAST_CRASH_GAME", "1", 1);   // (nvn_vk.c's white-screen ladder: a crash in the game's own code is not its route's)
         if (had_mods) { int n = mods_off(mods); if (n) { char t[200]; snprintf(t, sizeof t, "The game closed while %d mod%s were on, so they are switched off. Switch them back on in the menu, Mods.", n, n == 1 ? "" : "s"); notice("mods", t); } }
         else if (stock && !strstr(prev, "playing") && !strstr(prev, "in the game's code") && !g_safe_advanced) {   // (a crash in the game's own code is the engine's to fix, not the driver's: no driver dialog; nor while safe_start has a safer level to try)
             char gpu[256] = ""; char gp[1200]; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "r"); if (g) { if (!fgets(gpu, sizeof gpu, g)) gpu[0] = 0; fclose(g); }
@@ -528,6 +549,25 @@ static void mods_romfs(const char *mods) {
     if (g_roots_n) { setenv("DM_ROMFS_OVERLAY", g_roots, 1); fprintf(stderr, "boot: %d RomFS mod folder(s)\n", g_roots_n); }
 }
 #include "env_file.h"   // env_file(): KEY=VALUE files, each key set only when not set (env.txt, driver-check.env; tests/t_safe_start.c)
+#include "mali_white.h"   // (mw_env_migrate: tested in dm/gfx/tests/t_mali_white.c)
+// env.txt's float-target switches as an older version's Mali tests menu left them ("1", its only choice; no line was its Off), taken out once per env.txt before it is
+//   read: the menu is Auto / On / Off now, and with the white-screen check (nvn_vk.c mali_white_vk.inc) such a leftover would hold the check's route for good. The
+//   marker line DM_MALI_ENV=2 (written here, and by the menu when it sets either) says it was done: a "1" after it is the player's On. Mali phones only (gpu.txt, the
+//   engine's name of this phone's GPU, says Mali): the older menu offered these there alone, and env.txt stays untouched everywhere else
+static void mali_env_migrate(const char *path) {
+    { char gp[1200], gpu[256] = ""; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "r"); if (g) { if (!fgets(gpu, sizeof gpu, g)) gpu[0] = 0; fclose(g); }
+      for (char *c = gpu; *c; c++) *c = (char)tolower((unsigned char)*c);
+      if (!strstr(gpu, "mali")) return; }
+    static char in[16384], out[16640]; size_t k = 0; FILE *f = fopen(path, "r");
+    if (f) { k = fread(in, 1, sizeof in - 1, f); fclose(f); if (k == sizeof in - 1) return; }   // (a file this long is not one the app wrote: left alone)
+    in[k] = 0; int rm = 0;
+    if (mw_env_migrate(in, out, sizeof out, &rm) != 1) return;
+    char t[1200]; snprintf(t, sizeof t, "%s.tmp", path); FILE *w = fopen(t, "w"); if (!w) return;
+    int ok = fputs(out, w) >= 0; ok &= fclose(w) == 0;
+    if (!ok || rename(t, path)) { unlink(t); fprintf(stderr, "boot: [mali-white] env.txt could not be rewritten (errno %d)\n", errno); return; }
+    if (rm) fprintf(stderr, "boot: [mali-white] env.txt: %s%s%s, left by an older version's Mali tests menu, taken out once: Auto (the white-screen check picks the route; the menu's On / Off win from now on)\n",
+                    rm & MW_ROUTE_A ? "DM_VK_B10_AS_RGBA16=1" : "", rm == (MW_ROUTE_A | MW_ROUTE_B) ? " and " : "", rm & MW_ROUTE_B ? "DM_VK_B10_NOCOMPRESS=1" : "");
+}
 // Device profiles: defaults by chip, from its model (ro.soc.manufacturer / ro.soc.model, Android 12+: SM8750, MT6989, s5e9945 ...). Set without overwriting, after env.txt,
 // so the player's own settings (the settings screen writes env.txt) always win; DM_PROFILE=<name> below picks one by hand, DM_PROFILE=none none.
 // Mali GPUs (MediaTek, Tensor, Exynos before the 2000 series) have no BC texture support: the game's textures are decoded on upload to 4 to 8 times their size, and the
@@ -1414,7 +1454,10 @@ static void host_start(void) {
     if (g_dl_note[0]) fprintf(stderr, "%s\n", g_dl_note);
     { pthread_t lt; if (!pthread_create(&lt, NULL, log_mirror, NULL)) pthread_detach(lt); }
     { pthread_t it; if (!pthread_create(&it, NULL, inspector_main, NULL)) pthread_detach(it); }   // the memory inspector (scan.req / peek.req)
-    snprintf(p, sizeof p, "%s/env.txt", g_files); env_file(p, "env", NULL, 0);
+    snprintf(p, sizeof p, "%s/env.txt", g_files); mali_env_migrate(p); env_file(p, "env", NULL, 0);
+    // the Mali white-screen check's state (nvn_vk.c mali_white_vk.inc), one file per phone: in the app's files folder itself, which Sword and Shield share
+    //   (MaliLadder.java reads it there for the PanVK offer); env.txt may name another
+    { const char *root = g_app->activity->externalDataPath; snprintf(q, sizeof q, "%s/mali_ladder.txt", root ? root : g_files); setenv("DM_MALI_LADDER_FILE", q, 0); }
     // The allocator's cache of large blocks, made big enough for the GPU driver's: on a Galaxy S25+ (Adreno 830) a third of the game thread's time went to the driver
     //   mapping and unmapping memory, calloc → mmap and free → munmap in every vkCmdBeginRendering (about 250 a frame) and in every command pool reset, because its
     //   blocks were larger than scudo's secondary cache keeps (simpleperf, 2026-11-09). Cached, they are reused; the pages go back to the system on Android's own

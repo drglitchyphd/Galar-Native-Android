@@ -348,8 +348,23 @@ FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0：AMDの�
 Faster rendering	高速レンダリング
 Auto: on for Adreno GPUs, off for others	自動：Adreno GPUではオン、それ以外ではオフ
 Off: the graphics work runs on the game's own thread	オフ：グラフィック処理をゲーム自身のスレッドで行います
+Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself.	明るい場面：ARM純正のMaliドライバーで画面が白くなる問題への2つの修正です。自動にすると、ゲームが修正を選び、画面を自分で確認します。
 Bright scenes in a wider format	明るい場面をより広い形式で描画
 On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	オン：明るい場面をより余裕のある形式（R11G11B10Fの代わりにRGBA16F）で描画します。白い画面やちらつきのテストです。メモリを少し多く使います
+Bright scenes without compression	明るい場面を圧縮なしで描画
+On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth	オン：明るい場面の形式はそのままで、GPUのフレームバッファ圧縮（AFBC）を使わずに保存します。白い画面のテストです。メモリ帯域を多く使います
+Auto: on with ARM's own Mali driver for Sword / Shield; the game checks the picture while you play and moves to the second fix if it stays white	自動：ソード／シールドでARM純正のMaliドライバーのときオン。プレイ中に画面を確認し、白いままなら2つ目の修正に切り替えます
+Off: the lit scene in its own packed format (R11G11B10F)	オフ：明るい場面を本来の圧縮形式（R11G11B10F）で描画します
+Auto: used when the game finds that the first fix did not take on ARM's own Mali driver	自動：ARM純正のMaliドライバーで1つ目の修正が効かなかったとゲームが判断したときに使います
+Off: the framebuffer compression the driver chooses	オフ：ドライバーが選ぶフレームバッファ圧縮のまま
+Mali: the white-screen fix did not take; trying the second fix at the next start	Mali：白い画面の修正が効きませんでした。次回の起動時に2つ目の修正を試します
+Mali: the white-screen fix did not take; the next start tries the other fix again	Mali：白い画面の修正が効きませんでした。次回の起動時にもう一方の修正をもう一度試します
+Mali: a test switch in the settings overrides the white-screen fix	Mali：設定のテスト用スイッチが白い画面の修正より優先されています
+Mali: a test switch in the settings (%s) overrides the white-screen fix	Mali：設定のテスト用スイッチ（%s）が白い画面の修正より優先されています
+Mali: neither white-screen fix took; the next start offers the PanVK driver	Mali：白い画面の修正はどちらも効きませんでした。次回の起動時にPanVKドライバーを提案します
+White screen on this phone's own driver	この端末のドライバーで画面が白くなります
+On this phone's own Mali driver (%s), %s drew its lit scenes white, and both of the app's fixes were tried at earlier starts without success.	この端末のMaliドライバー（%s）では、%sの明るい場面が白く描画され、アプリの2つの修正も以前の起動で試しましたが効果がありませんでした。
+The PanVK driver draws the game on many Mali phones: download its .zip and choose it as the graphics driver.	PanVKドライバーは多くのMali端末でゲームを描画できます。その.zipをダウンロードして、グラフィックドライバーとして選んでください。
 AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1：輪郭を保つ拡大の後にシャープ化（シャープネスで強さを調整）
 Colour	色合い
 Natural	ナチュラル

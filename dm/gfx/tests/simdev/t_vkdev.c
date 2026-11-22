@@ -574,7 +574,7 @@ static void inttex_work(void) {
         tex_t t; memset(&t, 0, sizeof t); t.magic = MAGIC('T', 'E', 'X', 0); t.serial = nvn_new_serial(); t.d.format = F[i].nvn; t.d.target = F[i].target;
         t.d.width = t.d.height = 4; t.d.depth = F[i].target == 2 ? 4 : 1; t.d.levels = 1;
         int tid = 3900 + i; mtl_reg_tex(tid, &t, NULL);
-        pthread_mutex_lock(&g_rmu); VkImageView v = tex_view_for(tid, &r, 0); pthread_mutex_unlock(&g_rmu);   // (its caller holds g_rmu: push_stage)
+        pthread_mutex_lock(&g_rmu); VkImageView v = tex_view_for(tid, &r, 0, NULL, 1, 0); pthread_mutex_unlock(&g_rmu);   // (its caller holds g_rmu: push_stage; a fragment shader that writes no image)
         vtex *x = tex_res(&t); VkFormat got = VK_FORMAT_UNDEFINED;
         if (x && v) { pthread_mutex_lock(&x->vmu); for (int k = 0; k < x->nviews; k++) if (x->views[k].v == v) got = (VkFormat)x->views[k].k.fmt; pthread_mutex_unlock(&x->vmu); }
         VkFormat want = !F[i].as_float ? (empty && !keep ? VK_FORMAT_UNDEFINED : F[i].own)
@@ -585,6 +585,184 @@ static void inttex_work(void) {
         mtl_reg_tex(tid, NULL, NULL);
     }
 }
+
+// ---- R11G11B10F, the format the Mali float-target tests change (DM_VK_B10_AS_RGBA16: drawn as RGBA16F; DM_VK_B10_NOCOMPRESS: its targets without framebuffer
+//   compression), through the engine's own paths, judged by the validation layer against the simulated GPU, and checked bit for bit: a render target made and
+//   cleared in a pass (the load op, then vkCmdClearAttachments), copied into a pool and back, a pool's every channel code copied in and out, a texture clear, a
+//   CPU-filled linear texture uploaded, CPU reads, views in 4-byte formats (the stand-in's refused or made in RGBA16F by use), an image-flagged texture's storage
+//   usage against the GPU's R11G11B10F storage support; with the stand-in, an RGBA8 copy into it. Run with and without the switches
+static tex_t *b10_tex(pool_t *pl, uint8_t *mem, int fmt, uint32_t w, uint32_t h, int linear) {
+    tex_t *t = calloc(1, sizeof *t); t->magic = MAGIC('T', 'E', 'X', 0); t->d.target = NVN_TEXTURE_TARGET_2D; t->d.format = fmt; t->d.width = w; t->d.height = h; t->d.depth = 1; t->d.levels = 1;
+    t->d.flags = linear ? NVN_TEXTURE_FLAGS_LINEAR : NVN_TEXTURE_FLAGS_COMPRESSIBLE; if (linear) t->d.stride = w * 4;
+    nvn_tex_layout(&t->d, &t->L); t->pool = pl; t->off = mem - pl->mem; t->mem = mem; t->serial = nvn_new_serial(); mtl_tex_init(t);
+    return t;
+}
+static int b10_same(uint32_t a, uint32_t b) {   // packed texels equal, a NaN channel matching any NaN
+    for (int c = 0; c < 3; c++) { int mb = c == 2 ? 5 : 6, sh = c == 0 ? 0 : c == 1 ? 11 : 22; uint32_t m = c == 2 ? 0x3ff : 0x7ff, x = a >> sh & m, y = b >> sh & m;
+        int nx = (x >> mb) == 31 && (x & ((1u << mb) - 1)), ny = (y >> mb) == 31 && (y & ((1u << mb) - 1)); if (nx || ny ? !(nx && ny) : x != y) return 0; }
+    return 1;
+}
+static void b10_work(void) {
+    // the moved-mapping pool route cannot run on lavapipe (work's SIMGAP): there the memory is not made a pool and the copies through one are left out
+    int moved = !g_host_import && !g_fdmap && !g_heapmap;
+    if (moved) printf("SIMGAP b10: the pool route (moved mappings) cannot run on lavapipe: the copies through a pool left out, the rest runs\n");
+    // VK_EXT_image_compression_control listed by the profile but not lavapipe's: not enabled on the device (w_cd), so the engine must not use it here
+    if ((g_compctl || p_layout2) && !lvp_has_ext("VK_EXT_image_compression_control")) { g_compctl = 0; p_layout2 = NULL;
+        printf("SIMGAP b10: VK_EXT_image_compression_control is the profile's, not lavapipe's: DM_VK_B10_NOCOMPRESS takes its other route here\n"); }
+    size_t n = 1u << 20; uint8_t *mem = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(mem != MAP_FAILED, "b10 mmap"); if (mem == MAP_FAILED) return;
+    memset(mem, 0, n); g_step = "b10 pool"; if (!moved) mtl_pool_add(mem, n);
+    pool_t *pl = calloc(1, sizeof *pl); pl->magic = MAGIC('P', 'O', 'O', 'L'); pl->flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED; pl->mem = mem; pl->size = n;
+    // lavapipe's opaque-fd memory is the pool one page off (work's SIMGAP): there the checks of what the GPU read from or wrote into the pool are left out; the commands
+    //   still run (the validation layer judges them)
+    int pool_ok = 0; if (!moved) { mtl_sub_begin(); mtl_sub_fill((uint64_t)(uintptr_t)(mem + 0x8000), 4096, 0xB10B10B1u); uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+        uint32_t w0; memcpy(&w0, mem + 0x8000, 4); pool_ok = w0 == 0xB10B10B1u;
+        if (!pool_ok) printf("SIMGAP b10: the GPU does not see this pool where the CPU does (lavapipe's opaque-fd layout): the pool's checks are left out, its commands still run\n"); }
+    enum { W = 64 }; uint8_t *bufA = mem + 0x10000, *bufB = mem + 0x20000, *bufC = mem + 0x30000, *lin = mem + 0x40000;
+    uint32_t codes[W * W]; for (uint32_t i = 0; i < W * W; i++) codes[i] = (i & 0x7ff) | ((i * 7 + 3) & 0x7ff) << 11 | ((i * 13) & 0x3ff) << 22;   // (every R, G and B code)
+    memcpy(bufB, codes, sizeof codes); memcpy(lin, codes, sizeof codes);
+    tex_t *T1 = b10_tex(pl, mem + 0x80000, NVN_FORMAT_R11G11B10F, W, W, 0), *T5 = b10_tex(pl, mem + 0x90000, NVN_FORMAT_R11G11B10F, 16, 16, 0);
+    tex_t *T6 = b10_tex(pl, lin, NVN_FORMAT_R11G11B10F, W, W, 1), *T3 = b10_tex(pl, mem + 0xA0000, NVN_FORMAT_RGBA8, W, W, 0), *T4 = b10_tex(pl, mem + 0xB0000, NVN_FORMAT_R11G11B10F, W, W, 0);
+    // the commands, as hle_nvn.c records them: the target set, a clear (taken by the pass's load op), then a second clear inside the open pass
+    static uint64_t cmdbuf[512]; uint8_t *q = (uint8_t *)cmdbuf;
+    #define B10OP(op_, T, v) do { op_hdr h_ = { (op_), (uint32_t)((8 + sizeof(T) + 7) & ~7u) }; memcpy(q, &h_, 8); memset(q + 8, 0, h_.size - 8); memcpy(q + 8, &(v), sizeof(T)); q += h_.size; } while (0)
+    p_set_rt rt; memset(&rt, 0, sizeof rt); rt.n = 1; rt.color[0] = T1; B10OP(OP_SET_RT, p_set_rt, rt);
+    p_clear_color c1 = { 0, 0xf, { 0.25f, -1.0f, 8.0f, 0.0f } }; B10OP(OP_CLEAR_COLOR, p_clear_color, c1);
+    op_hdr end = { OP_END, 8 }; memcpy(q, &end, 8);
+    uint8_t *second = q + 8; q = second; p_clear_color c2 = { 0, 0xf, { 0.5f, 0.125f, 3.0f, 0.0f } }; B10OP(OP_CLEAR_COLOR, p_clear_color, c2); memcpy(q, &end, 8);
+    #undef B10OP
+    g_step = "b10 submission"; mtl_sub_begin();
+    mtl_exec((const uint8_t *)cmdbuf); CHECK(pass_begin(), "b10: the R11G11B10F target's pass did not begin");
+    if (P.open) CHECK((P.b10 & 1) == (b10_on() ? 1u : 0u) && P.cfmt[0] == (uint32_t)(b10_on() ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_B10G11R11_UFLOAT_PACK32),
+                      "b10: the pass's target format %u (stand-in mask %#x)", P.cfmt[0], P.b10);
+    mtl_exec(second); pass_end();
+    p_copy_b2t cp; memset(&cp, 0, sizeof cp); cp.r.width = W; cp.r.height = W; cp.r.depth = 1;
+    if (!moved) { cp.tex = T1; cp.src = (uint64_t)(uintptr_t)bufA; copy_b2t(&cp, 1);   // the cleared target into the pool (packed)
+                  cp.src = (uint64_t)(uintptr_t)bufB; copy_b2t(&cp, 0);                // every code from the pool into it (expanded)
+                  cp.src = (uint64_t)(uintptr_t)bufC; copy_b2t(&cp, 1); }              // and out again
+    p_clear_tex ct; memset(&ct, 0, sizeof ct); ct.tex = T5; ct.r.width = 16; ct.r.height = 16; ct.r.depth = 1; ct.mask = 0xf; ct.c.f[0] = -1; ct.c.f[1] = 0.5f; ct.c.f[2] = 3; ct.c.f[3] = 1; clear_tex(&ct);
+    if (b10_on()) {   // an RGBA8 texture (cleared) copied into the stand-in: then made what R11G11B10F holds
+        p_clear_tex c3; memset(&c3, 0, sizeof c3); c3.tex = T3; c3.r.width = W; c3.r.height = W; c3.r.depth = 1; c3.mask = 0xf; c3.c.f[0] = 1; c3.c.f[1] = 0; c3.c.f[2] = 1; c3.c.f[3] = 1; clear_tex(&c3);
+        p_copy_t2t tt; memset(&tt, 0, sizeof tt); tt.src = T3; tt.dst = T4; tt.sr.width = tt.dr.width = W; tt.sr.height = tt.dr.height = W; tt.sr.depth = tt.dr.depth = 1; copy_t2t(&tt); }
+    uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+    // a view of the target in a 4-byte format (on the Switch its packed bits): R11G11B10F takes it (viewed in its own format where its formats are fixed); the stand-in has
+    //   no packed bits: a float view to sample is made in RGBA16F (it reads the colour), an integer view, a storage view or a render target is not made (b10_view_fmt)
+    { vtex *x = tex_res(T1); uint8_t sw[4] = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+      VkImageView vu = x ? view_get(x, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 0, 1, 0, 1, sw, VK_IMAGE_ASPECT_COLOR_BIT) : VK_NULL_HANDLE;
+      VkImageView vf = x ? view_get(x, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 0, 1, 0, 1, sw, VK_IMAGE_ASPECT_COLOR_BIT) : VK_NULL_HANDLE;
+      if (b10_on()) {
+          CHECK(x && !vu && vf, "b10: the stand-in's 4-byte views: an integer one not made (%p), a float one made in RGBA16F (%p)", (void *)vu, (void *)vf);
+          CHECK(x && b10_view_fmt(x, VK_FORMAT_R32_UINT, B10V_SAMPLED, "t_vkdev") == VK_FORMAT_UNDEFINED && b10_view_fmt(x, VK_FORMAT_R32_SFLOAT, B10V_SAMPLED, "t_vkdev") == VK_FORMAT_R16G16B16A16_SFLOAT
+                && b10_view_fmt(x, VK_FORMAT_R32_SFLOAT, B10V_STORAGE, "t_vkdev") == VK_FORMAT_UNDEFINED && b10_view_fmt(x, VK_FORMAT_R8G8B8A8_UNORM, B10V_ATTACH, "t_vkdev") == VK_FORMAT_UNDEFINED
+                && b10_view_fmt(x, VK_FORMAT_R16G16B16A16_SFLOAT, B10V_ATTACH, "t_vkdev") == VK_FORMAT_R16G16B16A16_SFLOAT, "b10: the stand-in's views by use (b10_view_fmt)");
+      } else CHECK(x && vu && vf && b10_view_fmt(x, VK_FORMAT_R32_UINT, B10V_STORAGE, "t_vkdev") == VK_FORMAT_R32_UINT, "b10: views of the target in 4-byte formats (%p, %p)", (void *)vu, (void *)vf); }
+    // a texture the game may bind as a storage image: storage usage exactly where R11G11B10F itself has storage on this GPU, the stand-in too (it must not change the
+    //   compression a storage image may cost)
+    { tex_t *T7 = b10_tex(pl, mem + 0xC0000, NVN_FORMAT_R11G11B10F, 16, 16, 0); T7->d.flags |= NVN_TEXTURE_FLAGS_IMAGE; vtex *x = tex_res(T7);
+      VkFormatProperties bp; vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &bp); int want = !!(bp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+      CHECK(x && !!(x->usage & VK_IMAGE_USAGE_STORAGE_BIT) == want, "b10: an image-flagged R11G11B10F texture%s: storage usage %d, R11G11B10F storage on this GPU %d",
+            b10_on() ? " (the stand-in)" : "", x ? !!(x->usage & VK_IMAGE_USAGE_STORAGE_BIT) : -1, want);
+      printf("WORK b10: an image-flagged R11G11B10F texture: storage usage %s (R11G11B10F storage %s on this GPU)\n", x && (x->usage & VK_IMAGE_USAGE_STORAGE_BIT) ? "yes" : "no", want ? "supported" : "not supported"); }
+    // the checks: the clear (as R11G11B10F stores it), every code through the pool, the texture clear, the upload, the RGBA8 copy
+    uint32_t qc = b10_float_to_chan(0.5f, B10_MR) | b10_float_to_chan(0.125f, B10_MR) << 11 | b10_float_to_chan(3.0f, B10_MB) << 22, q5 = b10_float_to_chan(-1, B10_MR) | b10_float_to_chan(0.5f, B10_MR) << 11 | b10_float_to_chan(3, B10_MB) << 22;
+    int bad[6] = { 0 }; uint32_t got[W * W]; NVNcopyRegion r = { 0, 0, 0, W, W, 1 }, r16 = { 0, 0, 0, 16, 16, 1 };
+    for (int i = 0; i < W * W; i++) { uint32_t a, cc; memcpy(&a, bufA + 4 * i, 4); memcpy(&cc, bufC + 4 * i, 4); bad[0] += !b10_same(a, qc); bad[1] += !b10_same(cc, codes[i]); }
+    mtl_read_texels(T1, 0, 0, &r, (uint8_t *)got, W * 4, W * W * 4); for (int i = 0; i < W * W; i++) bad[2] += !b10_same(got[i], codes[i]);
+    mtl_read_texels(T5, 0, 0, &r16, (uint8_t *)got, 16 * 4, 16 * 16 * 4); for (int i = 0; i < 16 * 16; i++) bad[3] += !b10_same(got[i], q5);
+    mtl_read_texels(T6, 0, 0, &r, (uint8_t *)got, W * 4, W * W * 4); for (int i = 0; i < W * W; i++) bad[4] += !b10_same(got[i], codes[i]);
+    if (b10_on()) { uint32_t m = b10_float_to_chan(1, B10_MR) | b10_float_to_chan(1, B10_MB) << 22; mtl_read_texels(T4, 0, 0, &r, (uint8_t *)got, W * 4, W * W * 4); for (int i = 0; i < W * W; i++) bad[5] += !b10_same(got[i], m); }
+    if (!pool_ok) bad[0] = bad[1] = bad[2] = 0;   // (the SIMGAP above: what the GPU read from the pool and wrote into it is somewhere else)
+    CHECK(!bad[0], "b10: the cleared target copied into the pool: %d of %d texels not (0.5, 0.125, 3)", bad[0], W * W);
+    CHECK(!bad[1], "b10: every channel code through the target and back into the pool: %d of %d texels differ", bad[1], W * W);
+    CHECK(!bad[2], "b10: the CPU's read of the target holding every code: %d of %d texels differ", bad[2], W * W);
+    CHECK(!bad[3], "b10: the texture clear (-1, 0.5, 3) read by the CPU: %d of 256 texels differ", bad[3]);
+    CHECK(!bad[4], "b10: the CPU-filled linear texture uploaded and read back: %d of %d texels differ", bad[4], W * W);
+    CHECK(!bad[5], "b10: the RGBA8 texture copied into the stand-in: %d of %d texels not (1, 0, 1)", bad[5], W * W);
+    printf("WORK b10: R11G11B10F %s%s: clears, copies through a pool, upload, CPU reads%s: %s%s\n", b10_on() ? "as its RGBA16F stand-in" : "as itself", g_b10nc ? (g_compctl ? ", targets with compression disabled" : ", targets mutable with no format list") : "",
+           b10_on() ? ", an RGBA8 copy into it" : "", bad[0] + bad[1] + bad[2] + bad[3] + bad[4] + bad[5] ? "WRONG" : "exact", pool_ok ? "" : " (the pool's checks left out: SIMGAP)");
+}
+
+// ---- the Mali white-screen check (mali_white_vk.inc): whom its ladder runs for and the route it gives (route A by default on Arm's own driver with Sword / Shield
+//   only; env.txt's own settings win), whether its verdicts are kept (white ones; fine ones only with no other white-screen test) and the start marker is up, then
+//   its compute pass, forced on here on every GPU, on a lit-size R11G11B10F target (or its RGBA16F stand-in) cleared to 65504, +infinity, NaN (counted apart from
+//   saturated), a finite white under the old threshold (2000), the lower bucket (100), a normal colour, black and near black, and with an RGBA8 picture shown
+//   cleared to white, almost white and grey, each sample read back after its fence and counted; the validation layer judges the pass against the simulated GPU
+static void mw_work(void) {
+    const char *ea = getenv("DM_VK_B10_AS_RGBA16"), *eb = getenv("DM_VK_B10_NOCOMPRESS"), *le = getenv("DM_MALI_LADDER"), *se = getenv("DM_MALI_WHITE_SIM");
+    int arm = g_arm_rel != 0, en = mw_enabled(arm, DM_PORT_GALAR, le, se), a = 0, b = 0;
+    int route = mw_route_apply(en ? g_mw.want : mw_default_route(arm, DM_PORT_GALAR), ea, eb, &a, &b);
+    char ot[200]; int others = mw_other_tests(ot, sizeof ot), record = route == MW_ROUTE_A || route == MW_ROUTE_B || route == MW_ROUTE_BOTH, record_fine = record && !others;
+    const char *pr = getenv("DM_VK_PROBE"); int f16 = pr && strstr(pr, "f16target") != NULL;   // (DM_VK_PROBE=f16target makes the stand-in too: b10_on)
+    DEC("mali_ladder", "%d", g_mw.on); DEC("mali_route", "%s", mw_route_name(g_mw.route)); DEC("mali_check", "%d", g_mw.check); DEC("mali_record", "%d", g_mw.record);
+    DEC("mali_record_fine", "%d", g_mw.record_fine); DEC("mali_marker", "%d", g_mw.marker); DEC("mali_stage", "%s", mw_stage_name(g_mw.st.stage)); DEC("mali_galar", "%d", DM_PORT_GALAR);
+    CHECK(g_mw.on == (en != 0), "white-screen ladder on %d, expected %d (Arm's own driver %d, Sword / Shield %d)", g_mw.on, en != 0, arm, DM_PORT_GALAR);
+    CHECK(b10_on() == (a || f16) && g_b10nc == b, "white-screen route: stand-in %d (expected %d), no compression %d (expected %d)", b10_on(), a || f16, g_b10nc, b);
+    if (!(le && *le) && !(se && *se) && !(ea && *ea) && !(eb && *eb)) CHECK(b10_on() == ((arm && DM_PORT_GALAR) || f16) && !g_b10nc && g_mw.on == (arm && DM_PORT_GALAR),
+        "route A and the ladder by default exactly on Arm's own driver with Sword / Shield (Arm %d): stand-in %d, ladder %d", arm, b10_on(), g_mw.on);
+    if (en && !getenv("DM_MALI_LADDER_FILE")) {   // (no state file here: the ladder's first start)
+        CHECK(g_mw.check == MW_CHECK_FULL, "the ladder's first start checks the lit scene while playing (check %d)", g_mw.check);
+        CHECK(g_mw.record == record && g_mw.record_fine == record_fine, "verdicts kept: white %d, fine %d, expected %d, %d (route %s, other white-screen tests: %s)", g_mw.record, g_mw.record_fine,
+              record, record_fine, mw_route_name(route), others ? ot : "none");
+        CHECK(g_mw.marker == (record_fine && route == MW_ROUTE_A), "the start marker %d, expected %d (it marks the ladder's own route A, as the ladder asked, with no other test)", g_mw.marker,
+              record_fine && route == MW_ROUTE_A);
+        CHECK(!g_mw.marker || g_mw.st.stage == MW_STAGE_LOADING, "the start marker's stage after mtl_init: %s (loading: the check's compute pass made, no picture yet)", mw_stage_name(g_mw.st.stage));
+    }
+    g_step = "mali check: compute pass"; CHECK(mw_gpu_init(), "the white-screen check's compute pass made"); if (g_mw.gpu <= 0) return;
+    enum { LW = 1280, LH = 720 };
+    size_t n = 8u << 20; uint8_t *mem = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(mem != MAP_FAILED, "mali check mmap"); if (mem == MAP_FAILED) return;
+    pool_t *pl = calloc(1, sizeof *pl); pl->magic = MAGIC('P', 'O', 'O', 'L'); pl->flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED; pl->mem = mem; pl->size = n;
+    tex_t *T = b10_tex(pl, mem, NVN_FORMAT_R11G11B10F, LW, LH, 0);
+    // expected: saturated (a channel at 1024+, or +inf), at 64+ (or saturated), near black (every channel under 1/1024), infinite, NaN (counted apart)
+    static const struct { const char *what; float v[3]; uint32_t sat, low, dark, inf, nan; int32_t r[4]; } cs[] = {
+        { "65504 (white)", { 65504.0f, 65504.0f, 65504.0f }, MW_TEX, MW_TEX, 0, 0, 0, { 0, 0, LW, LH } },
+        { "65504, a part at an offset", { 65504.0f, 65504.0f, 65504.0f }, MW_TEX, MW_TEX, 0, 0, 0, { 100, 50, 640, 360 } },
+        { "+infinity", { INFINITY, INFINITY, INFINITY }, MW_TEX, MW_TEX, 0, MW_TEX, 0, { 0, 0, LW, LH } },
+        { "NaN", { NAN, NAN, NAN }, 0, 0, 0, 0, MW_TEX, { 0, 0, LW, LH } },
+        { "2000 (a finite white the old 60000 threshold missed; Arm left 21250 in #110)", { 2000.0f, 2000.0f, 2000.0f }, MW_TEX, MW_TEX, 0, 0, 0, { 0, 0, LW, LH } },
+        { "100 (the lower bucket only)", { 100.0f, 1.0f, 0.5f }, 0, MW_TEX, 0, 0, 0, { 0, 0, LW, LH } },
+        { "a normal colour (0.5, 0.25, 0.125)", { 0.5f, 0.25f, 0.125f }, 0, 0, 0, 0, 0, { 0, 0, LW, LH } },
+        { "black (0, 0, 0: a cleared target)", { 0.0f, 0.0f, 0.0f }, 0, 0, MW_TEX, 0, 0, { 0, 0, LW, LH } },
+        { "near black (0.0005, 0.0002, 0)", { 0.0005f, 0.0002f, 0.0f }, 0, 0, MW_TEX, 0, 0, { 0, 0, LW, LH } },
+        { "dark but not black (0.002, 0, 0)", { 0.002f, 0.0f, 0.0f }, 0, 0, 0, 0, 0, { 0, 0, LW, LH } } };
+    int bad = 0;
+    for (unsigned i = 0; i < sizeof cs / sizeof *cs; i++) {
+        g_step = "mali check: clear"; mtl_sub_begin();
+        p_clear_tex ct; memset(&ct, 0, sizeof ct); ct.tex = T; ct.r.width = LW; ct.r.height = LH; ct.r.depth = 1; ct.mask = 0xf; for (int k = 0; k < 3; k++) ct.c.f[k] = cs[i].v[k]; ct.c.f[3] = 1; clear_tex(&ct);
+        uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+        vtex *x = tex_res(T); CHECK(x && x->img && (x->usage & VK_IMAGE_USAGE_SAMPLED_BIT), "mali check: the target made, sampled"); if (!x || !x->img) return;
+        g_step = "mali check: sample"; int ok = mw_sample(x, cs[i].r, 0, 0, 0, 100, NULL, NULL); CHECK(ok, "mali check: the sample of %s submitted", cs[i].what); if (!ok) { bad++; continue; }
+        int k = 0; for (int s = 1; s < MW_SLOTS; s++) if (g_mw.slot[s].busy && g_mw.slot[s].seq > g_mw.slot[k].seq) k = s;
+        CHECK(vkWaitForFences(g_dev, 1, &g_mw.slot[k].f, VK_TRUE, 10000000000ull) == VK_SUCCESS, "mali check: the sample's fence");
+        mw_count c = mw_read_slot(k); vtex *sx = g_mw.slot[k].x; g_mw.slot[k].busy = 0; g_mw.slot[k].x = NULL; vtex_unref(sx);
+        int right = c.sat == cs[i].sat && c.low == cs[i].low && c.dark == cs[i].dark && c.inf == cs[i].inf && c.nan == cs[i].nan && !c.shown; bad += !right;
+        CHECK(right, "mali check, target %s cleared to %s, part %d,%d %dx%d: %u of %d saturated, %u at 64+, %u near black (%u infinite, %u NaN; largest finite %g; picture shown %u), expected %u, %u, %u (%u, %u; none)",
+              x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? "RGBA16F (stand-in)" : "R11G11B10F", cs[i].what, cs[i].r[0], cs[i].r[1], cs[i].r[2], cs[i].r[3], c.sat, MW_TEX, c.low, c.dark, c.inf, c.nan,
+              (double)c.mx, c.shown, cs[i].sat, cs[i].low, cs[i].dark, cs[i].inf, cs[i].nan);
+    }
+    // the picture shown (an RGBA8 window texture, 320x240, its crop the whole of it): white where every colour channel is at 0.99 or more (252.45 of 255)
+    tex_t *S = b10_tex(pl, mem + (4u << 20), NVN_FORMAT_RGBA8, 320, 240, 0);
+    static const struct { const char *what; float v[3]; uint32_t white; } ss[] = { { "white (1, 1, 1)", { 1, 1, 1 }, MW_TEX }, { "almost white (1, 1, 0.98: 250 of 255)", { 1, 1, 0.98f }, 0 },
+                                                                                    { "grey (0.5)", { 0.5f, 0.5f, 0.5f }, 0 } };
+    int sbad = 0;
+    for (unsigned i = 0; i < sizeof ss / sizeof *ss; i++) {
+        g_step = "mali check: shown clear"; mtl_sub_begin();
+        p_clear_tex ct; memset(&ct, 0, sizeof ct); ct.tex = S; ct.r.width = 320; ct.r.height = 240; ct.r.depth = 1; ct.mask = 0xf; for (int k = 0; k < 3; k++) ct.c.f[k] = ss[i].v[k]; ct.c.f[3] = 1; clear_tex(&ct);
+        ct.tex = T; ct.r.width = LW; ct.r.height = LH; for (int k = 0; k < 3; k++) ct.c.f[k] = 0.5f; clear_tex(&ct);
+        uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+        vtex *x = tex_res(T), *sx = tex_res(S); int sok = mw_shown_ok(sx);
+        CHECK(sok, "mali check: the RGBA8 picture shown is one the check reads (format %d)", sx ? (int)sx->fmt : -1); if (!sok) { sbad++; continue; }
+        int32_t r[4] = { 0, 0, LW, LH }, sr[4] = { 0, 0, 320, 240 };
+        g_step = "mali check: shown sample"; int ok = mw_sample(x, r, 0, 0, 0, 100, sx, sr); CHECK(ok, "mali check: the sample with the picture shown %s submitted", ss[i].what); if (!ok) { sbad++; continue; }
+        int k = 0; for (int s = 1; s < MW_SLOTS; s++) if (g_mw.slot[s].busy && g_mw.slot[s].seq > g_mw.slot[k].seq) k = s;
+        CHECK(vkWaitForFences(g_dev, 1, &g_mw.slot[k].f, VK_TRUE, 10000000000ull) == VK_SUCCESS, "mali check: the shown sample's fence");
+        mw_count c = mw_read_slot(k); vtex *lx = g_mw.slot[k].x, *px = g_mw.slot[k].sx; g_mw.slot[k].busy = 0; g_mw.slot[k].x = g_mw.slot[k].sx = NULL; vtex_unref(lx); if (px) vtex_unref(px);
+        int right = c.shown == MW_TEX && c.swhite == ss[i].white && c.sat == 0 && c.nan == 0; sbad += !right;
+        CHECK(right, "mali check, the picture shown cleared to %s: %u of %u white (lit target %u saturated), expected %u of %d", ss[i].what, c.swhite, c.shown, c.sat, ss[i].white, MW_TEX);
+    }
+    printf("WORK mali check: the lit target as %s, cleared and sampled %d times (65504, a part of it, +inf, NaN, 2000, 100, a normal colour, black, near black, dark): %s; "
+           "the picture shown (RGBA8) %d times (white, almost white, grey): %s\n", b10_on() ? "its RGBA16F stand-in" : "R11G11B10F", (int)(sizeof cs / sizeof *cs), bad ? "WRONG" : "counted right",
+           (int)(sizeof ss / sizeof *ss), sbad ? "WRONG" : "counted right");
+}
+
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -611,7 +789,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); }
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)

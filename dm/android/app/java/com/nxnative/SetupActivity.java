@@ -84,11 +84,11 @@ public final class SetupActivity extends Activity {
         }
         return block;
     }
-    // (translated: the dialog came half in English in the Portuguese app, #82)
-    private static String driverAdvice(android.content.Context c, String gpu) {
+    // (translated: the dialog came half in English in the Portuguese app, #82). Also MaliLadder's PanVK offer, for a GPU no PanVK build is known for
+    static String driverAdvice(android.content.Context c, String gpu) {
         String g = gpu.toLowerCase(java.util.Locale.ROOT);
         if (g.contains("adreno")) return T.t(c, "A recent Mesa Turnip package for Adreno usually fixes this: choose its .zip as the graphics driver.");
-        if (g.matches(".*mali-g(57|68|77|78|52|72|76).*")) return T.t(c, "FristOneRR's PanVK driver supports this Mali: download its .zip from the developer's GitHub Releases and choose it as the graphics driver.");
+        if (DriverPackages.panvkBifrost(g)) return T.t(c, "FristOneRR's PanVK driver supports this Mali: download its .zip from the developer's GitHub Releases and choose it as the graphics driver.");
         return T.t(c, "No replacement driver supports this GPU yet. Please report it with the log in Download (the -log-previous.txt file), so the app can be fixed for it.");
     }
     // a game set up (its folder has the ready file and the shader pack): the dual launcher's list
@@ -154,6 +154,8 @@ public final class SetupActivity extends Activity {
         if (ready() && !asked && !running && notices()) asked = true;   // the last run crashed starting its graphics: this screen offers a driver instead of starting the game
         // the last run crashed (Android's record of it, ApplicationExitInfo): offered once, a debug report for a GitHub issue (DebugBundle); Play goes on as a start would
         if (ready() && !asked && !running && DebugBundle.offerAfterCrash(this, () -> { if (pendingWork(gameDir())) startCaptures(); else startGame(); })) asked = true;
+        // both of the Mali white-screen fixes were white on this phone's own driver (the engine's check, MaliLadder): PanVK offered once, before the game starts
+        if (ready() && !asked && !running && MaliLadder.offer(this, this::startGame, () -> pick(PICK_DRIVER, false))) asked = true;
         if (ready() && !asked && !running) { gameIcon(); if (!pendingWork(gameDir())) { startGame(); return; } }
         setupScreen(official);
         if (getIntent().getBooleanExtra("from_app", false)) startSetupFromApp();   // am start ... --ez setup true --ez from_app true: set up (again) from the installed app, over adb
