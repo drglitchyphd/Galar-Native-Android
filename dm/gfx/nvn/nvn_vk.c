@@ -2374,6 +2374,14 @@ static vtex *tex_new(const tex_t *t, int pkg) {
         else if (arm && plain && twin == x->fmt) { ci.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; x->fixed_fmt = 1; }
         else if (g_fmtlist && ((ci.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || (arm && plain))) { ci.pNext = &fli; x->fixed_fmt = 2; x->twin = twin; }   // (without a list: mutable, as before lists)
     }
+    // DM_VK_B10_NOCOMPRESS (a Mali test, off by default): an R11G11B10F render target made without framebuffer compression, for the case that Arm's driver mishandles
+    //   the packed float format in AFBC (the white lit scene). Through VK_EXT_image_compression_control where the driver has it (compression disabled for this image);
+    //   else by the driver's own rule, the opposite of the lists above: mutable with no list of view formats (Mali keeps AFBC only on images that are not mutable or
+    //   list their view formats; Adreno's UBWC goes the same way). Only these targets; logged with what the driver then reports (b10 nocompress)
+    VkImageCompressionControlEXT ncc = { .sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT, .flags = VK_IMAGE_COMPRESSION_DISABLED_EXT };
+    int b10nc = g_b10nc && t->d.format == 0x3F && (ci.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    if (b10nc && g_compctl) { ncc.pNext = ci.pNext; ci.pNext = &ncc; }
+    else if (b10nc) { ci.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; ci.pNext = NULL; x->fixed_fmt = 0; x->twin = 0; }
     // a sample count the GPU has no mode for (Mali has no 2x MSAA: a 2-sample render target could not be created, and the pass drawing into it was lost, a black or
     // white screen) becomes the nearest one it has, the next higher first (2 → 4), else lower; every target of the same request maps the same way, so a pass's
     // attachments still agree, and a shader's sample index stays inside the image
@@ -2390,6 +2398,9 @@ static vtex *tex_new(const tex_t *t, int pkg) {
     }
     x->w = ci.extent.width; x->h = ci.extent.height; x->d = ci.extent.depth; x->levels = ci.mipLevels; x->layers = ci.arrayLayers; x->samples = ci.samples; x->usage = ci.usage; x->aspect = fmt_aspect(x->fmt);
     VkResult r = vkCreateImage(g_dev, &ci, NULL, &x->img);
+    if (r && b10nc && g_compctl) {   // (a driver that refuses the request: the target as it was made before, said once)
+        RED_ONCE(153, "b10 nocompress: the driver refused an R11G11B10F render target with framebuffer compression disabled (%d): made as before", r);
+        ci.pNext = ncc.pNext; b10nc = 0; r = vkCreateImage(g_dev, &ci, NULL, &x->img); }
     if (r) { RED_ONCE(3, "vkCreateImage %ux%ux%u format %#x (Vulkan %u) target %d failed: %d", x->w, x->h, x->d, t->d.format, vf, t->d.target, r); free(x); return NULL; }
     VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, x->img, &rq);
     x->a = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); atomic_fetch_add(&g_live_tex_bytes, (long)x->a.size);
@@ -2403,6 +2414,16 @@ static vtex *tex_new(const tex_t *t, int pkg) {
         VLOG("render target %ux%u format %d: framebuffer compression %s (flags %#x)", x->w, x->h, x->fmt,
              cp.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT ? "OFF" : "on", (unsigned)cp.imageCompressionFlags);
     }
+    static int nc_said;
+    if (b10nc && nc_said < 6) { nc_said++;   // DM_VK_B10_NOCOMPRESS: how, and what the driver reports where it can (the first few targets)
+        const char *how = g_compctl ? "made with compression disabled (VK_EXT_image_compression_control)" : "made mutable with no list of view formats (no VK_EXT_image_compression_control)";
+        if (p_layout2) { VkImageCompressionPropertiesEXT cp = { .sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT };
+            VkSubresourceLayout2EXT sl = { .sType = VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2_EXT, .pNext = &cp };
+            VkImageSubresource2EXT sr = { .sType = VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2_EXT, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 } };
+            p_layout2(g_dev, x->img, &sr, &sl);
+            VLOG("b10 nocompress: R11G11B10F render target %ux%u %s: the driver reports framebuffer compression %s (flags %#x)", x->w, x->h, how,
+                 cp.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT ? "OFF" : "still on", (unsigned)cp.imageCompressionFlags); }
+        else VLOG("b10 nocompress: R11G11B10F render target %ux%u %s (the driver cannot report its compression)", x->w, x->h, how); }
     return x;
 }
 static VkImageView view_get(vtex *t, VkImageViewType vt, VkFormat fmt, uint32_t lvl, uint32_t nlvl, uint32_t lay, uint32_t nlay, const uint8_t sw[4], VkImageAspectFlags aspect) {
