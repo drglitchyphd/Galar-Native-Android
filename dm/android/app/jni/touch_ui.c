@@ -663,7 +663,10 @@ static dm_ovl_item *add(dm_ovl_item *it, int *n, int max, float cx, float cy, fl
 // The game's own HUD block in the bottom right (the party Pokemon / items selector, its count and name; game picture coordinates 1460-1920 x 800-1080):
 //   a button over it keeps only its light rim and label, so the icons there are never dulled by the grey glass. The top is 800, where the item / party circles
 //   start: B's default place ends at 760, and a top there made B flip between the two looks as it shrank and grew when pressed
+// Legends: Arceus's block only (the touch-menu game, GESTURES_ON): Sword / Shield and Scarlet / Violet have no such block there, and with it their A, B and Y
+//   (inside those coordinates) lost the grey body while X (above them) kept it; every button of theirs keeps the frosted look, as before the shared tree
 static int over_hud(float x, float y, float r) {
+    if (!GESTURES_ON) return 0;
     float x0, y0, x1, y1; sel_to_win(1460, 800, &x0, &y0); sel_to_win(1920, 1080, &x1, &y1);
     float nx = x < x0 ? x0 : x > x1 ? x1 : x, ny = y < y0 ? y0 : y > y1 ? y1 : y;
     return (nx - x) * (nx - x) + (ny - y) * (ny - y) < r * r;
