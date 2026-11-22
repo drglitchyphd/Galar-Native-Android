@@ -123,6 +123,10 @@ def player_for(engine, players):
 def vk_env():
     e = dict(os.environ)
     if 'VK_ICD_FILENAMES' not in e and 'VK_DRIVER_FILES' not in e and os.path.exists(LVP): e['VK_ICD_FILENAMES'] = LVP
+    # every pipeline built where its draw asks for it: since background builds are on for every GPU (DM_VK_ASYNC_PSO, nvn_vk.c apso_on), a draw whose pipeline is
+    #   still being built is skipped for a frame or two, which a game hides and a golden frame cannot (golden_check.py b10's one-off draws came out empty on lavapipe,
+    #   every run). DM_VK_ASYNC_PSO set by the caller wins
+    e.setdefault('DM_VK_ASYNC_PSO', '0')
     return e
 
 def play(rec, out_png, players, extra_env=None):
