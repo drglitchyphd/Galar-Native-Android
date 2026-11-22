@@ -1069,6 +1069,14 @@ static int res_lowest(void) {
 extern double dm_gpu_avg_ms(int frames) __attribute__((weak));
 extern _Atomic uint64_t g_nvn_game_work_avg_ns __attribute__((weak));
 #define RES_HOT 2   // the step heat goes straight to: 720p from 1080p (the upscaler brings it back to the screen's size)
+// One governor with frame generation (nvn_vk.c fg_gov_absorb): when its pictures cost the game frames, the render scale gives way first. dm_guard_fg_absorb: 1 when this
+//   guard has a step left that can help (running, the scale applies, not at its lowest, not after a step that did not help, not CPU-bound): it takes the next step at
+//   its next check, judged as its own. dm_guard_heat: 0 cool, 1 hot, 2 hot with the scale already at its heat step (frame generation then gets lighter too).
+//   nvn_vk_fg_gpu_ms: frame generation's GPU time a game frame, counted into the budget the steps are judged by
+static _Atomic int g_fg_pressure, g_guard_room, g_guard_heat;
+int dm_guard_fg_absorb(void) { if (!atomic_load(&g_guard_room)) return 0; atomic_store(&g_fg_pressure, 1); atomic_store(&g_guard_room, 0); return 1; }
+int dm_guard_heat(void) { return atomic_load(&g_guard_heat); }
+extern double nvn_vk_fg_gpu_ms(void) __attribute__((weak));
 #define RES_START 1   // where Auto starts: 85 % (between 720p and 1080p), up to the game's full size after a calm minute at a steady 30, down to 720p when short (DM_RES_START=0..3 picks another step)
 static int g_fps_guard;   // set at start (fps_guard_init): the target, 0 off
 static void fps_guard_init(void) {
@@ -1101,9 +1109,29 @@ static void heat_guard(void) {
     if (power_saver()) { hot = st >= 1 || hr >= 0.75f; calm = st == 0 && (hr < 0 || hr < 0.6f); }
     float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
     calm_n = calm ? calm_n + 1 : 0;
+    atomic_store(&g_guard_heat, hot ? 2 : 0);   // (no frame-rate steps here: hot means the scale is at its heat step already)
     if (hot && !on) { on = 1; calm_n = 0; dm_res_factor_set(k_res_steps[RES_HOT]);
         fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% (about 720p) until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(k_res_steps[RES_HOT] * 100 + 0.5f)); }
     else if (on && calm_n >= 12) { on = 0; dm_res_factor_set(k_res_steps[0]); fprintf(stderr, "heat guard: cooled down: the game's own 3D render scale again\n"); }
+}
+// Locked 30, the last lever (Sword and Shield; Legends: Arceus has the same with its draw distance, lock30_draw there): when the lightest 3D render scale still falls
+//   short of 30 for 30 s, lighter shadows (DM_SHADOWS=low: 512 x 512 maps) and a shorter terrain-detail distance (DM_DRAW_DIST=75) are remembered in
+//   <files>/auto_lite.txt and used from the next start (both are written into the game's code at load: loader.c galar_shadow_patch / galar_draw_patch), each only
+//   where the player left that setting on its default. Ten calm minutes at the game's full size, CPU and GPU under half the budget, take it back for the start after
+static int lite_was(void) { char p[1100], cur[8] = ""; snprintf(p, sizeof p, "%s/auto_lite.txt", g_files); FILE *f = fopen(p, "r"); if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); } return cur[0] == '1'; }
+static void lock30_lite(int on, double fps, double gpu, double cpu, double budget) {
+    if (lite_was() == on) return;
+    char p[1100]; snprintf(p, sizeof p, "%s/auto_lite.txt", g_files); FILE *f = fopen(p, "w"); if (!f) return; fputs(on ? "1\n" : "\n", f); fclose(f);
+    fprintf(stderr, on ? "fps guard: %.1f fps even at the lightest 3D render scale (GPU %.1f ms, game thread %.1f ms of %.1f): lighter shadows and draw distance 75 %% from the next start (Settings -> Graphics overrides them)\n"
+                       : "fps guard: steady at the full picture with room to spare (%.1f fps; GPU %.1f ms, game thread %.1f ms of %.1f): the game's own shadows and draw distance again from the next start\n", fps, gpu, cpu, budget);
+}
+static void lite_boot(void) {   // at start, after fps_guard_init: what lock30_lite remembered, under the player's own choices
+    if (g_fps_guard != 30 || !lite_was()) return;
+    const char *sh = getenv("DM_SHADOWS"), *dd = getenv("DM_DRAW_DIST"); int a = 0, b = 0;
+    if (!sh || !*sh) { setenv("DM_SHADOWS", "low", 1); a = 1; }
+    if (!dd || !*dd || atoi(dd) == 100) { setenv("DM_DRAW_DIST", "75", 1); b = 1; }
+    if (a || b) fprintf(stderr, "boot: %s%s%s, chosen by the fps guard (this phone could not hold 30 at the lightest 3D render scale; Settings -> Graphics overrides it)\n",
+                        a ? "shadows low" : "", a && b ? " and " : "", b ? "draw distance 75 %" : "");
 }
 static void graphics_auto(void) {
     static int mode = 1, cool, slow, held, wait = 12, primed, lv, since; static uint64_t last_fr;
@@ -1128,11 +1156,11 @@ static void graphics_auto(void) {
     cool = calm && (!g_fps_guard || full) ? cool + 1 : 0;
     if (dm_res_scale_ready()) {   // the render scale (a cap set by hand, DM_RES_CAP or Lowest, is left alone)
         static int probe, probe_hot, nogain, noheat; static double fps_was;
-        if (getenv("DM_RES_CAP")) return;
+        if (getenv("DM_RES_CAP")) { atomic_store(&g_guard_room, 0); return; }
         since++;
         if (nogain > 0) nogain--;
         if (noheat > 0) noheat--;
-        if (!dm_res_scale_applies()) { probe = 0; slow = 0; return; }
+        if (!dm_res_scale_applies()) { probe = 0; slow = 0; atomic_store(&g_guard_room, 0); return; }
         if (power_saver() && lv < RES_HOT) { lv = RES_HOT; dm_res_factor_set(k_res_steps[lv]); probe = 0; cool = 0; held = 0; slow = 0; since = 0;   // (battery saver: no larger than the 720p step)
             fprintf(stderr, "power: battery saver: 3D render scale %d %%\n", (int)(k_res_steps[lv] * 100 + 0.5f)); return; }   // (a scene at the game's full size: see above)
         // Start at 85 % and settle: a phone that holds 30 there for a calm minute goes up to the game's full size, one short of it goes down to 720p, and back when a step falls
@@ -1157,11 +1185,21 @@ static void graphics_auto(void) {
         // the bottleneck, measured (2 s of frames): with the GPU over 85 % of the frame's budget a short frame rate steps down at the first short check (still judged after 15 s);
         //   with the GPU under 70 % and the game thread over 85 %, the CPU is the limit and the picture stays (a lower one would only look worse). No timestamps: as before
         double budget = 1000.0 / (g_fps_guard > 0 ? g_fps_guard : 30), gpu = dm_gpu_avg_ms ? dm_gpu_avg_ms(60) : -1, cpu = &g_nvn_game_work_avg_ns ? atomic_load(&g_nvn_game_work_avg_ns) / 1e6 : -1;
+        if (gpu > 0 && nvn_vk_fg_gpu_ms) gpu += nvn_vk_fg_gpu_ms();   // (frame generation's pictures share the GPU with the game's frame: one budget)
         int gpu_bound = gpu > 0 && gpu > 0.85 * budget, cpu_bound = gpu > 0 && gpu < 0.70 * budget && cpu > 0.85 * budget;
         { static int said_cpu; if (short_ && cpu_bound && !probe && !(said_cpu++ % 12))   // (said once a minute at most)
               fprintf(stderr, "fps guard: %.1f fps, short of %d, but the CPU is the limit (game thread %.1f ms, GPU %.1f ms of %.1f): the 3D render scale stays\n", fps, g_fps_guard, cpu, gpu, budget); }
+        { static int lite_short, lite_calm;   // (lock30_lite: 6 short checks at the floor = 30 s; 120 calm ones at full size = 10 minutes)
+          lite_short = g_fps_guard == 30 && short_ && (lv >= res_lowest() || nogain) && !probe && !hot ? lite_short + 1 : 0;
+          lite_calm = g_fps_guard == 30 && lv == 0 && full && !hot && cpu > 0 && cpu < 0.5 * budget && gpu > 0 && gpu < 0.5 * budget ? lite_calm + 1 : 0;
+          if (lite_short >= 6) { lite_short = 0; lock30_lite(1, fps_avg, gpu, cpu, budget); }
+          else if (lite_calm >= 120) { lite_calm = 0; lock30_lite(0, fps_avg, gpu, cpu, budget); } }
+        int fgp = atomic_exchange(&g_fg_pressure, 0);   // (frame generation's pictures cost the game frames: a step now, judged like any other)
         int for_heat = hot && lv < RES_HOT && since >= 6 && !noheat && !probe,   // (heat alone stops at 720p; only a frame rate short of 30 goes lower)
-            for_rate = slow >= (gpu_bound ? 1 : 3) && !nogain && !probe && !cpu_bound;   // (one step at a time: the last one judged first)
+            for_rate = (slow >= (gpu_bound ? 1 : 3) || fgp) && !nogain && !probe && !cpu_bound;   // (one step at a time: the last one judged first)
+        atomic_store(&g_guard_heat, hot ? (lv >= RES_HOT ? 2 : 1) : 0);
+        atomic_store(&g_guard_room, g_fps_guard && lv < res_lowest() && !nogain && !probe && !cpu_bound && !fgp);
+        if (fgp && for_rate) fprintf(stderr, "fps guard: frame generation costs the game frames: a lighter 3D picture first\n");
         // up early: the GPU's time projected to the next larger size (pixels grow with the square of the scale) fits in 75 % of the budget, after 10 s calm at the full rate
         double r_up = lv > 0 ? k_res_steps[lv - 1] / k_res_steps[lv] : 1;
         int up_early = lv > 0 && !probe && gpu > 0 && cool >= 2 && full && !hot && gpu * r_up * r_up < 0.75 * budget;
@@ -1360,9 +1398,19 @@ static void host_start(void) {
     { const char *le = getenv("DM_LAST_EXIT"); if (le && *le) fprintf(stderr, "boot: Android says the previous run ended: %s\n", le); }
     // Frame rate Dynamic (DM_FPS_TARGET=dyn): 60 wherever the phone holds it and 30 where it does not, frame by frame (the host's hold, hle_nvn.c vstep_tick), at the
     //   full picture: the fps guard defends 30 only (60 lowers the resolution to hold 60). Everything that reads the target sees 60; DM_FPS_DYN tells the guard
+    // Pokémon Sword / Shield: 30 fps for every player (the owner's call, 2026-11-21): 60 and Dynamic slowed the game on phones that could not hold 60 (the game's
+    //   own step chooser, main+0x5df360, reads the GPU time too short and picks the 16.67 ms step), and Dynamic stayed at 30. A saved 60 / Dynamic and Auto's 60 are
+    //   ignored; DM_UNLOCK_EXPERIMENTS=1 in env.txt lifts the lock (development)
+    { const char *u = getenv("DM_UNLOCK_EXPERIMENTS"), *ft = getenv("DM_FPS_TARGET");
+      if (display_galar() && !(u && !strcmp(u, "1"))) {
+        if (ft && *ft && strcmp(ft, "30")) fprintf(stderr, "boot: frame rate is 30 for Sword / Shield (env.txt had DM_FPS_TARGET=%s)\n", ft);
+        unsetenv("DM_FPS_TARGET"); unsetenv("DM_AUTO_FPS"); unsetenv("DM_FPS_DYN"); } }
     { const char *ft = getenv("DM_FPS_TARGET"); if (ft && !strcmp(ft, "dyn")) { setenv("DM_FPS_TARGET", "60", 1); setenv("DM_FPS_DYN", "1", 1); }
       extern _Atomic int dm_fps_dyn __attribute__((weak)); if (&dm_fps_dyn) atomic_store(&dm_fps_dyn, getenv("DM_FPS_DYN") != NULL); }
     fps_guard_init();   // (before the phone profile: Graphics chosen by hand only)
+#if !DM_PORT_ARCEUS   // (Sword / Shield's fps guard; Legends: Arceus has its own guard above and no such switches)
+    lite_boot();   // (lighter shadows and draw distance, when the fps guard remembered this phone needs them)
+#endif
     device_profile();   // the chip tier's defaults, under env.txt
     // Game files: inside the installed APKs (the all-in-one .apks bundle, read through apkfs.c as /nxapk/...), else copied into the files folder
     struct stat st; int inapk = !stat("/nxapk/RomFS", &st);

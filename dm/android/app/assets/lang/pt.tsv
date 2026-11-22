@@ -367,9 +367,9 @@ Off: this GPU needs %s ms for each picture, more than the game can spare. Switch
 Off until the next start (see the log for why).	Desligada até o próximo início (o motivo está no log).
 Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Desligada: mesmo no modo mais leve ela tirava quadros do próprio jogo aqui (até %s fps). Desligue e ligue para tentar de novo.
 Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	Desligada a 30 fps: a geração de quadros precisa do jogo a 60 fps estáveis (Desempenho → Taxa de quadros: 60).
-Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.	Pausada: o jogo roda a %s fps aqui, e a geração de quadros precisa de 60 estáveis. Ela volta sozinha quando o jogo mantém 60.
-On: a picture is made between each two of the game's frames, so 60 fps moves like 120. Only while the game holds a locked 60 fps; your input shows about 8 ms later	Ligado: uma imagem é criada entre cada dois quadros do jogo, então 60 fps se movem como 120. Só enquanto o jogo mantém 60 fps estáveis; seus comandos aparecem cerca de 8 ms depois
-Auto: 2x, light (the game at a locked 60 shown at 120)	Auto: 2x, leve (o jogo a 60 estáveis mostrado a 120)
+Paused: the game runs at %s fps here, under its own frame rate. Frame generation comes back on by itself once the game holds it again.	Pausada: o jogo roda a %s fps aqui, abaixo da própria taxa de quadros. A geração de quadros volta sozinha quando o jogo a mantiver de novo.
+On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Only while the game holds its own frame rate; your input shows a little later	Ligado: uma imagem é criada entre cada dois quadros do jogo, então 30 fps se movem como 60. Só enquanto o jogo mantém a própria taxa; seu comando aparece um pouco depois
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto: quantas a taxa da tela permitir (um jogo a 30 fps: 4x a 120 Hz, 3x a 90 Hz, 2x a 60 Hz)
 Widescreen	Widescreen
 Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	Widescreen: a câmera do jogo tão larga quanto a sua tela, nada esticado (Sword / Shield 1.3.2; a interface fica esticada)
 Output	Saída
@@ -473,3 +473,9 @@ Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	Toque em
 Tap only	Só tocar
 + works as on the console	+ funciona como no console
 the game's own (100 %)	o do jogo (100 %)
+Normal	Normal
+Normal: as the game is made	Normal: como o jogo foi feito
+Low: softer shadows, lighter on the GPU (from the next start)	Baixas: sombras mais suaves, menos carga na GPU (a partir do próximo início)
+Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	Mínimas: sombras suaves só perto, sem sombras distantes: o mais leve (a partir do próximo início)
+How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	Até onde a grama e os detalhes do campo são desenhados (a partir do próximo início). Menos: mais leve e frio. Mais: mais detalhe ao longe, mais carga na GPU.
+Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	A geração de quadros do Lossless Scaling não roda neste celular, então a do próprio app é usada no lugar (o log diz por quê).

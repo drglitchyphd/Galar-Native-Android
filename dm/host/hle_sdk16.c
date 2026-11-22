@@ -37,7 +37,7 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "absolute second
 }
 // LocationName = char[0x24] (time zone name): follows the host's system time zone
 HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device time zone name → host time zone", Result, h_time_LocName, char *out) {
-    memset(out, 0, 0x24); tzset(); strlcpy(out, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24); return RES_OK;
+    void dm_time_location(char *); dm_time_location(out); return RES_OK;   // (hle_time.c: the phone's zone ID)
 }
 HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock (offline, unavailable)", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4time8FinalizeEv", "pairs with Initialize; the host has no session", Result, h_time_Finalize, void) { return RES_OK; }

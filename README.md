@@ -68,6 +68,8 @@
 | Upscaling | Auto, Sharp, SGSR, Smooth |
 | Graphics | Auto, High, Low, Adaptive |
 | Mode | Auto, Quality, Performance |
+| Shadows | Normal, Low, Lowest (from the next start) |
+| Draw distance | 50–200 % for grass and field details (from the next start) |
 | Power | Balanced, Battery saver |
 | Textures | Auto, Full, Half |
 | Frame rate | Auto, 30, 60, Dynamic (changes while you play) |

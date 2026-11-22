@@ -794,12 +794,81 @@ static int arc_scale(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     LOG("%s: 3D render scale for Legends: Arceus 1.1.1: %.2f on the game's own (8 reads of 3DBufferWidthScale / HeightScale; the slider changes it live)", m->name, (double)c);
     return 9;
 }
+// Galar 1.3.2 (Shield; Sword's sites are 0x30 earlier, the same words): which game this main is, and its address shift from Shield's
+static int galar_shift(module_t *m, int64_t *d) {
+    if (!strncasecmp(m->build_id, "a16802625e7826bf83b6f9708e475b91", 32)) { *d = 0; return 1; }
+    if (!strncasecmp(m->build_id, "a3b75bcd3311385aeed67fbeeb79cbb7", 32)) { *d = -0x30; return 2; }
+    return 0;
+}
+static int words_are(module_t *m, int64_t p0, int64_t p1, const uint64_t *off, const uint32_t *orig, int n) {
+    for (int i = 0; i < n; i++) { uint32_t w; if (off[i] + 4 > m->text_end) return 0; memcpy(&w, m->base + off[i], 4); if (w != orig[i] || overlaps_rewrite(m, off[i], 4, p0, p1)) return 0; }
+    return 1;
+}
+// Shadows (DM_SHADOWS, Graphics → Shadows) for Sword and Shield 1.3.2. The main scene's shadow target is 1024 x 1024 with 2 layers = 2 cascades (built in main+0xf679d0:
+//   MOV W8, #0x400 / MOV X8, #0x400 at +0xf67d38 / +0xf67d40; handheld copies it), and the fallback target a scene builds when it has none (+0xf56108 / +0xf56110).
+//   low: 512 x 512 (a quarter of the memory and fill); lowest: also only the near cascade (the cascade-level setter main+0xf52930 always stores 1: CMP W1, #1 / B.LT
+//   → MOV W1, #1 / NOP; far shadows go). The layer count stays 2 (a level-2 request must pass the setter's bounds check). Read once, when the targets are made
+static int galar_shadow_patch(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_SHADOWS"); int64_t d; const char *g;
+    if (!e || (strcmp(e, "low") && strcmp(e, "lowest"))) return 0;
+    int gi = galar_shift(m, &d); if (!gi) return 0; g = gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2";
+    uint64_t so[4] = { 0xf67d38 + d, 0xf67d40 + d, 0xf56108 + d, 0xf56110 + d }; const uint32_t sw[4] = { 0x321603e8u, 0xd2808008u, 0x321603e8u, 0xd2808008u }, nw[4] = { 0x52804008u, 0xd2804008u, 0x52804008u, 0xd2804008u };
+    uint64_t co[2] = { 0xf52930 + d, 0xf52934 + d }; const uint32_t cw[2] = { 0x7100043fu, 0x5400010bu }, cn[2] = { 0x52800021u, 0xd503201fu };
+    int lowest = !strcmp(e, "lowest");
+    if (!words_are(m, p0, p1, so, sw, 4) || (lowest && !words_are(m, p0, p1, co, cw, 2))) { LOG("[RED] %s: shadows %s not applied (%s's shadow code differs)", m->name, e, g); return 0; }
+    for (int i = 0; i < 4; i++) memcpy(m->base + so[i], &nw[i], 4);
+    if (lowest) for (int i = 0; i < 2; i++) memcpy(m->base + co[i], &cn[i], 4);
+    LOG("%s: shadows %s for %s: shadow maps 512 x 512%s (DM_SHADOWS)", m->name, e, g, lowest ? ", the near cascade only" : "");
+    return lowest ? 6 : 4;
+}
+// Step pin (DM_STEP_PIN=1, a test switch for the stadium-crowd flicker at 60; off by default) for Sword and Shield 1.3.2. The game picks its step each frame from its
+//   frame-time table (main+0x203eeb0: 16.7, 33.3, 50, 66.7, 83.3 ms) by an index it derives from its own measured CPU / GPU time (main+0x5df360 / main+0x5df4b0,
+//   CSEL W2 ... at +0x5df460 and +0x5df508). Only entry 1 (+0x203eeb8) is the step word the host feeds at 60 (hle_nvn.c vstep_tick); the other entries are the
+//   game's own. Pinned, both selects give index 1 (MOV W2, #1): the step is always that word -- 33.3 ms at the game's own 30, the host's real step at 60. Same
+//   addresses in Sword and Shield (this part of the code is not shifted)
+static int galar_step_pin(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_STEP_PIN"); int64_t d;
+    if (!e || strcmp(e, "1")) return 0;
+    int gi = galar_shift(m, &d); if (!gi) return 0;
+    uint64_t so[2] = { 0x5df460, 0x5df508 }; const uint32_t ow[2] = { 0x1a89c2c2u, 0x1a8bc122u }, nw = 0x52800022u;
+    if (!words_are(m, p0, p1, so, ow, 2)) { LOG("[RED] %s: step pin not applied (the step code differs)", m->name); return 0; }
+    for (int i = 0; i < 2; i++) memcpy(m->base + so[i], &nw, 4);
+    LOG("%s: step pin for %s: the game's step is always the step word (DM_STEP_PIN, test switch)", m->name, gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2");
+    return 2;
+}
+// Draw distance (DM_DRAW_DIST, percent 50-200, Graphics → Draw distance; from the next start) for Sword and Shield 1.3.2: the terrain detail layers (grass and the other
+//   instanced field objects, terrain_draw_setting's visible distance and fade bands, main+0xccb000) are shown by a squared camera distance computed once per layer in
+//   main+0xccec80 (FADDP V2.2S at +0xcced80, stored and reused by every comparison). That one is scaled by 1 / k^2 in a small cave at the end of the rewriter's code area:
+//   FADDP; LDR S31, =1/k^2; FMUL S2, S2, S31; B back (V31 is unused in that function). Trees, NPCs and Pokémon in the wild are RomFS data, not this
+static int galar_draw_patch(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_DRAW_DIST"); int pct = e ? atoi(e) : 100; int64_t d;
+    if (pct == 100 || pct < 50 || pct > 200) return 0;
+    int gi = galar_shift(m, &d); if (!gi) return 0;
+    uint64_t site = 0xcced80 + d; const uint32_t orig = 0x2e20d402u;
+    if (!words_are(m, p0, p1, &site, &orig, 1)) { LOG("[RED] %s: draw distance not applied (the terrain layer code differs)", m->name); return 0; }
+    // the cave: the zero tail of the rewriter's code area (mapped read + execute with it), 64 bytes checked free
+    int64_t end = m->patch_off < 0 ? p1 : (int64_t)m->size; static const uint8_t z[64];
+    int64_t cave = end - 32;
+    if (end - 64 < p0 || memcmp(m->base + end - 64, z, 64) || llabs(cave - (int64_t)site) >= (1ll << 27)) { LOG("[RED] %s: draw distance not applied (no free code space in reach)", m->name); return 0; }
+    float k = pct / 100.0f, lit = 1.0f / (k * k); uint32_t c[5];
+    c[0] = orig;                                    // FADDP V2.2S, V0.2S, V0.2S
+    c[1] = 0x1c00007fu;                             // LDR S31, [PC, #12]
+    c[2] = 0x1e3f0842u;                             // FMUL S2, S2, S31
+    c[3] = 0x14000000u | (uint32_t)((((int64_t)site + 4) - (cave + 12)) >> 2 & 0x3ffffff);   // B site + 4
+    memcpy(&c[4], &lit, 4);
+    memcpy(m->base + cave, c, sizeof c);
+    uint32_t br = 0x14000000u | (uint32_t)((cave - (int64_t)site) >> 2 & 0x3ffffff); memcpy(m->base + site, &br, 4);
+    __builtin___clear_cache((char *)(m->base + cave), (char *)(m->base + cave + 20));
+    LOG("%s: draw distance %d %% for %s: grass and field detail layers (DM_DRAW_DIST)", m->name, pct, gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2");
+    return 2;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
     if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_wide_render(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     n += wide_patch(m, lim, p0, p1);
+    n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1) + galar_step_pin(m, p0, p1);
     n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
     n += wide_render_patch(m, p0, p1);
     return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
@@ -986,9 +1055,28 @@ void run_module_inits(void) {
 //   4x4 column-major (main+0x29fb138: the scene's constant buffer takes them from there). Each read through process_vm_readv: a pointer that is not (yet) valid
 //   while a scene loads fails the read instead of faulting. 1: vp = projection x view
 static int peek(uint64_t a, void *o, size_t n) { struct iovec l = { o, n }, r = { (void *)(uintptr_t)a, n }; return a && process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n; }
+// Sword and Shield 1.3.2 (the same data and struct offsets in both): the graphics system S = *(main+0x26365b8) (hle_resscale's global), its render-pipeline holder
+//   *(S+0x88), the render manager *(holder+0x58), the main 3D render view *(manager+0x160) (the game's own GetMainRenderView, Shield main+0xf67310 / Sword +0xf672e0),
+//   and that view's camera object V = *(view+0x128), which main+0x607670 (the Widescreen patch's function) rebuilds each update from the active camera: view at
+//   V+0x60, projection +0xa0, view-projection +0xe0, 4x4 column-major, GL form. A perspective camera has projection col2.w = -1 and col3.w = 0 (an orthographic one
+//   is skipped), the view's bottom row (0,0,0,1)
+static int galar_cam_viewproj(uint8_t *base, float vp[16]) {
+    uint64_t S, X, M, RV, V; float m[48];
+    if (!peek((uint64_t)(uintptr_t)(base + 0x26365b8), &S, 8) || !peek(S + 0x88, &X, 8) || !peek(X + 0x58, &M, 8) || !peek(M + 0x160, &RV, 8) || !peek(RV + 0x128, &V, 8)) return 0;
+    if (!peek(V + 0x60, m, sizeof m)) return 0;   // view, projection, view-projection
+    for (int i = 0; i < 48; i++) if (!__builtin_isfinite(m[i])) return 0;
+    if (m[16 + 11] != -1.0f || m[16 + 15] != 0.0f) return 0;                                  // perspective only
+    if (m[3] != 0.0f || m[7] != 0.0f || m[11] != 0.0f || m[15] != 1.0f) return 0;            // a rigid view
+    for (int c = 0; c < 3; c++) { float l = m[c * 4] * m[c * 4] + m[c * 4 + 1] * m[c * 4 + 1] + m[c * 4 + 2] * m[c * 4 + 2]; if (l < 0.998f || l > 1.002f) return 0; }
+    memcpy(vp, m + 32, 64);
+    return 1;
+}
 int dm_cam_viewproj(float vp[16]) {
-    static uint8_t *base; static int tried;
-    if (!tried) { tried = 1; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") && !strncasecmp(g_mod[i].build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) base = g_mod[i].base; }
+    static uint8_t *base, *galar; static int tried;
+    if (!tried) { tried = 1; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+        if (!strncasecmp(g_mod[i].build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) base = g_mod[i].base;
+        else if (!strncasecmp(g_mod[i].build_id, "a16802625e7826bf83b6f9708e475b91", 32) || !strncasecmp(g_mod[i].build_id, "a3b75bcd3311385aeed67fbeeb79cbb7", 32)) galar = g_mod[i].base; } }
+    if (galar) return galar_cam_viewproj(galar, vp);
     if (!base) return 0;
     const uint64_t key = 0x6723799257d05608ull; uint64_t R, n, bk, node;
     if (!peek((uint64_t)(uintptr_t)(base + 0x42ef5a8), &R, 8) || !peek(R + 0xa0, &n, 8) || !n || n > (1u << 20)) return 0;

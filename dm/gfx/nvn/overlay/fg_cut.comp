@@ -1,0 +1,46 @@
+#version 450
+// Camera cut / still frame (nvn_fgcut.h fgc_stat): the two frames the in-between pictures go between, compared on a coarse grid of 32 x 18 cells (each the mean
+//   colour of 16 taps over its area). Motion is allowed for: a cell of the newer frame counts as changed only when the 3 x 3 cells around it match no 3 x 3 cells
+//   of the older one placed up to two cells away (a pan of up to about a ninth of the frame a frame) within cell_diff (mean colour difference). A cut: most cells changed (cut_share) by a mean of cut_mean or more: every
+//   picture between the two becomes the newer real frame (fg_cutsel.comp). Still: the plain change cell for cell, summed for the CPU (a menu, a loading screen:
+//   the pictures are left out; read back a few frames later). One workgroup; the slot's four words: flag, changed cells, cells, summed plain change x 1000
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) uniform sampler2D a;   // the older frame
+layout(set = 0, binding = 1) uniform sampler2D b;   // the newer frame
+layout(set = 0, binding = 2) buffer R { uint flag, changed, cells, sum; } r;
+layout(push_constant) uniform P { float cell_diff, cut_share, cut_mean, on; } pc;
+const uint GX = 32u, GY = 18u, N = GX * GY;
+const int REACH = 2;
+shared float ar[N], ag[N], ab[N], br[N], bg[N], bb[N];   // (13.8 KB: plain floats, under Vulkan's 16 KB minimum, which vec3 arrays' padding would pass)
+vec3 CA(uint i) { return vec3(ar[i], ag[i], ab[i]); }
+vec3 CB(uint i) { return vec3(br[i], bg[i], bb[i]); }
+shared uint s_changed, s_sum, s_msum;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main() {
+    if (gl_LocalInvocationIndex == 0u) { s_changed = 0u; s_sum = 0u; s_msum = 0u; }
+    for (uint i = gl_LocalInvocationIndex; i < N; i += 256u) {
+        vec2 c0 = vec2(float(i % GX), float(i / GX)) / vec2(GX, GY), d = 1.0 / vec2(GX * 4u, GY * 4u); vec3 va = vec3(0.0), vb = vec3(0.0);
+        for (int t = 0; t < 16; t++) { vec2 uv = c0 + d * (vec2(float(t & 3), float(t >> 2)) + 0.5);
+            va += textureLod(a, uv, 0.0).rgb; vb += textureLod(b, uv, 0.0).rgb; }
+        va /= 16.0; vb /= 16.0; ar[i] = va.r; ag[i] = va.g; ab[i] = va.b; br[i] = vb.r; bg[i] = vb.g; bb[i] = vb.b;
+    }
+    barrier();
+    for (uint i = gl_LocalInvocationIndex; i < N; i += 256u) {
+        int x = int(i % GX), y = int(i / GX); float best = 1.0;
+        for (int dy = -REACH; dy <= REACH; dy++) for (int dx = -REACH; dx <= REACH; dx++) {
+            float sad = 0.0;
+            for (int py = -1; py <= 1; py++) for (int px = -1; px <= 1; px++) {
+                uint ib = uint(clamp(y + py, 0, int(GY) - 1)) * GX + uint(clamp(x + px, 0, int(GX) - 1)),
+                     ia = uint(clamp(y + py + dy, 0, int(GY) - 1)) * GX + uint(clamp(x + px + dx, 0, int(GX) - 1));
+                vec3 e = abs(CB(ib) - CA(ia)); sad += (e.r + e.g + e.b) / 3.0; }
+            best = min(best, sad / 9.0); }
+        if (best > pc.cell_diff) { atomicAdd(s_changed, 1u); atomicAdd(s_msum, uint(best * 1000.0 + 0.5)); }
+        atomicAdd(s_sum, uint(abs(luma(CB(i)) - luma(CA(i))) * 1000.0 + 0.5));
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        float mean = float(s_msum) / 1000.0 / float(N);   // (the unmatched change, over all cells)
+        r.flag = pc.on > 0.5 && float(s_changed) >= pc.cut_share * float(N) && mean >= pc.cut_mean ? 1u : 0u;
+        r.changed = s_changed; r.cells = N; r.sum = s_sum;
+    }
+}

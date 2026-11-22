@@ -86,6 +86,10 @@ static const char *dyn_name(int m) { return m == 1 ? "dynamic" : m == 2 ? "fixed
 // 1 while the factor and the cap reach what is drawn (the game's mode lets its scale go below full): the guard (android_main.c) judges a step only then
 static _Atomic int g_applies = 1;
 int dm_res_scale_applies(void) { return g_applies; }
+// The scale the 3D is drawn at (what the game asks, times the guard's factor, under the cap; float bits, 0 = not known yet): frame generation's work size
+//   (nvn_vk.c fg_work_scale) follows it, so it makes its pictures at the size the 3D really has
+static _Atomic uint32_t g_scene_bits;
+float dm_scene_scale(void) { uint32_t b = g_scene_bits; float f; memcpy(&f, &b, sizeof f); return b ? f : 1.0f; }
 
 void dm_res_scale_tick(void) {
     static float game = -1, wrote = -1; static uint64_t n; static int nlog, was_mode = -2, nmode;
@@ -113,6 +117,7 @@ void dm_res_scale_tick(void) {
     if (lower) { if (game >= 0.05f) want = game * factor_now(); if (want > cap) want = cap; }   // (the background's near-zero request stays as it is)
     if (cur != want) { uint32_t *p = (uint32_t *)(uintptr_t)(obj + k_scales[k].req), w; memcpy(&w, &want, sizeof w); dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, w, __ATOMIC_RELAXED); }
     wrote = want;
+    { uint32_t b; memcpy(&b, &want, sizeof b); g_scene_bits = b; }
     // A line a minute (at 30 fps) while the cap or the game's own scale is below full: what the game measured, what it asked for and what it draws at, for tuning the guard
     if (++n % 1800 == 0 && (cap < 1.0f || game < 1.0f || factor_now() < 1.0f) && nlog < 240) {
         int64_t gpu = 0; float app = 0; int32_t tv = -1, set = -1;
