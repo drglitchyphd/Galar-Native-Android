@@ -507,3 +507,20 @@ How far grass and field details are drawn (from the next start). Lower: lighter 
 Dynamic	ダイナミック
 Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます
 Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	この端末では Lossless Scaling のフレーム生成を使えないため、代わりにアプリ独自のフレーム生成を使います（理由はログを参照）。
+# the in-app updater (AppUpdater.java, About -> Updates)
+Updates	アップデート
+An unofficial build cannot update itself to an official release. Uninstall it and install the official app to get updates.	非公式ビルドは公式版にアップデートできません。アップデートを受け取るには、アンインストールして公式アプリをインストールしてください。
+Update now	今すぐアップデート
+Check for updates	アップデートを確認
+Look for updates when the app starts: on	アプリ起動時にアップデートを確認: オン
+Look for updates when the app starts: off	アプリ起動時にアップデートを確認: オフ
+Checking…	確認中…
+Downloading the update: %d%%	アップデートをダウンロード中: %d%%
+The update is ready: confirm the installation on the screen that opens.	アップデートの準備ができました。表示される画面でインストールを確認してください。
+This is the latest version.	最新バージョンです。
+Version %s is available. The game closes when the update installs, so save first.	バージョン%sが利用できます。アップデートのインストール時にゲームが終了するので、先にセーブしてください。
+%s %s is available. Open the menu, then About, to install it.	%s %sが利用できます。メニューの「このアプリについて」からインストールできます。
+Could not check for updates. Check the internet connection.	アップデートを確認できませんでした。インターネット接続を確認してください。
+The update could not be downloaded: %s	アップデートをダウンロードできませんでした: %s
+The downloaded file is not an official %s release, so it was not installed.	ダウンロードしたファイルは%sの公式版ではないため、インストールしませんでした。
+The update could not be installed: %s	アップデートをインストールできませんでした: %s
