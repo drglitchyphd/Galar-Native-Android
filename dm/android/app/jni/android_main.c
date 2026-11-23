@@ -1038,7 +1038,10 @@ int dm_guard_fg_absorb(void) { if (!atomic_load(&g_guard_room)) return 0; atomic
 int dm_guard_heat(void) { return atomic_load(&g_guard_heat); }
 extern double nvn_vk_fg_gpu_ms(void) __attribute__((weak));
 static void heat_guard(void) {   // (Legends: Arceus: the 3D render scale through loader.c arc_scale, under the slider's own value)
-    static int off = -1, on, calm_n; if (off < 0) { const char *e = getenv("DM_HEAT_GUARD"); off = e && !strcmp(e, "0"); }
+    // Off unless DM_HEAT_GUARD=1 (2026-11-24): every crash in two players' reports (Arceus #90, an Infinix on PanVK, and a vivo on Adreno 830) came minutes after
+    //   this guard dropped the scale to 67 % while playing, at the same place in the game (thread "s+350180", object main+0x417edf8: main+0x2b94314 / a call to 0
+    //   from main+0x2a763c8), and one of them saw striped 3D after it. The game's own scale change in the middle of play is not safe from here
+    static int off = -1, on, calm_n; if (off < 0) { const char *e = getenv("DM_HEAT_GUARD"); off = !(e && !strcmp(e, "1")); }
     extern void dm_arc_scale_set(float) __attribute__((weak));
     if (off || !g_th_mgr || !g_th_st || !dm_arc_scale_set) return;
     int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
