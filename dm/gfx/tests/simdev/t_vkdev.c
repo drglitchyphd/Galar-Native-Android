@@ -694,15 +694,15 @@ static void b10_work(void) {
 //   cleared to white, almost white and grey, each sample read back after its fence and counted; the validation layer judges the pass against the simulated GPU
 static void mw_work(void) {
     const char *ea = getenv("DM_VK_B10_AS_RGBA16"), *eb = getenv("DM_VK_B10_NOCOMPRESS"), *le = getenv("DM_MALI_LADDER"), *se = getenv("DM_MALI_WHITE_SIM");
-    int arm = g_arm_rel != 0, en = mw_enabled(arm, DM_PORT_GALAR, le, se), a = 0, b = 0;
-    int route = mw_route_apply(en ? g_mw.want : mw_default_route(arm, DM_PORT_GALAR), ea, eb, &a, &b);
+    int arm = g_arm_rel != 0, armd = arm && MALI_LIT_DEFAULT, en = mw_enabled(armd, DM_PORT_GALAR, le, se), a = 0, b = 0;   // (armd: v0.96 has the fix off by default, vk_quirks.h)
+    int route = mw_route_apply(en ? g_mw.want : mw_default_route(armd, DM_PORT_GALAR), ea, eb, &a, &b);
     char ot[200]; int others = mw_other_tests(ot, sizeof ot), record = route == MW_ROUTE_A || route == MW_ROUTE_B || route == MW_ROUTE_BOTH, record_fine = record && !others;
     const char *pr = getenv("DM_VK_PROBE"); int f16 = pr && strstr(pr, "f16target") != NULL;   // (DM_VK_PROBE=f16target makes the stand-in too: b10_on)
     DEC("mali_ladder", "%d", g_mw.on); DEC("mali_route", "%s", mw_route_name(g_mw.route)); DEC("mali_check", "%d", g_mw.check); DEC("mali_record", "%d", g_mw.record);
     DEC("mali_record_fine", "%d", g_mw.record_fine); DEC("mali_marker", "%d", g_mw.marker); DEC("mali_stage", "%s", mw_stage_name(g_mw.st.stage)); DEC("mali_galar", "%d", DM_PORT_GALAR);
     CHECK(g_mw.on == (en != 0), "white-screen ladder on %d, expected %d (Arm's own driver %d, Sword / Shield %d)", g_mw.on, en != 0, arm, DM_PORT_GALAR);
     CHECK(b10_on() == (a || f16) && g_b10nc == b, "white-screen route: stand-in %d (expected %d), no compression %d (expected %d)", b10_on(), a || f16, g_b10nc, b);
-    if (!(le && *le) && !(se && *se) && !(ea && *ea) && !(eb && *eb)) CHECK(b10_on() == ((arm && DM_PORT_GALAR) || f16) && !g_b10nc && g_mw.on == (arm && DM_PORT_GALAR),
+    if (!(le && *le) && !(se && *se) && !(ea && *ea) && !(eb && *eb)) CHECK(b10_on() == ((armd && DM_PORT_GALAR) || f16) && !g_b10nc && g_mw.on == (armd && DM_PORT_GALAR),
         "route A and the ladder by default exactly on Arm's own driver with Sword / Shield (Arm %d): stand-in %d, ladder %d", arm, b10_on(), g_mw.on);
     if (en && !getenv("DM_MALI_LADDER_FILE")) {   // (no state file here: the ladder's first start)
         CHECK(g_mw.check == MW_CHECK_FULL, "the ladder's first start checks the lit scene while playing (check %d)", g_mw.check);
