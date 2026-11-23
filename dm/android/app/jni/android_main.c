@@ -838,21 +838,37 @@ static void *host_thread(void *a) {
     fprintf(stderr, "boot: dm_main returned %d\n", rc);
     return NULL;
 }
-// The log where the player can reach it: Android/data is out of reach of the phone's Files app on recent Android versions, Download is not. At each start the previous
-// run's log (the one that ended in a crash, if one did) goes to Download/<game>-log-previous.txt (PokemonShield-…); while playing, Download/<game>-log.txt is refreshed every
-// 5 seconds, with a memory line (a run the system ends for memory leaves no crash report, only memory that kept rising)
+// The log where the player can reach it: Android/data is out of reach of the phone's Files app on recent Android versions, Documents and Download are not. At each
+// start the previous run's log (the one that ended in a crash, if one did) goes to <logs>/<game>-log-previous.txt (PokemonShield-…); while playing, <logs>/<game>-log.txt
+// is refreshed every 5 seconds, with a memory line (a run the system ends for memory leaves no crash report, only memory that kept rising). <logs> is the app's own
+// folder Documents/<docs_dir>/Logs (Galar Native, NXNative for Legends: Arceus, Paldea Native: the profile's docs_dir, as the save folder), kept apart from everything
+// else in Download; Download when that folder cannot be made or written
 #define DL "/storage/emulated/0/Download"
-// A name in Download this install may write. Android lets an app overwrite only files it created itself: after the game was uninstalled and installed again (or a file
-//   came from another app), opening the old <game>-log.txt for writing fails, and the logs players attach stayed days old (#155). The first of <game>-<what>.txt,
+#define DOCS "/storage/emulated/0/Documents"
+static const char *logs_dir(void) {   // (decided once: every log of this run in one place)
+    static char d[200]; static int done;
+    if (done) return d[0] ? d : DL;
+    done = 1;
+    char a[160]; snprintf(a, sizeof a, DOCS "/%s", DM_GAME_DOCS_DIR);
+    snprintf(d, sizeof d, "%s/Logs", a);
+    mkdir(DOCS, 0770); mkdir(a, 0770); mkdir(d, 0770);
+    char t[240]; snprintf(t, sizeof t, "%s/.write-test", d);
+    int f = open(t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (f < 0) { d[0] = 0; return DL; }
+    close(f); unlink(t); return d;
+}
+// A name in the logs folder this install may write. Android lets an app overwrite only files it created itself: after the game was uninstalled and installed again (or a
+//   file came from another app), opening the old <game>-log.txt for writing fails, and the logs players attach stayed days old (#155). The first of <game>-<what>.txt,
 //   <game>-<what>-2.txt … -9.txt that opens for writing: this install's own file, or a new one
-static char g_dl_note[160];
+static char g_dl_note[320];
 static void dl_name(char *out, size_t n, const char *what) {
+    const char *dir = logs_dir();
     for (int k = 1; k <= 9; k++) {
-        if (k == 1) snprintf(out, n, DL "/%s-%s.txt", g_stem, what); else snprintf(out, n, DL "/%s-%s-%d.txt", g_stem, what, k);
+        if (k == 1) snprintf(out, n, "%s/%s-%s.txt", dir, g_stem, what); else snprintf(out, n, "%s/%s-%s-%d.txt", dir, g_stem, what, k);
         int f = open(out, O_WRONLY | O_CREAT, 0644);
-        if (f >= 0) { close(f); if (k > 1) snprintf(g_dl_note, sizeof g_dl_note, "log: Download's %s-%s.txt belongs to an earlier install: written as %s", g_stem, what, out); return; }
+        if (f >= 0) { close(f); if (k > 1) snprintf(g_dl_note, sizeof g_dl_note, "log: %s/%s-%s.txt belongs to an earlier install: written as %s", dir, g_stem, what, out); return; }
     }
-    snprintf(out, n, DL "/%s-%s.txt", g_stem, what);
+    snprintf(out, n, "%s/%s-%s.txt", dir, g_stem, what);
 }
 static void copy_file(const char *a, const char *b) {
     int i = open(a, O_RDONLY), o = i < 0 ? -1 : open(b, O_WRONLY | O_CREAT | O_TRUNC, 0644); char buf[65536]; ssize_t n;

@@ -89,7 +89,7 @@ public final class SetupActivity extends Activity {
         String g = gpu.toLowerCase(java.util.Locale.ROOT);
         if (g.contains("adreno")) return T.t(c, "A recent Mesa Turnip package for Adreno usually fixes this: choose its .zip as the graphics driver.");
         if (DriverPackages.panvkBifrost(g)) return T.t(c, "FristOneRR's PanVK driver supports this Mali: download its .zip from the developer's GitHub Releases and choose it as the graphics driver.");
-        return T.t(c, "No replacement driver supports this GPU yet. Please report it with the log in Download (the -log-previous.txt file), so the app can be fixed for it.");
+        return T.t(c, "No replacement driver supports this GPU yet. Please report it with the log in Documents, in the app's Logs folder (the -log-previous.txt file), so the app can be fixed for it.");
     }
     // a game set up (its folder has the ready file and the shader pack): the dual launcher's list
     private boolean isReady(String id) {
