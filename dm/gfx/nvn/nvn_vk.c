@@ -2020,7 +2020,9 @@ static VkCommandPool g_once_pool; static pthread_mutex_t g_once_mu = PTHREAD_MUT
 //   order it before every later submission; its command buffer and staging buffer go once its fence has signalled (once_reap, at the next one-off, at most 64 waiting)
 typedef struct { VkCommandBuffer cb; VkFence f; VkBuffer sb; vmalloc_t tmp; } once_pend;
 static once_pend g_once_p[64]; static int g_once_np;
-static int once_wait(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ONCE_WAIT"); v = e && atoi(e) == 1; } return v; }
+// v0.96 (2026-11-23): WAITED by default again. Not waited, Legends: Arceus on a Galaxy S25+ (Adreno 830) showed single frames with terrain and trees pale and
+//   untextured while walking and in battle (10-27 such frames in 10 s); with the wait, none. Why the ordering is not enough is not found yet. DM_VK_ONCE_WAIT=0: not waited
+static int once_wait(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ONCE_WAIT"); v = !(e && *e && atoi(e) == 0); } return v; }
 static void once_free(once_pend *o) {
     vkDestroyFence(g_dev, o->f, NULL); vkFreeCommandBuffers(g_dev, g_once_pool, 1, &o->cb);
     if (o->sb) { vkDestroyBuffer(g_dev, o->sb, NULL); vk_free(o->tmp); }
@@ -2065,7 +2067,7 @@ static void once_end_async(VkCommandBuffer cb, VkBuffer sb, vmalloc_t tmp) {
     if (r) VDIE("one-off submit failed: %d", r);
     if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { once_reap(0); if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { vk_wait(NULL, g_once_p[0].f, UINT64_MAX); once_reap(0); } }
     g_once_p[g_once_np++] = (once_pend){ cb, f, sb, tmp };
-    static int said; if (!said++) VLOG("one-off uploads: not waited for (each would have waited for all the GPU work queued before it; DM_VK_ONCE_WAIT=1 waits)");
+    static int said; if (!said++) VLOG("one-off uploads: not waited for (DM_VK_ONCE_WAIT=0; the default waits)");
     pthread_mutex_unlock(&g_once_mu);
 }
 static VkCommandBuffer ucb(void) {
