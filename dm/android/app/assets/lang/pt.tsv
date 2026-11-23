@@ -240,11 +240,11 @@ Set up anyway?	Configurar mesmo assim?
 The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	As partes danificadas dos seus arquivos ficam como estão. O jogo pode fechar ou mostrar falhas onde as usar. Copiar seus arquivos de novo por inteiro é a solução real.
 the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	a cópia de %s parou antes do fim (%s de %s MB): escolha-o de novo, de preferência do armazenamento do próprio celular
 %s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s está incompleto: tem %s de seus %s MB. Foi cortado ao ser copiado ou baixado: copie o arquivo inteiro de novo.
-Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)	Até 60 fps: mais fluido onde o celular consegue, a velocidade do jogo continua certa (mod Dynamic FPS de Fl4sh)
+Up to 60 fps: smoother where the phone can, the game keeps its real speed	Até 60 fps: mais fluido onde o celular consegue, o jogo mantém sua velocidade real
 Shadows	Sombras
 Standard	Padrão
 Standard: 1024 × 1024, as the game is made	Padrão: 1024 × 1024, como o jogo original
-Sharp: 2048 × 2048 shadow maps, more GPU work (Fl4sh's 2K Shadows mod)	Nítidas: mapas de sombra 2048 × 2048, mais trabalho para a GPU (mod 2K Shadows de Fl4sh)
+Sharp: 2048 × 2048 shadow maps, more GPU work	Nítidas: mapas de sombra 2048 × 2048, mais trabalho para a GPU
 60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)	60 fps: mais fluido; cai para 720p quando preciso para manter 60 (com Gráficos em Auto ou Adaptável)
 Android stopped the setup to free memory: going on from where it was (%s of 3)...	O Android parou a configuração para liberar memória: continuando de onde estava (%s de 3)...
 Step %s of %s: %s	Etapa %s de %s: %s

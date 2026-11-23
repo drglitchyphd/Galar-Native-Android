@@ -511,37 +511,53 @@ static int pchtxt_dir(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
 // for the gameplay camera: patched alone, the picture was unchanged. wide_patch below also patches where the gameplay camera takes it, and the culling.)
 int dm_step_hz; uint8_t *dm_step_word;   // the high frame rate below: its rate and the game's step word, which hle_nvn.c vstep_tick rewrites every frame
 static int fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1);
-// Built-in community mods (builtin_mods.h, from dm/games/*/builtin_mods/*.pchtxt), each behind a setting: Scarlet / Violet 4.0.0's dynamic frame rate (Fl4sh's ASM
-// "Dynamic FPS": up to 60, the game's step from the time each frame really took) with DM_FPS_TARGET=60, their 2048×2048 shadow maps (Fl4sh's "2K Shadows") with
-// DM_SHADOWS=2k. A mod goes in whole or not at all: every site must still hold the game's own bytes and none may be code the rewriter turned into a branch
+// Built-in code patches as .pchtxt files (builtin_mods.h, from dm/games/*/builtin_mods/*.pchtxt), each behind a setting: Scarlet / Violet 4.0.0's shadow map size,
+// 2048×2048 with DM_SHADOWS=2k (test only), 512×512 with DM_SHADOWS=low. A patch goes in whole or not at all: every site must still hold the game's own bytes and none
+// may be code the rewriter turned into a branch
 #include "builtin_mods.h"
 static int bmod_wanted(const char *name) {
-    if (!strcmp(name, "dynamic_fps")) { const char *e = getenv("DM_FPS_TARGET"); return e && atoi(e) >= 60; }
-    if (!strcmp(name, "shadows_2k")) { const char *e = getenv("DM_SHADOWS"); return e && !strcasecmp(e, "2k"); }   // (test only: not offered in the menu)
-    // DM_SHADOWS=low: the same site as 2K, 512×512 instead of the game's 1024 (a quarter of the shadow map's pixels; a smaller map also leaves the game's GPU
+    // the shadow map's size where the game makes it (main+0x146e80c MOVZ W8, #0x400: 1024): 2048 (a bigger map takes the game's GPU pool from streaming: test only,
+    //   not offered in the menu)
+    if (!strcmp(name, "shadows_high")) { const char *e = getenv("DM_SHADOWS"); return e && !strcasecmp(e, "2k"); }
+    // DM_SHADOWS=low: the same site, 512×512 instead of the game's 1024 (a quarter of the shadow map's pixels; a smaller map also leaves the game's GPU
     //   pool more room, where a bigger one takes it from streaming). Not offered in the menu until seen on a phone
     if (!strcmp(name, "shadows_low")) { const char *e = getenv("DM_SHADOWS"); return e && !strcasecmp(e, "low"); }
     return 0;
 }
 int dm_shadow_off;   // nvn_vk.c draw: DM_SHADOWS=off on Scarlet / Violet 4.0.0's main, the sun shadow pass's draws dropped
-static int g_bmod_fps;   // the frame rate came from a built-in mod: the Sword / Shield patch below is not this game's
-int dm_dynfps;   // hle_nvn.c dyn_tick: Scarlet / Violet's Dynamic FPS is in, presentation is paced in steps of 30 / 60
 static int bmod_apply(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
     int total = 0;
     for (unsigned i = 0; i < sizeof BUILTIN_MODS / sizeof *BUILTIN_MODS; i++) {
         const bmod *b = &BUILTIN_MODS[i]; int hit = 0;
         for (int k = 0; b->builds[k]; k++) if (!strncasecmp(m->build_id, b->builds[k], 32)) hit = 1;
-        if (hit && !strcmp(b->name, "shadows_2k") && !dm_shadow_off) { const char *e = getenv("DM_SHADOWS");   // (the 2K mod's builds are Scarlet / Violet 4.0.0)
+        if (hit && !strcmp(b->name, "shadows_low") && !dm_shadow_off) { const char *e = getenv("DM_SHADOWS");   // (the shadow patches' builds are Scarlet / Violet 4.0.0)
             if (e && !strcasecmp(e, "off")) { dm_shadow_off = 1; LOG("%s: shadows off (DM_SHADOWS=off): the sun shadow pass's draws are dropped", m->name); } }
         if (!hit || !bmod_wanted(b->name)) continue;
         int bad = -1;
         for (int s = 0; s < b->n && bad < 0; s++) { const bmod_site *t = &b->sites[s];
             if ((uint64_t)t->off + t->len > lim || memcmp(m->base + t->off, t->orig, t->len) || overlaps_rewrite(m, t->off, t->len, p0, p1)) bad = s; }
-        if (bad >= 0) { LOG("[RED] %s: built-in mod %s not applied: +%#x differs from the game's code or was rewritten", m->name, b->name, b->sites[bad].off); continue; }
+        if (bad >= 0) { LOG("[RED] %s: built-in patch %s not applied: +%#x differs from the game's code or was rewritten", m->name, b->name, b->sites[bad].off); continue; }
         for (int s = 0; s < b->n; s++) memcpy(m->base + b->sites[s].off, b->sites[s].mod, b->sites[s].len);
-        LOG("%s: built-in mod %s applied (%d sites)", m->name, b->name, b->n); total += b->n; if (!strcmp(b->name, "dynamic_fps")) g_bmod_fps = dm_dynfps = 1;
+        LOG("%s: built-in patch %s applied (%d sites)", m->name, b->name, b->n); total += b->n;
     }
     return total;
+}
+// Scarlet / Violet 4.0.0 up to 60 fps (DM_FPS_TARGET=60, the menu's 60 fps and Dynamic): our patch, paldea_fps.h (what each site is in the game's code). The host
+//   presents in whole vsyncs and writes the step the frame really took into the game's frame-time table (hle_nvn.c dyn_tick, dm_dyn_step)
+#include "paldea_fps.h"
+int dm_dynfps;   // hle_nvn.c dyn_tick: Scarlet / Violet at up to 60, presentation paced in steps of 30 / 60
+uint8_t *dm_dyn_step;   // hle_nvn.c dyn_tick: the game's step word (u64 ns) it writes every frame
+static int paldea_fps_patch(module_t *m, uint64_t lim, int64_t p0, int64_t p1) {
+    if (!pfps_build(m->build_id) || !pfps_wanted(getenv("DM_FPS_TARGET"))) return 0;   // (at 30 nothing is written: the game's own code)
+    int bad = pfps_check(m->base, lim, m->text_end);
+    for (int i = 0; i < PFPS_NCODE && bad < 0; i++) if (overlaps_rewrite(m, PFPS_CODE[i].off, 4, p0, p1)) bad = i;
+    if (bad >= 0) { LOG("[RED] %s: 60 fps not applied: +%#llx differs from Scarlet / Violet 4.0.0's code or was rewritten; the game stays at its own 30", m->name,
+                        (unsigned long long)(bad < PFPS_NCODE ? PFPS_CODE[bad].off : PFPS_STEP)); return 0; }
+    pfps_write_code(m->base);
+    dm_dyn_step = m->base + PFPS_STEP; dm_dynfps = 1;
+    LOG("%s: up to 60 fps for Scarlet / Violet 4.0.0: present interval 1 (+%#x), the step the frame took in the game's frame-time table (+%#llx, 16.67 or 33.33 ms), "
+        "frame-time divisor kept at 30 fps (+%#x)", m->name, PFPS_CODE[0].off, (unsigned long long)PFPS_STEP, PFPS_CODE[1].off);
+    return PFPS_NCODE;
 }
 // Widescreen (DM_ASPECT=wide, the menu's Picture → Widescreen): the game's camera made as wide as the screen, for Sword and Shield 1.3.2, after Fl4sh's Ultrawide
 //   mods (16:10 / 21:9 / 32:9 .pchtxt), with this screen's own aspect (DM_WIDE_RATIO, its long side over its short, written by the app) instead of a fixed one.
@@ -907,12 +923,13 @@ static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, in
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
+    if (pfps_build(m->build_id)) return n + paldea_fps_patch(m, lim, p0, p1);   // (Scarlet / Violet 4.0.0: none of the Sword / Shield patches below are its)
     if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_wide_render(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     n += wide_patch(m, lim, p0, p1);
     n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1) + galar_step_pin(m, p0, p1);
     n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
     n += wide_render_patch(m, p0, p1);
-    return n + (g_bmod_fps ? 0 : fps_patch(m, lim, p0, p1));
+    return n + fps_patch(m, lim, p0, p1);
 }
 // Built-in: DM_FPS_TARGET=60..120 (opt-in, the in-game menu; experimental) for Pokémon Shield and Sword 1.3.2's main: the present interval the game asks NVN for, 2 (30 fps),
 // becomes 1 (in the game's present-interval setter: if the interval asked for differs from the window's, MOV W1, W21 then a call through NVN's set-present-interval

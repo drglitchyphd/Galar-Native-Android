@@ -1560,8 +1560,8 @@ static int vstep_on(void) { return &dm_step_hz && dm_step_hz > 0 && &dm_step_wor
 static int live_fps(void) { return &dm_fps_live ? __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED) : 0; }
 // the hold in use (report_interval): at 60 Hz slots only, where a slot is the Switch's own vsync and the hold is the interval the game would set itself
 static int reported_hold(void) { return vstep_on() && dm_step_hz == 60 ? atomic_load(&g_fs_k) : 0; }
-// Scarlet / Violet's built-in Dynamic FPS (loader.c dm_dynfps): the game steps by the time each frame took, so only presentation is paced, in whole vsyncs of 60 Hz
-__attribute__((weak)) int dm_dynfps;
+// Scarlet / Violet up to 60 (loader.c paldea_fps_patch, dm_dynfps): presentation paced in whole vsyncs of 60 Hz, and the game's step the time each frame took (dm_dyn_step)
+__attribute__((weak)) int dm_dynfps; __attribute__((weak)) uint8_t *dm_dyn_step;   // graphics unit tests have no loader
 static int dyn_on(void) { return &dm_dynfps && dm_dynfps; }
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
 int nvn_game_fps(void) { int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
@@ -1663,8 +1663,10 @@ static void vstep_tick(const win_t *o) {
     if (o->presents % 1800 == 0) { LOG("[nvn] frame step: held 1 / 2 / 3 slots %llu / %llu / %llu frames, %llu late", (unsigned long long)held[1], (unsigned long long)held[2],
                                        (unsigned long long)held[3], (unsigned long long)g_vs.late); memset(held, 0, sizeof held); }
 }
-// Scarlet / Violet at 60 (Dynamic FPS): the same controller as vstep_tick, for presentation only: 2 vsyncs (30 fps) while frames do not fit in one, 1 (60 fps) after a run
-//   that fits, never 3. Frames steady at 30 rather than swinging between 24 and 50 as each one finished
+// Scarlet / Violet at up to 60: the same controller as vstep_tick: 2 vsyncs (30 fps) while frames do not fit in one, 1 (60 fps) after a run that fits, never 3.
+//   Frames steady at 30 rather than swinging between 24 and 50 as each one finished. The game's next step is the hold it is shown for (paldea_fps.h): 16.67 ms at 1,
+//   the game's own 33.33 ms at 2 (and before the first hold), so the world moves at real speed at 60 and at 30; the hold changes only after late frames or a trial
+//   run, never frame by frame, so the step does not swing between frames
 static void dyn_tick(const win_t *o) {
     static uint64_t prev; static nvn_fstep vs; static int nlog;
     const double v = 1e9 / 60;
@@ -1676,6 +1678,9 @@ static void dyn_tick(const win_t *o) {
     double cost = cpu > gpu ? cpu : gpu;
     int k0 = vs.k; nvn_fstep_next(&vs, shown, cost, 1, 2, 0);
     atomic_store(&g_fs_k, vs.k);
+    if (&dm_dyn_step && dm_dyn_step) { static uint64_t last; uint64_t ns = vs.k == 1 ? 16666667ull : 33333334ull;   // (the game's frame-time table entry, u64 ns)
+        if (ns != last) { dm_guest_write_prepare(dm_dyn_step, 8); __atomic_store_n((uint64_t *)dm_dyn_step, ns, __ATOMIC_RELAXED); last = ns;
+            LOG("[nvn] game step: %.2f ms a frame (the hold it is shown for)", ns / 1e6); } }
     if (k0 && vs.k != k0 && nlog < 40) LOG("[nvn] dynamic fps: %d fps at present %llu (cost %.2f slots of 16.67 ms, GPU %.2f)%s", 60 / vs.k, (unsigned long long)o->presents, cost, gpu, ++nlog == 40 ? "; further changes not logged" : "");
 }
 // Legends: Arceus at 60 fps (DM_FPS_TARGET=60; the in-game menu): the game advances its logic by a frame time it keeps in its data at main+0x397e8d8, in nanoseconds

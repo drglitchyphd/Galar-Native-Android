@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Built-in code mods: community IPSwitch .pchtxt patches the app ships as settings (dm/games/<title>/builtin_mods/<name>.pchtxt), turned into the table loader.c applies
+# Built-in code patches: IPSwitch-format .pchtxt patches the app ships as settings (dm/games/<title>/builtin_mods/<name>.pchtxt), turned into the table loader.c applies
 #   (dm/host/builtin_mods.h). Each site keeps the bytes the game has there, read from the game's own decompressed main, so the loader applies a mod only to a main whose
 #   every site still holds them: all of a mod or none of it.
 # Usage: builtin_mods.py <main image> <out .h> <name>=<pchtxt>[,<extra build id>...] ...
