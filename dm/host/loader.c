@@ -919,6 +919,61 @@ static int galar_draw_patch(module_t *m, int64_t p0, int64_t p1) {
     LOG("%s: draw distance %d %% for %s: grass and field detail layers (DM_DRAW_DIST)", m->name, pct, gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2");
     return 2;
 }
+// The game's memory pool running dry (Sword and Shield 1.3.2; DM_POOL_DUMP=0 leaves it out). The Dynamax crash (#211 #325 #330 #341) and the load crash at
+//   main+0x5a00a8: a gflib3 tlsf_pool_resource (vtable main+0x250dae0) gives no memory, and the caller uses the null. Its allocate (main+0x661260: the pool at
+//   obj+0x28, then the parent resource at obj+0x20) returns null without a word: the game's own dump (vtable +0xb8, main+0x6614e0 → do_dump_no_lock
+//   main+0x660910: "[gfl::mem] dump <name> begin", one line per block with the source file and line that took it) runs only where a caller asks for it, and
+//   the Dynamax path (the file loader main+0x5fac50 allocating a 2.6 MB VFXB effect file through its request's allocator, no null check) does not.
+//   So: at the allocate's end (+0x66131c MOV X0, X22, after the pool's lock is let go) a branch to added code in the zero tail of the rewriter's code area
+//   (as galar_draw_patch: the 64 bytes before its own): a null result calls dm_gfl_pool_fail (pool, size asked, sp), which logs the pool, the size and the
+//   caller, and runs the game's dump on that pool (hle_sdk16.c h_diag_Log lets "[gfl::mem]" lines into the log). The result is returned unchanged. Same
+//   words at the same addresses in both games (checked in both mains)
+// (dm_bigstack_enter: hle.h, hle_bigstack.c)
+static uint8_t *g_gfl_main; static int g_gfl_test;
+void dm_gfl_pool_fail(uint8_t *pool, uint64_t size, uint8_t *sp);
+void dm_gfl_pool_fail(uint8_t *pool, uint64_t size, uint8_t *sp) {
+    if (g_gfl_test) {   // (DM_POOL_DUMP=test: every allocate comes here; the first one of 2 MB or more is reported and dumped as if it had failed, once)
+        static int t; if (size < (2u << 20) || __atomic_exchange_n(&t, 1, __ATOMIC_RELAXED)) return;
+        LOG("memory pool report (test): pool %p gave %llu bytes, asked from main+%#llx; the game's own dump of it follows", (void *)pool, (unsigned long long)size,
+            (unsigned long long)(*(uint64_t *)(sp + 0x38) - (uint64_t)g_gfl_main));
+        ((void (*)(void *))(g_gfl_main + 0x6614e0))(pool); LOG("memory pool report (test): dump done"); return; }
+    static int n; int k = __atomic_fetch_add(&n, 1, __ATOMIC_RELAXED); if (k >= 40) return;
+    uint64_t lr = *(uint64_t *)(sp + 0x38);   // (the allocate's own return address, saved by its prologue: stp x29, x30, [sp, #0x30])
+    LOG("[RED] the game's memory pool %p (%s) could not give %llu bytes (%.2f MB), asked from main+%#llx%s", (void *)pool,
+        *(uint64_t *)(pool + 0x20) ? "its parent too" : "no parent", (unsigned long long)size, size / 1048576.0, (unsigned long long)(lr - (uint64_t)g_gfl_main),
+        k < 4 ? "; the game's own dump of it follows" : "");
+    if (k < 4) ((void (*)(void *))(g_gfl_main + 0x6614e0))(pool);   // (the pool's dump through its own vtable function: takes the pool's lock, let go above)
+}
+static int galar_pool_dump(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_POOL_DUMP"); if (e && !strcmp(e, "0")) return 0;
+    int64_t d; if (!galar_shift(m, &d)) return 0; (void)d;   // (the allocator sits at the same address in Sword and Shield)
+    static const uint64_t W[3] = { 0x66131c, 0x661320, 0x6614e0 }; static const uint32_t O[3] = { 0xaa1603e0u, 0xa9437bfdu, 0xa9bd57f6u };   // MOV X0, X22 / LDP X29, X30, [SP, #0x30] / the dump's STP X22, X21, [SP, #-0x30]!
+    if (!words_are(m, p0, p1, W, O, 3)) { LOG("[RED] %s: memory pool report not applied (the allocator's code differs)", m->name); return 0; }
+    int64_t end = m->patch_off < 0 ? p1 : (int64_t)m->size, cave = end - 128; static const uint8_t z[64];
+    if (cave < p0 || memcmp(m->base + cave, z, 64) || llabs(cave - (int64_t)W[0]) >= (1ll << 27)) { LOG("[RED] %s: memory pool report not applied (no free code space in reach)", m->name); return 0; }
+    g_gfl_main = m->base;
+    uint32_t cc[16] = {
+        0xaa1603e0u,   // [0]  MOV X0, X22            (the game's own)
+        0xb5000120u,   // [1]  CBNZ X0, [10]          memory given: straight back
+        0xaa1303e0u,   // [2]  MOV X0, X19            the pool
+        0xaa1503e1u,   // [3]  MOV X1, X21            the size asked
+        0x910003e2u,   // [4]  MOV X2, SP             (the allocate's frame: its return address at +0x38)
+        0x580000f0u,   // [5]  LDR X16, [12]          dm_gfl_pool_fail
+        0x58000111u,   // [6]  LDR X17, [14]          dm_bigstack_enter: on this thread's host stack (a game thread's own can be small)
+        0xd63f0220u,   // [7]  BLR X17                (x1..x18 and x30 are free here: the allocate reloads x29 / x30 and returns x0 only)
+        0xaa1f03e0u,   // [8]  MOV X0, XZR            the null, as before
+        0x14000000u | (uint32_t)((((int64_t)W[1]) - (cave + 36)) >> 2 & 0x3ffffff),   // [9]  B +0x661320
+        0x14000000u | (uint32_t)((((int64_t)W[1]) - (cave + 40)) >> 2 & 0x3ffffff),   // [10] B +0x661320
+        0xd503201fu,   // [11] NOP
+        0, 0, 0, 0 };  // [12] [14] the two addresses
+    uint64_t fn = (uint64_t)(uintptr_t)dm_gfl_pool_fail, ent = (uint64_t)(uintptr_t)dm_bigstack_enter; memcpy(&cc[12], &fn, 8); memcpy(&cc[14], &ent, 8);
+    if (!strcmp(e ? e : "", "test")) { g_gfl_test = 1; cc[1] = 0xd503201fu; cc[8] = 0xaa1603e0u; }   // (test: NOP the CBNZ, every result goes through and comes back as it was: MOV X0, X22)
+    memcpy(m->base + cave, cc, sizeof cc);
+    uint32_t br = 0x14000000u | (uint32_t)((cave - (int64_t)W[0]) >> 2 & 0x3ffffff); memcpy(m->base + W[0], &br, 4);
+    __builtin___clear_cache((char *)(m->base + cave), (char *)(m->base + cave + sizeof cc));
+    LOG("%s: memory pool report: when one of the game's memory pools gives nothing, the log names it and the game's own dump of it follows (DM_POOL_DUMP%s)", m->name, g_gfl_test ? "=test: the first allocate of 2 MB or more is dumped once" : "");
+    return 2;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
@@ -927,6 +982,7 @@ static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, in
     if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_wide_render(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     n += wide_patch(m, lim, p0, p1);
     n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1) + galar_step_pin(m, p0, p1);
+    n += galar_pool_dump(m, p0, p1);
     n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
     n += wide_render_patch(m, p0, p1);
     return n + fps_patch(m, lim, p0, p1);
