@@ -73,9 +73,18 @@ _dm_gate:
     str x9, [sp, #776]
     mrs x9, fpcr
     str x9, [sp, #784]
-    mov x0, x30              // Return point = gate identifier
-    mov x1, sp               // regs
+    // The gate's host code (svc handling, and whatever libc does under it) runs on the thread's own host stack, not the game's: a game thread can have a 16 KB
+    //   stack, and Android's libc formats text inside pthread_cond_timedwait when the system traces (Arceus #46: vsnprintf past the end of a 16 KB stack, from
+    //   svc_thread). The registers stay saved here on the game's stack; x19 (saved with them) holds where they are
+    mov x19, sp
+    mov x0, sp
+    bl _gate_host_stack      // the host stack's top for this thread, or 0 to stay on this stack
+    cbz x0, 1f
+    mov sp, x0
+1:  ldr x0, [x19, #240]      // return point = gate identifier (the saved x30)
+    mov x1, x19              // regs
     bl _gate_dispatch
+    mov sp, x19
     ldr x9, [sp, #784]
     msr fpcr, x9
     ldr x9, [sp, #776]

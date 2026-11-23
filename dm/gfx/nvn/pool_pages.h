@@ -11,6 +11,10 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#ifdef __linux__
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 
 // The one moment left: between the driver's pages leaving the range and the copy arriving (two mremaps back to back; no single call does both). The range is marked
 // for it (pp_begin / pp_end), and a fault inside a marked range, or one that ended less than 100 ms ago, waits 50 µs and runs the faulting instruction again
@@ -37,10 +41,28 @@ static int pp_fault(void *addr) {   // async-signal-safe: atomics, clock_gettime
     return 0;
 }
 
-// a private copy of the pages at [base, base+size), for pages_back (MAP_FAILED when there is no memory for it)
+// a private copy of the pages at [base, base+size), for pages_back (MAP_FAILED when there is no memory for it).
+// Only the parts /proc/self/maps shows mapped readable are copied: Turnip (Adreno 660, #281) had taken back pages moved under a pool by the time the pool was freed,
+//   and the plain memcpy here crashed reading them (SIGSEGV in memcpy, mtl_pool_del, after minutes of play). What is not mapped readable stays zero in the copy:
+//   the pool is being freed, the game only gets its memory back. pages_lost counts it (said in the log by the caller). (process_vm_readv, tried first, cannot read
+//   the driver's own mappings at all, VM_PFNMAP: on Adreno's own driver it gave readable pools back as zeros, S25+ 2026-11-19)
+static _Atomic uint64_t pages_lost;
 static void *pages_copy(uintptr_t base, size_t size) {
     void *c = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (c != MAP_FAILED) memcpy(c, (void *)base, size);
+    if (c == MAP_FAILED) return c;
+#ifdef __linux__
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (!m) { memcpy(c, (void *)base, size); return c; }   // (no map to look at: the plain copy, as before)
+    char ln[512]; size_t covered = 0; uintptr_t end = base + size;
+    while (fgets(ln, sizeof ln, m)) { unsigned long s0, e0; char pr[8] = "";
+        if (sscanf(ln, "%lx-%lx %7s", &s0, &e0, pr) != 3 || e0 <= base || s0 >= end || pr[0] != 'r') continue;
+        uintptr_t a = s0 > base ? s0 : base, b = e0 < end ? e0 : end;
+        memcpy((uint8_t *)c + (a - base), (void *)a, b - a); covered += b - a; }
+    fclose(m);
+    if (covered < size) atomic_fetch_add(&pages_lost, size - covered);
+#else
+    memcpy(c, (void *)base, size);
+#endif
     return c;
 }
 // [base, base+size) becomes the copy (ordinary memory, readable and writable), whatever was mapped there; the copy's own address is gone afterwards.

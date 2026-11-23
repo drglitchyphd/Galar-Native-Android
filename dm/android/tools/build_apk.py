@@ -13,7 +13,7 @@ from xml.sax.saxutils import escape as xml_escape   # (the label: "Pokémon Swor
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE); DM = os.path.dirname(ANDROID)
 LIBS = ['libnxnative.so', 'libnx_extract.so', 'libdmsh_xlate.so', 'libspirv_cross.so', 'libpython3.14.so', 'libpython_exe.so', 'libcapstone.so', 'liblz4.so', 'libssl_python.so', 'libcrypto_python.so']
-OPTIONAL = ['libdmsh_gate.so', 'libdmoodle.so', 'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so']   # libadrenotools: custom Adreno drivers (Turnip); without them the phone's own driver only
+OPTIONAL = ['libdmsh_gate.so', 'libdmoodle.so', 'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so', 'libVkLayer_khronos_validation.so', 'libdmprobe.so']   # libadrenotools: custom Adreno drivers (Turnip); without them the phone's own driver only
 PY_SKIP = ('test', 'idlelib', 'tkinter', 'turtledemo', 'ensurepip', 'pydoc_data', 'lib2to3', 'venv', 'sqlite3', '__pycache__', 'unittest', 'wsgiref', 'xmlrpc', 'curses', 'dbm')
 DM_PARTS = ['games/game.py', 'tools/patch_nso.py', 'gfx/tools', 'ios/tools/ios_metal.py', 'android/tools']   # and every game profile (setup names the other game when given its dump)
 sys.path.insert(0, os.path.join(DM, 'games')); import game as _game
@@ -34,13 +34,14 @@ def png(size, top=(220, 40, 50), bg=(24, 32, 64)):   # the app's icon, drawn her
     chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
     return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)) + chunk(b'IDAT', raw) + chunk(b'IEND', b'')
 
-def zipdir(z, src, arc, skip=()):
+def zipdir(z, src, arc, skip=(), sub=None):   # sub: {name in the zip: the file written there instead} (a shader chain generation's frozen tools, chain_tree.py)
     if not os.path.isdir(src): sys.exit('[RED] missing folder: ' + src)
     for d, ds, fs in os.walk(src):
         ds[:] = [x for x in ds if x not in skip and x not in ('out', 'obj', 'bin')]
         for f in fs:
             if f.endswith(('.pyc', '.dll', '.dylib')): continue
-            p = os.path.join(d, f); z.write(p, os.path.join(arc, os.path.relpath(p, src)).replace(os.sep, '/'))
+            p = os.path.join(d, f); n = os.path.join(arc, os.path.relpath(p, src)).replace(os.sep, '/')
+            z.write((sub or {}).get(n, p), n)
 
 def shader_chain(g):   # the translation chain the engine is compiled for (DMSH_CHAIN in the game's dmsh_chain.h, nvn_vk.c)
     h = g.table('dmsh_chain.h')
@@ -74,7 +75,7 @@ def main():
     a = ap.parse_args()
     g = _game.load(a.game); fam = _game.family(g)   # the games the engine built for g runs (Pokémon Shield: Shield and Sword, one app)
     ic = g.get('app_icon', 'dc2832 182040').split(); icon = [tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)) for h in ic[:2]]   # app_icon: top colour, ground colour (hex)
-    a.name = a.name or (g.get('app_name', 'Galar Native') if len(fam) > 1 else g.get('name'))   # the app's name (the base game's app_name: Galar Native runs Sword and Shield, Paldea Native Scarlet and Violet; each game's own shortcut names it)
+    a.name = a.name or g.get('app_name', '') or ('Galar Native' if len(fam) > 1 else g.get('name'))   # the app's name (the base game's app_name: Galar Native runs Sword and Shield, Paldea Native Scarlet and Violet, Arceus Native Legends: Arceus; each game's own shortcut names it)
     a.package = a.package or 'com.nxnative.' + _game.file_stem(g).lower()   # com.nxnative.pokemonshield: the Shield app's package, so its players update in place
     exe = '.exe' if os.name == 'nt' else ''; bat = '.bat' if os.name == 'nt' else ''
     bt = a.bt or os.path.expanduser('~/nxnative-work/tools/android-15'); jar = a.jar or os.path.expanduser('~/nxnative-work/tools/android-35/android.jar')
@@ -93,6 +94,12 @@ def main():
         so = f.read()
         if shader_chain(g).encode() not in so:
             sys.exit('[RED] libnxnative.so was not built for shader chain ' + shader_chain(g) + ' (dmsh_chain.h): rebuild it (delete it and run win_build_lib.py)')
+    # ... and the shader tools this APK carries compute that same chain (the game's generation, dm/gfx/chains/chain_tree.py: a profile on the wrong xlate_chain would
+    #   make every player's setup build a pack the engine refuses)
+    sys.path.insert(0, os.path.join(DM, 'gfx/chains')); import chain_tree
+    if chain_tree.run_chain(g) != shader_chain(g): sys.exit(f'[RED] the shader tools for {g.id} (chain generation {chain_tree.gen_of(g) or "live"}) compute chain {chain_tree.run_chain(g)}, dmsh_chain.h says {shader_chain(g)}')
+    with open(os.path.join(a.libs, 'libnxnative.so'), 'rb') as f:
+        so = f.read()
         if any(f.id.encode() not in so for f in fam):   # the engine is built per profile (game_profile.h: DM_GAME_FAMILY, the games it runs)
             sys.exit(f'[RED] libnxnative.so was not built for {g.get("name")} ({g.id}): run win_build_lib.py {g.id}')
     w = tempfile.mkdtemp(prefix='apk_')
@@ -102,12 +109,13 @@ def main():
     open(os.path.join(w, 'AndroidManifest.xml'), 'w', encoding='utf-8').write(f'''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{a.package}" android:versionCode="{a.version}" android:versionName="0.{a.version}">
     <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="35" />
-    <uses-permission android:name="android.permission.VIBRATE" />
+{''.join(f'    <queries><package android:name="{p}" /></queries>' + chr(10) for p in sorted({f.get('setup_from_app', '') for f in fam} - {''}))}    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
@@ -123,6 +131,7 @@ def main():
                   android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|smallestScreenSize|density">
             <meta-data android:name="android.app.lib_name" android:value="nxnative" />
         </activity>
+        <service android:name="com.nxnative.DriverCheckService" android:process=":drvcheck" android:exported="false" />
     </application>
 </manifest>
 ''')
@@ -132,7 +141,7 @@ def main():
     # Java: the setup screen, the keyboard dialog, the immersive helper
     cls = os.path.join(w, 'classes'); os.makedirs(cls)
     srcs = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(ANDROID, 'app/java')) for f in fs if f.endswith('.java')]
-    run('javac', '-source', '8', '-target', '8', '-nowarn', '-cp', jar, '-d', cls, *srcs)
+    run('javac', '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-nowarn', '-cp', jar, '-d', cls, *srcs)   # (UTF-8 sources: a Windows JDK reads them as cp1252 otherwise, and the menu's ✕ › °C · ✓ come out garbled)
     run(os.path.join(bt, 'd8' + bat), '--release', '--min-api', '33', '--lib', jar, '--output', w, *[os.path.join(d, f) for d, _, fs in os.walk(cls) for f in fs])
     # the payload: native libraries, the Python standard library, the setup scripts
     with zipfile.ZipFile(os.path.join(w, 'base.apk'), 'a') as z:
@@ -143,10 +152,16 @@ def main():
         z.writestr('assets/python.zip', b.getvalue(), compress_type=zipfile.ZIP_STORED)
         b = io.BytesIO()
         with zipfile.ZipFile(b, 'w', zipfile.ZIP_DEFLATED) as dz:
+            # the game's shader translation chain generation (dm/gfx/chains/chain_tree.py, the profile's xlate_chain): its frozen tool files in place of the live ones,
+            #   so the phone's setup computes and builds that game's own chain (Arceus Native, Paldea Native: the translator before FMZ); gfx/tools/CHAIN names it
+            sys.path.insert(0, os.path.join(DM, 'gfx/chains')); import chain_tree
+            gen = chain_tree.gen_of(g); sub = chain_tree.overlay(gen)
             for part in DM_PARTS + ['games/' + p.id for p in _game.all_games()]:
                 p = os.path.join(DM, part)
-                if os.path.isdir(p): zipdir(dz, p, part)
-                else: dz.write(p, part)
+                if os.path.isdir(p): zipdir(dz, p, part, sub=sub)
+                else: dz.write(sub.get(part, p), part)
+            dz.writestr('gfx/tools/CHAIN', gen + '\n')
+            if gen: print(f'shader tools: chain generation {gen} (dm/gfx/chains/{gen})')
             zipdir(dz, os.path.join(ANDROID, 'pyshim'), 'android/pyshim')
             zipdir(dz, a.capstone_py, 'android/pyshim/capstone', ('lib', 'include', '__pycache__'))
             for f in ('nintendo_ext.ttf', 'nintendo_ext.LICENSE.txt'):
@@ -156,8 +171,11 @@ def main():
         for f in ('cjk_fallback.ttf', 'cjk_fallback.LICENSE.txt'):   # the Chinese / Korean shared-font stand-in (GameActivity copies it into the game's font/)
             p = os.path.join(ANDROID, 'app/assets', f)
             if os.path.isfile(p): z.write(p, 'assets/' + f)
+        seed = g.table('vk_pipelines_seed.bin')   # the pipelines the game used on a phone (android_main.c copies it into the game folder; nvn_vk.c builds them before the game starts)
+        if seed.is_file(): z.write(str(seed), 'assets/vk_pipelines_seed.bin')
         z.writestr('assets/shader_chain', shader_chain(g) + '\n')   # the launcher sends players back to setup when their shader pack was made for another chain
         z.writestr('assets/games', ''.join(f'{f.id}\t{f.get("name")}\t{_game.file_stem(f)}\t{list(f.builds().values())[-1]["display"]}\t{"heavy" if f.get("android_heavy", "off") == "on" else ""}\n' for f in fam))   # the games this app runs, its own first, with the version they need (GameSettings.games)
+        z.writestr('assets/setup_from', ''.join(f'{f.id}\t{f.get("setup_from_app")}\n' for f in fam if f.get('setup_from_app', '')))   # an installed app a game can be set up from (SetupActivity)
         z.writestr('assets/app', f'{a.name}\t{g.get("app_repo", "github.com/simipoB/Galar-Native-Android")}\n')   # the app's name and where its official releases are (SetupActivity)
         for t in sorted(glob.glob(os.path.join(ANDROID, 'app/assets/lang/*.tsv'))): z.write(t, 'assets/lang/' + os.path.basename(t))   # the app's text in other languages (T.java)
         # the licences (GameMenu's About page): the app's own (NOTICE, then the GPL-3.0 text and the MIT notice its older code keeps), whose notice must stay with every

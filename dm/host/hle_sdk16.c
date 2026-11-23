@@ -37,7 +37,7 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "absolute second
 }
 // LocationName = char[0x24] (time zone name): follows the host's system time zone
 HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device time zone name → host time zone", Result, h_time_LocName, char *out) {
-    memset(out, 0, 0x24); tzset(); strlcpy(out, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24); return RES_OK;
+    void dm_time_location(char *); dm_time_location(out); return RES_OK;   // (hle_time.c: the phone's zone ID)
 }
 HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock (offline, unavailable)", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4time8FinalizeEv", "pairs with Initialize; the host has no session", Result, h_time_Finalize, void) { return RES_OK; }
@@ -73,6 +73,42 @@ static font_t font_map(const char *p) {
     memcpy(m, &done, 4); memcpy(m + 4, &len, 4);
     f.p = m; f.n = n + 8; return f;
 }
+// A Switch system font as the console stores it (BFTTF: a word derived from the key, the obfuscated length, then the TTF XORed word by word): the player's own, dumped
+//   from their console, in DM_FONT_DIR under Nintendo's file name. Decoded here as the console does (key = word 0 ^ 0x7f9a0218, each word byte-swapped after the XOR),
+//   then handed over like a TTF stand-in. NULL when the file is missing or is not a BFTTF
+static font_t font_map_bfttf(const char *p) {
+    font_t f = {0}; int fd = open(p, O_RDONLY); struct stat st;
+    if (fd < 0 || fstat(fd, &st)) { if (fd >= 0) close(fd); return f; }
+    size_t n = (size_t)st.st_size;
+    if (n < 16 || (n & 3)) { close(fd); LOG("[RED] shared font %s: not a BFTTF (size %zu)", p, n); return f; }
+    uint32_t *w = malloc(n); size_t got = 0;
+    while (w && got < n) { ssize_t r = pread(fd, (uint8_t *)w + got, n - got, (off_t)got); if (r <= 0) break; got += (size_t)r; }
+    close(fd);
+    if (!w || got != n) { free(w); LOG("[RED] shared font read short: %s", p); return f; }
+    if (w[0] != 0x36f81a1eu) { LOG("[RED] shared font %s: not a Switch BFTTF (first word %08x)", p, w[0]); free(w); return f; }
+    uint32_t key = w[0] ^ 0x7f9a0218u, len = __builtin_bswap32(w[1] ^ key);
+    size_t ttf = n - 8; if (len && len <= ttf) ttf = len;
+    uint8_t *m = mmap(NULL, ttf + 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { free(w); LOG("[RED] shared font memory allocation failed (%zu bytes)", ttf + 8); return f; }
+    uint32_t *o = (uint32_t *)(m + 8); size_t nw = (ttf + 3) / 4;
+    for (size_t i = 0; i < nw; i++) o[i] = __builtin_bswap32(w[2 + i] ^ key);
+    free(w);
+    uint32_t done = 0x18029a7fu, hl = __builtin_bswap32((uint32_t)ttf ^ 0x49621806u);
+    memcpy(m, &done, 4); memcpy(m + 4, &hl, 4);
+    LOG("shared font: %s (the console's own font, %zu bytes decoded)", p, ttf);
+    f.p = m; f.n = ttf + 8; return f;
+}
+// The console's own font for a type, if the player put it in DM_FONT_DIR: Nintendo's BFTTF name first, then a plain TTF of that one type (for 1 to 4)
+static font_t font_real(int type) {
+    static const char *const bf[6] = { "nintendo_udsg-r_std_003.bfttf", "nintendo_udsg-r_org_zh-cn_003.bfttf", "nintendo_udsg-r_ext_zh-cn_003.bfttf",
+                                       "nintendo_udjxh-db_zh-tw_003.bfttf", "nintendo_udsg-r_ko_003.bfttf", "nintendo_ext_003.bfttf" };
+    static const char *const tt[6] = { NULL, "zh-cn.ttf", "zh-cn-ext.ttf", "zh-tw.ttf", "ko.ttf", NULL };
+    const char *dir = getenv("DM_FONT_DIR"); char buf[1024]; font_t f = {0};
+    if (!dir || !*dir || type < 0 || type > 5) return f;
+    snprintf(buf, sizeof buf, "%s/%s", dir, bf[type]); if (access(buf, R_OK) == 0) f = font_map_bfttf(buf);
+    if (!f.p && tt[type]) { snprintf(buf, sizeof buf, "%s/%s", dir, tt[type]); if (access(buf, R_OK) == 0) { f = font_map(buf); if (f.p) LOG("shared font %d: %s (%zu bytes)", type, buf, f.n - 8); } }
+    return f;
+}
 static font_t font_first(const char *env, const char *file, const char *fallback) {
     char buf[1024]; const char *dir = getenv("DM_FONT_DIR"), *c[3] = {getenv(env), NULL, fallback};
     if (dir && *dir) { snprintf(buf, sizeof buf, "%s/%s", dir, file); c[1] = buf; }
@@ -84,7 +120,12 @@ static font_t font_first(const char *env, const char *file, const char *fallback
 }
 static font_t font_get(int type) {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static font_t std_f, ext_f; static int std_done, ext_done;
+    static font_t real_f[6]; static int real_done[6];
     pthread_mutex_lock(&mu);
+    // the console's own fonts, one per type, when the player supplied them (#239: Simplified Chinese drawn with the stand-in's metrics looked stretched, and its
+    //   extension font's punctuation, such as the ellipsis, came out as "?")
+    if (type >= 0 && type <= 5) { if (!real_done[type]) { real_done[type] = 1; real_f[type] = font_real(type); }
+                                  if (real_f[type].p) { font_t r = real_f[type]; pthread_mutex_unlock(&mu); return r; } }
     if (!std_done) { std_done = 1; std_f = font_first("DM_SHARED_FONT", "standard.ttf",
 #ifdef __ANDROID__
         access("/system/fonts/Roboto-Regular.ttf", R_OK) == 0 ? "/system/fonts/Roboto-Regular.ttf" : "/system/fonts/NotoSans-Regular.ttf"   // the phone's own font (the macOS path below does not exist there)
@@ -262,6 +303,35 @@ HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Displa
 HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "game log → host log", void, h_diag_Put, const void *meta, const char *s, size_t n) {
     (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (n) LOG("[game] %.*s", (int)n, s);
 }
+// The formatted game log (NN_LOG with arguments: nn::diag::detail::LogImpl(meta, format, ...)). Nearly all of it is noise, so only one thing is let through: the game's
+//   own memory pool dump. When one of Game Freak's pools cannot give memory (gflib3 tlsf_pool_resource.cpp do_dump_no_lock; Sword / Shield 1.3.2 main+0x660910), the
+//   game prints "[gfl::mem] dump <pool> begin", one line per block ("idx[..] using[..] addr[..] size[..]:[..]" and the source file and line that took it), and
+//   "... end", then goes on with a null pointer and crashes (the Dynamax crashes #211 / #298 / #325 / #330, and a load on a Mali-G615, 2026-11-22: a vector of 25 x
+//   512 bytes got no memory). Those lines say which pool ran dry and what filled it; without this hook the SDK's own LogImpl dropped them. At most 3 dumps a run,
+//   400 lines each, the rest counted. DM_GAME_LOG=1: every formatted game log line (development).
+//   The guest and an AArch64 Linux / Android host pass variable arguments the same way (AAPCS64), so the host's vsnprintf reads them; elsewhere the hook is left out
+#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
+#include <stdarg.h>
+HLE_FORCE("_ZN2nn4diag6detail7LogImplERKNS0_11LogMetaDataEPKcz", "formatted game log: the game's memory pool dump goes to the host log", void, h_diag_Log, const void *meta, const char *fmt, ...) {
+    (void)meta; if (!fmt) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static int all = -1, in_dump, dumps, lines, dropped;
+    if (all < 0) { const char *e = getenv("DM_GAME_LOG"); all = e && atoi(e) > 0; }
+    int mem = !strncmp(fmt, "[gfl::mem]", 10);
+    if (!all && !mem && !in_dump) return;   // (read without the lock: a dump is rare, and its lines come from the thread that opened it)
+    char b[1024]; va_list ap; va_start(ap, fmt); int n = vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    if (n < 0) return;
+    if (n >= (int)sizeof b) n = (int)sizeof b - 1;
+    while (n && (b[n - 1] == '\n' || b[n - 1] == ' ')) b[--n] = 0;
+    for (int i = 0; i < n; i++) if (b[i] == '\n') b[i] = ' ';   // (a block's three lines as one)
+    pthread_mutex_lock(&mu);
+    int begin = mem && strstr(b, " begin"), end = mem && strstr(b, " end");
+    if (begin) { in_dump = 1; lines = dropped = 0; dumps++;
+        if (dumps <= 3) LOG("[RED] the game's memory pool could not give memory: its own dump follows (%d of at most 3 this run); the game goes on with no memory and usually crashes next", dumps); }
+    if (all || dumps <= 3) { if (all || !in_dump || lines < 400 || end) LOG("[game] %s", b); else dropped++; lines += in_dump; }
+    if (end) { if (dropped && dumps <= 3) LOG("[game] (%d more blocks of that pool not printed)", dropped); in_dump = 0; }
+    pthread_mutex_unlock(&mu);
+}
+#endif
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);

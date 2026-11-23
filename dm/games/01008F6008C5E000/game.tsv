@@ -65,3 +65,10 @@ android_heavy	on
 # Trinity's open world is heavier than Arceus (about 20 fps docked on the Galaxy S25+): handheld mode, the game's own lower render resolution
 android_op_mode	handheld
 touch_zlzr	on
+
+# ---- Port (engine unification: docs/ENGINE_UNIFY.md) ----
+# the released app (Paldea Native; Pokémon Scarlet takes these through tables_from); the shared save folder Documents/Paldea Native/<title id>/save, as its releases made it
+port	paldea
+docs_dir	Paldea Native
+# the shader translation chain generation (dm/gfx/chains/chain_tree.py): the translator Paldea Native's releases ship (Scarlet takes it through tables_from)
+xlate_chain	pre-fmz

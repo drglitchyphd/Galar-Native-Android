@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-enum { OVL_DISC = 0, OVL_RING = 1, OVL_RRECT = 2 };
+enum { OVL_DISC = 0, OVL_RING = 1, OVL_RRECT = 2, OVL_HALF = 3 };   // (OVL_HALF: a disc's top half; Vulkan overlay only)
 enum { OVL_G_A, OVL_G_B, OVL_G_X, OVL_G_Y, OVL_G_L, OVL_G_R, OVL_G_ZL, OVL_G_ZR, OVL_G_PLUS, OVL_G_MINUS, OVL_G_L3, OVL_G_R3, OVL_G_NONE = -1 };   // (the atlas cells: overlay/ovl_font.h)
 typedef struct {
     float x, y, w, h;          // rectangle, pixels
@@ -13,6 +13,7 @@ typedef struct {
     int shape; float ring;     // OVL_*; ring width as a fraction of the radius (OVL_RING)
     float radius;              // OVL_RRECT corner radius, fraction of the height
     int glyph; float gscale, galpha;   // OVL_G_* label, its size as a fraction of the control, its opacity
+    float gdark;               // the label's darkness: 0 white .. 1 black (Vulkan overlay only; Metal draws it white)
 } dm_ovl_item;
 // Fills up to max items for a surface of width x height pixels; returns how many (0: nothing drawn)
 int front_overlay(dm_ovl_item *it, int max, int width, int height);
@@ -24,7 +25,7 @@ enum { DM_ASPECT_FIT, DM_ASPECT_20_9, DM_ASPECT_FILL };
 __attribute__((weak)) int dm_aspect_mode = -1;   // -1: not read yet (one definition kept by the linker)
 static inline int dm_aspect(void) {
     int m = __atomic_load_n(&dm_aspect_mode, __ATOMIC_RELAXED);
-    if (m < 0) { const char *e = getenv("DM_ASPECT"); m = !e ? DM_ASPECT_FIT : !strcmp(e, "20:9") ? DM_ASPECT_20_9 : !strcmp(e, "fill") ? DM_ASPECT_FILL : DM_ASPECT_FIT;
+    if (m < 0) { const char *e = getenv("DM_ASPECT"); m = !e ? DM_ASPECT_FIT : !strcmp(e, "20:9") ? DM_ASPECT_20_9 : !strcmp(e, "fill") || !strcmp(e, "wide") ? DM_ASPECT_FILL : DM_ASPECT_FIT;
                  __atomic_store_n(&dm_aspect_mode, m, __ATOMIC_RELAXED); }
     return m;
 }

@@ -11,6 +11,9 @@
 // All waits hang on one global lock G, with one condition variable per thread; correctness first, performance to be measured later.
 #include "dm.h"
 #include <errno.h>
+#ifdef __linux__
+#include <sys/prctl.h>   // (guest threads named by their entry point: thread_main)
+#endif
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -237,6 +240,17 @@ static void qos_apply(thr_t *t) {   // on the thread itself
 }
 // A host helper thread (audio notify / silent sink, vsync, movie decode) created from a guest thread inherits that thread's class; under DM_QOS_MAP it sets its own instead
 void dm_host_helper_qos(qos_class_t q) { if (g_qos_map) pthread_set_qos_class_self_np(q, 0); }
+// The host stack a guest thread's gates run on (entry.S dm_gate): the part of the thread's own 1 MB pthread stack below thread_main, unused once dm_thread_enter
+//   has moved the thread onto the game's stack. 0 on threads that never went through thread_main (the process's main thread runs the game on its own big stack)
+static __thread uintptr_t g_gate_host_sp;
+#define GATE_HOST_SPAN (768u << 10)   // of the 1 MB pthread stack: what thread_main and the frames above it leave free, with room to spare
+uintptr_t gate_host_stack(uintptr_t sp) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_GATE_HOST_STACK"); on = !(e && !strcmp(e, "0")); }
+    uintptr_t h = g_gate_host_sp;
+    if (!on || !h) return 0;
+    if (sp <= h && sp > h - GATE_HOST_SPAN) return 0;   // already on it: a gate inside guest code that host code called
+    return h;
+}
 static void *thread_main(void *p) {
     thr_t *t = p;
     pthread_setspecific(g_keythr, t);
@@ -246,10 +260,13 @@ static void *thread_main(void *p) {
     t->mport = pthread_mach_thread_np(pthread_self()); t->host_work = &dm_host_work;
 #ifdef __linux__
     t->ltid = (int)gettid();
+    { module_t *m = module_of((void *)(uintptr_t)t->entry); char nm[16]; if (m) snprintf(nm, sizeof nm, "%c+%llx", m->name[0], (unsigned long long)(t->entry - (uint64_t)(uintptr_t)m->base)); else snprintf(nm, sizeof nm, "g%#llx", (unsigned long long)t->entry);
+      prctl(PR_SET_NAME, nm, 0, 0, 0); }   // (named by its entry point: the load report names the game's busy threads, android_main.c)
 #endif
     crash_thread_init();
     guest_thread_init();
     pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
+    g_gate_host_sp = ((uintptr_t)__builtin_frame_address(0) - 4096) & ~(uintptr_t)15;   // (below this frame and its callees' spill room)
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
 }

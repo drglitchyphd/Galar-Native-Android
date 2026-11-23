@@ -54,7 +54,7 @@ $(OUT)/objl/main.o: $(HOST)/main.c $(GAME_H)
 	@mkdir -p $(dir $@); $(CC) $(CFLAGS) -Dmain=dm_main -c $< -o $@
 $(OUT)/objl/android_main.o: app/jni/android_main.c $(GAME_H)
 	@mkdir -p $(dir $@); $(CC) $(CFLAGS) -I$(GLUE) -c $< -o $@
-$(OUT)/objl/touch_ui.o: app/jni/touch_ui.c $(GFXD)/nvn/nvn_ovl.h
+$(OUT)/objl/touch_ui.o: app/jni/touch_ui.c $(GFXD)/nvn/nvn_ovl.h $(GAME_H)
 	@mkdir -p $(dir $@); $(CC) $(CFLAGS) -I$(GFXD)/nvn -c $< -o $@
 $(OUT)/objl/touch_menu.o: app/jni/touch_menu.c $(GAME_H)
 	@mkdir -p $(dir $@); $(CC) $(CFLAGS) -c $< -o $@
@@ -76,3 +76,9 @@ $(OUT)/lib/libnxnative.so: $(LIBOBJ) $(OUT)/libvpx.a $(OUT)/libdxbcspv.a
 	@mkdir -p $(dir $@); $(CXX) -shared -static-libstdc++ -o $@ $(LIBOBJ) $(OUT)/libvpx.a $(OUT)/libdxbcspv.a -lm -ldl -llog -lz -laaudio -lmediandk -lvulkan -landroid -Wl,-Bsymbolic -Wl,--no-undefined -Wl,-z,max-page-size=16384 -u ANativeActivity_onCreate
 .PHONY: lib
 lib: $(OUT)/lib/libnxnative.so
+# The driver check (DriverCheckService.java): the probe app's GPU self-tests (probe/jni/selftest.c) as a library of their own, run in a process of their own before Play,
+#   on the driver the game uses (probe_vk.c opens it as nvn_vk.c does: no libvulkan link)
+DPROBE_SRC = probe/jni/dprobe_jni.c probe/jni/selftest.c probe/jni/probe_vk.c $(GFXD)/tex/bc_gpu.c $(GFXD)/tex/bc_decode.c $(GFXD)/tex/etc_encode.c $(GFXD)/nvn/nvn_spv.c
+$(OUT)/lib/libdmprobe.so: $(DPROBE_SRC) $(wildcard probe/jni/*.h) $(GFXD)/nvn/overlay/zcopy_spv.h $(GFXD)/nvn/nvn_spv.h $(GFXD)/nvn/vk_quirks.h
+	@mkdir -p $(dir $@); $(CC) -O2 -g -fPIC -shared -Wall -Wno-unused-function -I$(GFXD)/tex -I$(GFXD)/nvn -Iprobe/jni -o $@ $(DPROBE_SRC) -ldl -llog -lm -Wl,--no-undefined -Wl,-z,max-page-size=16384
+lib: $(OUT)/lib/libdmprobe.so

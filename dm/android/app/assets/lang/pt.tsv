@@ -48,7 +48,10 @@ Delete this mod from the phone?	Excluir este mod do celular?
 Deleted: applies the next time you start the game.	Excluído: vale a partir da próxima vez que você iniciar o jogo.
 Display	Tela
 Done	Concluído
-Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + to reset).	Arraste um controle para movê-lo, faça pinça para redimensionar, toque duas vezes para ocultar. Segure − por 2 s para salvar (segure + para redefinir).
+Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset).	Arraste um controle para movê-lo. Para redimensionar, toque nele e depois faça pinça com dois dedos em qualquer lugar. Toque duas vezes para ocultar. Segure − por 2 s para salvar (segure + para redefinir).
+Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	Arraste um controle para movê-lo, faça pinça para redimensionar, toque duas vezes para ocultar. Segure − por 2 s para salvar (segure + e − juntos para redefinir).
+Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	Arraste um controle para movê-lo. Para redimensionar, toque nele e depois faça pinça com dois dedos em qualquer lugar. Toque duas vezes para ocultar. Segure − por 2 s para salvar (segure + e − juntos para redefinir).
+Button size	Tamanho dos botões
 Edit notes	Editar notas
 Enter both the server and the room code.	Insira o servidor e o código da sala.
 Export save data	Exportar dados salvos
@@ -237,11 +240,11 @@ Set up anyway?	Configurar mesmo assim?
 The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	As partes danificadas dos seus arquivos ficam como estão. O jogo pode fechar ou mostrar falhas onde as usar. Copiar seus arquivos de novo por inteiro é a solução real.
 the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	a cópia de %s parou antes do fim (%s de %s MB): escolha-o de novo, de preferência do armazenamento do próprio celular
 %s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s está incompleto: tem %s de seus %s MB. Foi cortado ao ser copiado ou baixado: copie o arquivo inteiro de novo.
-Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)	Até 60 fps: mais fluido onde o celular consegue, a velocidade do jogo continua certa (mod Dynamic FPS de Fl4sh)
+Up to 60 fps: smoother where the phone can, the game keeps its real speed	Até 60 fps: mais fluido onde o celular consegue, o jogo mantém sua velocidade real
 Shadows	Sombras
 Standard	Padrão
 Standard: 1024 × 1024, as the game is made	Padrão: 1024 × 1024, como o jogo original
-Sharp: 2048 × 2048 shadow maps, more GPU work (Fl4sh's 2K Shadows mod)	Nítidas: mapas de sombra 2048 × 2048, mais trabalho para a GPU (mod 2K Shadows de Fl4sh)
+Sharp: 2048 × 2048 shadow maps, more GPU work	Nítidas: mapas de sombra 2048 × 2048, mais trabalho para a GPU
 60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)	60 fps: mais fluido; cai para 720p quando preciso para manter 60 (com Gráficos em Auto ou Adaptável)
 Android stopped the setup to free memory: going on from where it was (%s of 3)...	O Android parou a configuração para liberar memória: continuando de onde estava (%s de 3)...
 Step %s of %s: %s	Etapa %s de %s: %s
@@ -264,6 +267,15 @@ Auto: on with ARM's driver (v0.52)	Auto: ligado com o driver da ARM (v0.52)
 Off: the shaders as before v0.52	Desligado: os shaders como antes da v0.52
 Merge render passes	Unir passagens de renderização
 Off: every render target change starts a new pass	Desligado: cada mudança de alvo de renderização inicia uma nova passagem
+Lower specs	Requisitos menores
+Off: the world as the game draws it	Não: o mundo como o jogo o desenha
+On: shorter draw distance for Pokémon, people and trees, lighter shadows	Sim: menor distância de desenho para Pokémon, pessoas e árvores, sombras mais leves
+Lowest: shorter draw distance and no shadows	Mínimo: menor distância de desenho e sem sombras
+No reflections	Sem reflexos
+On: smooth ground lighting, no purple shadows	Sim: iluminação suave do chão, sem sombras roxas
+Off: the ground's full lighting detail (purple shadows in places)	Não: todo o detalhe de iluminação do chão (sombras roxas em alguns lugares)
+Preparing the ground's lighting (No reflections)...	Preparando a iluminação do chão (Sem reflexos)...
+Could not prepare No reflections (%s); the game plays as it draws itself.	Não foi possível preparar Sem reflexos (%s); o jogo aparece como ele mesmo desenha.
 Close	Fechar
 Choose a driver	Escolher um driver
 Start anyway	Iniciar mesmo assim
@@ -273,6 +285,8 @@ No replacement driver supports this GPU yet. Please report it with the log in Do
 Faster rendering (experimental)	Renderização mais rápida (experimental)
 On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub	Ligado: o trabalho gráfico roda na própria thread, ao lado da do jogo. Ainda não foi testado em todos os celulares: se o jogo der problema, desligue e avise no GitHub
 Freed %s GB left over from an earlier setup.	Foram liberados %s GB que sobraram de uma configuração anterior.
+Or use the game from the %s app already on this phone (no dump or keys needed):	Ou use o jogo do app %s que já está neste telefone (sem dump nem chaves):
+Set up from the installed app	Preparar a partir do app instalado
 Min / max as on the Switch	Mín / máx como no Switch
 Auto: on with ARM's driver (v0.57)	Auto: ligado com o driver da ARM (v0.57)
 Off: the shaders as before v0.57	Desligado: os shaders como antes da v0.57
@@ -298,14 +312,12 @@ L3 / R3 buttons	Botões L3 / R3
 Off: no L3 / R3 on screen (a controller's stick buttons still work)	Desligado: sem L3 / R3 na tela (os botões dos analógicos de um controle continuam funcionando)
 On: L3 and R3 above the sticks (move them with Move the touch controls)	Ligado: L3 e R3 acima dos analógicos (mova-os com Mover os controles de toque)
 Frame generation (experimental)	Geração de quadros (experimental)
-On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Needs a fast GPU; your input shows about 17 ms later	Ativada: uma imagem é criada entre cada dois quadros do jogo, então 30 fps se movem como 60. Precisa de uma GPU rápida; seus comandos aparecem cerca de 17 ms depois
 Lossless Scaling: the in-between picture made by your own copy of Lossless Scaling's frame generation (sharper motion, needs a faster GPU)	Lossless Scaling: a imagem intermediária é criada pela sua própria cópia da geração de quadros do Lossless Scaling (movimento mais nítido, precisa de uma GPU mais rápida)
 Own Lossless Scaling? Import its Lossless.dll (in the program's folder) to use its frame generation here.	Tem o Lossless Scaling? Importe o Lossless.dll dele (na pasta do programa) para usar a geração de quadros dele aqui.
 Import Lossless.dll	Importar Lossless.dll
 Lossless Scaling imported. Choose it under Frame generation.	Lossless Scaling importado. Escolha-o em Geração de quadros.
 Could not import Lossless Scaling: %s	Não foi possível importar o Lossless Scaling: %s
 Lossless Scaling pictures	Imagens do Lossless Scaling
-Auto: 4x on a 120 Hz screen, 3x on 90 Hz, else 2x (at 30 fps)	Auto: 4x numa tela de 120 Hz, 3x em 90 Hz, senão 2x (a 30 fps)
 2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: uma imagem entre cada dois quadros do jogo (30 fps se movem como 60)
 3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: duas imagens entre cada dois quadros (como 90 fps; uniforme só numa tela de 90 Hz)
 4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: três imagens entre cada dois quadros (como 120 fps; precisa de uma tela de 120 Hz e uma GPU rápida)
@@ -332,5 +344,180 @@ Save folder	Pasta do save
 App folder	Pasta do app
 App folder: Android/data, as before	Pasta do app: Android/data, como antes
 Documents	Documentos
-Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/Galar Native/%s/save, para ferramentas de sincronização como o Syncthing. Seu save é copiado para lá no próximo início; o que já estiver lá é mantido como backup. Requer acesso a todos os arquivos
+Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/%s/%s/save, para ferramentas de sincronização como o Syncthing. Seu save é copiado para lá no próximo início; o que já estiver lá é mantido como backup. Requer acesso a todos os arquivos
 The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	A última configuração traduziu só parte dos shaders do jogo, por isso partes do jogo não apareciam. Toque em Configurar mais uma vez: ela termina o resto (os já feitos são mantidos).
+FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0: o escalonador da AMD, ampliação que respeita as bordas e depois nitidez
+Faster rendering	Renderização mais rápida
+Auto: on for Adreno GPUs, off for others	Auto: ligado em GPUs Adreno, desligado nas outras
+Off: the graphics work runs on the game's own thread	Desligado: o trabalho gráfico roda na própria thread do jogo
+Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself.	Cenas iluminadas: duas correções para a tela branca com o driver Mali da própria ARM. Auto deixa o jogo escolher uma e verificar a imagem sozinho.
+Bright scenes in a wider format	Cenas iluminadas em um formato mais amplo
+On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	Ligado: a cena iluminada é desenhada em um formato com mais margem (RGBA16F em vez de R11G11B10F), um teste para imagens brancas ou piscando; usa um pouco mais de memória
+Bright scenes without compression	Cenas iluminadas sem compressão
+On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth	Ligado: a cena iluminada mantém seu formato, mas é armazenada sem a compressão de framebuffer da GPU (AFBC), um teste para imagens brancas; usa mais largura de banda de memória
+Auto: on with ARM's own Mali driver for Sword / Shield; the game checks the picture while you play and moves to the second fix if it stays white	Auto: ligado com o driver Mali da própria ARM em Sword / Shield; o jogo verifica a imagem enquanto você joga e passa para a segunda correção se ela continuar branca
+Off: the lit scene in its own packed format (R11G11B10F)	Desligado: a cena iluminada no próprio formato compactado (R11G11B10F)
+Auto: used when the game finds that the first fix did not take on ARM's own Mali driver	Auto: usado quando o jogo detecta que a primeira correção não funcionou com o driver Mali da própria ARM
+Off: the framebuffer compression the driver chooses	Desligado: a compressão de framebuffer que o driver escolher
+Mali: the white-screen fix did not take; trying the second fix at the next start	Mali: a correção da tela branca não funcionou; a segunda correção será testada no próximo início
+Mali: the white-screen fix did not take; the next start tries the other fix again	Mali: a correção da tela branca não funcionou; o próximo início testará a outra correção de novo
+Mali: a test switch in the settings overrides the white-screen fix	Mali: um interruptor de teste nas configurações substitui a correção da tela branca
+Mali: a test switch in the settings (%s) overrides the white-screen fix	Mali: um interruptor de teste nas configurações (%s) substitui a correção da tela branca
+Mali: neither white-screen fix took; the next start offers the PanVK driver	Mali: nenhuma correção da tela branca funcionou; o próximo início oferecerá o driver PanVK
+White screen on this phone's own driver	Tela branca com o driver do próprio celular
+On this phone's own Mali driver (%s), %s drew its lit scenes white, and both of the app's fixes were tried at earlier starts without success.	Com o driver Mali do próprio celular (%s), %s desenhou as cenas iluminadas em branco, e as duas correções do app foram testadas em inícios anteriores sem sucesso.
+The PanVK driver draws the game on many Mali phones: download its .zip and choose it as the graphics driver.	O driver PanVK desenha o jogo em muitos celulares Mali: baixe o .zip dele e escolha-o como driver gráfico.
+AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1: ampliação que respeita as bordas e depois nitidez (Nitidez ajusta quanto)
+Colour	Cor
+Natural	Natural
+Natural: the colours as the game draws them	Natural: as cores como o jogo as desenha
+Vibrant	Vívido
+Vibrant: muted colours lifted, a touch more contrast (less grey haze)	Vívido: cores apagadas realçadas, um pouco mais de contraste (menos névoa cinza)
+Cinematic	Cinematográfico
+Cinematic: stronger contrast, a slightly warm tone	Cinematográfico: mais contraste e um tom levemente quente
+Sticks	Analógicos
+Fixed	Fixos
+Fixed: the sticks stay where they are drawn, as on Joy-Cons	Fixos: os analógicos ficam onde são desenhados, como nos Joy-Con
+Floating	Flutuantes
+Floating: touch anywhere on the left half to move (the stick comes to your thumb); drag on the right half to turn the camera	Flutuantes: toque em qualquer lugar da metade esquerda para andar (o analógico vai até o seu polegar); arraste na metade direita para girar a câmera
+Off: this GPU needs %s ms for each picture, more than the game can spare. Switch it off and on to try again.	Desligada: esta GPU precisa de %s ms para cada imagem, mais do que o jogo pode ceder. Desligue e ligue para tentar de novo.
+Off until the next start (see the log for why).	Desligada até o próximo início (o motivo está no log).
+Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Desligada: mesmo no modo mais leve ela tirava quadros do próprio jogo aqui (até %s fps). Desligue e ligue para tentar de novo.
+Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	Desligada a 30 fps: a geração de quadros precisa do jogo a 60 fps estáveis (Desempenho → Taxa de quadros: 60).
+Paused: the game runs at %s fps here, under its own frame rate. Frame generation comes back on by itself once the game holds it again.	Pausada: o jogo roda a %s fps aqui, abaixo da própria taxa de quadros. A geração de quadros volta sozinha quando o jogo a mantiver de novo.
+On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Only while the game holds its own frame rate; your input shows a little later	Ligado: uma imagem é criada entre cada dois quadros do jogo, então 30 fps se movem como 60. Só enquanto o jogo mantém a própria taxa; seu comando aparece um pouco depois
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto: quantas a taxa da tela permitir (um jogo a 30 fps: 4x a 120 Hz, 3x a 90 Hz, 2x a 60 Hz)
+Widescreen	Widescreen
+Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	Widescreen: a câmera do jogo tão larga quanto a sua tela, nada esticado (Sword / Shield 1.3.2; a interface fica esticada)
+Output	Saída
+Float target	Destino flutuante
+Output: what each shader writes is limited. If the white goes away, tell us	Saída: o que cada shader escreve é limitado. Se o branco sumir, avise-nos
+Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us	Destino flutuante: a cena iluminada é guardada numa imagem de ponto flutuante de 16 bits em vez da compactada. Se o branco sumir, avise-nos
+Multiplies	Multiplicações
+Additions	Somas
+Multiply-adds	Multiplicar-somar
+Multiplies: every multiply result is limited. If the white goes away, tell us	Multiplicações: cada resultado de multiplicação é limitado. Se o branco sumir, avise-nos
+Additions: every add / subtract result is limited. If the white goes away, tell us	Somas: cada resultado de soma / subtração é limitado. Se o branco sumir, avise-nos
+Multiply-adds: every fused multiply-add result is limited. If the white goes away, tell us	Multiplicar-somar: cada resultado de multiplicação-soma é limitado. Se o branco sumir, avise-nos
+NaN fix	Correção NaN
+NaN fix + textures	Correção NaN + texturas
+NaN fix: broken values the shaders write become 0 instead of turning the picture white. Tell us how it looks	Correção NaN: os valores quebrados que os shaders escrevem viram 0 em vez de deixar a imagem branca. Conte-nos como ficou
+NaN fix + textures: the same, and broken values read from textures become 0 too. Tell us how it looks	Correção NaN + texturas: o mesmo, e os valores quebrados lidos de texturas também viram 0. Conte-nos como ficou
+This version translates the game's shaders differently: updating them now. Your files aren't needed and your save is kept. Keep this screen open; it takes about as long as the shader step of a setup.	Esta versão traduz os shaders do jogo de outro jeito: atualizando agora. Seus arquivos não são necessários e seu save é mantido. Deixe esta tela aberta; leva o mesmo tempo que a etapa de shaders da instalação.
+Setting up	Configuração
+Keep the phone cooler: half the workers (setup takes longer)	Manter o celular mais fresco: metade dos processos (a configuração demora mais)
+Updating the shaders for this app version: your files aren't needed and your save is kept.	Atualizando os shaders para esta versão do app: seus arquivos não são necessários e seu save é mantido.
+Updating the shaders	Atualizando os shaders
+3D render scale	Escala de renderização 3D
+Auto: what the Graphics setting gives, lowered by itself when the phone is hot	Auto: o que a configuração de Gráficos dá, reduzido sozinho quando o celular esquenta
+50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50 %: o 3D na metade do tamanho, o mais fresco e rápido (o texto e os menus continuam nítidos)
+Quit the game	Sair do jogo
+Closes the game completely	Fecha o jogo completamente
+Quit the game? Progress you have not saved in the game is lost, as on the console.	Sair do jogo? O progresso que você não salvou no jogo é perdido, como no console.
+Quit	Sair
+Power	Energia
+Balanced	Equilibrado
+Balanced: the best picture this phone holds at a steady frame rate	Equilibrado: a melhor imagem que este telefone mantém com uma taxa de quadros estável
+Battery saver	Economia de bateria
+Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up	Economia de bateria: um telefone mais frio e mais bateria: 30 fps no Automático, uma imagem mais leve, e alivia mais cedo quando o telefone esquenta
+Record the frame's passes	Gravar os passes do quadro
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Para cenas lentas: feche este menu em até 3 segundos e fique onde o jogo está lento. Os passes de renderização de três quadros, com o tempo de GPU quando o telefone informa, são salvos em Download (um arquivo terminado em framegraph.txt). Anexe à sua issue.
+Recording in 3 seconds: close the menu.	Gravando em 3 segundos: feche o menu.
+Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	Esquerda: Automático, o que a configuração de Gráficos dá, reduzido sozinho quando o telefone esquenta. Mais baixo: mais frio e rápido, o 3D mais suave; texto e menus continuam nítidos.
+Lossless Scaling pictures	Imagens do Lossless Scaling
+2x: one picture between each two of the game's frames (30 fps moves like 60)	2x: uma imagem entre cada dois quadros do jogo (30 fps se movem como 60)
+3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x: duas imagens entre cada dois quadros (como 90 fps; uniforme só numa tela de 90 Hz)
+4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x: três imagens entre cada dois quadros (como 120 fps; precisa de uma tela de 120 Hz e uma GPU rápida)
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto: quantas a taxa da tela permitir (um jogo a 30 fps: 4x a 120 Hz, 3x a 90 Hz, 2x a 60 Hz)
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	Pausada: aqui o jogo roda a %s fps, abaixo da taxa de quadros configurada. Volta sozinha quando o jogo a mantém de novo.
+Mode	Modo
+Auto: as the Graphics setting decides	Auto: o que o ajuste de Gráficos decidir
+Quality	Qualidade
+Quality: docked: 1080p and the game's full effects	Qualidade: no dock: 1080p e todos os efeitos do jogo
+Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	Desempenho: o 3D em 720p: mais fresco e estável (o HUD e o texto continuam nítidos)
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Desempenho: portátil: 720p e os ajustes mais leves do jogo: mais fresco e estável
+Resolution	Resolução
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p: o mais leve, para celulares que não mantêm 30 (a partir do próximo início)
+1080p, as the game is made	1080p, como o jogo foi feito
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p: mais nítido, mas mais pesado para a GPU (menos fps, celular mais quente; a partir do próximo início)
+Dynamic	Dinâmico
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinâmico: 60 onde o celular consegue, 30 onde não, com a imagem completa; a velocidade do jogo fica certa
+100 % (as on the Switch)	100 % (como no Switch)
+How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick.	A velocidade com que o analógico direito e a câmera por toque giram. Menos: mais lenta e precisa. Mais: velocidade máxima com menos analógico.
+Auto: on for a Mali-G615 on ARM's driver older than r49, which needed it to start	Auto: ligado num Mali-G615 com o driver da ARM anterior ao r49, que precisava disso para iniciar
+Off: the GPU reads the game's uniform data directly (a test for invisible characters and Pokémon; if the game then closes at start, set Auto again)	Desligado: a GPU lê diretamente os dados uniformes do jogo (um teste para personagens e Pokémon invisíveis; se o jogo fechar ao iniciar, volte para Auto)
+Animated models: a render target for their capture	Modelos animados: um alvo de renderização para a captura
+Auto: a quick test at each start on ARM's driver decides (the log says which)	Auto: um teste rápido a cada início com o driver da ARM decide (o registro diz qual)
+Off: as before v0.35	Desligado: como antes da v0.35
+On: for a driver that skips the work of a pass with nothing to draw into (invisible characters and Pokémon)	Ligado: para um driver que pula o trabalho de uma passagem sem nada onde desenhar (personagens e Pokémon invisíveis)
+Style move effects	Efeitos dos estilos
+Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before	Desligado: sem a animação em tela cheia ao iniciar um golpe de estilo forte ou ágil (deixava quadros cinza em muitos celulares); os golpes funcionam como antes
+On: the game's own animation (grey boxes on some phones)	Ligado: a animação do próprio jogo (quadros cinza em alguns celulares)
+Touch camera sensitivity	Sensibilidade da câmera de toque
+Touch camera	Câmera de toque
+Drag	Arrastar
+Drag: the camera follows the finger's movement and stops when it stops	Arrastar: a câmera segue o movimento do dedo e para quando ele para
+Stick	Analógico
+Stick: where the finger lands is the centre; hold it away to keep turning, faster the further (hold-to-lock-on is off)	Analógico: onde o dedo encosta é o centro; segure afastado para continuar girando, mais rápido quanto mais longe (travar mira segurando fica desligado)
+Right stick on screen	Analógico direito na tela
+Show	Mostrar
+Hide	Ocultar
+Hide: the camera is turned with a finger only	Ocultar: a câmera é girada só com o dedo
+Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle	Panorâmico: a câmera do jogo tão larga quanto a sua tela, sem esticar nada; a interface fica em 16:9 no centro
+Barriers between passes	Barreiras entre passadas
+Fewer	Menos
+Every pass	Cada passada
+Auto: fewer on Adreno, one before every pass on other GPUs	Auto: menos na Adreno, uma antes de cada passada nas outras GPUs
+Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	Menos: mais rápido, a GPU continua ocupada; em Xclipse, Mali e PowerVR as sombras podem piscar
+Every pass: the safest picture, slower	Cada passada: a imagem mais segura, mais lento
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p: mais nítido, mas mais pesado para a GPU (menos fps, celular mais quente)
+Model tests (Adreno)	Testes de modelos (Adreno)
+For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	Para polígonos esticados ou explodindo. Reinicie o jogo depois de mudar e diga no GitHub se sumiram.
+Copy shared data on the GPU	Copiar dados compartilhados na GPU
+On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	Ligado: os dados que o jogo coloca fora do alinhamento do driver são copiados na GPU, depois do que a GPU escreveu antes, em vez de na CPU (um teste para polígonos explodindo em Adreno antigos)
+Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	Esquerda: Automático, a resolução do próprio jogo. Mais baixo: mais frio e rápido, o 3D mais suave; texto e menus continuam nítidos.
+Auto: 2x, light (the game's frame rate shown doubled)	Auto: 2x, leve (a taxa de quadros do jogo, mostrada em dobro)
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	Pausada: aqui o jogo roda a %s fps, abaixo da taxa de quadros configurada. Volta sozinha quando o jogo a mantém de novo.
+Draw distance	Distância de desenho
+Near	Perto
+Default	Padrão
+Far	Longe
+Very far	Muito longe
+Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)	Perto: árvores e detalhes mais perto, menos pessoas e Pokémon carregados: mais leve (a partir do próximo início)
+Default: as the game draws it	Padrão: como o jogo desenha
+Far: trees, terrain detail and animation half as far again (from the next start)	Longe: árvores, detalhe do terreno e animação 50 % mais longe (a partir do próximo início)
+Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	Muito longe: árvores, detalhe do terreno e animação o dobro mais longe: mais pesado para a GPU (a partir do próximo início)
+Edge-run	Correr na borda
+On: push the stick past its ring to dash	Sim: empurre o analógico além do anel para correr
+Off: the stick only walks and runs	Não: o analógico só anda e corre
+Ride button	Botão de montaria
+Tap or swipe	Tocar ou deslizar
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	Toque em + para chamar um Pokémon de montaria; deslize para a esquerda / direita para trocá-lo
+Tap only	Só tocar
++ works as on the console	+ funciona como no console
+the game's own (100 %)	o do jogo (100 %)
+Normal	Normal
+Normal: as the game is made	Normal: como o jogo foi feito
+Low: softer shadows, lighter on the GPU (from the next start)	Baixas: sombras mais suaves, menos carga na GPU (a partir do próximo início)
+Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	Mínimas: sombras suaves só perto, sem sombras distantes: o mais leve (a partir do próximo início)
+How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	Até onde a grama e os detalhes do campo são desenhados (a partir do próximo início). Menos: mais leve e frio. Mais: mais detalhe ao longe, mais carga na GPU.
+Dynamic	Dinâmico
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dinâmico: 60 onde o celular consegue, 30 onde não, com a imagem completa; a velocidade do jogo fica certa
+Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	A geração de quadros do Lossless Scaling não roda neste celular, então a do próprio app é usada no lugar (o log diz por quê).
+# the in-app updater (AppUpdater.java, About -> Updates)
+Updates	Atualizações
+An unofficial build cannot update itself to an official release. Uninstall it and install the official app to get updates.	Uma versão não oficial não pode se atualizar para uma versão oficial. Desinstale-a e instale o app oficial para receber atualizações.
+Update now	Atualizar agora
+Check for updates	Procurar atualizações
+Look for updates when the app starts: on	Procurar atualizações ao abrir o app: sim
+Look for updates when the app starts: off	Procurar atualizações ao abrir o app: não
+Checking…	Verificando…
+Downloading the update: %d%%	Baixando a atualização: %d%%
+The update is ready: confirm the installation on the screen that opens.	A atualização está pronta: confirme a instalação na tela que se abre.
+This is the latest version.	Esta é a versão mais recente.
+Version %s is available. The game closes when the update installs, so save first.	A versão %s está disponível. O jogo fecha quando a atualização é instalada, então salve antes.
+%s %s is available. Open the menu, then About, to install it.	%s %s está disponível. Abra o menu e depois Sobre para instalar.
+Could not check for updates. Check the internet connection.	Não foi possível procurar atualizações. Verifique a conexão com a internet.
+The update could not be downloaded: %s	Não foi possível baixar a atualização: %s
+The downloaded file is not an official %s release, so it was not installed.	O arquivo baixado não é uma versão oficial de %s, então não foi instalado.
+The update could not be installed: %s	Não foi possível instalar a atualização: %s

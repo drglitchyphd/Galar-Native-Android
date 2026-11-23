@@ -1,7 +1,8 @@
 // Engine render scale kept in game memory: some engines draw their 3D scene into part of a full-size target (viewport and scissor scaled by a factor) and stretch it
 // to the screen, with a dynamic resolution of their own that lowers the factor when the GPU runs late. The host lowers that factor for a lighter GPU load than the game's
 // own settings give (a hot phone, a slow GPU): a factor on the game's own request (dm_res_factor_set: android_main.c graphics_auto, the frame-rate and heat guard), under
-// a cap (DM_RES_CAP 0.5 - 1, Graphics on Lowest; dm_res_cap_set). The game's own requests are kept and only lowered, never raised: its scenes' lower factor and the
+// a cap (DM_RES_CAP 0.35 - 1, Graphics on Lowest; dm_res_cap_set). 0.35 and 0.40 are for budget GPUs (Adreno 610 / 613, Mali-G52): the floor RES_MIN
+// holds for what is drawn too, so the guard's factor on a scene the game already asks 0.8 for does not go under it. The game's own requests are kept and only lowered, never raised: its scenes' lower factor and the
 // background's near-zero one stay as it asks. Only where the game itself draws below full size: a scene that pins full size keeps it (the menus showing Pokémon models,
 // zoomed in and misplaced when lowered, #97 #139).
 // Measured on a Galaxy S25+ (Adreno 830, Shield, walking in town where the game itself asks 0.8): at 0.6 the GPU clock fell from 336 to 273 MHz on average, but frames
@@ -34,6 +35,7 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t req, 
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
 
+#define RES_MIN 0.35f   // the lowest cap, factor and drawn scale (1080p: 378 lines; the upscaler brings it back to the screen's size)
 static _Atomic int g_row = -2;            // the matching row, -1 none, -2 not looked up yet
 static _Atomic uint32_t g_cap_bits;       // the cap as float bits (0 = none set yet: DM_RES_CAP or 1)
 static _Atomic uint32_t g_factor_bits = 0x3f800000;   // the guard's factor on the game's own request (float bits; 1.0): a step always lowers what is drawn, also where the game asks 0.8
@@ -42,7 +44,7 @@ static uint8_t *g_base;
 
 static float cap_now(void) {
     uint32_t b = g_cap_bits; float c;
-    if (!b) { const char *e = getenv("DM_RES_CAP"); c = e ? (float)atof(e) : 1.0f; if (!(c >= 0.5f && c <= 1.0f)) { if (e) LOG("[RED] DM_RES_CAP=%s: must be 0.5 - 1; no cap", e); c = 1.0f; }
+    if (!b) { const char *e = getenv("DM_RES_CAP"); c = e ? (float)atof(e) : 1.0f; if (!(c >= RES_MIN && c <= 1.0f)) { if (e) LOG("[RED] DM_RES_CAP=%s: must be 0.35 - 1; no cap", e); c = 1.0f; }
               memcpy(&b, &c, sizeof b); g_cap_bits = b; }
     memcpy(&c, &b, sizeof c); return c;
 }
@@ -61,14 +63,14 @@ static int row(void) {
 // game's graphics object exists applies once it does
 int dm_res_scale_ready(void) { return row() >= 0; }
 void dm_res_cap_set(float c) {
-    if (!(c >= 0.5f && c <= 1.0f)) return;
+    if (!(c >= RES_MIN && c <= 1.0f)) return;
     float old = cap_now(); uint32_t b; memcpy(&b, &c, sizeof b); g_cap_bits = b;
     if (old != c) LOG("render scale cap %.2f → %.2f", old, c);
 }
 float dm_res_cap_get(void) { return cap_now(); }
-// The frame-rate and heat guard (android_main.c graphics_auto): draw at this factor of what the game asks (0.5 - 1), still under the cap
+// The frame-rate and heat guard (android_main.c graphics_auto): draw at this factor of what the game asks (0.35 - 1), still under the cap
 void dm_res_factor_set(float f) {
-    if (!(f >= 0.5f && f <= 1.0f)) return;
+    if (!(f >= RES_MIN && f <= 1.0f)) return;
     uint32_t b; memcpy(&b, &f, sizeof b); uint32_t old = atomic_exchange(&g_factor_bits, b); float o; memcpy(&o, &old, sizeof o);
     if (o != f) LOG("render scale factor %.2f → %.2f", o, f);
 }
@@ -86,6 +88,11 @@ static const char *dyn_name(int m) { return m == 1 ? "dynamic" : m == 2 ? "fixed
 // 1 while the factor and the cap reach what is drawn (the game's mode lets its scale go below full): the guard (android_main.c) judges a step only then
 static _Atomic int g_applies = 1;
 int dm_res_scale_applies(void) { return g_applies; }
+// The scale the 3D is drawn at (what the game asks, times the guard's factor, under the cap; float bits, 0 = not known yet): frame generation's work size
+//   (nvn_vk.c fg_work_scale) follows it, so it makes its pictures at the size the 3D really has
+static _Atomic uint32_t g_scene_bits;
+float dm_arc_scene_scale(void) __attribute__((weak));   // (loader.c: Legends: Arceus's own render scale word; 0 in the other games)
+float dm_scene_scale(void) { float arc = dm_arc_scene_scale ? dm_arc_scene_scale() : 0.0f; if (arc > 0) return arc; uint32_t b = g_scene_bits; float f; memcpy(&f, &b, sizeof f); return b ? f : 1.0f; }
 
 void dm_res_scale_tick(void) {
     static float game = -1, wrote = -1; static uint64_t n; static int nlog, was_mode = -2, nmode;
@@ -104,12 +111,16 @@ void dm_res_scale_tick(void) {
     if (mode != was_mode) {
         if (nmode < 200 && (was_mode != -2 || mode != -1)) { nmode++; LOG("render scale: the game's mode %s → %s%s", dyn_name(was_mode), dyn_name(mode),
                                                                          lower ? "" : ": drawn at the game's own scale, the factor and the cap wait"); }
+        if (mode == 2 && was_mode == 1) {   // dynamic → fixed 0.8: a battle begins (Sword / Shield). DM_FG_ON_BATTLE=1: the frame recorder takes three short recordings of its transition
+            static int on = -1; if (on < 0) { const char *e = getenv("DM_FG_ON_BATTLE"); on = e && atoi(e) > 0; }
+            extern void nvn_fgr_arm_series(void) __attribute__((weak)); if (on && nvn_fgr_arm_series) nvn_fgr_arm_series(); }
         was_mode = mode;
     }
     float want = game;
-    if (lower) { if (game >= 0.05f) want = game * factor_now(); if (want > cap) want = cap; }   // (the background's near-zero request stays as it is)
+    if (lower) { if (game >= 0.05f) { want = game * factor_now(); if (want < RES_MIN && game >= RES_MIN) want = RES_MIN; } if (want > cap) want = cap; }   // (the background's near-zero request stays as it is)
     if (cur != want) { uint32_t *p = (uint32_t *)(uintptr_t)(obj + k_scales[k].req), w; memcpy(&w, &want, sizeof w); dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, w, __ATOMIC_RELAXED); }
     wrote = want;
+    { uint32_t b; memcpy(&b, &want, sizeof b); g_scene_bits = b; }
     // A line a minute (at 30 fps) while the cap or the game's own scale is below full: what the game measured, what it asked for and what it draws at, for tuning the guard
     if (++n % 1800 == 0 && (cap < 1.0f || game < 1.0f || factor_now() < 1.0f) && nlog < 240) {
         int64_t gpu = 0; float app = 0; int32_t tv = -1, set = -1;

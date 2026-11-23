@@ -8,10 +8,14 @@ void nvn_fmt_vk_depth24(int has_x8d24, int has_d24s8);
 // BC1–BC7 on a device without textureCompressionBC (Mali, PowerVR): nvn_fmt_to_vk then gives the plain format the texels are decoded into on upload
 // (RGBA8 / sRGB, R8, RG8, RGBA16F), and nvn_fmt_vk_decode says which bc_decode.h kind a format decodes as (0 = sampled as it is)
 void nvn_fmt_vk_bc(int has_bc);
+void nvn_fmt_vk_r11_f16(int on);   // R11G11B10F stored as RGBA16F (a diagnostic: DM_VK_PROBE=f16target)
 int nvn_fmt_vk_decode(int nvn_format);
 // with nvn_fmt_vk_etc(1, astc) (and no BC), BC kinds become ETC2 / EAC / ASTC / B10G11R11 instead (etc_encode.h); nvn_fmt_vk_transcode gives the kind when it does
 void nvn_fmt_vk_etc(int on, int astc);
 int nvn_fmt_vk_transcode(int nvn_format);
+// R11G11B10F (NVN 0x3F) drawn and sampled as RGBA16F (a Mali test, nvn_vk.c DM_VK_B10_AS_RGBA16); _swapped: whether format f is so changed
+void nvn_fmt_vk_b10_as_rgba16(int on);
+int nvn_fmt_vk_b10_swapped(int nvn_format);
 int nvn_fmt_to_vk(int nvn_format, uint32_t *vk_format, uint8_t swz[4]);
 // NVN vertex attribute format → Vulkan vertex format (0 = none); *ct gets its component class (0 float / normalized / scaled, 1 uint, 2 sint)
 uint32_t nvn_vfmt_to_vk(int nvn_format, int *ct);

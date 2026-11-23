@@ -63,7 +63,7 @@ cp "$A/out/host-$GAME-vulkan/lib/libnxnative.so" "$LIBS/"
 
 step "3/8 the NSP / XCI unpacker and the shader translator (.NET NativeAOT for Android)"
 bash "$A/extract_aot/build_extract_aot.sh" | tail -1; cp "$A/extract_aot/out/libnx_extract.so" "$LIBS/"
-bash "$A/xlate_aot/build_xlate_aot.sh" | tail -1; cp "$A/xlate_aot/out/libdmsh_xlate.so" "$LIBS/"
+GAME=$GAME bash "$A/xlate_aot/build_xlate_aot.sh" | tail -1; cp "$A/xlate_aot/out/libdmsh_xlate.so" "$LIBS/"
 
 step "4/8 spirv-cross"
 NDK=$NDK API=$API bash "$A/spirv_cross/build_spirv_cross.sh" | tail -1; cp "$A/spirv_cross/out/libspirv_cross.so" "$LIBS/"
@@ -74,7 +74,9 @@ if [ ! -f "$PY/prefix/lib/libpython3.14.so" ]; then
     mkdir -p "$PY"; curl -fsSLo py.tar.gz "https://www.python.org/ftp/python/$PYV/python-$PYV-aarch64-linux-android.tar.gz"; tar -xzf py.tar.gz -C "$PY"; rm py.tar.gz
 fi
 cp "$PY/prefix/lib/libpython3.14.so" "$PY/prefix/lib/libssl_python.so" "$PY/prefix/lib/libcrypto_python.so" "$LIBS/"
-"$CC" -O2 -fPIE -pie $P16 -I"$PY/prefix/include/python3.14" "$A/python/pylaunch.c" -L"$PY/prefix/lib" -lpython3.14 -o "$LIBS/libpython_exe.so"
+# (-rpath $ORIGIN: the launcher finds libpython3.14.so beside itself. Phones find it through LD_LIBRARY_PATH; the Android emulator's arm64 translation ignores that
+#  variable for programs an app starts, and the setup stopped there with "library libpython3.14.so not found".)
+"$CC" -O2 -fPIE -pie $P16 -Wl,-rpath,'$ORIGIN' -I"$PY/prefix/include/python3.14" "$A/python/pylaunch.c" -L"$PY/prefix/lib" -lpython3.14 -o "$LIBS/libpython_exe.so"
 "$CC" -O2 -fPIE -pie $P16 "$A/gate/dmsh_gate.c" -o "$LIBS/libdmsh_gate.so"   # the setup's memory gate for the shader translators
 "$CC" -O2 -fPIE -pie $P16 "$A/oodle/dmoodle.c" -ldl -o "$LIBS/libdmoodle.so"   # the game's own Oodle decoder for Trinity games' shader scan (Violet)
 

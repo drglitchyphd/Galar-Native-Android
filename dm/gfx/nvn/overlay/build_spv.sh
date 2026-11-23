@@ -46,3 +46,29 @@ for out, head, parts in (('ovl_spv.h', 'Generated from ovl.vert / ovl.frag (glsl
     open(o + '/' + out, 'w').write('// ' + head + '\n' + ''.join(arr(p + '_spv', o + '/' + p.replace('_', '.') + '.spv') for p in parts))
     print(out)
 EOF
+# AMD FidelityFX Super Resolution 1 (MIT: dm/third_party/fsr1/license.txt): fsr_easu.frag / fsr_rcas.frag include AMD's headers as published → fsr_spv.h (the vertex
+#   shader is scale.vert's). GLSLC=<the NDK's shader-tools/.../glslc>
+GC=${GLSLC:-glslc}; W=$(mktemp -d)
+for f in fsr_easu fsr_rcas; do $GC -O --target-env=vulkan1.1 -I "$O/../../../third_party/fsr1" "$O/$f.frag" -o "$W/$f.spv"; done
+python3 - "$W" "$O/fsr_spv.h" <<'PY'
+import struct, sys
+s = "// Generated from fsr_easu.frag / fsr_rcas.frag (glslc -O, the NDK shader-tools; build_spv.sh): AMD FidelityFX Super Resolution 1 (EASU + RCAS),\n// Copyright (c) 2021 Advanced Micro Devices, Inc., MIT (dm/third_party/fsr1/license.txt)\n"
+for n in ("fsr_easu", "fsr_rcas"):
+    b = open(sys.argv[1] + "/" + n + ".spv", "rb").read(); w = struct.unpack("<%dI" % (len(b) // 4), b)
+    s += "static const uint32_t %s_frag_spv[] = {%s};\n" % (n, ",".join(hex(x) for x in w))
+open(sys.argv[2], "w").write(s); print("fsr_spv.h")
+PY
+rm -rf "$W"
+# (ls_hud_spv.h: build_comp_spv.sh, with the other compute shaders of frame generation)
+# The depth / stencil texture copy (nvn_vk.c zcopy_draw): zcopy.vert + zcopy_d.frag / zcopy_s.frag → zcopy_spv.h, for Vulkan 1.0
+W=$(mktemp -d)
+for f in zcopy.vert zcopy_d.frag zcopy_s.frag; do $GC -O --target-env=vulkan1.0 "$O/$f" -o "$W/$f.spv"; done
+python3 - "$W" "$O/zcopy_spv.h" <<'PY'
+import struct, sys
+s = "// Generated from zcopy.vert / zcopy_d.frag / zcopy_s.frag (glslc -O --target-env=vulkan1.0; build_spv.sh): the depth / stencil texture copy\n"
+for n, f in (("zcopy_vert", "zcopy.vert"), ("zcopy_d_frag", "zcopy_d.frag"), ("zcopy_s_frag", "zcopy_s.frag")):
+    b = open(sys.argv[1] + "/" + f + ".spv", "rb").read(); w = struct.unpack("<%dI" % (len(b) // 4), b)
+    s += "static const uint32_t %s_spv[] = {%s};\n" % (n, ",".join(hex(x) for x in w))
+open(sys.argv[2], "w").write(s); print("zcopy_spv.h")
+PY
+rm -rf "$W"

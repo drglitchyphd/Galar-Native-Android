@@ -9,6 +9,7 @@
 #include "front.h"
 #include <dirent.h>
 #include <errno.h>
+#include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -78,6 +79,11 @@ static int dm_fs_test_fail(const char *pt) {
 }
 static int in_txn_dir(const char *hp) { for (int i = 0; i < g_nmnt; i++) { size_t n = strlen(g_mnt[i].dir); if (g_mnt[i].commit[0] && !strncmp(hp, g_mnt[i].dir, n) && (hp[n] == '/' || !hp[n])) return 1; } return 0; }
 static int rm_tree(const char *p);
+static int fs_aside(const char *p) {   // 1: moved to <p>.stale-<time> (rm_tree could not delete it)
+    char to[1200]; snprintf(to, sizeof to, "%s.stale-%ld", p, (long)time(NULL));
+    if (rename(p, to)) return 0;
+    errno = 0; LOG("save transaction: %s could not be deleted (not this app's files?): moved aside to %s", p, to); return 1;
+}
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_nmnt; i++)
@@ -97,8 +103,10 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
 #endif
         mkdir(dir, 0755);
         const char *why = NULL;
-        if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
-        else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
+        // a leftover that cannot be deleted (files another app or a computer copied in, owned by someone else: a .new from adb at 06:07 kept a phone's saves read-only
+        //   all day) is renamed aside instead, which needs only the parent folder's permission; the committed directory is never touched
+        if (!access(work, F_OK) && rm_tree(work) && !fs_aside(work)) why = "cannot clear the work directory left over from last time";
+        else if (!access(neu, F_OK) && rm_tree(neu) && !fs_aside(neu)) why = "cannot clear the .new left over from last time";
         else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0)) why = "cloning the work directory failed";
         if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
@@ -486,10 +494,12 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     return RES_OK;
 }
 _Atomic uint64_t dm_fs_read_bytes;   // bytes the game has read from its files (android_main.c: a burst of reads is a load)
+_Atomic uint64_t dm_fs_read_ns;   // time spent inside those reads, all threads together (android_main.c: a load's report)
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
     if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
     size_t got = 0;
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
+    struct timespec rt0; clock_gettime(CLOCK_MONOTONIC, &rt0);
     while (got < sz) {
         ssize_t r = pread((int)h, (uint8_t *)buf + got, sz - got, off + got);
         if (r < 0) { if (errno == EINTR) continue;
@@ -503,6 +513,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         atomic_fetch_add(&dm_fs_read_bytes, (uint64_t)r);
         got += r;
     }
+    { struct timespec rt1; clock_gettime(CLOCK_MONOTONIC, &rt1); atomic_fetch_add(&dm_fs_read_ns, (uint64_t)((rt1.tv_sec - rt0.tv_sec) * 1000000000LL + (rt1.tv_nsec - rt0.tv_nsec))); }
     *out = got;
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)

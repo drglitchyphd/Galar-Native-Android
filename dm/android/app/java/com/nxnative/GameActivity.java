@@ -13,6 +13,7 @@ import android.view.InputDevice;
 public final class GameActivity extends NativeActivity implements InputManager.InputDeviceListener {
     static { System.loadLibrary("nxnative"); }   // loaded through this class's loader, so the native method below resolves (NativeActivity then opens the same library)
     private static native void nativePadConnected(boolean connected);
+    private static native void nativeGyro(float yaw, float pitch);   // (android_main.c -> hle_hid.c dm_gyro_set: gyro aiming)
     private static native int nativeLoading();   // 1 while the game loads (android_main.c: a burst of its file reads)
     private static native long nativeFrames();   // frames the engine has presented (android_main.c), -1 before it draws
     private InputManager im;
@@ -29,7 +30,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         // shaders the game captured last time: hand over to it before there is a window (the engine starts with the window, android_main.c)
         //   (alive only after this: set before it, the setup screen took this finishing activity for a running game and sent the player back to it, round and round;
         //   the game named, so the launcher of two games does not come in between)
-        if (!viaSetup && SetupActivity.pendingWork(GameSettings.dir(this))) { startActivity(new Intent(this, SetupActivity.class).putExtra("game", GameSettings.game(this)[0])); finish(); return; }
+        if (!viaSetup && (SetupActivity.pendingWork(GameSettings.dir(this)) || SetupActivity.shadersStale(this, GameSettings.dir(this)))) { startActivity(new Intent(this, SetupActivity.class).putExtra("game", GameSettings.game(this)[0])); finish(); return; }
         alive = true;
         im = getSystemService(InputManager.class);
         if (im != null) im.registerInputDeviceListener(this, null);
@@ -37,7 +38,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         liveShaders();
         handheld();
         if (GameSettings.get(this, "DM_PERF_OVERLAY").equals("on")) perfOverlay(true);
-        displayMode(); sustained(); loadH.postDelayed(loadPoll, 2000);
+        displayMode(); sustained(); loadH.postDelayed(loadPoll, 2000); loadH.postDelayed(pwPoll, 300);
     }
     // ---------- the display matched to the game, always (no setting; DM_DISPLAY_RATE=phone in env.txt leaves the phone's own rate, for comparing) ----------
     // The lowest display mode of at least 60 Hz that the game's frames divide evenly: 60 Hz for a 30 fps game on a 120 Hz phone, which otherwise keeps its
@@ -50,7 +51,7 @@ public final class GameActivity extends NativeActivity implements InputManager.I
             int want = 0;
             if (!GameSettings.get(this, "DM_DISPLAY_RATE").equals("phone")) {
                 String fg = GameSettings.get(this, "DM_FRAMEGEN"); boolean gen = GameSettings.experimentsUnlocked(this) && !fg.isEmpty() && !fg.equals("off");   // (locked off for now)
-                String f = GameSettings.get(this, "DM_FPS_TARGET"); int fps = f.equals("60") ? 60 : 30;
+                String f = GameSettings.get(this, "DM_FPS_TARGET"); int fps = f.equals("60") && GameSettings.has60(this) ? 60 : 30;
                 android.view.Display.Mode cur = d.getMode(), best = null;
                 for (android.view.Display.Mode m : d.getSupportedModes()) {
                     if (m.getPhysicalWidth() != cur.getPhysicalWidth() || m.getPhysicalHeight() != cur.getPhysicalHeight()) continue;
@@ -80,6 +81,35 @@ public final class GameActivity extends NativeActivity implements InputManager.I
             try { Api33.loading(GameActivity.this, l == 1); } catch (RuntimeException | LinkageError e) { } }
         if (alive) loadH.postDelayed(this, 500);
     } };
+    // ---------- shaders built before the game starts (android_main.c nativePrewarm, nvn_vk.c DM_VK_PREWARM): a card with the count while the game waits ----------
+    private static native long nativePrewarm();
+    private android.app.Dialog pwDlg; private android.widget.TextView pwText; private android.widget.ProgressBar pwBar; private int pwIdle; private boolean pwSeen;
+    private final Runnable pwPoll = new Runnable() { @Override public void run() {
+        long v; try { v = nativePrewarm(); } catch (UnsatisfiedLinkError e) { return; }
+        if (v >= 0) { pwSeen = true; prewarmShow((int) (v >>> 32), (int) v); if (alive) loadH.postDelayed(this, 250); return; }
+        if (pwDlg != null) { try { pwDlg.dismiss(); } catch (RuntimeException e) { } pwDlg = null; }
+        if (alive && !pwSeen && ++pwIdle < 240) loadH.postDelayed(this, 250);   // (until the engine's Vulkan start, at most a minute)
+    } };
+    private void prewarmShow(int done, int total) {
+        if (pwDlg == null) {
+            try {
+                android.widget.LinearLayout c = new android.widget.LinearLayout(this); c.setOrientation(android.widget.LinearLayout.VERTICAL);
+                float dp = getResources().getDisplayMetrics().density; int p = Math.round(16 * dp);
+                android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable(); bg.setColor(0xE6202833); bg.setCornerRadius(16 * dp); c.setBackground(bg);
+                c.setPadding(p, Math.round(12 * dp), p, Math.round(12 * dp));
+                pwText = new android.widget.TextView(this); pwText.setTextColor(0xFFFFFFFF); pwText.setTextSize(15); c.addView(pwText);
+                pwBar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal); pwBar.setMax(1000);
+                android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(Math.round(280 * dp), -2); lp.topMargin = Math.round(8 * dp); c.addView(pwBar, lp);
+                pwDlg = new android.app.Dialog(this); pwDlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE); pwDlg.setContentView(c); pwDlg.setCancelable(false);
+                android.view.Window w = pwDlg.getWindow();
+                if (w != null) { w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0)); w.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                    w.addFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE); }
+                pwDlg.show();
+            } catch (RuntimeException e) { pwDlg = null; return; }
+        }
+        pwText.setText(T.t(this, "Building the shaders before the game starts: %d / %d", done, total));
+        pwBar.setProgress(total > 0 ? (int) (1000L * done / total) : 0);
+    }
     // Android 13's GameState in a class of its own, loaded only on 13+: inside the poller above, Android 12's verifier rejected the whole class over it and the app closed at
     //   the Game Freak logo (Arceus-Native-Android #19, a Snapdragon 865 on Android 12)
     private static final class Api33 { static void loading(android.content.Context c, boolean on) {
@@ -175,7 +205,35 @@ public final class GameActivity extends NativeActivity implements InputManager.I
         }, "live shaders");
         t.setPriority(Thread.MIN_PRIORITY); t.setDaemon(true); t.start();
     }
-    @Override protected void onResume() { super.onResume(); check(); displayMode(); }
+    @Override protected void onResume() { super.onResume(); check(); displayMode(); gyro(); }
+    @Override protected void onPause() { gyroOff(); super.onPause(); }
+    // Gyro aiming (the menu's Gyro aiming, DM_GYRO aim / on): the gyroscope's rates turned to the screen as it is held, yaw (turning right positive) and pitch
+    //   (the top edge going away positive), to the engine (hle_hid.c, which adds them to the camera while aiming or always). Listened to only while it is on
+    private android.hardware.SensorEventListener gyroL;
+    void gyro() {
+        String m = GameSettings.get(this, "DM_GYRO"); boolean want = m.equals("aim") || m.equals("on");
+        if (!want) { gyroOff(); return; }
+        if (gyroL != null) return;
+        android.hardware.SensorManager sm = getSystemService(android.hardware.SensorManager.class); if (sm == null) return;
+        android.hardware.Sensor s = sm.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE); if (s == null) return;
+        gyroL = new android.hardware.SensorEventListener() {
+            int rot = -1; long rotT;
+            @Override public void onSensorChanged(android.hardware.SensorEvent e) {
+                if (rot < 0 || e.timestamp - rotT > 500_000_000L) { android.view.Display d = getDisplay(); rot = d != null ? d.getRotation() : 1; rotT = e.timestamp; }
+                float x = e.values[0], y = e.values[1], sx, sy;   // device axes to the screen's (x right, y up)
+                switch (rot) { case android.view.Surface.ROTATION_90: sx = -y; sy = x; break; case android.view.Surface.ROTATION_180: sx = -x; sy = -y; break;
+                               case android.view.Surface.ROTATION_270: sx = y; sy = -x; break; default: sx = x; sy = y; }
+                nativeGyro(-sy, -sx);   // turning right is negative about the screen's up axis; the top edge going away is negative about its x axis
+            }
+            @Override public void onAccuracyChanged(android.hardware.Sensor s, int a) { }
+        };
+        sm.registerListener(gyroL, s, android.hardware.SensorManager.SENSOR_DELAY_GAME);
+    }
+    private void gyroOff() {
+        if (gyroL == null) return;
+        android.hardware.SensorManager sm = getSystemService(android.hardware.SensorManager.class); if (sm != null) sm.unregisterListener(gyroL);
+        gyroL = null; nativeGyro(0, 0);
+    }
     // am start ... --es menu <page>: the settings panel (testing over adb; 1 = the controller buttons)
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); String m = i.getStringExtra("menu"); if (m != null) GameMenu.show(this, m.equals("1") ? 1 : 0); }
     @Override protected void onActivityResult(int req, int res, Intent data) { if (!GameMenu.onResult(this, req, res, data)) super.onActivityResult(req, res, data); }   // the in-game menu's file pickers
@@ -199,11 +257,11 @@ public final class GameActivity extends NativeActivity implements InputManager.I
             String[] p = GameSettings.profile(this);
             android.system.Os.setenv("DM_AUTO_GRAPHICS", p[2], true); android.system.Os.setenv("DM_AUTO_TEX", p[3], true);
             android.system.Os.setenv("DM_AUTO_ANISO", p[4], true); android.system.Os.setenv("DM_AUTO_FPS", p[5], true); android.system.Os.setenv("DM_AUTO_WHAT", p[1], true);
-            android.system.Os.setenv("DM_AUTO_SCALER", p[6], true); android.system.Os.setenv("DM_AUTO_SHADOWS", p[7], true);
-            android.system.Os.setenv("DM_AUTO_HD", p[8], true);   // (HD texture packs on Auto: android_main.c mod_root)
+            android.system.Os.setenv("DM_AUTO_SCALER", p[6], true); android.system.Os.setenv("DM_AUTO_SHADOWS", p[7], true); android.system.Os.setenv("DM_AUTO_LOWSPEC", p[8], true);
+            android.system.Os.setenv("DM_AUTO_HD", p[9], true);   // (HD texture packs on Auto: android_main.c mod_root)
             // Sword / Shield: no split submissions (nvn_vk.c sub_split): they need none (3-5 ms of work a frame on a Galaxy S25+) and with them Sword flashed white
-            //   (v0.40, pulled); Scarlet / Violet keep them, they hold 30 fps with them. env.txt's own DM_VK_SPLIT wins
-            if (!GameSettings.paldea(this) && GameSettings.get(this, "DM_VK_SPLIT").isEmpty()) android.system.Os.setenv("DM_VK_SPLIT", "0", true);
+            //   (v0.40, pulled); Scarlet / Violet and Legends: Arceus keep them (heavy scenes: Scarlet outdoors 70 to 33 ms a frame). env.txt's own DM_VK_SPLIT wins
+            if (!GameSettings.paldea(this) && !GameSettings.arceus(this) && GameSettings.get(this, "DM_VK_SPLIT").isEmpty()) android.system.Os.setenv("DM_VK_SPLIT", "0", true);
             StringBuilder hz = new StringBuilder(); for (float r : GameSettings.refreshRates(this)) hz.append(hz.length() > 0 ? "," : "").append(Math.round(r));
             android.system.Os.setenv("DM_DISPLAY_HZ", hz.toString(), true);
         } catch (Exception e) { }
