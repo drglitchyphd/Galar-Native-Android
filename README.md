@@ -5,7 +5,7 @@
 **Pokémon Sword and Shield (Switch, update 1.3.2) running natively on Android.** Not emulation: the game's own ARM64 code runs on the phone, and its graphics (NVN) run on Vulkan.
 
 > [!WARNING]
-> **Beta.** See [Compatibility](#compatibility). Reports with logs help most ([CONTRIBUTING.md](CONTRIBUTING.md)).
+> **Beta. v0.96 is a pre-release**, so far played only briefly on one test phone (Snapdragon 8 Elite, Adreno 830). See [Compatibility](#compatibility). Reports with logs help most ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 > [!NOTE]
 > **No game files, code, shaders or keys are included.** You need your own dump (base game + update 1.3.2) and your console's `prod.keys`.
@@ -19,6 +19,7 @@
 - One app runs both games, each with its own setup, saves, settings and mods. With both installed, the app icon lets you choose; each game's home screen shortcut has its own name and icon.
 - It updates PKShield in place (package `com.nxnative.pokemonshield`), so your setup and saves are kept.
 - Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`. Any other build says "Unofficial build".
+- **Updates:** ☰ → About → Updates checks this repository's releases for a newer full release (never a pre-release) and installs it after you confirm. It only installs the official build signed with the key above. Turn off **Look for updates when the app starts** to stop the check.
 
 ## Requirements
 
@@ -32,31 +33,30 @@
 | **Adreno 6xx–8xx** (Snapdragon 845+) | Qualcomm or **Turnip** | Plays. Turnip fixes old-driver crashes (#44). |
 | **Mali G57 / G68 / G77 / G78** | Stock or **PanVK** | Starts; stock driver has rendering gaps (#32). Try PanVK. |
 | **Mali G52 / G72 / G76** | Stock or PanVK | Low settings. |
-| **Mali G610–G925, Immortalis** | Stock only | White-screen fix (#40, #47), awaiting reports. |
+| **Mali G610–G925, Immortalis** | Stock or **PanVK** | White screen on Arm's own driver, not fixed yet (#215, #227, #282, #311, #316). PanVK (downloaded separately) draws the game. |
 | **Xclipse 540 / 940** | Stock | Crash fixes (#41, #45), awaiting reports. |
 | **PowerVR** (Tensor G5 / G6) | Stock | Untested. |
 
 ## What's new
 
-**v0.95**
+**v0.96** (pre-release). Galar Native, Arceus Native and Paldea Native now share one engine and one version number. Install over v0.94 or the v0.95 preview; no new setup is needed. Full notes: [releases page](https://github.com/simipoB/Galar-Native-Android/releases).
 
-- **A steady 30 fps.** When the phone can't keep up, the game lowers its 3D resolution step by step until it can, and raises it again once things calm down. The HUD and text stay sharp.
-- **Heat guard.** When the phone gets hot, the 3D resolution drops before the phone throttles itself, on every Graphics setting.
-- **Frame rate: Auto, 30, 60 or Dynamic**, changed while you play. *Dynamic* runs at 60 where the phone can and 30 where it can't, at the full picture.
-- **Resolution: 720p, 1080p or 1440p** (from the next start), and a **3D render scale** slider.
-- **Widescreen:** the HUD now stays 16:9 in the middle instead of stretching.
-- **Frame generation** draws the in-between pictures without the HUD (no more doubled text) and uses depth to keep characters clean.
-- **Older and less common phones:** Vulkan 1.0 drivers are supported, older Snapdragon drivers no longer show exploding polygons, PowerVR textures use a safer format, and older ARMv8.0 CPUs no longer crash on certain instructions.
-- **Smoother and lighter:** faster texture loading, fixes found by Vulkan's own validation checks, and a memory report in the log.
-- **Camera sensitivity is a slider** (50–200 %), like every other setting given in percent.
-- **Setup** keeps the game's icon (home screen shortcut, recent apps) even when it stops partway.
+- **Locked at 30 fps.** Sword and Shield always run at 30; 60 and Dynamic are gone for now and come back once they run at the right speed on every phone that can hold them. When the phone can't keep up, the 3D picture steps down (to 35 %), and if that isn't enough, the next start uses lighter shadows and draw distance. Your own settings always win.
+- **Shaders built before you play:** a short wait at the start, then fewer missing objects and stutters, even on the very first play.
+- **Heat guard** on every Graphics level, and a **Battery saver** (☰ → Performance → Power).
+- **New settings:** Shadows, Draw distance, Resolution, Mode, Colour, and FSR 1 upscaling.
+- **Updates from inside the app** (☰ → About → Updates), **Quit the game**, and a performance report for slow scenes (☰ → System → Bug reports).
+- **More phones and fewer crashes:** Vulkan 1.0 drivers, older Snapdragon drivers, PowerVR textures, older ARMv8.0 CPUs, and a Turnip crash after playing a while. The game's clock now changes days at your local midnight.
+- **Frame generation stays off** for Sword and Shield in this release.
+
+**Earlier:** each version's notes are on the [releases page](https://github.com/simipoB/Galar-Native-Android/releases).
 
 ## Playing
 
 - **Touch:** on-screen controls, with **☰** (settings) next to −. Two-finger tap = B.
 - **Controllers:** hide the touch controls automatically. Hold **−** and **+** together for 1 s for ☰, or **−** for 3 s to remap buttons. Rumble works on controllers and phones.
 - **Handhelds** (AYN Odin / Thor, Retroid Pocket, AYANEO, Anbernic, Logitech G Cloud...): detected; the built-in controls are used from the start.
-- **Logs:** `Download/PokemonSword-log.txt` or `Download/PokemonShield-log.txt`.
+- **Logs:** `Download/PokemonSword-log.txt` or `Download/PokemonShield-log.txt` (the run before: `…-log-previous.txt`).
 
 ## Settings (☰)
 
@@ -64,22 +64,27 @@
 | --- | --- |
 | Picture | 16:9, fill screen, widescreen (the HUD stays 16:9) |
 | Resolution | 720p, 1080p, 1440p (from the next start) |
-| 3D render scale | Auto, or 50–100 % |
-| Upscaling | Auto, Sharp, SGSR, Smooth |
+| 3D render scale | Auto, or 35–100 % |
+| Upscaling | Auto, Sharp, SGSR, Smooth, FSR 1 |
+| Colour | Natural, Vibrant, Cinematic |
 | Graphics | Auto, High, Low, Adaptive |
 | Mode | Auto, Quality, Performance |
+| Shadows | Normal, Low, Lowest (from the next start) |
+| Draw distance | 50–200 % for grass and field details (from the next start) |
 | Power | Balanced, Battery saver |
 | Textures | Auto, Full, Half |
-| Frame rate | Auto, 30, 60, Dynamic (changes while you play) |
-| Frame generation | Off, On, Lossless Scaling (your own `Lossless.dll`) |
+| Shaders at start | Build before play (default), or While playing (start at once, build as you go) |
+| Frame generation | Off, On, Lossless Scaling (your own `Lossless.dll`); switched off for Sword and Shield in v0.96 |
 | Graphics driver | Phone's own, Turnip, PanVK, or any driver package (with their options) |
 | Controls | Button layout, remapping, camera sensitivity (50–200 %), touch look and layout, rumble |
 | Performance overlay | fps, temperature, GPU, free memory, battery |
 | Online room | Server and room code for local play over the internet |
 | Mods, saves | Import, switch, order and annotate mods; export / import saves |
+| System | Quit the game; Bug reports (record a slow scene's frame for an issue) |
+| About | Version, official / unofficial build, Updates |
 | Language | English, Español, Português, Français, 日本語 (Auto: the phone's) |
 
-**Auto** rates the phone's CPU, GPU and RAM and picks graphics, textures and filtering from that; while you play it keeps the frame rate steady and the phone cool. The menu shows what it picked.
+**Auto** rates the phone's CPU, GPU and RAM and picks graphics, textures and filtering from that; while you play it keeps 30 fps steady and the phone cool. The menu shows what it picked.
 
 ## Local play
 
@@ -93,6 +98,10 @@ Import a mod `.zip` (`romfs/` file replacements, `exefs/*.pchtxt` code patches f
 
 - Nintendo's online services (Surprise Trade, online battles and raids).
 - Wild Area water renders darker than on the Switch.
+- 60 fps and frame generation are switched off for now.
+- Mali with Arm's own driver: white screen, not fixed yet (use PanVK).
+- Dynamax crash on some phones (#211): attach the log if it happens to you.
+- Occasional short hitches (about 60 ms) during play.
 
 ## License
 

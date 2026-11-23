@@ -37,7 +37,7 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "absolute second
 }
 // LocationName = char[0x24] (time zone name): follows the host's system time zone
 HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device time zone name → host time zone", Result, h_time_LocName, char *out) {
-    memset(out, 0, 0x24); tzset(); strlcpy(out, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24); return RES_OK;
+    void dm_time_location(char *); dm_time_location(out); return RES_OK;   // (hle_time.c: the phone's zone ID)
 }
 HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock (offline, unavailable)", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4time8FinalizeEv", "pairs with Initialize; the host has no session", Result, h_time_Finalize, void) { return RES_OK; }
@@ -303,6 +303,35 @@ HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Displa
 HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "game log → host log", void, h_diag_Put, const void *meta, const char *s, size_t n) {
     (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (n) LOG("[game] %.*s", (int)n, s);
 }
+// The formatted game log (NN_LOG with arguments: nn::diag::detail::LogImpl(meta, format, ...)). Nearly all of it is noise, so only one thing is let through: the game's
+//   own memory pool dump. When one of Game Freak's pools cannot give memory (gflib3 tlsf_pool_resource.cpp do_dump_no_lock; Sword / Shield 1.3.2 main+0x660910), the
+//   game prints "[gfl::mem] dump <pool> begin", one line per block ("idx[..] using[..] addr[..] size[..]:[..]" and the source file and line that took it), and
+//   "... end", then goes on with a null pointer and crashes (the Dynamax crashes #211 / #298 / #325 / #330, and a load on a Mali-G615, 2026-11-22: a vector of 25 x
+//   512 bytes got no memory). Those lines say which pool ran dry and what filled it; without this hook the SDK's own LogImpl dropped them. At most 3 dumps a run,
+//   400 lines each, the rest counted. DM_GAME_LOG=1: every formatted game log line (development).
+//   The guest and an AArch64 Linux / Android host pass variable arguments the same way (AAPCS64), so the host's vsnprintf reads them; elsewhere the hook is left out
+#if defined(__aarch64__) && (defined(__ANDROID__) || defined(__linux__))
+#include <stdarg.h>
+HLE_FORCE("_ZN2nn4diag6detail7LogImplERKNS0_11LogMetaDataEPKcz", "formatted game log: the game's memory pool dump goes to the host log", void, h_diag_Log, const void *meta, const char *fmt, ...) {
+    (void)meta; if (!fmt) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static int all = -1, in_dump, dumps, lines, dropped;
+    if (all < 0) { const char *e = getenv("DM_GAME_LOG"); all = e && atoi(e) > 0; }
+    int mem = !strncmp(fmt, "[gfl::mem]", 10);
+    if (!all && !mem && !in_dump) return;   // (read without the lock: a dump is rare, and its lines come from the thread that opened it)
+    char b[1024]; va_list ap; va_start(ap, fmt); int n = vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    if (n < 0) return;
+    if (n >= (int)sizeof b) n = (int)sizeof b - 1;
+    while (n && (b[n - 1] == '\n' || b[n - 1] == ' ')) b[--n] = 0;
+    for (int i = 0; i < n; i++) if (b[i] == '\n') b[i] = ' ';   // (a block's three lines as one)
+    pthread_mutex_lock(&mu);
+    int begin = mem && strstr(b, " begin"), end = mem && strstr(b, " end");
+    if (begin) { in_dump = 1; lines = dropped = 0; dumps++;
+        if (dumps <= 3) LOG("[RED] the game's memory pool could not give memory: its own dump follows (%d of at most 3 this run); the game goes on with no memory and usually crashes next", dumps); }
+    if (all || dumps <= 3) { if (all || !in_dump || lines < 400 || end) LOG("[game] %s", b); else dropped++; lines += in_dump; }
+    if (end) { if (dropped && dumps <= 3) LOG("[game] (%d more blocks of that pool not printed)", dropped); in_dump = 0; }
+    pthread_mutex_unlock(&mu);
+}
+#endif
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);

@@ -23,6 +23,7 @@
 #include "vk_dispatch.h"
 #include "xf_learn.h"   // renderer stage 3: depth / stencil stores the next frame overwrites unread, learnt
 #include <pthread.h>
+#include <sys/resource.h>
 #include <semaphore.h>
 #include <sys/resource.h>
 #include <stdatomic.h>
@@ -37,6 +38,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/uio.h>   // (process_vm_readv / writev: the pool mapping test)
 #include "nvn_mtl.h"
 #include "nvn_obj.h"
 #include "nvn_hmap.h"
@@ -49,17 +51,19 @@
 #include "../tex/etc_encode.h"
 #include "../tex/tex_cache.h"
 #include "../tex/bc_gpu.h"
+#include "../tex/b10_conv.h"   // R11G11B10F <-> RGBA16F texels (DM_VK_B10_AS_RGBA16)
 #include "framecap_zip.h"
 #include "dmsh_chain.h"
 #include "game_profile.h"
 #include "../../host/dm.h"
+#include "golden_rec.h"   // golden-frame recordings (golden_rec.c; the backend side: golden_vk.inc at the end)
 
 #define VLOG(...) do { fprintf(stderr, "[dm] [nvn-vk] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 // A fatal Vulkan error (VDIE) aborts, and SIGABRT is not one of the signals the crash handler takes (crash.c), so boot_state never said "crashed": the next start
 //   neither went a safe-start level up nor offered another driver (#280: Mali-G68 r38p1, "vkWaitSemaphores failed: -4 (device lost?)" 12 s in, every start)
 void dm_crash_note(int in_game) __attribute__((weak));
 #define VDIE(...) do { VLOG("FATAL " __VA_ARGS__); if (dm_crash_note) dm_crash_note(0); abort(); } while (0)
-static int g_red_once[160];
+static int g_red_once[176];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) VLOG("[RED] " __VA_ARGS__); } while (0)
 #define VKCHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) VDIE("%s failed: %d (%s:%d)", #x, r_, __FILE__, __LINE__); } while (0)
 #define NTEX 256
@@ -70,15 +74,21 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 // ================= Device =================
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperties g_memp;
+#include "vk_quirks.h"   // the unified driver layer's table: every per-GPU workaround's default, from one description of the GPU
+static gpu_id g_gpuid = { .driver_id = -1 };
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
+static int g_mclamp;   // MIRROR_CLAMP_TO_EDGE samplers allowed (VK_KHR_sampler_mirror_clamp_to_edge, or Vulkan 1.2's samplerMirrorClampToEdge); else wrapm falls back
+static int g_inst_xmemcaps;   // VK_KHR_external_memory_capabilities enabled on the instance
 // Passes as dynamic rendering (1) or as Vulkan 1.0 render passes (0: rend_begin); draw state set per draw (1, extended dynamic state) or built into each pipeline (0: sst).
 //   0 where the driver lacks them (Arm's r3x drivers for Mali-G57 / G68 / G77 / G78, Vulkan 1.1: A25 5G); DM_VK_NO_DYNREN=1 / DM_VK_NO_EDS=1 force 0 on any driver
 static int g_dynren = 1, g_eds = 1;
 static int g_bar_clean, g_after_pass, g_game_bar;   // the barrier state of the submission's command buffer (barrier_all)
 static int32_t g_game_bits;   // the game's barrier bits since the last draw pass began (NVN_BARRIER_*: pass_begin narrows by them)
 static int g_store_none;   // VK_ATTACHMENT_STORE_OP_NONE usable (Vulkan 1.3, VK_KHR / VK_EXT_load_store_op_none): skip stores' read-only depth / stencil
-// The Arceus engine's three passes (androidswithy 84fb5df: relaxed barriers between passes, uniform updates deferred inside a pass, learnt attachment stores) are on by
-//   default for Legends: Arceus, where they were measured; off for Sword / Shield until measured there. Each has its switch (DM_VK_BARRIER, DM_VK_UB_DEFER, DM_VK_SKIP_STORES)
+// Uniform updates deferred inside a pass (ubd_on, DM_VK_UB_DEFER=0 / 1), from the Arceus engine (androidswithy 84fb5df): on by default for Legends: Arceus, where it was
+//   measured; off for Sword / Shield and Scarlet / Violet. The only switch that reads this now: that engine's relaxed barriers are vk_quirks.h's Q_BARRIER_RELAXED for
+//   every game (DM_VK_BARRIER), and its learnt attachment stores (DM_VK_SKIP_STORES) are off for every game. A per-game choice that is no GPU rule, by the program ID
+//   as before (docs/ENGINE_UNIFY.md: candidate for an engine_quirks word)
 static int arceus_pass_default(const char *name, const char *off_value, const char *on_value) {
     const char *e = getenv(name);
     if (e && !strcmp(e, off_value)) return 0;
@@ -126,6 +136,10 @@ static uint32_t g_maxpush = 32;   // maxPushDescriptors: a program with more des
 static int g_np;   // the program being bound uses descriptor sets (g_nopush, or over g_maxpush)
 static PFN_vkGetMemoryHostPointerPropertiesEXT p_hostprops;
 static PFN_vkGetImageSubresourceLayout2EXT p_layout2;   // VK_EXT_image_compression_control: whether an image's framebuffer compression (UBWC, AFBC) stayed on
+static int g_compctl;   // VK_EXT_image_compression_control enabled with its feature: an image can be made with its compression off (DM_VK_B10_NOCOMPRESS)
+// DM_VK_B10_NOCOMPRESS=1 (a Mali test, off by default; the in-game menu's Mali tests): R11G11B10F render targets keep their format but are made without framebuffer
+//   compression (Arm's AFBC), through VK_EXT_image_compression_control where the driver has it, else by the rule the driver itself keys AFBC on (tex_new)
+static int g_b10nc;
 
 static int g_fmtlist;   // images may list their view formats (Vulkan 1.2, or VK_KHR_image_format_list): tex_make
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
@@ -136,6 +150,7 @@ static int fd_export_mark(int op);   // (mtl_init, mtl_pool_add)
 static int mark_file(const char *name, const char *what, int op);
 static int heap_import_mark(int op);   // the same for the dma-buf heap route (its own file: a crash of one route does not close the other)
 static void pcache_open(void); static void *prewarm_main(void *arg);   // pipeline list and cache (below)
+static atomic_int g_pw_hold; static int prewarm_all(void); static void prewarm_wait(void);   // the game waiting for the prewarm (below)
 // The Vulkan driver: DM_VK_DRIVER=<folder>/<library> (a driver package chosen on the setup screen: Mesa Turnip for Adreno, Mesa PanVK for Mali) is opened through
 // libadrenotools (BSD-2-Clause, shipped in the app with its hook libraries); when that is missing or fails, the library itself (PanVK talks to the Mali kernel driver,
 // kbase, on its own and needs none of the Adreno hooks); when that fails too, the system's libvulkan
@@ -171,11 +186,23 @@ static int g_bcgpu;   // the BC layer is on (mtl_init): a mask of the paths that
 static int g_fctl_ext, g_drvprops_ext;   // a Vulkan 1.1 driver with VK_KHR_shader_float_controls / VK_KHR_driver_properties (enabled at device creation)
 static int g_fctl;    // every shader asks for SignedZeroInfNanPreserve (spv_float_controls; mtl_init decides)
 static int g_probe;   // DM_VK_PROBE (spv_probe's mask), 0 off
+static void tf_selftest(void);   // tf_selftest.h (included with the capture passes)
+static void tfp_decide(void); static int g_tf_pts = -1, g_vstores = 1; static VkShaderModule g_tfp_fs[4];   // captures as points (tf_points.h); the driver has vertex stores
+enum { TFP_W = 256, TFP_H = 256 };   // the point targets: up to 65,536 vertices a capture
+static int g_tfst_a = -1, g_tfst_b = -1, g_tfst_c = -1;   // the transform feedback self-test's counts (tf_selftest.h), -1 not run
+static void vtx_canary(void);   // vtx_canary.h: per-draw vertex sizes checked on this driver at start
 static int g_arm_rel, g_arm_p;   // Arm's own Mali driver: its release, r<rel>p<p> (driverVersion is VK_MAKE_VERSION(rel, p, 0): 0xb001000 = r44p1); 0 for any other driver
 static int g_arm_beta;           // ... a beta build of it (driverInfo "v1.r49p1-03bet0": the G925's)
+static int g_drv_id = -1;        // the driver's ID (VkDriverId) where it reports driver properties, else -1 (mtl_init; the white-screen ladder's key)
+// The Mali white-screen ladder and its detector (mali_white_vk.inc, included after the draw counters; its rules: mali_white.h): the route at mtl_init, the lit target
+//   and the part drawn of it from pass_begin / draw_ / pass_end, the samples at mtl_present (with the picture shown), the state in the frame capture's notes
+struct vtex; static struct vtex *g_mw_px;   // the open pass's lit-target candidate (mw_pass_target), NULL: none
+static void mw_init(int *a_on, int *b_on, const char **why_a, const char **why_b); static void mw_pass_target(struct vtex *x, uint32_t lv); static void mw_pass_end(void);
+static void mw_draw_rect(float vx, float vy, float vw, float vh, const VkRect2D *sc); static void mw_present(uint64_t n, const tex_t *shown, const int crop[4]); static void mw_capture_note(void);
 static int g_clampzero; static _Atomic int g_clampzero_n;   // shaders get spv_clamp_zero (Arm erratum 3779215: mtl_init decides); how many it changed
 static int g_fmz; static _Atomic int g_fmz_n;   // shaders get spv_fmz (every multiply by 0 gives 0, as Maxwell's FMZ: DM_VK_FMZ=1, a test); how many it changed
 static unsigned g_exact; static _Atomic int g_exact_n;
+static int g_qlod; static _Atomic int g_qlod_n;   // shaders get spv_query_lod (textureQueryLod's level clamped: mtl_init decides)
 static int g_initloc; static _Atomic int g_initloc_n;   // shaders get spv_init_locals (the translator's registers start at zero, as Mesa's compilers treat undefined values: mtl_init decides)   // shaders get spv_exact_math (Maxwell's log2 / exp2 / inversesqrt / sqrt / F2I at their edge cases: mtl_init decides)
 static int g_nanmm; static _Atomic int g_nanmm_n;           // shaders get spv_nan_minmax (min / max / saturate drop NaN as on Maxwell: mtl_init decides; 2: spv_nan_select too); how many it changed
 static int g_dualsrc = 1;        // the device blends with a second shader output (dualSrcBlend): Arm's own Mali driver has none (r44p1)
@@ -193,6 +220,7 @@ static const char *drv_mark(const char *base) {
 }
 static void vk_logf(const char *f, ...) { va_list a; va_start(a, f); fputs("[dm] [nvn-vk] ", stderr); vfprintf(stderr, f, a); fputc('\n', stderr); va_end(a); }
 static uint32_t g_instance_api = VK_API_VERSION_1_3;   // the instance's apiVersion (mtl_init)
+static int g_yflip;   // Vulkan 1.0 without VK_KHR_maintenance1 (or DM_VK_YFLIP=1): NVN's upper-left origin made in the vertex shaders (spv_flip_y), viewports kept positive
 static uint32_t g_api;   // the device's Vulkan version (DM_VK_API=11 / 12 tries an older device's path on a newer one)
 static PFN_vkVoidFunction vk_dev_fn(const char *name) {   // a device function; before 1.3 the KHR / EXT name of a promoted one (dynamic rendering, timeline semaphores, extended dynamic state)
     char alt[128];
@@ -254,6 +282,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL vk_shader_module_10(VkDevice d, const VkSh
     return r;
 }
 const char *nvn_vk_gpu_name(void) { return g_dev ? g_props.deviceName : NULL; }   // android_main.c boot_guard
+// The quirk table for code outside this file (hle_nvn.c rq_on: Faster rendering's Auto): this GPU's default, -1 before the device exists (as nvn_vk_gpu_name; gpu_id's
+//   name, API, vendor and the profile's port / eng are set before the device is made), and -1 for a rule that reads the driver ID or Arm's release (vk_quirks.h
+//   quirk_late) until mtl_init has read them, just after (g_gpuid_done); and the start's [quirk] note
+static _Atomic int g_gpuid_done;
+int nvn_vk_quirk_default(int q) { return !g_dev || (quirk_late(q) && !atomic_load(&g_gpuid_done)) ? -1 : quirk_default(q, &g_gpuid); }
+int nvn_vk_quirk_note(int q, int value, int from_env) { return quirk_note(q, value, from_env); }
 void mtl_init(void) {
     if (g_dev) return;
     if (!vkGetInstanceProcAddr) {
@@ -274,9 +308,11 @@ void mtl_init(void) {
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative", .apiVersion = instance_api };
     uint32_t nie = 0; vkEnumerateInstanceExtensionProperties(NULL, &nie, NULL);
     VkExtensionProperties *ie = calloc(nie ? nie : 1, sizeof *ie); vkEnumerateInstanceExtensionProperties(NULL, &nie, ie);
-    const char *iext[6]; uint32_t niext = 0; VkInstanceCreateFlags ifl = 0;
+    const char *iext[8]; uint32_t niext = 0; VkInstanceCreateFlags ifl = 0;
     if (has_ext(ie, nie, "VK_KHR_portability_enumeration")) { iext[niext++] = "VK_KHR_portability_enumeration"; ifl |= 0x00000001; /* VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR */ }
     if (has_ext(ie, nie, "VK_KHR_get_physical_device_properties2")) iext[niext++] = "VK_KHR_get_physical_device_properties2";
+    // (a Vulkan 1.0 GPU: vkGetPhysicalDeviceExternalBufferProperties is this extension's; the core name of a 1.3 instance is not allowed on a 1.0 device)
+    if ((g_inst_xmemcaps = has_ext(ie, nie, "VK_KHR_external_memory_capabilities"))) iext[niext++] = "VK_KHR_external_memory_capabilities";
     if (has_ext(ie, nie, "VK_KHR_surface")) iext[niext++] = "VK_KHR_surface";
 #ifdef __ANDROID__
     if (has_ext(ie, nie, "VK_KHR_android_surface")) iext[niext++] = "VK_KHR_android_surface";
@@ -305,6 +341,13 @@ void mtl_init(void) {
         VDIE("no Vulkan device");
     }
     VkPhysicalDevice pds[8]; if (npd > 8) npd = 8; vkEnumeratePhysicalDevices(g_inst, &npd, pds); g_pd = pds[0];
+    {   // DM_VK_DEVICE=<index> or <part of the name>: the device to use where the loader lists several (PC tools: lavapipe beside a real GPU, a profile layer's device)
+        const char *dv = getenv("DM_VK_DEVICE");
+        if (dv && *dv) { char *x; long k = strtol(dv, &x, 10); int found = 0;
+            if (!*x && k >= 0 && k < (long)npd) { g_pd = pds[k]; found = 1; }
+            else for (uint32_t i = 0; i < npd && !found; i++) { VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pds[i], &pp); if (strcasestr(pp.deviceName, dv)) { g_pd = pds[i]; found = 1; } }
+            if (!found) VLOG("[RED] DM_VK_DEVICE=%s: no such device among %u: the first one", dv, npd); }
+    }
     vkGetPhysicalDeviceProperties(g_pd, &g_props); vkGetPhysicalDeviceMemoryProperties(g_pd, &g_memp);
     uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
     for (g_qf = 0; g_qf < nq && (qp[g_qf].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT); g_qf++) {}
@@ -323,7 +366,12 @@ void mtl_init(void) {
         // without timeline semaphores (a Vulkan 1.1 Adreno 6xx stock driver: #99, Adreno 613) every submission signals a fence of its own instead (g_tlsem)
         if (has_ext(de, nde, "VK_KHR_timeline_semaphore")) dext[ndext++] = "VK_KHR_timeline_semaphore";
         else { g_tlsem = 0; VLOG("Vulkan %u.%u device without timeline semaphores: a fence for each submission instead", VK_API_VERSION_MAJOR(g_api), VK_API_VERSION_MINOR(g_api)); }
-        if ((x_dynren = has_ext(de, nde, "VK_KHR_dynamic_rendering"))) {
+        // before 1.2 its prerequisites must all be there: depth_stencil_resolve and create_renderpass2, and on a 1.0 device multiview and maintenance2 as well
+        //   (core in 1.1). One missing: render passes (simdev: Turnip on a Vulkan 1.0 Adreno 610 lists create_renderpass2 without multiview, VUID-...-01387)
+        x_dynren = has_ext(de, nde, "VK_KHR_dynamic_rendering");
+        if (x_dynren && old11) for (unsigned k = 0; k < sizeof deps11 / sizeof *deps11; k++)
+            if ((k < 2 || g_api < VK_API_VERSION_1_1) && !has_ext(de, nde, deps11[k])) { VLOG("dynamic rendering listed without %s: render passes", deps11[k]); x_dynren = 0; break; }
+        if (x_dynren) {
             dext[ndext++] = "VK_KHR_dynamic_rendering";
             if (old11) for (unsigned k = 0; k < sizeof deps11 / sizeof *deps11; k++) if (has_ext(de, nde, deps11[k])) dext[ndext++] = deps11[k];
         }
@@ -355,11 +403,18 @@ void mtl_init(void) {
         VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pd }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (pd.maxPushDescriptors) g_maxpush = pd.maxPushDescriptors; if (getenv("DM_VK_MAXPUSH")) g_maxpush = (uint32_t)atoi(getenv("DM_VK_MAXPUSH"));   // a lower limit tests the set path
         VLOG("push descriptors: up to %u per program", g_maxpush); }
-    if ((g_host_import = has_ext(de, nde, "VK_EXT_external_memory_host"))) dext[ndext++] = "VK_EXT_external_memory_host";
+    // Vulkan 1.0 GPUs: every external-memory extension needs VK_KHR_external_memory beside it (core from 1.1); without it listed, no external-memory route
+    //   (simdev: Turnip on Adreno 610 with a 1.0 device, VUID-vkCreateDevice-ppEnabledExtensionNames-01387 for VK_EXT_external_memory_host)
+    int dev10 = VK_API_VERSION_MAJOR(g_props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_props.apiVersion) == 0;
+    int xmem_ok = !dev10 || has_ext(de, nde, "VK_KHR_external_memory");
+    if (xmem_ok && (g_host_import = has_ext(de, nde, "VK_EXT_external_memory_host"))) { dext[ndext++] = "VK_EXT_external_memory_host"; if (dev10) dext[ndext++] = "VK_KHR_external_memory"; }
     if ((g_has_swapchain = has_ext(de, nde, "VK_KHR_swapchain"))) dext[ndext++] = "VK_KHR_swapchain";
     if (g_has_swapchain && (g_dtiming = has_ext(de, nde, "VK_GOOGLE_display_timing"))) dext[ndext++] = "VK_GOOGLE_display_timing";   // frame pacing (pace_time)
     if ((g_clipctl = !as_mali && has_ext(de, nde, "VK_EXT_depth_clip_control"))) dext[ndext++] = "VK_EXT_depth_clip_control";
     if ((g_border = has_ext(de, nde, "VK_EXT_custom_border_color"))) dext[ndext++] = "VK_EXT_custom_border_color";
+    // NVN's mirror-clamp wrap modes (MIRROR_CLAMP / _TO_EDGE) are Vulkan's MIRROR_CLAMP_TO_EDGE, which is not core 1.0: Mali-G72 r26p0, Mali-G52, PowerVR BXM and
+    //   Vulkan 1.0 drivers lack it (simdev). The extension where listed; 1.2's feature below; without either, mirrored repeat (wrapm)
+    if ((g_mclamp = has_ext(de, nde, "VK_KHR_sampler_mirror_clamp_to_edge"))) dext[ndext++] = "VK_KHR_sampler_mirror_clamp_to_edge";
     if ((g_divisor = !as_mali && has_ext(de, nde, "VK_EXT_vertex_attribute_divisor"))) dext[ndext++] = "VK_EXT_vertex_attribute_divisor";
     if ((g_eds2 = has_ext(de, nde, "VK_EXT_extended_dynamic_state2"))) dext[ndext++] = "VK_EXT_extended_dynamic_state2";
     int compctl = has_ext(de, nde, "VK_EXT_image_compression_control"); if (compctl) dext[ndext++] = "VK_EXT_image_compression_control";
@@ -371,20 +426,31 @@ void mtl_init(void) {
     if (g_api < VK_API_VERSION_1_1) {
         static const char *const x10[] = { "VK_KHR_maintenance1", "VK_KHR_shader_draw_parameters", "VK_KHR_storage_buffer_storage_class" };
         // without shader_draw_parameters: spv_no_drawparams (push constants); without storage_buffer_storage_class: spv_sb_to_uniform (Uniform + BufferBlock)
-        for (unsigned k = 0; k < sizeof x10 / sizeof *x10; k++) { if (has_ext(de, nde, x10[k])) { dext[ndext++] = x10[k]; continue; } if (k == 1) g_drawp = 0; else if (k == 2) g_nosbsc = 1;
-            if (k == 0) VLOG("[RED] Vulkan 1.0 driver without %s: the picture may come out upside down", x10[k]);
-            else VLOG("Vulkan 1.0 driver without %s: %s", x10[k], k == 1 ? "draw parameters come from push constants" : "storage buffers declared the Vulkan 1.0 way"); }
+        for (unsigned k = 0; k < sizeof x10 / sizeof *x10; k++) { if (has_ext(de, nde, x10[k])) dext[ndext++] = x10[k]; else if (k == 0) g_yflip = 1; else if (k == 1) g_drawp = 0; else g_nosbsc = 1;
+            if (k && !has_ext(de, nde, x10[k])) VLOG("Vulkan 1.0 driver without %s: %s", x10[k], k == 1 ? "draw parameters come from push constants" : "storage buffers declared the Vulkan 1.0 way"); }
         VLOG("Vulkan 1.0 driver: shaders made SPIR-V 1.0 as they load, 1.1 features through their extensions");
     }   // to read whether render targets stay compressed
+    if (getenv("DM_VK_YFLIP")) g_yflip = atoi(getenv("DM_VK_YFLIP")) != 0;   // (tries the route on a driver that has maintenance1)
+    if (g_yflip) VLOG("no flipped viewports (Vulkan 1.0 without VK_KHR_maintenance1): the upper-left origin is made in the vertex shaders");
+    // the GPU described once for the quirk table (vk_quirks.h); the driver ID and Arm's release are added below, where the driver properties are read
+    g_gpuid.vendor = g_props.vendorID; g_gpuid.driver_version = g_props.driverVersion; snprintf(g_gpuid.name, sizeof g_gpuid.name, "%s", g_props.deviceName);
+    g_gpuid.custom = getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"); g_gpuid.api = g_props.apiVersion;
+    // the game, from its profile (game_profile.h, generated from game.tsv): the app (key port → DM_PORT_*, named in the log) and the game's own per-GPU choices (key
+    //   engine_quirks → DM_GAME_ENG_*, one gpu_id.eng bit each, mapped by name here so the order of game.py's list cannot move them; the table's rules read only these bits)
+    g_gpuid.port = DM_PORT_ARCEUS ? PORT_ARCEUS : DM_PORT_PALDEA ? PORT_PALDEA : PORT_GALAR;
+    g_gpuid.eng = (DM_GAME_ENG_QC11_NO_EDS ? ENG_QC11_NO_EDS : 0u) | (DM_GAME_ENG_ASYNC_PSO_OFF ? ENG_ASYNC_PSO_OFF : 0u) | (DM_GAME_ENG_DRIVER_SELFTESTS ? ENG_DRIVER_SELFTESTS : 0u)
+                | (DM_GAME_ENG_NVN_ASYNC_NEVER ? ENG_NVN_ASYNC_NEVER : 0u) | (DM_GAME_ENG_MALI_LIT_STANDIN ? ENG_MALI_LIT_STANDIN : 0u);
+    { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; long kb = 0; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); g_gpuid.ram_kb = kb; }
     if (getenv("DM_VK_NO_HOST_IMPORT")) g_host_import = 0;
     // Imported host memory pins the game's pools (about 3 GB) for every submission. Samsung's Xclipse driver of the late-2026 One UI update refuses that a few frames into play
     // (vkQueueSubmit: VK_ERROR_OUT_OF_HOST_MEMORY with a gigabyte free, #39), so on Xclipse the driver's own memory backs the pools instead (as on Mali); elsewhere a
     // submission that fails while pools are imported leaves a marker (host_import_failed, next to the pipeline cache) and the next start does the same. DM_VK_HOST_IMPORT=1 forces import.
     // Decided before the fd route below: deciding it after left Xclipse without the fd route, on mirrored pools (every pool twice in memory, swapping, multi-second stalls: #41)
     if (g_host_import && !getenv("DM_VK_HOST_IMPORT")) {
-        const char *why = g_props.vendorID == 0x144D ? "Samsung Xclipse" : NULL;
-        // (never on Adreno, 0x5143: its fallback, moving the driver's mappings, is the route that crashed it on area changes; one failed submission must not switch it for good)
-        if (!why && g_props.vendorID != 0x5143 && host_import_mark(0)) why = "a submission failed with it last time";
+        const char *why = quirk_note(Q_HOST_IMPORT_OFF, quirk_default(Q_HOST_IMPORT_OFF, &g_gpuid), 0) ? "Samsung Xclipse" : NULL;
+        // (never on Adreno, vk_quirks.h Q_IMPORT_MARK_OFF: its fallback, moving the driver's mappings, is the route that crashed it on area changes; one failed submission
+        //   must not switch it for good)
+        if (!why && !quirk_note(Q_IMPORT_MARK_OFF, quirk_default(Q_IMPORT_MARK_OFF, &g_gpuid), 0) && host_import_mark(0)) why = "a submission failed with it last time";
         if (why) { g_host_import = 0; VLOG("memory pools: host import off (%s): the driver's own memory backs the pools", why); }
     }
 #ifdef __linux__
@@ -394,8 +460,10 @@ void mtl_init(void) {
     // fd_export_mark sets around that first allocation: this start moves the driver's mappings instead (DM_VK_FDMAP=1 tries the fd route again)
     int fd_crashed = fd_export_mark(0) && !(getenv("DM_VK_FDMAP") && atoi(getenv("DM_VK_FDMAP")));
     if (fd_crashed) VLOG("[RED] memory pools: the driver crashed exporting its memory last time: no export this start");
-    // the heap route's own marker (heap_import_mark): set by a crash importing the first dma-buf or a failed submission with them; DM_VK_DMAHEAP=1 tries it again
-    int heap_crashed = heap_import_mark(0) && !(getenv("DM_VK_DMAHEAP") && atoi(getenv("DM_VK_DMAHEAP")));
+    // the heap route's own marker (heap_import_mark): set by a crash importing the first dma-buf or a failed submission with them; DM_VK_DMAHEAP=1 in env.txt tries it
+    //   again (a value from the driver check is this driver's default: the marker still applies, vk_quirks.h vkq_env_player)
+    const char *hep = vkq_env_player("DM_VK_DMAHEAP");
+    int heap_crashed = heap_import_mark(0) && !(hep && atoi(hep));
     // The marker only proves something while the route without it does better: a start that skipped the heap route and crashed anyway (after the device came up) sends
     //   the next start back to it. Without this a marker left by a run closed as stuck kept every later start on the mirrored route, which crashed an Xclipse 530 at
     //   every start (#76); a phone whose heap route really crashes (#63) stays off it as long as the other route holds
@@ -406,7 +474,11 @@ void mtl_init(void) {
     if (heap_crashed) { mark_file("heap_route_skipped", "a start that left the dma-buf heap route out (heap_import_crashed); if it crashes too, the next start uses the route again\n", 1);
         VLOG("[RED] memory pools: importing dma-bufs failed last time: not this start"); }
     else mark_file("heap_route_skipped", "", -1);
-    if (!g_host_import && (!fd_crashed || !heap_crashed) && has_ext(de, nde, "VK_KHR_external_memory_fd") && !(getenv("DM_VK_NO_FDMAP") && atoi(getenv("DM_VK_NO_FDMAP")))) {
+    // Vulkan 1.0 GPUs (Adreno 5xx's 1.0 drivers, Mali r14p0): external memory is three extensions there, not core. The buffer query only through its instance
+    //   extension; the fd routes only with VK_KHR_external_memory beside VK_KHR_external_memory_fd (simdev: adreno-512-vk10, VUID-vkCreateDevice-...-01387)
+    //   (dev10 / xmem_ok: worked out before the host-import route, which needs the same)
+    if (dev10 && !g_inst_xmemcaps) vkGetPhysicalDeviceExternalBufferProperties = NULL;
+    if (!g_host_import && (!fd_crashed || !heap_crashed) && xmem_ok && has_ext(de, nde, "VK_KHR_external_memory_fd") && !(getenv("DM_VK_NO_FDMAP") && atoi(getenv("DM_VK_NO_FDMAP")))) {
         VkExternalMemoryHandleTypeFlagBits cand[2] = { VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
         int dmabuf = has_ext(de, nde, "VK_EXT_external_memory_dma_buf") && !(getenv("DM_VK_NO_DMABUF") && atoi(getenv("DM_VK_NO_DMABUF")));
         for (int i = dmabuf ? 0 : 1; i < 2 && !g_fdmap && !fd_crashed; i++) {
@@ -424,8 +496,8 @@ void mtl_init(void) {
         //   export (#47: the forced export failed, errno 2), or any GPU with DM_VK_DMAHEAP=1
         // Samsung Xclipse without export (its export crashed the driver: Xclipse 530 / 540, #45 / #57 / #59) took the mremap route, where its driver handed out
         //   mappings the pools had taken and the game crashed on scene changes: it takes the heap route too
-        {   const char *he = getenv("DM_VK_DMAHEAP"), *sh = getenv("DM_VK_POOL_SHADOW");
-            int want = he ? atoi(he) : (!g_fdmap && !heap_crashed && (g_props.vendorID == 0x13B5 || g_props.vendorID == 0x144D));
+        {   const char *he = getenv("DM_VK_DMAHEAP"), *sh = getenv("DM_VK_POOL_SHADOW");   // (he from the driver check, not hep: the default, under the fd route and the marker)
+            int want = hep ? atoi(hep) : (!g_fdmap && !heap_crashed && (he ? atoi(he) != 0 : quirk_default(Q_DMAHEAP, &g_gpuid))); quirk_note(Q_DMAHEAP, want, vkq_env_src("DM_VK_DMAHEAP"));
             if (sh && atoi(sh)) want = 0;   // (a forced mirror leaves it out too)
             VkPhysicalDeviceExternalBufferInfo xi = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO, .usage = BUF_ALL, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
             VkExternalBufferProperties xp = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES };
@@ -442,8 +514,9 @@ void mtl_init(void) {
                 else VLOG("memory pools: no dma-buf heap could be opened (errno %d)", errno);
             } else if (want) VLOG("memory pools: the driver does not import dma-buf buffers (features %#x)", (unsigned)xp.externalMemoryProperties.externalMemoryFeatures);
         }
-        if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && g_props.vendorID == 0x13B5) { g_fdtype = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; g_fdmap = -1;
+        if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && quirk_note(Q_DMABUF_TRY, quirk_default(Q_DMABUF_TRY, &g_gpuid), 0)) { g_fdtype = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; g_fdmap = -1;
             VLOG("memory pools: Mali lists no exportable buffer: the dma-buf route tried anyway (it falls back by itself)"); }
+        if ((g_heapmap || g_fdmap) && dev10) dext[ndext++] = "VK_KHR_external_memory";   // (core from 1.1)
         if (g_heapmap) { dext[ndext++] = "VK_KHR_external_memory_fd"; dext[ndext++] = "VK_EXT_external_memory_dma_buf"; }
         else if (g_fdmap) { dext[ndext++] = "VK_KHR_external_memory_fd"; if (g_fdtype == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) dext[ndext++] = "VK_EXT_external_memory_dma_buf"; }
     }
@@ -484,14 +557,29 @@ void mtl_init(void) {
     int dynren = old ? x_dynren && fdr.dynamicRendering : f13.dynamicRendering, timeline = old11 ? fts.timelineSemaphore : f12.timelineSemaphore;
     int eds = old ? x_eds && fed.extendedDynamicState : 1;
     if (!timeline && g_tlsem) { g_tlsem = 0; VLOG("timeline semaphores listed but not supported: a fence for each submission instead"); }
-    // Adreno (Qualcomm 0x5143): render passes by default. Its vkCmdBeginRendering allocates a large block every time (a calloc that goes to mmap, freed with munmap when
-    //   the command pool is reset): Sword / Shield begin about 267 passes a frame in the field, and on a Galaxy S25+ that was a third of the replay's CPU time. With render
-    //   passes and their framebuffers kept (fb_cache.h) the replay went from 27.5 to 17.3 ms a frame. DM_VK_NO_DYNREN=0 / 1 decides on any GPU; Mali and the rest as before
-    { const char *e = getenv("DM_VK_NO_DYNREN"); int no = e ? atoi(e) != 0 : g_props.vendorID == 0x5143;
+    // Adreno: render passes by default (Galar Native #205), for every game (vk_quirks.h Q_NO_DYNREN; Legends: Arceus too since its v0.45). Its vkCmdBeginRendering
+    //   callocs a large block at every pass begin (freed again when the command pool is reset): on a Galaxy S25+ that was a third of the replay's CPU time in Sword /
+    //   Shield, and with render passes and their framebuffers kept (fb_cache.h, FBC_N 1024) the replay went from 27.5 to 17.3 ms a frame. DM_VK_NO_DYNREN=0 / 1 decides
+    //   on any GPU; Mali and the rest as before
+    { const char *e = getenv("DM_VK_NO_DYNREN"); int no = quirk_note(Q_NO_DYNREN, e ? atoi(e) != 0 : quirk_default(Q_NO_DYNREN, &g_gpuid), e != NULL);
       g_dynren = dynren && !no; }
-    g_eds = eds && !(getenv("DM_VK_NO_EDS") && atoi(getenv("DM_VK_NO_EDS")));
-    VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : dynren ? (g_props.vendorID == 0x5143 && !getenv("DM_VK_NO_DYNREN") ? "render passes (Adreno's default: DM_VK_NO_DYNREN=0 for dynamic rendering)" : "render passes (DM_VK_NO_DYNREN)") : "render passes (the driver has no dynamic rendering)",
-         g_eds ? "set per draw (extended dynamic state)" : eds ? "built into each pipeline (DM_VK_NO_EDS)" : "built into each pipeline (the driver has no extended dynamic state)");
+    // Qualcomm's Vulkan 1.1 drivers (Adreno 6xx / 710 stock, API 1.1.x) misread vertex strides passed per draw (vkCmdBindVertexBuffers2): exploded, stretched
+    //   polygons across the view (Arceus #34, Galar #209). Built into each pipeline there unless DM_VK_NO_EDS=0. Per game (vk_quirks.h Q_NO_EDS reads the profile's
+    //   engine_quirks qc11_no_eds through gpu_id.eng: Legends: Arceus); Sword / Shield answered #209 with full barriers instead (Q_BARRIER_RELAXED, old Qualcomm
+    //   drivers) and keep per-draw state there
+    const char *ne = getenv("DM_VK_NO_EDS");
+    g_eds = eds && !quirk_note(Q_NO_EDS, ne ? atoi(ne) != 0 : quirk_default(Q_NO_EDS, &g_gpuid), ne != NULL);
+    // DM_VK_BASELINE=1 (vk_quirks.h): the Vulkan 1.1 floor on any GPU, each feature's own fallback, as a phone with an old driver runs: render passes, the draw state in
+    //   each pipeline, a fence per submission. For reproducing a low-end driver's problem on a phone with a new one
+    int baseline = 0;
+    { const char *e = getenv("DM_VK_BASELINE"); if (e && atoi(e) > 0) { baseline = 1; g_dynren = 0; g_eds = 0; g_tlsem = 0;
+        VLOG("[quirk] Vulkan 1.1 baseline (DM_VK_BASELINE): render passes, draw state in each pipeline, a fence per submission, whatever this driver offers"); } }
+    g_gpuid.dynren = g_dynren;   // (Q_VIEW_QUARANTINE reads it)
+    quirk_note(Q_PCACHE_GAPS_OFF, quirk_default(Q_PCACHE_GAPS_OFF, &g_gpuid) && !g_dynren, 0);   // (pso_make applies it with render passes only; noted here, once)
+    VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : !dynren ? "render passes (the driver has no dynamic rendering)" : baseline ? "render passes (DM_VK_BASELINE)"
+         : quirk_default(Q_NO_DYNREN, &g_gpuid) && !getenv("DM_VK_NO_DYNREN") ? "render passes (Adreno's default: DM_VK_NO_DYNREN=0 for dynamic rendering)" : "render passes (DM_VK_NO_DYNREN)",
+         g_eds ? "set per draw (extended dynamic state)" : !eds ? "built into each pipeline (the driver has no extended dynamic state)" : baseline ? "built into each pipeline (DM_VK_BASELINE)"
+               : ne ? "built into each pipeline (DM_VK_NO_EDS)" : "built into each pipeline (Qualcomm Vulkan 1.1 driver: per-draw vertex strides drawn wrong; DM_VK_NO_EDS=0 to try)");
     if (!fcc.depthClipControl) g_clipctl = 0;
     // custom border colours are made without a format (sampler_get), which needs customBorderColorWithoutFormat: a driver without it gets the nearest standard colour
     if (!fbc.customBorderColors || !fbc.customBorderColorWithoutFormat) { if (fbc.customBorderColors) VLOG("custom border colours need a format on this driver: the nearest standard colour instead"); g_border = 0; }
@@ -499,7 +587,7 @@ void mtl_init(void) {
     //   uniform buffers were copied at record time (DM_VK_UBO_SNAPSHOT) and its BC textures decoded, not transcoded to ETC2 (DM_VK_BC_TRANSCODE=off): the two logs that play
     //   on v0.5x (#77, #110) have both, and every crash lacks one of them. Both from the first start there (the safe-start ladder took four crashes to reach them);
     //   env.txt still wins
-    if (g_props.vendorID == 0x13B5 && (g_props.driverVersion >> 22) < 49 && strstr(g_props.deviceName, "G615") && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) {
+    if (quirk_note(Q_G615_SAFE, quirk_default(Q_G615_SAFE, &g_gpuid), vkq_env_src("DM_VK_UBO_SNAPSHOT") > vkq_env_src("DM_VK_BC_TRANSCODE") ? vkq_env_src("DM_VK_UBO_SNAPSHOT") : vkq_env_src("DM_VK_BC_TRANSCODE"))) {
         int u = !getenv("DM_VK_UBO_SNAPSHOT"), b = !getenv("DM_VK_BC_TRANSCODE");
         setenv("DM_VK_UBO_SNAPSHOT", "1", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
         VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110)",
@@ -513,10 +601,16 @@ void mtl_init(void) {
     // PowerVR (Imagination): BC textures decoded to plain RGBA, not transcoded to ETC2 / EAC / ASTC. On a Tensor G5 (PowerVR D-Series, Arceus-Native-Android #32)
     //   static world meshes came out flat lavender with the textures transcoded both ways (the BC layer's compute in v0.35-37, the CPU in v0.39); our encoders match
     //   an independent decoder (tests/etc_check.py), so what is left is how this driver samples them. The plain decode is Mali's path. DM_VK_BC_TRANSCODE=on: transcoded
-    if (g_props.vendorID == 0x1010) { const char *tc = getenv("DM_VK_BC_TRANSCODE");
+    //   (vk_quirks.h Q_BC_DECODE, every game)
+    if (quirk_default(Q_BC_DECODE, &g_gpuid)) { const char *tc = getenv("DM_VK_BC_TRANSCODE");
+        quirk_note(Q_BC_DECODE, !(tc && strcmp(tc, "off")), tc != NULL);
         if (!tc) setenv("DM_VK_BC_TRANSCODE", "off", 0);
         VLOG("PowerVR: BC textures %s (DM_VK_BC_TRANSCODE=%s, %s)", tc && strcmp(tc, "off") ? "transcoded to ETC2 / ASTC" : "decoded to RGBA", tc ? tc : "off", tc ? "env.txt" : "default here"); }
     { const char *tc = getenv("DM_VK_BC_TRANSCODE"); nvn_fmt_vk_etc(!f2.features.textureCompressionBC && f2.features.textureCompressionETC2 && !(tc && !strcmp(tc, "off")), f2.features.textureCompressionASTC_LDR); }
+    // Descriptors updated after binding: the engine never makes such a layout, and with robustBufferAccess on (f2 passes every feature as queried) a driver whose
+    //   robustBufferAccessUpdateAfterBind is false must not have them enabled (Turnip on Adreno 740, VUID-VkDeviceCreateInfo-robustBufferAccess-10247): left off
+    if (!old11) { f12.descriptorBindingUniformBufferUpdateAfterBind = f12.descriptorBindingStorageBufferUpdateAfterBind = f12.descriptorBindingUniformTexelBufferUpdateAfterBind =
+                  f12.descriptorBindingStorageTexelBufferUpdateAfterBind = f12.descriptorBindingSampledImageUpdateAfterBind = f12.descriptorBindingStorageImageUpdateAfterBind = VK_FALSE; }
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_qf, .queueCount = 1, .pQueuePriorities = &prio };
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext };
@@ -528,7 +622,7 @@ void mtl_init(void) {
     if (g_api < VK_API_VERSION_1_1) { g_csm_real = vkCreateShaderModule; vkCreateShaderModule = vk_shader_module_10; }   // (Vulkan 1.0: every shader through spv_to_10)
     vkGetDeviceQueue(g_dev, g_qf, 0, &g_q);
     p_push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(g_dev, "vkCmdPushDescriptorSetKHR");
-    if (compctl && fic.imageCompressionControl) p_layout2 = (PFN_vkGetImageSubresourceLayout2EXT)vkGetDeviceProcAddr(g_dev, "vkGetImageSubresourceLayout2EXT");
+    if (compctl && fic.imageCompressionControl) { p_layout2 = (PFN_vkGetImageSubresourceLayout2EXT)vkGetDeviceProcAddr(g_dev, "vkGetImageSubresourceLayout2EXT"); g_compctl = 1; }
     p_hostprops = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_dev, "vkGetMemoryHostPointerPropertiesEXT");
     if (g_dtiming) { p_refresh = (PFN_vkGetRefreshCycleDurationGOOGLE)vkGetDeviceProcAddr(g_dev, "vkGetRefreshCycleDurationGOOGLE");
                      p_past = (PFN_vkGetPastPresentationTimingGOOGLE)vkGetDeviceProcAddr(g_dev, "vkGetPastPresentationTimingGOOGLE"); if (!p_refresh) g_dtiming = 0; }
@@ -548,17 +642,19 @@ void mtl_init(void) {
         VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &fc }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (!drvp) snprintf(dp.driverName, sizeof dp.driverName, "%s", g_props.vendorID == 0x13B5 ? "Mali (no driver properties: taken as ARM's)" : "unknown");
         // Samsung's Xclipse driver too: the probe self-test (float-controls) found inf - inf not NaN without them on Xclipse 540 and 940, and every check right with them
-        const char *e = getenv("DM_VK_FLOAT_CONTROLS"); int arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : g_props.vendorID == 0x13B5;
-        int sec = drvp ? dp.driverID == VK_DRIVER_ID_SAMSUNG_PROPRIETARY : g_props.vendorID == 0x144D;
+        const char *e = getenv("DM_VK_FLOAT_CONTROLS"); g_gpuid.driver_id = drvp ? (int)dp.driverID : -1;
+        int arm = gpu_is_arm_driver(&g_gpuid), sec = gpu_is_samsung_driver(&g_gpuid);
         arm_known = 1; if (arm) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); g_arm_beta = drvp && strstr(dp.driverInfo, "bet") != NULL; }
-        g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : arm || sec);
+        if (drvp) g_drv_id = (int)dp.driverID;
+        g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : quirk_default(Q_FLOAT_CONTROLS, &g_gpuid));
         // The test shader below crashed a driver (#89: Mali-G57, the start ended right after this line): a start that dies there leaves the marker, and later starts on
-        //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 tries again)
-        int fc_crashed = g_fctl && mark_file(drv_mark("float_controls_crashed"), "", 0) && !e;
+        //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 in env.txt tries again). A DM_VK_FLOAT_CONTROLS=1 from the driver check (driver-check.env:
+        //   a driver right only with them) is this driver's default, not the player's: the marker still applies to it (vk_quirks.h vkq_env_player)
+        int fc_crashed = g_fctl && mark_file(drv_mark("float_controls_crashed"), "", 0) && !vkq_env_player("DM_VK_FLOAT_CONTROLS");
         if (fc_crashed) g_fctl = 0;
         char rel[24] = ""; if (arm && g_arm_rel) snprintf(rel, sizeof rel, " r%dp%d", g_arm_rel, g_arm_p);
         VLOG("driver %s (id %d)%s%s; shaders keep infinities and NaN (float controls): %s", dp.driverName, (int)dp.driverID, arm ? ", ARM's own" : sec ? ", Samsung's own" : "", rel,
-             fc_crashed ? "not asked for: the driver crashed on their test shader at an earlier start (DM_VK_FLOAT_CONTROLS=1 tries again)"
+             fc_crashed ? "not asked for: the driver crashed on their test shader at an earlier start (DM_VK_FLOAT_CONTROLS=1 in env.txt tries again)"
              : g_fctl ? "asked for" : !fc.shaderSignedZeroInfNanPreserveFloat32 ? "not supported" : "not asked for");
         if (g_fctl) mark_file(drv_mark("float_controls_crashed"), "building the float-controls test shader; if this file is still here the driver crashed doing so, and later starts go without float controls\n", 1);
         if (g_fctl) {   // a self-test: an empty compute shader patched the same way must make a pipeline, else this start goes without (the game's shaders would fail one by one)
@@ -579,10 +675,13 @@ void mtl_init(void) {
     }
     // A driver without Vulkan 1.2 or the float-controls extension: Arm's own when it is ARM's vendor ID and not a driver package (PanVK reports ARM's ID too)
     if (!arm_known && g_props.vendorID == 0x13B5 && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); }
+    g_gpuid.arm_rel = g_arm_rel; g_gpuid.arm_p = g_arm_p; g_gpuid.arm_beta = g_arm_beta;   // (the quirk table's description complete from here)
+    atomic_store(&g_gpuid_done, 1);
+    gpu_id_log(&g_gpuid); quirk_note(Q_FLOAT_CONTROLS, g_fctl, vkq_env_src("DM_VK_FLOAT_CONTROLS"));
     // Arm erratum 3779215 (r38p1 to r49p0 and r50p0 to r51p0, fixed in r49p1 and r52p0; a beta r49p1, the G925's, is not known to have the fix): a clamp to zero of a value
     //   selected between constants compiled as a plain min or max. Shaders on those drivers get spv_clamp_zero; DM_VK_CLAMP_ZERO=0 / 1 decides on any driver
-    { int v = g_arm_rel * 100 + g_arm_p; const char *e = getenv("DM_VK_CLAMP_ZERO");
-      g_clampzero = e ? atoi(e) != 0 : g_arm_rel && ((v >= 3801 && v < 4901) || (g_arm_beta && v >= 4901 && v < 4902) || (v >= 5000 && v < 5101));
+    { const char *e = getenv("DM_VK_CLAMP_ZERO");
+      g_clampzero = quirk_note(Q_CLAMP_ZERO, e ? atoi(e) != 0 : quirk_default(Q_CLAMP_ZERO, &g_gpuid), e != NULL);
       if (g_clampzero) VLOG("shaders: a clamp to zero of a value selected between constants gets a zero the compiler cannot fold (Arm erratum 3779215%s)", e ? ", DM_VK_CLAMP_ZERO" : g_arm_beta ? ", a beta driver" : ""); }
     // NaN in min / max / saturate (spv_nan_minmax): the frame capture of a white scene on Arm's own driver (#110, Mali-G615 MC2 r44p1; #111 the G925 on r49p1 too) has
     //   every lit surface's first draw put the format's maximum in the lit scene, with float controls on; PanVK on the same GPUs draws it right. Maxwell's min / max / saturate
@@ -597,8 +696,24 @@ void mtl_init(void) {
     //   DM_VK_FMZ=0 / 1 (the in-game menu's Mali tests) decides on any GPU
     //   Since v0.76 on by default for PanVK only: on Arm's own driver it did not help (#172, Mali-G720 r49p1, still white on v0.75) and made it worse on Bifrost (#215,
     //   Mali-G52 r26p0: 86 % white instead of 81 %, the dark outlines gone, about 10 % slower)
-    // R11G11B10F render targets as RGBA16F (nvn_fmt_vk.c nvn_fmt_vk_b10_as_rgba16): a test for Mali's white lit scene, off unless DM_VK_B10_AS_RGBA16=1 (the menu's Mali tests)
-    { const char *e = getenv("DM_VK_B10_AS_RGBA16"); if (e && atoi(e) > 0) { nvn_fmt_vk_b10_as_rgba16(1); VLOG("formats: R11G11B10F drawn and sampled as RGBA16F (DM_VK_B10_AS_RGBA16, a Mali test)"); } }
+    // R11G11B10F render targets as RGBA16F (nvn_fmt_vk.c nvn_fmt_vk_b10_as_rgba16, route A), and the other route (DM_VK_B10_NOCOMPRESS, tex_new, route B: R11G11B10F
+    //   kept, its render targets made without framebuffer compression, for the case that Arm's driver mishandles the packed float format in AFBC; the log names how it
+    //   was done and what the driver then reports for each target, "b10 target"): Mali's white lit scene. Route A is the default on Arm's own driver with Sword /
+    //   Shield, where the white-screen ladder (mali_white_vk.inc) checks the lit scene while playing and moves on to route B, then to offering PanVK, start by start;
+    //   both are off on every other driver and game (vk_quirks.h Q_B10_STANDIN / Q_MALI_WHITE_CHECK: Arm's own driver, a game whose profile says mali_lit_standin).
+    //   DM_VK_B10_AS_RGBA16 / DM_VK_B10_NOCOMPRESS in env.txt (the menu's Mali tests) always win
+    { int a = 0, b = 0; const char *wa = "", *wb = "";
+      mw_init(&a, &b, &wa, &wb);
+      if (a) { nvn_fmt_vk_b10_as_rgba16(1); VLOG("formats: R11G11B10F drawn and sampled as RGBA16F (%s): texels converted where the game's memory meets the image, its alpha read as 1 ('b10 swap:' lines name each kind once)", wa); }
+      // (a result of route A alone does not tell the format from the compression: RGBA16F may get no framebuffer compression where R11G11B10F gets it, on a GPU
+      //   without FP16 AFBC. Read it beside DM_VK_B10_NOCOMPRESS's (route B: the ladder's next step), by the picture. Both are Sword / Shield fixes: see b10_on)
+      if (nvn_fmt_vk_b10_swapped(0x3F)) VLOG("formats: the float-target test changes the format and may change the compression with it (a GPU without FP16 framebuffer compression): read its result beside DM_VK_B10_NOCOMPRESS's%s",
+                                             g_gpuid.eng & ENG_MALI_LIT_STANDIN ? "" : "; a Sword / Shield test: here it only makes every R11G11B10F image twice the size (Legends: Arceus draws its G-buffer and bloom in it)");
+      g_b10nc = b;
+      if (g_b10nc) VLOG("formats: R11G11B10F render targets made without framebuffer compression (%s): %s%s", wb, g_compctl
+            ? "VK_EXT_image_compression_control, compression disabled image by image"
+            : "the driver has no VK_EXT_image_compression_control: made mutable with no list of view formats, which keeps Mali's AFBC (and Adreno's UBWC) off",
+            g_gpuid.eng & ENG_MALI_LIT_STANDIN ? "" : " (a Sword / Shield test: see b10_on)"); }
     //   Since chain 91294b095153 the translator writes FMZ into the multiplies the game marked (as yuzu / Eden do), on every GPU: PanVK keeps its fix and the multiplies
     //   the game did not mark keep their NaN (the dark outlines on Mali-G52, #215), with a fraction of the cost. The every-multiply copy is off by default, DM_VK_FMZ=1 to compare
     { const char *e = getenv("DM_VK_FMZ"); g_fmz = e && *e && atoi(e) > 0;
@@ -613,22 +728,30 @@ void mtl_init(void) {
                         g_probe & PROBE_INPUTS ? " every input from the vertex shader" : "", g_probe & PROBE_DIV ? " every division" : "", g_probe & PROBE_OUTPUT ? " what they write (±64)" : "", e);
       if (g_probe & (PROBE_MUL | PROBE_ADD | PROBE_FMA)) VLOG("shaders: DIAGNOSTIC, fragment shaders clamp every%s%s%s result (±16384)", g_probe & PROBE_MUL ? " multiply" : "",
                         g_probe & PROBE_ADD ? " add / subtract" : "", g_probe & PROBE_FMA ? " fused multiply-add" : ""); } }
-    { const char *e = getenv("DM_VK_NAN_MINMAX"); g_nanmm = e ? atoi(e) : g_arm_rel ? 2 : 0; if (g_nanmm < 0 || g_nanmm > 2) g_nanmm = 1;
+    { const char *e = getenv("DM_VK_NAN_MINMAX"); g_nanmm = e ? atoi(e) : quirk_default(Q_NAN_MINMAX, &g_gpuid); if (g_nanmm < 0 || g_nanmm > 2) g_nanmm = 1; quirk_note(Q_NAN_MINMAX, g_nanmm, e != NULL);
       if (g_nanmm) VLOG("shaders: min / max / saturate give the operand that is not NaN, as on the Switch's GPU (NMin / NMax / NClamp%s%s)", g_nanmm == 2 ? " and the rule written out with isnan" : "",
                         e ? ", DM_VK_NAN_MINMAX" : ", Arm's own driver"); }
     // Maxwell's special functions at their edge cases (spv_exact_math): log2 (0) = -inf, exp2 below 2^-126 = 0, inversesqrt (0) = +inf, a negative root NaN, F2I clamped
     //   with NaN 0, where SPIR-V leaves the answer to the driver. The translated lighting takes pow (max (0, x), y) as exp2 (log2 (x) * y), so x = 0 on every surface facing
     //   away from a light, and still white on Arm's own driver in v0.67 with every switch above (#47: Mali-G615 MC6, r44p1); PanVK draws the same shaders right.
     //   On by default with Arm's own driver; DM_VK_EXACT_MATH=<mask> chooses (1 log2, 2 exp2, 4 inversesqrt, 8 sqrt, 16 float to int; 31 all, 0 none) on any driver
-    { const char *e = getenv("DM_VK_EXACT_MATH"); g_exact = e ? (unsigned)atoi(e) & EXACT_ALL : g_arm_rel ? EXACT_ALL : 0;
+    { const char *e = getenv("DM_VK_EXACT_MATH"); g_exact = e ? (unsigned)atoi(e) & EXACT_ALL : quirk_default(Q_EXACT_MATH, &g_gpuid) ? EXACT_ALL : 0; quirk_note(Q_EXACT_MATH, (int)g_exact, e != NULL);
       if (g_exact) VLOG("shaders: Maxwell's answers for log2 / exp2 / inversesqrt / sqrt / float-to-int at their edge cases (mask %u%s)", g_exact, e ? ", DM_VK_EXACT_MATH" : ", Arm's own driver"); }
     // The translator's registers start at zero (spv_init_locals): a register read on a path that did not write it is undefined in SPIR-V; Mesa's compilers make it 0 (PanVK
     //   drew the lit scene right on the phones where Arm's driver drew it at the format's maximum), Arm's driver may keep anything. Still white with spv_exact_math on all
     //   five classes (#47, mali-white-test1). On by default with Arm's own driver; DM_VK_INIT_LOCALS=0 / 1 decides on any driver
-    { const char *e = getenv("DM_VK_INIT_LOCALS"); g_initloc = e ? atoi(e) != 0 : g_arm_rel != 0;
+    { const char *e = getenv("DM_VK_INIT_LOCALS"); g_initloc = quirk_note(Q_INIT_LOCALS, e ? atoi(e) != 0 : quirk_default(Q_INIT_LOCALS, &g_gpuid), e != NULL);
       if (g_initloc) VLOG("shaders: the translator's registers start at zero (undefined values as Mesa's compilers make them%s)", e ? ", DM_VK_INIT_LOCALS" : ", Arm's own driver"); }
+    // textureQueryLod's level (spv_query_lod): Arm's own driver returns floor (LOD) for it, ignoring the texture's level count (dEQP-VK texturequerylod on a Mali-G615 MC6
+    //   stock driver: 63 of 190 failed, the LOD component right in all); the game's TMML reads only that component. On by default with Arm's own driver; DM_VK_QUERY_LOD=0 / 1
+    { const char *e = getenv("DM_VK_QUERY_LOD"); g_qlod = quirk_note(Q_QUERY_LOD, e ? atoi(e) != 0 : quirk_default(Q_QUERY_LOD, &g_gpuid), e != NULL);
+      if (g_qlod) VLOG("shaders: texture LOD queries give the level as clamp (LOD, 0, levels - 1)%s", e ? " (DM_VK_QUERY_LOD)" : " (Arm's own driver)"); }
     // Dual-source blending (the game's blend factors SRC1_*) needs dualSrcBlend; Arm's own driver has none (r44p1), and a pipeline using it there is undefined: those
     //   factors become the first output's (bfac_dev), named once in the log. DM_VK_DUALSRC=keep passes them as they are
+    // Transform feedback (Legends: Arceus skins its characters and sways its trees with it) is captured by the vertex shader storing into buffers: that needs
+    //   vertexPipelineStoresAndAtomics (Arceus-Native-Android#6: on Arm's driver the player, the Pokemon and swaying trees vanished, PanVK drew them)
+    g_vstores = f2.features.vertexPipelineStoresAndAtomics != 0;
+    VLOG("vertex shader stores (transform feedback captures): %s", f2.features.vertexPipelineStoresAndAtomics ? "supported" : "[RED] not supported by this driver: captured vertices stay empty, animated models vanish");
     g_dualsrc = f2.features.dualSrcBlend || (getenv("DM_VK_DUALSRC") && !strcmp(getenv("DM_VK_DUALSRC"), "keep"));
     if (getenv("DM_VK_DUALSRC") && !strcmp(getenv("DM_VK_DUALSRC"), "emulate")) g_dualsrc = 0;   // (a test: the two-step blend of draw on a driver that has dualSrcBlend)
     if (!f2.features.dualSrcBlend) VLOG("blending: the driver has no dual-source blending (dualSrcBlend): the game's SRC1 blend factors %s", g_dualsrc ? "passed as they are (DM_VK_DUALSRC=keep)" : "become the first output's");
@@ -637,6 +760,7 @@ void mtl_init(void) {
       const VkPhysicalDeviceFeatures *F = &f2.features;
       g_drawp = g_api < VK_API_VERSION_1_1 ? g_drawp : old11 ? fsdp.shaderDrawParameters != 0 : f11.shaderDrawParameters != 0;
       g_minmax = g_api >= VK_API_VERSION_1_2 && !old11 ? f12.samplerFilterMinmax != 0 : g_minmax;
+      if (g_api >= VK_API_VERSION_1_2 && !old11 && f12.samplerMirrorClampToEdge) g_mclamp = 1;   // (the feature is enabled with the device: f2 is passed as queried)
       g_f_clamp = F->depthClamp; g_f_logic = F->logicOp; g_f_nonsolid = F->fillModeNonSolid; g_f_indblend = F->independentBlend; g_f_biasclamp = F->depthBiasClamp; g_f_aniso = F->samplerAnisotropy;
       g_feat_have = (F->geometryShader ? SPV_NEED_GEOM : 0) | (F->tessellationShader ? SPV_NEED_TESS : 0) | (F->shaderFloat64 ? SPV_NEED_F64 : 0) | (F->shaderInt64 ? SPV_NEED_I64 : 0)
                   | (F->shaderInt16 ? SPV_NEED_I16 : 0) | (F->shaderTessellationAndGeometryPointSize ? SPV_NEED_TGPSIZE : 0) | (F->shaderImageGatherExtended ? SPV_NEED_GATHEREXT : 0)
@@ -645,6 +769,8 @@ void mtl_init(void) {
                   | (F->shaderResourceMinLod ? SPV_NEED_MINLOD : 0) | (F->shaderStorageImageExtendedFormats ? SPV_NEED_EXTFMT : 0)
                   | (F->shaderStorageImageReadWithoutFormat ? SPV_NEED_IMGRNF : 0) | (F->shaderStorageImageWriteWithoutFormat ? SPV_NEED_IMGWNF : 0) | (F->multiViewport ? SPV_NEED_MVP : 0)
                   | (F->fragmentStoresAndAtomics ? SPV_NEED_FRAGSTORE : 0);
+      if (minf || (getenv("DM_VK_NO_MCLAMP") && atoi(getenv("DM_VK_NO_MCLAMP")))) g_mclamp = 0;   // (test switch: the mirrored-repeat fallback on any GPU)
+      if (!g_mclamp) VLOG("samplers: no mirror-clamp-to-edge on this driver: the game's mirror-clamp wrap modes become mirrored repeat (the same inside one mirror)");
       if (minf) { g_drawp = g_minmax = g_f_clamp = g_f_logic = g_f_nonsolid = g_f_indblend = g_f_biasclamp = g_f_aniso = 0; }
       if (getenv("DM_VK_NO_DRAWP")) g_drawp = !atoi(getenv("DM_VK_NO_DRAWP"));   // 1: the push-constant route on any GPU; 0: draw parameters passed as before
       if (!g_drawp) VLOG("draw parameters: the device has none%s: shaders that read them get them from push constants", getenv("DM_VK_NO_DRAWP") ? " (DM_VK_NO_DRAWP)" : "");
@@ -658,10 +784,16 @@ void mtl_init(void) {
       if (!(g_feat_have & SPV_NEED_GEOM) || !(g_feat_have & SPV_NEED_TESS))
           VLOG("shader stages this device lacks: %s%s%s (programs with them are skipped)", g_feat_have & SPV_NEED_GEOM ? "" : "geometry", !(g_feat_have & SPV_NEED_GEOM) && !(g_feat_have & SPV_NEED_TESS) ? ", " : "", g_feat_have & SPV_NEED_TESS ? "" : "tessellation"); }
     // The BC layer's set-up builds and runs its shaders on this GPU: a start that dies there leaves the marker, and later starts on this driver convert on the CPU
-    //   (DM_VK_BC_GPU=1 tries again)
-    if (!f2.features.textureCompressionBC) {
+    //   (DM_VK_BC_GPU=1 tries again). Not on Vulkan 1.0: its shader is SPIR-V 1.3 and bc_gpu.c makes its module itself, past vk_shader_module_10 (simdev t_vkdev,
+    //   Mali-G72 r14p0 profile: VUID-VkShaderModuleCreateInfo-pCode-08737); BC textures are converted on the CPU there
+    if (!f2.features.textureCompressionBC && g_api >= VK_API_VERSION_1_1) {
+        // (a DM_VK_BC_GPU from the driver check, its bc-textures test having crashed or failed, is this driver's default: the marker still applies, vkq_env_player)
+        // PowerVR: its compute results already differ from the CPU's for some kinds at the start-up check, and objects came out purple on a Tensor G5 (#32, with
+        //   reflections on and off): every BC texture converted on the CPU there unless DM_VK_BC_GPU=1
         const char *be = getenv("DM_VK_BC_GPU");
-        if (mark_file(drv_mark("bc_gpu_crashed"), "", 0) && !be) VLOG("[RED] BC layer: the driver crashed setting it up at an earlier start: BC textures converted on the CPU (DM_VK_BC_GPU=1 tries again)");
+        int pvr_off = quirk_note(Q_BC_GPU_OFF, quirk_default(Q_BC_GPU_OFF, &g_gpuid) && !(be && atoi(be) > 0), vkq_env_src("DM_VK_BC_GPU"));
+        if (mark_file(drv_mark("bc_gpu_crashed"), "", 0) && !vkq_env_player("DM_VK_BC_GPU")) VLOG("[RED] BC layer: the driver crashed setting it up at an earlier start: BC textures converted on the CPU (DM_VK_BC_GPU=1 in env.txt tries again)");
+        else if (pvr_off) VLOG("BC layer: off on PowerVR (BC textures converted on the CPU; DM_VK_BC_GPU=1 turns it on)");
         else {
             mark_file(drv_mark("bc_gpu_crashed"), "setting up the BC layer (its shaders built and checked on this GPU); if this file is still here the driver crashed doing so, and later starts convert on the CPU\n", 1);
             bc_gpu_info bi = { g_dev, g_q, g_qf, vkGetDeviceProcAddr, &g_memp, vk_logf }; g_bcgpu = bc_gpu_init(&bi) ? 7 : 0;
@@ -684,8 +816,18 @@ void mtl_init(void) {
          nvn_fmt_vk_transcode(0x46) ? "transcoded to ETC2 on upload" : nvn_fmt_vk_decode(0x46) ? "decoded on upload" : "sampled by the GPU");
     completion_start();
     dummies_init();
+    // the driver self-tests at start, for a game whose profile says driver_selftests (vk_quirks.h Q_DRIVER_SELFTESTS through gpu_id.eng; Legends: Arceus: its releases
+    //   run both at start; Sword / Shield / Scarlet / Violet not yet)
+    if (quirk_note(Q_DRIVER_SELFTESTS, quirk_default(Q_DRIVER_SELFTESTS, &g_gpuid), 0)) {
+        vtx_canary();    // (whether this driver reads vertex sizes given per draw right; if not, they go into each pipeline: vtx_canary.h)
+        tf_selftest();   // (Arm's driver, Q_TF_SELFTEST: whether transform feedback captures write; tf_selftest.h)
+    }
+    tfp_decide();    // (and whether they go as points: tf_points.h)
     pcache_open();
-    if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) { pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); }
+    if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) {
+        if (prewarm_all()) atomic_store(&g_pw_hold, 1);   // (the game's first submission waits for it: prewarm_wait)
+        pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); else atomic_store(&g_pw_hold, 0);
+    }
 }
 
 // ================= Device memory (images, internal buffers) =================
@@ -716,7 +858,8 @@ void dm_vk_mem_stats(double *blocks_mb, double *used_mb) {
 static vmalloc_t vk_alloc(VkMemoryRequirements rq, VkMemoryPropertyFlags want, int map) {
     int t = mem_type(rq.memoryTypeBits, want, map ? 0 : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     if (t < 0) VDIE("no memory type for bits %#x flags %#x", rq.memoryTypeBits, want);
-    VkDeviceSize al = rq.alignment > g_props.limits.bufferImageGranularity ? rq.alignment : g_props.limits.bufferImageGranularity;
+    VkDeviceSize gr = g_props.limits.bufferImageGranularity; while (gr & (gr - 1)) gr = (gr | (gr - 1)) + 1;   // (a power of two: one 2016 PowerVR driver reports 9990)
+    VkDeviceSize al = rq.alignment > gr ? rq.alignment : gr;
     pthread_mutex_lock(&g_amu);
     for (int k = 0; k < g_nblocks; k++) {
         vblock *b = g_blocks[k]; if (b->type != (uint32_t)t || (map && !b->map)) continue;
@@ -770,6 +913,12 @@ static void vk_trim(void) {
     pthread_mutex_unlock(&g_amu);
     if (nf) { g_trim_bytes += freed; g_trim_n += nf; static int said; if (said++ < 30) VLOG("device memory: %d empty block%s given back (%.0f MB; %.0f MB in all so far)", nf, nf == 1 ? "" : "s", freed / 1048576.0, g_trim_bytes / 1048576.0); }
 }
+// The device memory this engine holds in its blocks (MB), for the log's memory line (android_main.c log_mirror): a run Android ends for memory then shows whether
+//   the growth was the engine's GPU memory or something else
+long nvn_vk_device_mb(void) {
+    double t = 0; pthread_mutex_lock(&g_amu); for (int k = 0; k < g_nblocks; k++) t += g_blocks[k]->size; pthread_mutex_unlock(&g_amu);
+    return (long)(t / 1048576);
+}
 
 // ================= Deferred destruction: objects the GPU may still use go when the submissions recorded so far are done =================
 enum { DF_IMAGE, DF_VIEW, DF_BUFFER, DF_BUFVIEW, DF_ALLOC, DF_PIPELINE, DF_FRAMEBUFFER };
@@ -791,7 +940,7 @@ static void fbc_forget(VkImageView v);   // (the framebuffers naming a view, des
 typedef struct { uint64_t h; uint8_t img; } qent;
 static qent *g_vq; static int g_vqcap = -1; static size_t g_vqhead, g_vqcount;
 static int quarantine_on(void) {
-    if (g_vqcap < 0) { const char *e = getenv("DM_VK_VIEW_QUARANTINE"); g_vqcap = e ? atoi(e) : g_arm_rel && g_dynren ? 2048 : 0;
+    if (g_vqcap < 0) { const char *e = getenv("DM_VK_VIEW_QUARANTINE"); g_vqcap = quirk_note(Q_VIEW_QUARANTINE, e ? atoi(e) : quirk_default(Q_VIEW_QUARANTINE, &g_gpuid), e != NULL);
         if (g_vqcap > 0 && !(g_vq = calloc((size_t)g_vqcap, sizeof *g_vq))) g_vqcap = 0;
         if (g_vqcap > 0) VLOG("image views: the last %d destroyed views and images kept back (Arm's driver: a reused view handle hits stale rendering state)", g_vqcap); }
     return g_vqcap > 0;
@@ -1045,12 +1194,33 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         for (int tries = 0;; tries++) {
             VKCHECK(vkAllocateMemory(g_dev, &mai, NULL, &e.mem));
             VKCHECK(vkMapMemory(g_dev, e.mem, 0, VK_WHOLE_SIZE, 0, &p));
-            int rw = 0; vs = ve = 0; FILE *mf = fopen("/proc/self/maps", "r"); char ln[512];
+            int rw = 0; vs = ve = 0; FILE *mf = fopen("/proc/self/maps", "r"); char ln[512], mline[160] = "";
             while (mf && fgets(ln, sizeof ln, mf)) { unsigned long s0, e0; char pr[8] = "";
-                if (sscanf(ln, "%lx-%lx %7s", &s0, &e0, pr) == 3 && (uintptr_t)p >= s0 && (uintptr_t)p < e0) { vs = s0; ve = e0; rw = pr[0] == 'r' && pr[1] == 'w'; break; } }
+                if (sscanf(ln, "%lx-%lx %7s", &s0, &e0, pr) == 3 && (uintptr_t)p >= s0 && (uintptr_t)p < e0) { vs = s0; ve = e0; rw = pr[0] == 'r' && pr[1] == 'w';
+                    snprintf(mline, sizeof mline, "%s", ln); mline[strcspn(mline, "\n")] = 0; break; } }
             if (mf) fclose(mf);
             if (rw && ve >= (uintptr_t)p + n) break;
-            VLOG("[RED] memory pool %p+%#llx: the driver's mapping %p is not usable (%s): kept aside, allocating again", mem, (unsigned long long)size, p, rw ? "too short" : "not writable");
+            // The Android emulator's GPU (gfxstream, the app under arm64 translation) hands out mappings that /proc/self/maps lists without rw (or not at all);
+            //   keeping each aside (313 MB) used up its memory window and the third allocation crashed inside gfxstream. Tried directly instead: the first and last
+            //   byte read and written back unchanged (process_vm_*: a fault is an error, not a signal). Usable then, always mirrored (vs = 0: the shadow route below,
+            //   never mremap, which would carry the listed protection along)
+            {   unsigned char b0, b1; struct iovec l0 = { &b0, 1 }, l1 = { &b1, 1 }, r0 = { p, 1 }, r1 = { (uint8_t *)p + n - 1, 1 };
+                int rd_ok = process_vm_readv(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_readv(getpid(), &l1, 1, &r1, 1, 0) == 1;
+                int wr_ok = rd_ok && process_vm_writev(getpid(), &l0, 1, &r0, 1, 0) == 1 && process_vm_writev(getpid(), &l1, 1, &r1, 1, 0) == 1;
+                static int said; if (said++ < 3) VLOG("memory pools: the driver's mapping %p: %s; read test %s, write test %s (errno %d)", p, vs ? mline : "not in /proc/self/maps",
+                                                     rd_ok ? "passed" : "failed", wr_ok ? "passed: used, mirrored" : "failed", errno);
+                if (wr_ok) { vs = ve = 0; break; }
+                // The emulator's gfxstream maps its host-visible memory write-only ("-w-s /dev/goldfish_address_space"), a device mapping that the process_vm calls
+                //   cannot reach (EFAULT either way). The CPU underneath is x86, where a writable page is readable too, so the game's code can use it: taken, mirrored.
+                //   (Only that device: phones never have it.)
+                char pr[8] = ""; if (vs && sscanf(mline, "%*lx-%*lx %7s", pr) == 1 && pr[1] == 'w' && strstr(mline, "/dev/goldfish_address_space") && ve >= (uintptr_t)p + n) {
+                    // moved onto the pool when it starts at p (mremap moves the pool's part and leaves the mapping's last page behind): no copies, no page tracking,
+                    //   which the translation cannot do (it cannot deliver the write faults); else mirrored
+                    int whole = vs == (uintptr_t)p && !((uintptr_t)p & (getpagesize() - 1));
+                    static int said2; if (!said2++) VLOG("memory pools: the emulator's write-only GPU mappings (/dev/goldfish_address_space, %s) used, %s", pr, whole ? "moved onto the pools" : "mirrored");
+                    if (whole) ve = (uintptr_t)p + n; else vs = ve = 0;
+                    break; } }
+            VLOG("[RED] memory pool %p+%#llx: the driver's mapping %p is not usable (%s): kept aside, allocating again", mem, (unsigned long long)size, p, rw ? "too short" : vs ? "not writable" : "not in the memory map, failed the read / write test");
             if (tries >= 16) VDIE("memory pool %p+%#llx: no usable GPU memory mapping after %d tries", mem, (unsigned long long)size, tries + 1);
         }
         {   // mremap moves whole mappings: the driver's must start at p, be page-aligned, and end exactly after the pool
@@ -1182,6 +1352,7 @@ static int pool_find(uint64_t addr, uint64_t len) {   // caller holds g_mu
 }
 // GPU buffer + offset of [addr, addr + len); 0 when it is in no pool
 static int pool_buf(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceSize *left) {
+    GOLDEN_MEM(addr, len);
     pthread_mutex_lock(&g_mu); int i = pool_find(addr, len ? len : 1);
     if (i >= 0) { *buf = g_pools[i].buf; *off = addr - g_pools[i].base; if (left) *left = g_pools[i].base + g_pools[i].size - addr; }
     pthread_mutex_unlock(&g_mu);
@@ -1209,7 +1380,7 @@ void mtl_alias_drop_pool(const void *pool);   // textures (section below)
 // A submission (mtl_sub_begin … mtl_sub_commit) records into its main command buffer; texture uploads and the first-use setup of new images go into its upload command buffer,
 // submitted just before it. CPU-visible effects (event writes, counter reports) are collected and applied by the completion thread when the GPU has finished the submission,
 // in submission order, before the fence value is published (games wait on either)
-typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; } post_op;
+typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint32_t q; } post_op;   // (q: the report's GPU timestamp query + 1, report_ts)
 typedef struct { VkBuffer buf; vmalloc_t a; uint8_t *map; VkDeviceSize used, size; } arena_blk;
 // A held submission whose stores are decided at its flush (DM_VK_FRAME_HOLD=2): its work in pieces, in order. A gap (no pass open: barriers, copies, dispatches) and each
 //   pass's contents are secondary command buffers; the flush records one primary that runs the gaps and, around each pass's secondary, begins and ends the pass with
@@ -1226,6 +1397,7 @@ typedef struct {
     wb_t *wb; int nwb, cwb;        // mirrored pools: ranges the GPU writes in this submission (copied back to the game's pages at completion)
     VkDescriptorPool *dp; int ndp, cdp;   // g_nopush: this submission's descriptor pools (dp[cdp] in use), reset when it is reused
     uint64_t frame;                 // the frame it belongs to (GPU time per frame, mtl_gpu_ms)
+    uint32_t nrq, rq_pend;           // report_ts: timestamp queries used by its counter reports, and how many wait for the open pass to end
     VkFence vf;                     // without timeline semaphores (g_tlsem 0): the fence its submission signals, waited for by the completion thread
 } sub_t;
 #define NSUB 6
@@ -1242,8 +1414,40 @@ static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 static sub_t *g_inflight[NSUB * 2]; static int g_nin;   // submitted, not yet completed, in submission order (under g_cmu)
 static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
 static int on_sub_thread(void) { return atomic_load(&g_sub_thread_set) && pthread_equal(pthread_self(), g_sub_thread); }
+static uint64_t g_frame_no;   // (defined again below, where it is used most: a tentative definition)
+#include "vk_crumbs.h"   // GPU breadcrumbs: what each submission held, printed when the GPU fails
 
-static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) g = mono_ns(); return g * 12 / 625; }
+int dm_gpu_ts614(void);   // (hle_nvn.c: DM_GPU_TS=614, the Switch GPU's 614.4 MHz ticks)
+static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) g = mono_ns(); return dm_gpu_ts614() ? g * 384 / 625 : g * 12 / 625; }
+// Counter reports with the GPU's own time (DM_VK_REPORT_TS=0: off). A report's timestamp is when the GPU reached it: Game Freak's engines time their GPU work by the
+//   reports around it and lower their own 3D render scale when it runs long (Legends: Arceus main+0xcc35a4: GPU time / 33.3 ms, at 95 % one step lighter, up to 0.8 x 0.7;
+//   Sword / Shield main+0xf6acb0, 0.8). Every report used to get the CPU's time when the whole submission was seen complete (post_apply), so two reports in one
+//   submission were nearly equal, the game saw no GPU time and never lowered its scale. Now each report writes a Vulkan timestamp query where it is recorded, and one more
+//   ends the submission (RQ_END); at completion a report's time is the completion time less the GPU time from it to the end, on the guest's 19.2 MHz clock. Differences
+//   within a submission are the GPU's own; between submissions the anchor is the completion thread's wake-up (sub-millisecond). On tilers a timestamp inside a render
+//   pass can take the pass out of tile memory (Adreno), so one recorded in an open pass is written as that pass ends (report_ts_flush): never inside a pass
+enum { RQ_PER = 64, RQ_END = RQ_PER - 1 };   // queries per submission slot; the last one ends the submission
+static VkQueryPool g_rtq; static double g_rtper; static uint64_t g_rt_last;   // (g_rt_last: reports never go back in time)
+static void report_ts_init(void) {
+    const char *e = getenv("DM_VK_REPORT_TS"); if (e && !strcmp(e, "0")) { VLOG("counter reports: CPU time at completion (DM_VK_REPORT_TS=0)"); return; }
+    uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
+    if (g_qf >= nq || qp[g_qf].timestampValidBits < 48 || !(g_props.limits.timestampPeriod > 0)) { VLOG("counter reports: CPU time at completion (the queue has no usable timestamps)"); return; }
+    VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = RQ_PER * NSUB };
+    if (vkCreateQueryPool(g_dev, &qi, NULL, &g_rtq)) { g_rtq = VK_NULL_HANDLE; return; }
+    g_rtper = g_props.limits.timestampPeriod; VLOG("counter reports: the GPU's own timestamps (%.2f ns a tick), written between passes", g_rtper);
+}
+static void report_ts_flush(VkCommandBuffer cb, sub_t *s) {   // outside any pass: the timestamps of the reports recorded in the pass that just ended
+    for (; s->rq_pend; s->rq_pend--) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rtq, (uint32_t)(s - g_subs) * RQ_PER + s->nrq - s->rq_pend);
+}
+static uint64_t report_time(sub_t *s, uint32_t q, uint64_t now_ticks) {   // a report's time (19.2 MHz ticks) from its query and the submission's end
+    uint64_t t[2]; uint32_t base = (uint32_t)(s - g_subs) * RQ_PER;
+    if (vkGetQueryPoolResults(g_dev, g_rtq, base + q - 1, 1, 8, &t[0], 8, VK_QUERY_RESULT_64_BIT) != VK_SUCCESS ||
+        vkGetQueryPoolResults(g_dev, g_rtq, base + RQ_END, 1, 8, &t[1], 8, VK_QUERY_RESULT_64_BIT) != VK_SUCCESS || t[1] < t[0]) return now_ticks;
+    uint64_t back = (uint64_t)((double)(t[1] - t[0]) * g_rtper * 12.0 / 625.0);   // ns → 19.2 MHz ticks
+    uint64_t r = back < now_ticks ? now_ticks - back : now_ticks;
+    if (r < g_rt_last) r = g_rt_last; g_rt_last = r;
+    return r;
+}
 static void wb_apply(sub_t *s) {
     for (int i = 0; i < s->nwb; i++) {
         pthread_mutex_lock(&g_mu); int k = pool_find(s->wb[i].addr, s->wb[i].n); pool_ent e = k >= 0 ? g_pools[k] : (pool_ent){0}; pthread_mutex_unlock(&g_mu);
@@ -1259,7 +1463,8 @@ static void post_apply(sub_t *s) {
         post_op *o = &s->post[i];
         if (o->kind == 1) { if (o->mode == 1) *o->val += o->v; else *o->val = o->v; }
         else {   // counter report {value, timestamp}: timestamps on the guest's 19.2 MHz clock; occlusion counts are not measured yet (reported as visible)
-            uint64_t t = gpu_ticks(), rec[2] = { o->type == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 0xffffu : (o->type == 0 || o->type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t };
+            uint64_t t = gpu_ticks(); if (o->q && g_rtq) t = report_time(s, o->q, t); else if (t < g_rt_last) t = g_rt_last;   // (report_ts)
+            uint64_t rec[2] = { o->type == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 0xffffu : (o->type == 0 || o->type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t };
             memcpy((void *)o->addr, rec, sizeof rec);
         }
     }
@@ -1303,9 +1508,12 @@ static void *completion_main(void *unused) { DM_THREAD_NAME("dm-complete");
         pthread_mutex_unlock(&g_cmu);
         VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_tl, .pValues = &want };
         VkResult r = g_tlsem ? vk_wait(&wi, VK_NULL_HANDLE, 2000000000ull) : vk_wait(NULL, vf, 2000000000ull);
-        if (r == VK_TIMEOUT) continue;
-        if (r) VDIE("%s failed: %d (device lost?)", g_tlsem ? "vkWaitSemaphores" : "vkWaitForFences", r);
-        post_apply(s); gpu_ts_done(s);
+        if (r == VK_TIMEOUT) {   // a submission 10 s late: the GPU hangs (no device lost yet); its breadcrumbs printed once
+            static uint64_t late, late_t, told; uint64_t now = mono_ns();
+            if (late != want) { late = want; late_t = now; } else if (told != want && now - late_t > 10000000000ull) { told = want; nvn_vk_crumbs_dump("GPU hang: a submission more than 10 s late"); }
+            continue; }
+        if (r) { nvn_vk_crumbs_dump("device lost"); VDIE("%s failed: %d (device lost?)", g_tlsem ? "vkWaitSemaphores" : "vkWaitForFences", r); }
+        cr_completed(s); post_apply(s); gpu_ts_done(s);
         pthread_mutex_lock(&g_cmu);
         memmove(g_inflight, g_inflight + 1, (size_t)--g_nin * sizeof *g_inflight);
         atomic_store(&g_done, want);
@@ -1334,12 +1542,17 @@ static void completion_start(void) {
     }
     {   uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, NULL); VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
         // Two timestamps a submission (the GPU's time per frame): on by default, as the frame-rate guard steers the resolution by it (android_main.c graphics_auto: GPU- or
-        //   CPU-bound), except on Mali and PowerVR, whose timestamps around work on a tiler are least trustworthy (they keep the old trial steps). DM_VK_GPU_TIME=0 / 1 decides
+        //   CPU-bound), except on Mali and PowerVR (vk_quirks.h Q_GPU_TIME_OFF), whose timestamps around work on a tiler are least trustworthy (they keep the old trial
+        //   steps). DM_VK_GPU_TIME=0 / 1 decides
         const char *gt = getenv("DM_VK_GPU_TIME"), *gg = getenv("DM_GRAPHICS");
-        int want_ts = gt ? atoi(gt) != 0 : (g_props.vendorID != 0x13B5 && g_props.vendorID != 0x1010); (void)gg;   // (the guard runs on most phones whatever the Graphics level: a top phone's profile says High)
+        int want_ts = !quirk_note(Q_GPU_TIME_OFF, gt ? atoi(gt) == 0 : quirk_default(Q_GPU_TIME_OFF, &g_gpuid), gt != NULL); (void)gg;   // (the guard runs on most phones whatever the Graphics level: a top phone's profile says High)
+#if DM_GAME_ENG_GPU_TIME_AUTO_ONLY   // (profile engine_quirks gpu_time_auto_only, Legends: Arceus: only where Graphics Auto steers by it, as its releases do)
+        if (!gt) want_ts = want_ts && gg && !strcmp(gg, "auto");
+#endif
         if (g_qf < nq && qp[g_qf].timestampValidBits && g_props.limits.timestampPeriod > 0 && want_ts) {
             VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * NSUB };
             if (vkCreateQueryPool(g_dev, &qi, NULL, &g_tsq)) g_tsq = VK_NULL_HANDLE; g_tsper = g_props.limits.timestampPeriod; } }
+    report_ts_init();
     pthread_t t; pthread_create(&t, NULL, completion_main, NULL); pthread_detach(t);
 }
 uint64_t mtl_last_fence(void) { return g_fence; }
@@ -1391,15 +1604,18 @@ static void pass_end(void);
 static int g_rt_stale;   // a target change kept the open pass, to be checked at the next draw or clear (rt_resolve, DM_VK_PASS_DEFER)
 static void state_reset(void);
 static uint64_t g_frame_no;
+uint64_t g_tfchk_at, g_tfchk_frame; uint32_t g_tfchk_n;   // the transform feedback check (draw_, the first capture on Arm's driver)
 static uint64_t g_dsc_gen = 1;   // descriptor pools reset (desc_flush's reuse: a set from an older generation is gone)
 static uint64_t g_wait_ring_ns;   // DM_VK_PROF: waits for a free submission slot (the GPU 6 submissions behind)
+_Atomic uint64_t g_st_slot_ns, g_st_submit_ns;   // the same, and the queue submissions, never reset (hle_nvn.c's long-frame log takes per-frame differences)
 static int hold_dec(void); static void seg_gap_begin(sub_t *s);   // (the held frame's pieces: below)
 void mtl_sub_begin(void) {
     mtl_init();
+    prewarm_wait();   // the first one: every listed pipeline is built before the game draws (DM_VK_PREWARM)
     if (g_sub) VDIE("submit re-entered");
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     sub_t *s = &g_subs[g_sub_next]; g_sub_next = (g_sub_next + 1) % NSUB;
-    if (s->fence) { uint64_t t0 = mono_ns(); mtl_wait(s->fence, UINT64_MAX); g_wait_ring_ns += mono_ns() - t0; }
+    if (s->fence) { uint64_t t0 = mono_ns(); mtl_wait(s->fence, UINT64_MAX); uint64_t d = mono_ns() - t0; g_wait_ring_ns += d; atomic_fetch_add(&g_st_slot_ns, d); }
     defer_drain();
     VKCHECK(vkResetCommandPool(g_dev, s->pool, 0)); arena_reset(s);
     for (int i = 0; i < s->ndp; i++) vkResetDescriptorPool(g_dev, s->dp[i], 0); s->cdp = 0; g_dsc_gen++;   // (desc_flush's reused sets were in these pools)
@@ -1408,10 +1624,12 @@ void mtl_sub_begin(void) {
     if (!s->prim) s->prim = s->cb;   // (the submission's own primary: allocated with it)
     s->dec = hold_dec(); s->nsec = 0; s->nseg = 0;
     if (s->dec) seg_gap_begin(s); else { s->cb = s->prim; VKCHECK(vkBeginCommandBuffer(s->cb, &bi)); }
+    s->nrq = 0; s->rq_pend = 0; if (g_rtq) vkCmdResetQueryPool(s->cb, g_rtq, (uint32_t)(s - g_subs) * RQ_PER, RQ_PER);   // (report_ts: in the primary or the first gap, before any of its writes)
     if (g_tsq) { int i = (int)(s - g_subs); s->frame = g_frame_no; unsigned k = s->frame % GRING;
         if (atomic_load(&g_gpu[k].frame) != s->frame) { atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].frame, s->frame); }
         atomic_fetch_add(&g_gpu[k].pending, 1);
         vkCmdResetQueryPool(s->cb, g_tsq, (uint32_t)i * 2, 2); vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_tsq, (uint32_t)i * 2); }
+    cr_sub_begin(s);
     g_sub = s;
     g_bar_clean = g_after_pass = 0;
     static int inited; if (!inited) { inited = 1; state_reset(); }
@@ -1422,6 +1640,34 @@ void mtl_sub_begin(void) {
 static void barrier_host(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+// Frame generation's camera guidance: the game's view-projection (column-major, its clip space) from a game-specific reader (loader.c), and the matrix from the
+//   current frame's clip space to the frame before's, prev x inverse(cur), in double. DM_FG_CAMERA=0: off
+int dm_cam_viewproj(float vp[16]) __attribute__((weak));
+static int fg_cam_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FG_CAMERA"); v = !(e && !strcmp(e, "0")); } return v; }
+static int fg_cam_m(const float *prev, const float *cur, float *out) {
+    double a[16], inv[16]; for (int i = 0; i < 16; i++) a[i] = cur[i];
+    inv[0] = a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15] + a[9]*a[7]*a[14] + a[13]*a[6]*a[11] - a[13]*a[7]*a[10];
+    inv[4] = -a[4]*a[10]*a[15] + a[4]*a[11]*a[14] + a[8]*a[6]*a[15] - a[8]*a[7]*a[14] - a[12]*a[6]*a[11] + a[12]*a[7]*a[10];
+    inv[8] = a[4]*a[9]*a[15] - a[4]*a[11]*a[13] - a[8]*a[5]*a[15] + a[8]*a[7]*a[13] + a[12]*a[5]*a[11] - a[12]*a[7]*a[9];
+    inv[12] = -a[4]*a[9]*a[14] + a[4]*a[10]*a[13] + a[8]*a[5]*a[14] - a[8]*a[6]*a[13] - a[12]*a[5]*a[10] + a[12]*a[6]*a[9];
+    inv[1] = -a[1]*a[10]*a[15] + a[1]*a[11]*a[14] + a[9]*a[2]*a[15] - a[9]*a[3]*a[14] - a[13]*a[2]*a[11] + a[13]*a[3]*a[10];
+    inv[5] = a[0]*a[10]*a[15] - a[0]*a[11]*a[14] - a[8]*a[2]*a[15] + a[8]*a[3]*a[14] + a[12]*a[2]*a[11] - a[12]*a[3]*a[10];
+    inv[9] = -a[0]*a[9]*a[15] + a[0]*a[11]*a[13] + a[8]*a[1]*a[15] - a[8]*a[3]*a[13] - a[12]*a[1]*a[11] + a[12]*a[3]*a[9];
+    inv[13] = a[0]*a[9]*a[14] - a[0]*a[10]*a[13] - a[8]*a[1]*a[14] + a[8]*a[2]*a[13] + a[12]*a[1]*a[10] - a[12]*a[2]*a[9];
+    inv[2] = a[1]*a[6]*a[15] - a[1]*a[7]*a[14] - a[5]*a[2]*a[15] + a[5]*a[3]*a[14] + a[13]*a[2]*a[7] - a[13]*a[3]*a[6];
+    inv[6] = -a[0]*a[6]*a[15] + a[0]*a[7]*a[14] + a[4]*a[2]*a[15] - a[4]*a[3]*a[14] - a[12]*a[2]*a[7] + a[12]*a[3]*a[6];
+    inv[10] = a[0]*a[5]*a[15] - a[0]*a[7]*a[13] - a[4]*a[1]*a[15] + a[4]*a[3]*a[13] + a[12]*a[1]*a[7] - a[12]*a[3]*a[5];
+    inv[14] = -a[0]*a[5]*a[14] + a[0]*a[6]*a[13] + a[4]*a[1]*a[14] - a[4]*a[2]*a[13] - a[12]*a[1]*a[6] + a[12]*a[2]*a[5];
+    inv[3] = -a[1]*a[6]*a[11] + a[1]*a[7]*a[10] + a[5]*a[2]*a[11] - a[5]*a[3]*a[10] - a[9]*a[2]*a[7] + a[9]*a[3]*a[6];
+    inv[7] = a[0]*a[6]*a[11] - a[0]*a[7]*a[10] - a[4]*a[2]*a[11] + a[4]*a[3]*a[10] + a[8]*a[2]*a[7] - a[8]*a[3]*a[6];
+    inv[11] = -a[0]*a[5]*a[11] + a[0]*a[7]*a[9] + a[4]*a[1]*a[11] - a[4]*a[3]*a[9] - a[8]*a[1]*a[7] + a[8]*a[3]*a[5];
+    inv[15] = a[0]*a[5]*a[10] - a[0]*a[6]*a[9] - a[4]*a[1]*a[10] + a[4]*a[2]*a[9] + a[8]*a[1]*a[6] - a[8]*a[2]*a[5];
+    double det = a[0]*inv[0] + a[1]*inv[4] + a[2]*inv[8] + a[3]*inv[12];
+    if (!(fabs(det) > 1e-20) || det != det) return 0;
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) {   // out = prev x inv (column-major: element (r, c) at c * 4 + r)
+        double v = 0; for (int k = 0; k < 4; k++) v += (double)prev[k * 4 + r] * (inv[c * 4 + k] / det); out[c * 4 + r] = (float)v; if (v != v) return 0; }
+    return 1;
 }
 // Barriers in the submission's command buffer (from the Arceus engine; on Adreno each full one waits for the GPU to go idle and flushes its caches):
 //   g_bar_clean: the last thing recorded was a full barrier, so a barrier before the next pass orders nothing more (it is left out)
@@ -1437,10 +1683,11 @@ static int barrier_bits_on(void) { static int v = -1; if (v < 0) { const char *e
 // Qualcomm's own driver before Vulkan 1.3 (Adreno 6xx / 7xx phones on driver 1.1.128 and the like; not Turnip, which names itself "Turnip Adreno"): skinned and
 //   swaying models explode into spikes there with barriers narrowed between draw passes (Arceus-Native-Android #34 #46 #59 on the Adreno 710, Galar #209 on the
 //   Adreno 650), as on Xclipse until v0.39 made its barriers full (#31 → #48 #78). The vertex-stride fix and the stride canary did not change it; Turnip on the same
-//   phone draws them right. So these drivers get a full barrier before each pass, as Xclipse, PowerVR and Mali (DM_VK_BARRIER=relaxed: narrowed again)
-static int old_qcom_driver(void) { return g_props.vendorID == 0x5143 && VK_API_VERSION_MINOR(g_props.apiVersion) < 3 && !strncmp(g_props.deviceName, "Adreno", 6); }
-static int barrier_relaxed(void) { static int v = -1; if (v < 0) { { const char *e = getenv("DM_VK_BARRIER");   // (relaxed by default for Legends: Arceus, and for every game on Adreno (Qualcomm, vendor 0x5143); Mali and the rest keep full barriers)
-        v = e && (!strcmp(e, "full") || !strcmp(e, "relaxed")) ? !strcmp(e, "relaxed") : (arceus_pass_default("DM_VK_BARRIER", "full", "relaxed") || g_props.vendorID == 0x5143) && !old_qcom_driver(); } VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
+//   phone draws them right. So these drivers get a full barrier before each pass, as Xclipse, PowerVR and Mali (DM_VK_BARRIER=relaxed: narrowed again).
+//   The rule is vk_quirks.h's Q_BARRIER_RELAXED (with gpu_is_old_qcom, which was old_qcom_driver here), the same for every game
+static int barrier_relaxed(void) { static int v = -1; if (v < 0) { { const char *e = getenv("DM_VK_BARRIER");   // (relaxed by default on Adreno (Qualcomm, vendor 0x5143) for every game; Mali, Xclipse, PowerVR keep full barriers: on those, Legends: Arceus flickered with them relaxed, Arceus-Native-Android #20 #31 #32)
+        int set = e && (!strcmp(e, "full") || !strcmp(e, "relaxed"));
+        v = quirk_note(Q_BARRIER_RELAXED, set ? !strcmp(e, "relaxed") : quirk_default(Q_BARRIER_RELAXED, &g_gpuid), set); } VLOG("barriers before draw passes: %s", v ? "left out after a full one, narrowed between passes (DM_VK_BARRIER=full: a full one each)" : "a full one each"); } return v; }
 static void barrier_all(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
@@ -1557,6 +1804,7 @@ static void seg_pass_begin(const VkRenderingInfo *ri, const uint32_t *cf, uint32
     VKCHECK(vkBeginCommandBuffer(cb, &bi)); g->cb = cb; s->cb = cb; g_seg_in = 1;
 }
 static void rend_begin(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain) {
+    cr_pass_begin(cb, ri, cf, dsfmt);   // (breadcrumbs: the pass noted for its submission)
     if (g_sub && g_sub->dec && cb == g_sub->cb && !g_seg_in && !swapchain) { seg_pass_begin(ri, cf, dsfmt, samples); g_seg_fgp = -1; return; }
     g_seg_fgp = -1;
     rend_begin_ex(cb, ri, cf, dsfmt, samples, swapchain, 0);
@@ -1601,8 +1849,11 @@ static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const u
     vkCmdBeginRenderPass(cb, &bi, secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
 }
 static void rend_end(VkCommandBuffer cb) {
-    if (g_sub && g_sub->dec && g_seg_in && cb == g_sub->cb) { VKCHECK(vkEndCommandBuffer(cb)); seg_push(g_sub, g_sub->cur); g_seg_in = 0; seg_gap_begin(g_sub); return; }   // (the pass's secondary ends; a new gap)
+    // (a held frame: the pass's secondary ends and a new gap begins; the breadcrumbs' pass closes there, its GPU mark with DM_VK_BREADCRUMBS in the gap, after the pass:
+    //   a fill is not allowed inside a pass. That mark is work in the gap, so with breadcrumbs on the passes around it are not run as one, seg_record_prim)
+    if (g_sub && g_sub->dec && g_seg_in && cb == g_sub->cb) { VKCHECK(vkEndCommandBuffer(cb)); seg_push(g_sub, g_sub->cur); g_seg_in = 0; seg_gap_begin(g_sub); cr_pass_end(g_sub->cb); return; }
     if (g_dynren) vkCmdEndRendering(cb); else vkCmdEndRenderPass(cb);
+    cr_pass_end(cb);   // (breadcrumbs: with DM_VK_BREADCRUMBS the GPU marks the pass done)
 }
 // the render pass a secondary's contents are recorded against: the one rend_begin_ex would begin for ri (compatibility leaves the load / store ops out)
 static VkRenderPass rp_compat(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples) {
@@ -1652,7 +1903,7 @@ static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFe
     pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, g_tlsem ? VK_NULL_HANDLE : vf); pthread_mutex_unlock(&g_qmu);
     if (r && g_host_import && host_import_mark(1)) VLOG("[RED] vkQueueSubmit failed with imported host memory: the next start will not import it");
     if (r && g_heapmap > 0 && heap_import_mark(1)) VLOG("[RED] vkQueueSubmit failed with dma-buf pools: the next start moves the driver's mappings instead");
-    if (r) VDIE("vkQueueSubmit failed: %d", r);
+    if (r) { nvn_vk_crumbs_dump("vkQueueSubmit failed"); VDIE("vkQueueSubmit failed: %d", r); }
 }
 // ================= The whole frame held (renderer phase 2, DM_VK_FRAME_HOLD=1; off by default until measured on phones) =================
 // A finished submission is not handed to the GPU at once: the frame's submissions wait until the frame is presented, so the frame is known whole before any of it runs
@@ -1665,7 +1916,9 @@ static uint64_t g_hold_frames, g_hold_split;   // frames submitted whole at thei
 // Default (the user's choice after the S25+ test, 2026-11-19: mode 2 looked better): mode 2 where the replay has a thread of its own (hle_nvn.c DM_NVN_ASYNC, Auto: Adreno),
 //   whose ~7 ms more a frame then stays off the game's thread; off where the replay runs on the game's thread
 int nvn_async_on(void) __attribute__((weak));
-static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : nvn_async_on && nvn_async_on() ? 2 : 0; if (v < 0 || v > 2) v = 0;
+// (profile engine_quirks frame_hold_off, Legends: Arceus: off by default, DM_VK_FRAME_HOLD=1 / 2 to try: its transform feedback capture passes and report timestamps
+//   have not been run held on a phone)
+static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : !DM_GAME_ENG_FRAME_HOLD_OFF && nvn_async_on && nvn_async_on() ? 2 : 0; if (v < 0 || v > 2) v = 0;
     VLOG("frames: %s", v == 2 ? "held whole until presented, each pass's stores decided from the whole frame (DM_VK_FRAME_HOLD=2): up to a frame later on screen"
                        : v ? "held whole until presented (DM_VK_FRAME_HOLD=1): up to a frame later on screen" : "submitted as recorded"); } return v; }
 static uint64_t g_dec_dc, g_dec_fix, g_dec_passes;   // stores left out (overwritten unread), stores put back (read after all: a guess elsewhere was wrong), passes decided
@@ -1680,7 +1933,7 @@ static void hold_flush(int why) { if (!atomic_load(&g_nheld)) return; pthread_mu
 // Fence values are handed out under g_cmu so the present thread's submissions (screenshots) and the game's stay in order on the timeline
 static uint64_t submit_tracked(sub_t *s, VkCommandBuffer *cbs, uint32_t n) {
     pthread_mutex_lock(&g_cmu);
-    uint64_t f = ++g_fence; s->fence = f;
+    uint64_t f = ++g_fence; s->fence = f; cr_submitted(s);
     if (!g_tlsem) {   // a new fence for this submission (the slot is reused only after its last submission completed, so the old fence is no longer waited on)
         if (s->vf) vkDestroyFence(g_dev, s->vf, NULL);
         VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; s->vf = VK_NULL_HANDLE; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &s->vf));
@@ -1742,6 +1995,7 @@ uint64_t mtl_sub_commit(void) {
     if (s->dec && g_seg_in) rend_end(s->cb);   // (a pass still open: its secondary closed, a gap after it)
     shadow_sync_ordered(s);   // (into the upload command buffer, which runs before this submission's work)
     if (g_tsq) vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, (uint32_t)(s - g_subs) * 2 + 1);
+    if (g_rtq) { report_ts_flush(s->cb, s); vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rtq, (uint32_t)(s - g_subs) * RQ_PER + RQ_END); }
     barrier_host(s->cb);
     VKCHECK(vkEndCommandBuffer(s->cb));
     if (s->dec) { seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb, .work = ~0u }); s->cb = s->prim; g_gap_cb = VK_NULL_HANDLE; }   // (the primary is recorded at the flush: seg_record_prim)
@@ -1749,7 +2003,7 @@ uint64_t mtl_sub_commit(void) {
     if (s->ucb_open) { barrier_all(s->ucb); VKCHECK(vkEndCommandBuffer(s->ucb)); cbs[n++] = s->ucb; s->ucb_open = 0; }
     cbs[n++] = s->cb;
     g_sub = NULL;
-    uint64_t vt0 = mono_ns(); uint64_t r = submit_tracked(s, cbs, n); g_vp_c += mono_ns() - vt0;   // (DM_VK_PROF: the queue submission)
+    uint64_t vt0 = mono_ns(); uint64_t r = submit_tracked(s, cbs, n); uint64_t vd = mono_ns() - vt0; g_vp_c += vd; atomic_fetch_add(&g_st_submit_ns, vd);   // (DM_VK_PROF: the queue submission)
     return r;
 }
 void mtl_drain(void) { mtl_finish(); }
@@ -1760,8 +2014,28 @@ static void post(post_op o) {
 }
 // One-off command buffer for work outside a submission (uploads requested off the submit thread, readbacks): recorded, submitted and waited for at once
 static VkCommandPool g_once_pool; static pthread_mutex_t g_once_mu = PTHREAD_MUTEX_INITIALIZER;
+// One-off uploads (a texture or a new image's first clear, recorded off the submit thread) are not waited for (DM_VK_ONCE_WAIT=1: waited, as before): a one-off is
+//   ordered after everything submitted before it, so waiting for it meant waiting for all the GPU work queued so far. On a slow GPU that was a frame or two each time:
+//   a 16x16 texture took 30-70 ms on a Mali-G68 with PanVK (Violet, 2026-11-21), a game thread that made seven new textures stood 3 s. Its full barriers at the end
+//   order it before every later submission; its command buffer and staging buffer go once its fence has signalled (once_reap, at the next one-off, at most 64 waiting)
+typedef struct { VkCommandBuffer cb; VkFence f; VkBuffer sb; vmalloc_t tmp; } once_pend;
+static once_pend g_once_p[64]; static int g_once_np;
+// v0.96 (2026-11-23): WAITED by default again. Not waited, Legends: Arceus on a Galaxy S25+ (Adreno 830) showed single frames with terrain and trees pale and
+//   untextured while walking and in battle (10-27 such frames in 10 s); with the wait, none. Why the ordering is not enough is not found yet. DM_VK_ONCE_WAIT=0: not waited
+static int once_wait(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ONCE_WAIT"); v = !(e && *e && atoi(e) == 0); } return v; }
+static void once_free(once_pend *o) {
+    vkDestroyFence(g_dev, o->f, NULL); vkFreeCommandBuffers(g_dev, g_once_pool, 1, &o->cb);
+    if (o->sb) { vkDestroyBuffer(g_dev, o->sb, NULL); vk_free(o->tmp); }
+}
+static void once_reap(int all) {   // (g_once_mu held) the finished ones freed; all: waited for first
+    for (int i = 0; i < g_once_np;) {
+        if (all) vk_wait(NULL, g_once_p[i].f, UINT64_MAX);
+        else if (vkGetFenceStatus(g_dev, g_once_p[i].f) != VK_SUCCESS) { i++; continue; }
+        once_free(&g_once_p[i]); g_once_p[i] = g_once_p[--g_once_np]; }
+}
 static VkCommandBuffer once_begin(void) {
     pthread_mutex_lock(&g_once_mu);
+    if (g_once_np) once_reap(0);
     if (!g_once_pool) { VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_qf }; VKCHECK(vkCreateCommandPool(g_dev, &pci, NULL, &g_once_pool)); }
     VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_once_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
     VkCommandBuffer cb; VKCHECK(vkAllocateCommandBuffers(g_dev, &cai, &cb));
@@ -1779,6 +2053,21 @@ static void once_end(VkCommandBuffer cb) {   // ordered after everything submitt
     if (r) VDIE("one-off submit failed: %d", r);
     vk_wait(NULL, f, UINT64_MAX); vkDestroyFence(g_dev, f, NULL);
     vkFreeCommandBuffers(g_dev, g_once_pool, 1, &cb);
+    pthread_mutex_unlock(&g_once_mu);
+}
+// once_end without the wait (see once_begin): sb / tmp, a staging buffer of its own, go with it (VK_NULL_HANDLE: none)
+static void once_end_async(VkCommandBuffer cb, VkBuffer sb, vmalloc_t tmp) {
+    if (once_wait()) { once_end(cb); if (sb) { vkDestroyBuffer(g_dev, sb, NULL); vk_free(tmp); } return; }
+    barrier_all(cb); barrier_host(cb); VKCHECK(vkEndCommandBuffer(cb));
+    VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence f; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &f));
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+    hold_flush(1);   // (held work first: this one is ordered after everything recorded so far)
+    shadow_sync();
+    pthread_mutex_lock(&g_qmu); VkResult r = vkQueueSubmit(g_q, 1, &si, f); pthread_mutex_unlock(&g_qmu);
+    if (r) VDIE("one-off submit failed: %d", r);
+    if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { once_reap(0); if (g_once_np == (int)(sizeof g_once_p / sizeof *g_once_p)) { vk_wait(NULL, g_once_p[0].f, UINT64_MAX); once_reap(0); } }
+    g_once_p[g_once_np++] = (once_pend){ cb, f, sb, tmp };
+    static int said; if (!said++) VLOG("one-off uploads: not waited for (DM_VK_ONCE_WAIT=0; the default waits)");
     pthread_mutex_unlock(&g_once_mu);
 }
 static VkCommandBuffer ucb(void) {
@@ -2045,9 +2334,90 @@ static int fmt_int_class(VkFormat f) {   // 0 float / normalized, 1 uint, 2 sint
         default: return 0;
     }
 }
+// The same bits in a format of another numeric class (want: 0 float, 1 uint, 2 sint), the channel layout kept: 32-bit channels in all three, the narrower integer ones
+//   in the other signedness only (a float format of their size would convert, not reinterpret); 0: none. (tex_view_for takes the 32-bit ones only: a narrower one's
+//   other signedness extends its sign the other way)
+static VkFormat fmt_as_class(VkFormat f, int want) {
+    static const VkFormat T[][3] = {
+        { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT }, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT },
+        { VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT },
+        { 0, VK_FORMAT_R8_UINT, VK_FORMAT_R8_SINT }, { 0, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_SINT }, { 0, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_SINT },
+        { 0, VK_FORMAT_R16_UINT, VK_FORMAT_R16_SINT }, { 0, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT }, { 0, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_SINT },
+        { 0, VK_FORMAT_A2B10G10R10_UINT_PACK32, VK_FORMAT_A2B10G10R10_SINT_PACK32 } };
+    if (want < 0 || want > 2) return (VkFormat)0;
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) for (int c = 0; c < 3; c++) if (T[i][c] && T[i][c] == f) return T[i][want];
+    return (VkFormat)0;
+}
 static VkClearColorValue clear_for(VkFormat f, const float rgba[4]) {
     VkClearColorValue v; int k = fmt_int_class(f);
     for (int i = 0; i < 4; i++) { if (k == 1) v.uint32[i] = rgba[i] <= 0 ? 0 : (uint32_t)rgba[i]; else if (k == 2) v.int32[i] = (int32_t)rgba[i]; else v.float32[i] = rgba[i]; }
+    return v;
+}
+// ================= R11G11B10F drawn as RGBA16F (DM_VK_B10_AS_RGBA16, the Mali float-target test, #282) =================
+// The packed float format (NVN 0x3F) is stood in for by RGBA16F (nvn_fmt_vk.c): every 0x3F image is made RGBA16F, its texel 8 bytes where the game's memory holds 4.
+// What makes the stand-in read and write as R11G11B10F does:
+//  - the game's bytes meet it only through a conversion (b10_conv.h, exact for every packed value): uploads from the game's files and pool content expand them; buffer
+//    → texture copies expand and texture → buffer copies pack them on the GPU, in a compute shader with the same rules (b10_conv.comp, b10_copy_buf: in order with
+//    what the GPU wrote before); CPU reads pack them; a buffer texture keeps the packed format (it is the game's memory);
+//  - the packed format has no alpha: views read alpha 1 (the format's channel mapping), draws never write it and blending reads the target's alpha as 1 (pso_make,
+//    pkey.b10); clears store the colour as the packed format would (negative to 0, rounded) with alpha 1, a new image's first clear too;
+//  - what a draw writes into it is rounded as the packed format stores it (negative and -inf to 0, its mantissa, at most its largest finite value: spv_b10_outputs
+//    in a variant of the fragment shader, pso_make), where the shader's output is what gets stored: without blending, or blending by min / max. A blended result
+//    cannot be rounded in a shader: there what the blend adds up to is kept (below 0 or past 65024 too; logged once);
+//  - what a shader stores into it as a storage image likewise: through an image the shader declares R11G11B10F at load (spv_b10_image_writes, alpha 1), through one
+//    declared without a format by a compute shader after its dispatch (b10_quantize_region); a storage image only where R11G11B10F could be one (tex_new);
+//  - a texture → texture copy or blit into the stand-in from another format is then made what R11G11B10F holds there (its range and rounding: b10_quantize_region);
+//  - no view across texel sizes (b10_view_fmt): the stand-in viewed in a 4-byte format (on the Switch, its packed bits) is sampled as itself where the view is a
+//    float one (it reads the colour, not the bits: said in red) and not made at all for an integer view, a storage image or a render target (said in red); a
+//    4-byte image viewed as R11G11B10F is viewed as the packed format it holds;
+//  - storage images the shaders declare R11G11B10F are declared RGBA16F (the image they are given); texel buffers keep the packed format;
+//  - render targets: the attachment format is RGBA16F everywhere (passes, render passes, pipelines); the pipeline lists keep R11G11B10F (pso_record, prewarm);
+//  - the frame capture and the golden recorder read the stand-in as it is (RGBA16F, labelled); the golden player converts when a recording and a replay differ.
+// Each kind of meeting is logged once ("b10 swap: ..."), so a player's log shows what the swap met.
+// Not a per-game choice: both float-target tests (this one and DM_VK_B10_NOCOMPRESS) key on the format alone. They are tests for Sword / Shield's white lit scene on
+//   Arm's own driver; Legends: Arceus draws 21-31 R11G11B10F images a frame (a 1080p G-buffer, its bloom chain), which the stand-in makes twice the size and wider
+//   than many Mali GPUs' tile budget, for no white to fix there. Any default-on of either must key on the game (Sword / Shield) as well as on the driver, never on
+//   the driver alone: route A's is the quirk table's Q_B10_STANDIN (Arm's own driver, in a game whose profile says mali_lit_standin); the Android menu offers both
+//   for Sword / Shield only
+static int b10_on(void) { return nvn_fmt_vk_b10_swapped(0x3F); }   // (DM_VK_B10_AS_RGBA16, or DM_VK_PROBE=f16target)
+static int b10_swapped_tex(const vtex *x) { return x && x->fmt == VK_FORMAT_R16G16B16A16_SFLOAT && nvn_fmt_vk_b10_swapped(x->nvn_fmt); }
+static void b10_note(const char *what, const vtex *x, int other) {
+    static const char *seen[64]; static int n; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu); int i = 0; while (i < n && strcmp(seen[i], what)) i++;
+    if (i < n || n == 64) { pthread_mutex_unlock(&mu); return; } seen[n++] = what; pthread_mutex_unlock(&mu);
+    VLOG("b10 swap: %s (first: image %ux%u, %u levels, %u layers%s; format or factor met: %d)", what, x ? x->w : 0, x ? x->h : 0, x ? x->levels : 0, x ? x->layers : 0, x && x->is3d ? ", 3D" : "", other);
+}
+static uint32_t vk_fmt_bytes(VkFormat f) {   // a colour format's texel size (0: not one the engine makes)
+    int v = (int)f;
+    if (v == 1 || (v >= 9 && v <= 15)) return 1; if ((v >= 2 && v <= 8) || (v >= 16 && v <= 22) || (v >= 70 && v <= 76)) return 2; if (v >= 23 && v <= 36) return 3;
+    if ((v >= 37 && v <= 69) || (v >= 77 && v <= 83) || (v >= 98 && v <= 100) || v == 122 || v == 123) return 4; if (v >= 84 && v <= 90) return 6;
+    if ((v >= 91 && v <= 97) || (v >= 101 && v <= 103) || (v >= 110 && v <= 112)) return 8; if (v >= 104 && v <= 106) return 12; if ((v >= 107 && v <= 109) || (v >= 113 && v <= 115)) return 16;
+    return 0;
+}
+// the format a view of image t asked for in fmt is made in, for use B10V_* (who: the shader binding or target, for the log; may be NULL); VK_FORMAT_UNDEFINED: the
+//   view is not made. fmt itself unless the test is on.
+//  - the stand-in in a 4-byte format: on the Switch its packed bits read through another format, which the stand-in does not hold. A float view to sample is made in
+//    the stand-in's own RGBA16F (it reads the colour, not the bits: wrong, said in red once); an integer view (Vulkan leaves a float image read through one
+//    undefined), a storage image or a render target is not made (the slot reads 0, the target is not attached: said in red once, with the first binding's name)
+//  - a 4-byte image viewed as R11G11B10F (which the swap made RGBA16F): viewed as the packed format it holds, the bits as they are
+enum { B10V_SAMPLED, B10V_STORAGE, B10V_ATTACH };
+static VkFormat b10_view_fmt(const vtex *t, VkFormat fmt, int use, const char *who) {
+    if (!t || fmt == t->fmt || !b10_on()) return fmt;
+    if (b10_swapped_tex(t) && vk_fmt_bytes(fmt) != 8) {
+        if (use == B10V_SAMPLED && !fmt_int_class(fmt)) {
+            RED_ONCE(154, "b10 swap: the stand-in sampled through a view in 4-byte format %d (%s; on the Switch it reads the packed bits): made in RGBA16F, it reads the colour instead (wrong data: if that scene looks wrong, turn the test off)", fmt, who ? who : "-");
+            return t->fmt; }
+        if (use == B10V_SAMPLED) RED_ONCE(155, "b10 swap: the stand-in sampled through an integer view in 4-byte format %d (%s; on the Switch its packed bits): there are none here, it reads 0 (wrong data: turn the test off)", fmt, who ? who : "-");
+        else if (use == B10V_STORAGE) RED_ONCE(156, "b10 swap: the stand-in bound as a storage image in 4-byte format %d (%s; on the Switch its packed bits): not bound, it reads 0 and takes no writes (wrong data: turn the test off)", fmt, who ? who : "-");
+        else RED_ONCE(157, "b10 swap: the stand-in as a render target in 4-byte format %d (%s; on the Switch drawn as its packed bits): not attached, the pass's draws into it are lost (wrong picture: turn the test off)", fmt, who ? who : "-");
+        return VK_FORMAT_UNDEFINED;
+    }
+    if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT && !b10_swapped_tex(t) && vk_fmt_bytes(t->fmt) == 4) { b10_note("a 4-byte image viewed as R11G11B10F: viewed as the packed format it holds", t, t->fmt); return VK_FORMAT_B10G11R11_UFLOAT_PACK32; }
+    return fmt;
+}
+// a clear of the stand-in: the colour as R11G11B10F stores it (negative to 0, rounded to its precision, the largest finite value at most), alpha 1
+static VkClearColorValue b10_clear(const float rgba[4]) {
+    VkClearColorValue v; v.float32[0] = b10_quantize(rgba[0], B10_MR); v.float32[1] = b10_quantize(rgba[1], B10_MR); v.float32[2] = b10_quantize(rgba[2], B10_MB); v.float32[3] = 1.0f;
     return v;
 }
 // First use of a new image: to GENERAL (where every image stays), cleared to 0 when asked (new Switch memory reads 0; a new Vulkan image is undefined)
@@ -2059,10 +2429,11 @@ static void img_init(vtex *t, int zero) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
     if (zero && t->samples <= 1) {
         VkImageSubresourceRange r = { t->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
-        if (t->aspect & VK_IMAGE_ASPECT_COLOR_BIT) { VkClearColorValue c = {{0}}; vkCmdClearColorImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
+        if (t->aspect & VK_IMAGE_ASPECT_COLOR_BIT) { VkClearColorValue c = {{0}}; if (b10_swapped_tex(t)) c.float32[3] = 1.0f;   // (the stand-in's alpha is 1: see b10_on)
+            vkCmdClearColorImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
         else { VkClearDepthStencilValue c = {0, 0}; vkCmdClearDepthStencilImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &r); }
     }
-    if (once) once_end(cb);
+    if (once) once_end_async(cb, VK_NULL_HANDLE, (vmalloc_t){0});
 }
 // Texture quality (DM_VK_TEX_QUALITY=half, the device profile's choice for weaker GPUs): the game's own block-compressed textures of 512x512 and up with mip levels are kept
 // without their largest level, a quarter of the memory and bandwidth (and of the decode work on GPUs without BC). Only textures from the game's files: they are never drawn
@@ -2074,7 +2445,9 @@ static uint64_t g_drop_n, g_drop_saved;   // textures stored without their large
 static int tex_quality_half(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_TEX_QUALITY"); v = e && !strcmp(e, "half");
-        if (v && g_arm_rel && g_arm_rel < 49 && getenv("DM_VK_TEX_QUALITY_AUTO")) { v = 0;
+        int unsafe = quirk_default(Q_TEX_HALF_UNSAFE, &g_gpuid), mine = v && !getenv("DM_VK_TEX_QUALITY_AUTO");   // (mine: the player's own half, not the profile's)
+        quirk_note(Q_TEX_HALF_UNSAFE, unsafe && !mine, unsafe && mine);
+        if (v && unsafe && !mine) { v = 0;
             VLOG("texture quality full, not the phone profile's half: Arm's driver r%dp%d closed the game with half textures (Mali-G615 MC2, #82); DM_VK_TEX_QUALITY=half in env.txt uses it anyway", g_arm_rel, g_arm_p); }
         else if (v) VLOG("texture quality half: the game's large textures without their largest mip level"); }
     return v;
@@ -2110,7 +2483,14 @@ static vtex *tex_new(const tex_t *t, int pkg) {
         if (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         if (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) ci.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     }
-    if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+        // R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16): a storage image only where R11G11B10F itself could be one on this GPU (storage of it is optional; RGBA16F's
+        //   is not). A storage image may lose Mali's framebuffer compression, and the test must change the format alone, not the compression with it
+        VkFormatProperties bp = { 0 }; int sw = nvn_fmt_vk_b10_swapped(t->d.format);
+        if (sw) vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &bp);
+        if (!sw || (bp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        else b10_note("an image the game may bind as a storage image: made without storage usage, as R11G11B10F has none on this GPU", NULL, (int)bp.optimalTilingFeatures);
+    }
     if (fmt_compressed(t->d.format) && !nvn_fmt_vk_decode(t->d.format)) ci.flags |= VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
     // Mutable formats switch off Adreno's framebuffer compression (UBWC) unless the formats are listed: depth / stencil images are not mutable at all (their views keep
     // the format), colour images that can be render targets list their format and its sRGB / linear twin (the reinterpretations NVN views make of render targets)
@@ -2120,13 +2500,21 @@ static vtex *tex_new(const tex_t *t, int pkg) {
     VkFormat fl[2] = { x->fmt, twin }; VkImageFormatListCreateInfo fli = { .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, .viewFormatCount = twin != x->fmt ? 2 : 1, .pViewFormats = fl };
     // Mali (Arm) keeps AFBC only on images that are not mutable (Bifrost) or list their view formats (Valhall): there every colour image that is not block-compressed
     // gets the same treatment as render targets do on Adreno, and one with no sRGB / linear twin is not mutable at all
-    static int arm = -1; if (arm < 0) arm = g_props.vendorID == 0x13B5 || getenv("DM_VK_ARM_FORMATS") != NULL;
+    static int arm = -1; if (arm < 0) arm = quirk_note(Q_ARM_FORMATS, quirk_default(Q_ARM_FORMATS, &g_gpuid) || getenv("DM_VK_ARM_FORMATS") != NULL, getenv("DM_VK_ARM_FORMATS") != NULL);
     int plain = !fmt_compressed(t->d.format) || nvn_fmt_vk_decode(t->d.format);
     if (!nolist && !x->is3d) {
         if (fmt_is_depth(x->fmt) || x->fmt == VK_FORMAT_S8_UINT) { ci.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; x->fixed_fmt = 1; }
         else if (arm && plain && twin == x->fmt) { ci.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; x->fixed_fmt = 1; }
         else if (g_fmtlist && ((ci.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || (arm && plain))) { ci.pNext = &fli; x->fixed_fmt = 2; x->twin = twin; }   // (without a list: mutable, as before lists)
     }
+    // DM_VK_B10_NOCOMPRESS (a Mali test, off by default): an R11G11B10F render target made without framebuffer compression, for the case that Arm's driver mishandles
+    //   the packed float format in AFBC (the white lit scene). Through VK_EXT_image_compression_control where the driver has it (compression disabled for this image);
+    //   else by the driver's own rule, the opposite of the lists above: mutable with no list of view formats (Mali keeps AFBC only on images that are not mutable or
+    //   list their view formats; Adreno's UBWC goes the same way). Only these targets; logged with what the driver then reports (b10 nocompress)
+    VkImageCompressionControlEXT ncc = { .sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT, .flags = VK_IMAGE_COMPRESSION_DISABLED_EXT };
+    int b10nc = g_b10nc && t->d.format == 0x3F && (ci.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    if (b10nc && g_compctl) { ncc.pNext = ci.pNext; ci.pNext = &ncc; }
+    else if (b10nc) { ci.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; ci.pNext = NULL; x->fixed_fmt = 0; x->twin = 0; }
     // a sample count the GPU has no mode for (Mali has no 2x MSAA: a 2-sample render target could not be created, and the pass drawing into it was lost, a black or
     // white screen) becomes the nearest one it has, the next higher first (2 → 4), else lower; every target of the same request maps the same way, so a pass's
     // attachments still agree, and a shader's sample index stays inside the image
@@ -2143,6 +2531,9 @@ static vtex *tex_new(const tex_t *t, int pkg) {
     }
     x->w = ci.extent.width; x->h = ci.extent.height; x->d = ci.extent.depth; x->levels = ci.mipLevels; x->layers = ci.arrayLayers; x->samples = ci.samples; x->usage = ci.usage; x->aspect = fmt_aspect(x->fmt);
     VkResult r = vkCreateImage(g_dev, &ci, NULL, &x->img);
+    if (r && b10nc && g_compctl) {   // (a driver that refuses the request: the target as it was made before, said once)
+        RED_ONCE(153, "b10 nocompress: the driver refused an R11G11B10F render target with framebuffer compression disabled (%d): made as before", r);
+        ci.pNext = ncc.pNext; b10nc = 0; r = vkCreateImage(g_dev, &ci, NULL, &x->img); }
     if (r) { RED_ONCE(3, "vkCreateImage %ux%ux%u format %#x (Vulkan %u) target %d failed: %d", x->w, x->h, x->d, t->d.format, vf, t->d.target, r); free(x); return NULL; }
     VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, x->img, &rq);
     x->a = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); atomic_fetch_add(&g_live_tex_bytes, (long)x->a.size);
@@ -2156,9 +2547,32 @@ static vtex *tex_new(const tex_t *t, int pkg) {
         VLOG("render target %ux%u format %d: framebuffer compression %s (flags %#x)", x->w, x->h, x->fmt,
              cp.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT ? "OFF" : "on", (unsigned)cp.imageCompressionFlags);
     }
+    // R11G11B10F render targets (NVN 0x3F), whatever the switches (a log line only): the first two (with DM_VK_B10_NOCOMPRESS the first six) named with how they
+    //   were made (create flags, usage, the view formats listed: what the drivers key framebuffer compression on) and what the driver then reports, where it can.
+    //   A normal log shows whether the lit scene's target is compressed at all, which route B needs; route B's own report proves nothing on Arm's driver, which
+    //   answers "compression OFF" for every render target it is asked about (players' logs: #128 #10 #19 #21, Mali-G610 to G925), so a route's result is read off
+    //   the picture (the white), never off these lines
+    static int b10_said;
+    if (t->d.format == 0x3F && (ci.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && b10_said < (b10nc ? 6 : 2)) { b10_said++;
+        char fl[80] = "none (not mutable)"; const VkBaseInStructure *pn = ci.pNext;
+        for (; pn; pn = pn->pNext) if (pn->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) { const VkImageFormatListCreateInfo *l = (const void *)pn; int o = 0;
+            for (uint32_t i = 0; i < l->viewFormatCount && o < (int)sizeof fl - 12; i++) o += snprintf(fl + o, sizeof fl - (size_t)o, "%s%d", i ? " " : "", (int)l->pViewFormats[i]); break; }
+        if (!pn && (ci.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) snprintf(fl, sizeof fl, "none listed (mutable: any compatible format)");
+        const char *how = !b10nc ? "as usual (DM_VK_B10_NOCOMPRESS off)" : g_compctl ? "with compression disabled (DM_VK_B10_NOCOMPRESS, VK_EXT_image_compression_control)"
+                        : "mutable with no list of view formats (DM_VK_B10_NOCOMPRESS; no VK_EXT_image_compression_control)";
+        char rep[64] = "the driver cannot report its compression";
+        if (p_layout2) { VkImageCompressionPropertiesEXT cp = { .sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT };
+            VkSubresourceLayout2EXT sl = { .sType = VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2_EXT, .pNext = &cp };
+            VkImageSubresource2EXT sr = { .sType = VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2_EXT, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 } };
+            p_layout2(g_dev, x->img, &sr, &sl);
+            snprintf(rep, sizeof rep, "the driver reports framebuffer compression %s (flags %#x)", cp.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT ? "OFF" : "on", (unsigned)cp.imageCompressionFlags); }
+        VLOG("b10 target: R11G11B10F render target %ux%u, %u levels, stored as vk format %d%s: create flags %#x, usage %#x, view formats %s; made %s; %s", x->w, x->h, x->levels,
+             (int)x->fmt, b10_swapped_tex(x) ? " (the RGBA16F stand-in, DM_VK_B10_AS_RGBA16)" : "", (unsigned)ci.flags, (unsigned)ci.usage, fl, how, rep);
+    }
     return x;
 }
 static VkImageView view_get(vtex *t, VkImageViewType vt, VkFormat fmt, uint32_t lvl, uint32_t nlvl, uint32_t lay, uint32_t nlay, const uint8_t sw[4], VkImageAspectFlags aspect) {
+    fmt = b10_view_fmt(t, fmt, B10V_SAMPLED, NULL); if (!fmt) return VK_NULL_HANDLE;   // (DM_VK_B10_AS_RGBA16: no view across texel sizes; the callers map first, with the use)
     if (t->fixed_fmt && fmt != t->fmt && fmt != t->twin) { RED_ONCE(73, "a view in format %d of an image whose formats are fixed to %d / %d: viewed in its own format (DM_VK_NO_FMT_LIST=1 to compare)", fmt, t->fmt, t->twin); fmt = t->fmt; }
     vview_key k = { (uint32_t)fmt, (uint32_t)vt, lvl, nlvl, lay, nlay, (uint32_t)sw[0] | (uint32_t)sw[1] << 8 | (uint32_t)sw[2] << 16 | (uint32_t)sw[3] << 24, (uint32_t)aspect };
     pthread_mutex_lock(&t->vmu);
@@ -2213,7 +2627,8 @@ static VkDeviceSize up_slot(int bck, int bw, int bh, int bpb, int obw, int obh, 
 static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb) return -1;
     // BC on a GPU without it: the blocks are deswizzled into scratch and decoded into staging as plain texels (bc_decode.c)
-    int bck = nvn_fmt_vk_decode(t->d.format), etk = nvn_fmt_vk_transcode(t->d.format), obpb = etk ? bc_transcode_bytes(etk) : bck ? bc_texel_bytes(bck) : bpb,
+    int b10 = b10_swapped_tex(x) && bpb == 4 && bw == 1;   // (expanded from scratch, as BC is decoded)
+    int bck = nvn_fmt_vk_decode(t->d.format), etk = nvn_fmt_vk_transcode(t->d.format), obpb = etk ? bc_transcode_bytes(etk) : bck ? bc_texel_bytes(bck) : b10 ? 8 : bpb,
         obw = bck && !(etk && bc_transcode_blocks(etk)) ? 1 : bw, obh = bck && !(etk && bc_transcode_blocks(etk)) ? 1 : bh; uint8_t *scratch = NULL;   // (transcoded: ETC2 / EAC blocks, 4x4 like BC)
     unsigned layers = x->is3d ? 1 : x->layers;
     VkDeviceSize total = 0;
@@ -2245,9 +2660,9 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     for (unsigned l = 0; l < x->levels; l++) {
         uint32_t w = x->w >> l ? x->w >> l : 1, h = x->h >> l ? x->h >> l : 1, z = x->is3d ? (x->d >> l ? x->d >> l : 1) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh, opitch = (size_t)((w + obw - 1) / obw) * obpb, orows = (h + obh - 1) / obh;
-        if (bck) { free(scratch); scratch = malloc(pitch * rows * z); }
+        if (bck || b10) { free(scratch); scratch = malloc(pitch * rows * z); }
         for (unsigned y = 0; y < layers; y++) {
-            uint8_t *dst = bck ? scratch : sp + off; uint64_t c0 = mono_ns();
+            uint8_t *dst = bck || b10 ? scratch : sp + off; uint64_t c0 = mono_ns();
             if (linear) {   // LINEAR: rows at the texture's stride (one level, one layer)
                 size_t stride = t->d.stride ? t->d.stride : pitch; for (size_t r = 0; r < rows; r++) memcpy(dst + r * pitch, t->mem + r * stride, pitch);
             } else if (nvn_deswizzle(&t->d, l + (unsigned)x->drop, y, t->mem, dst, pitch)) { RED_ONCE(5, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
@@ -2263,6 +2678,7 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
                     g_bc_gpu_levels++; off += SLOT(w, h, z); continue; }
             }
             if (bck) bc_convert(bck, etk, scratch, pitch, rows, (int)w, (int)h, z, sp + off, opitch, orows);
+            else if (b10) { b10_rows_expand(scratch, pitch, w, rows * z, sp + off, opitch); if (!l && !y) b10_note("texels from the game's memory expanded on upload", x, 0); }
             rg[nrg++] = (VkBufferImageCopy){ .bufferOffset = so + off, .bufferRowLength = (uint32_t)(opitch / obpb * obw), .bufferImageHeight = (uint32_t)(orows * obh),
                 .imageSubresource = { x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : x->aspect, l, x->is3d ? 0 : y, 1 }, .imageExtent = { w, h, z } };
             off += SLOT(w, h, z);
@@ -2271,7 +2687,7 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     free(scratch);
     if (nrg) vkCmdCopyBufferToImage(cb, sb, x->img, VK_IMAGE_LAYOUT_GENERAL, nrg, rg);
     free(rg); g_up_bytes += total;
-    if (once) { once_end(cb); vkDestroyBuffer(g_dev, sb, NULL); vk_free(tmp); }
+    if (once) once_end_async(cb, sb, tmp);
     else if (batch) { t_upb->sb[t_upb->n] = sb; t_upb->tmp[t_upb->n] = tmp; t_upb->n++; }
     if (vfy) {   // texel by texel (8 bytes: RGBA16F), level by level, layer by layer, in the staging layout
         const uint8_t *got = (const uint8_t *)vm.b->map + vm.off; VkDeviceSize o = 0; int said = 0; unsigned long long bad = 0, all = 0;
@@ -2292,7 +2708,6 @@ static vtex *pkg_upload(const tex_t *t) {
     nvn_dirty_protect(t->mem, t->L.size); x->stamp = nvn_dirty_now();
     if (tex_upload(x, t)) { vtex_unref(x); return NULL; }
     x->pkg = 1; x->span = nvn_dirty_span(t->mem, t->L.size); x->seen = nvn_dirty_now();
-    if (nvn_fmt_vk_b10_swapped(t->d.format)) RED_ONCE(51, "a texture from the game's files in R11G11B10F with DM_VK_B10_AS_RGBA16 on: its texels do not fit RGBA16F and it comes out wrong (turn the test off)");
     return x;
 }
 static vtex *serial_get(uint64_t k) {   // caller holds g_smu
@@ -2417,8 +2832,10 @@ void mtl_alias_drop_pool(const void *pool) {
 }
 // Texture object → its image (nvn_mtl.m tex_mtl_): CPU-filled ones (packaged layout, CPU-written, linear) uploaded and re-uploaded when their pages change; buffer textures as views of
 // their pool; the rest are GPU images shared by storage + description. The returned image is valid until the submission completes (tables hold it, replacements are deferred)
+static void golden_vk_tex_ref(const tex_t *t);   // (golden_vk.inc)
 static vtex *tex_res(const tex_t *t) {
     if (!t || !t->serial) return NULL;
+    if (__builtin_expect(g_golden == 2, 0)) golden_vk_tex_ref(t);
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(6, "texture object no longer valid (magic %#x, ser=%llu)", t->magic, (unsigned long long)t->serial); return NULL; }
     pthread_mutex_lock(&g_smu);
     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && t->d.target != NVN_TEXTURE_TARGET_BUFFER && t->pool && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
@@ -2448,6 +2865,7 @@ static vtex *tex_res(const tex_t *t) {
         if (!nvn_fmt_to_vk(t->d.format, &vf, swz) || !vf || !bpb || !t->mem || !pool_buf((uint64_t)(uintptr_t)t->mem, (uint64_t)t->d.width * bpb, &b, &o, &left)) {
             RED_ONCE(7, "buffer texture format %#x / storage not usable", t->d.format); pthread_mutex_unlock(&g_smu); return NULL; }
         if (o % g_props.limits.minTexelBufferOffsetAlignment) { RED_ONCE(8, "buffer texture offset %#llx not aligned to %llu", (unsigned long long)o, (unsigned long long)g_props.limits.minTexelBufferOffsetAlignment); pthread_mutex_unlock(&g_smu); return NULL; }
+        if (nvn_fmt_vk_b10_swapped(t->d.format)) { vf = VK_FORMAT_B10G11R11_UFLOAT_PACK32; b10_note("a buffer texture: kept in the packed format (its texels are the game's memory)", NULL, (int)vf); }
         vtex *x = calloc(1, sizeof *x); atomic_fetch_add(&g_live_tex, 1); x->refs = 1; x->fmt = (VkFormat)vf; x->nvn_fmt = t->d.format; pthread_mutex_init(&x->vmu, NULL);
         VkDeviceSize n = (VkDeviceSize)t->d.width * bpb; if (n > left) n = left;
         VkBufferViewCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = b, .format = x->fmt, .offset = o, .range = n };
@@ -2503,7 +2921,7 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     pthread_mutex_unlock(&g_rmu);
 }
 static VkSamplerAddressMode wrapm(int w) {
-    switch (w) { case 0: case 7: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT; case 2: case 3: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+    switch (w) { case 0: case 7: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT; case 2: case 3: return g_mclamp ? VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;   // (fallback: identical for coordinates in [-1, 1])
                  case 4: case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; case 6: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; }
     return VK_SAMPLER_ADDRESS_MODE_REPEAT;
 }
@@ -2624,7 +3042,28 @@ static int tex_is_int(int tid) {   // the texture ID's view format is an integer
     VkFormat f = x->fmt; if (rg.has_v && rg.v.set_format) { uint32_t vf = 0; uint8_t s2[4]; if (nvn_fmt_to_vk(rg.v.format, &vf, s2) && vf) f = (VkFormat)vf; }
     return fmt_int_class(f) != 0 || fmt_no_linear(f);
 }
-static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
+// R11G11B10F's stand-in (DM_VK_B10_AS_RGBA16) bound as a storage image of a compute shader that declares it without a format: its stores are made what the packed
+//   format holds after the dispatch (dispatch, b10_quantize_region), the level and layers bound here
+typedef struct { vtex *x; uint32_t lv, z0, nz; } b10q_ent; static b10q_ent g_b10q[8]; static int g_nb10q;
+// the stand-in (or an image viewed as R11G11B10F) bound as a storage image: 0 when it must not be (said in red once)
+static int b10_storage_bind(vtex *x, const spv_res *r, VkFormat f, int st, int img_writes, uint32_t l0, uint32_t s0, uint32_t ns, const char *who) {
+    // an image the shader declares R11G11B10F was re-declared RGBA16F at load (spv_image_format_swap): a view in another format does not fit that declaration
+    if (r->ifmt == SPV_IMGFMT_R11G11B10F && f != VK_FORMAT_R16G16B16A16_SFLOAT) {
+        RED_ONCE(158, "b10 swap: %s: an image declared R11G11B10F (re-declared RGBA16F for the stand-in) given an image viewed in vk format %d: not bound, it reads 0 and takes no writes (turn the test off)", who, (int)f);
+        return 0; }
+    if (!b10_swapped_tex(x)) return 1;
+    if (r->ifmt == SPV_IMGFMT_R11G11B10F) b10_note("the stand-in bound as a storage image declared R11G11B10F: its stores made what the packed format holds (the shader, at load), alpha 1", x, st);
+    else if (r->ifmt == 0 && img_writes && st == 5) {
+        uint32_t nz = x->is3d ? (x->d >> l0 ? x->d >> l0 : 1) : ns, z0 = x->is3d ? 0 : s0; int dup = 0;
+        for (int i = 0; i < g_nb10q; i++) if (g_b10q[i].x == x && g_b10q[i].lv == l0 && g_b10q[i].z0 == z0 && g_b10q[i].nz == nz) dup = 1;
+        if (!dup && g_nb10q < 8) g_b10q[g_nb10q++] = (b10q_ent){ x, l0, z0, nz };
+        b10_note("the stand-in bound as a storage image declared without a format: what the dispatch stores made what R11G11B10F holds after it", x, st); }
+    else if (r->ifmt == 0 && img_writes)
+        RED_ONCE(159, "b10 swap: %s: a draw's shader writes the stand-in through an image declared without a format: what it stores is not made what R11G11B10F holds (negative values, alpha kept)", who);
+    else b10_note("the stand-in bound as a storage image declared in another format, or not written: as it is", x, r->ifmt);
+    return 1;
+}
+static VkImageView tex_view_for(int tid, const spv_res *r, int storage, const char *skey, int st, int img_writes) {
     if (g_tpool_n && tid >= g_tpool_n) return VK_NULL_HANDLE;
     treg_t rg; if (!treg_get(tid, &rg)) { if (tid > 0) RED_ONCE(11, "texture ID %d not registered", tid); return VK_NULL_HANDLE; }
     vtex *x = tex_res(&rg.t); if (!x || !x->img) return VK_NULL_HANDLE;
@@ -2678,9 +3117,50 @@ static VkImageView tex_view_for(int tid, const spv_res *r, int storage) {
         if (s >= NVN_SWZ_R && !nofmt) s = fsw[s - NVN_SWZ_R];
         vk[c] = (uint8_t)(s + 1);   // NVN_SWZ_ZERO 0 → VK_COMPONENT_SWIZZLE_ZERO 1, ONE → 2, R → 3 …
     }
+    // A shader that reads an integer texture as another numeric class than its format (Shield: an R16G16B16A16_UINT texture under a float sampler, binding
+    //   fp_t_tcb_8; VUID-vkCmdDrawIndexed-format-07753, the Khronos layer 2026-11-20; undefined in Vulkan). The Switch's texture unit returns each channel as 32 bits
+    //   by the texture's own format (an integer zero- or sign-extended as its format says) and the shader takes them as its class:
+    //   - 32-bit channels (R32 / R32G32 / R32G32B32A32 UINT or SINT) read as float or as the other signedness: exactly the same bits in a view of the shader's class
+    //     (fmt_as_class), where the image allows that view: mutable without a format list (fixed_fmt 0: 3D images, DM_VK_NO_FMT_LIST, and outside Mali a format that
+    //     cannot be a render target or a driver without format lists, Vulkan 1.1 without VK_KHR_image_format_list), or the view's format is the image's own. Where
+    //     the image's formats are fixed (tex_new: not mutable, fixed_fmt 1, every plain colour image on Mali, Q_ARM_FORMATS; a list of its own format and sRGB twin,
+    //     fixed_fmt 2, a render-target format wherever format lists exist: Adreno, Xclipse, Vulkan 1.2 drivers) the texture's own format is read as before
+    //     (6e0e1dd): a view of another class would be invalid there, and the empty texture is no answer for 32-bit data;
+    //   - 8 / 16-bit (and 10-bit) integers read as float keep their own format, as before (6e0e1dd). "Read as float" says little here: the translator declares every
+    //     sampled texture float (Ryujinx's SPIR-V backend; QuerySamplerType carries no component type, so r->sclass is 0 for an integer texture too) and takes the
+    //     result's bits with a bitcast where the Maxwell code does integer work on it. Such a shader needs the texel's own bits, which most drivers return through
+    //     this binding; only a shader that does float work on the value gets 0 on the Switch (denormals, flushed). Which one a game's shaders are is not known yet
+    //     (Shield's fp_t_tcb_8 is the one seen): DM_VK_INT_TEX_EMPTY=1 gives these reads the empty texture of their class (0) instead, on every GPU, to compare;
+    //   - 8 / 16-bit integers read as the other signedness keep their own format, as before: a view of the other signedness would extend them the other way
+    //     (R16_UINT 0xffff as R16_SINT: -1, where the Switch gives 65535);
+    //   - a float / UNORM / SNORM / sRGB texture (or a BC one decoded here) read as uint / sint keeps its own format, as before: not seen in Sword / Shield yet.
+    //   docs/ENGINE_UNIFY.md lists where each applies. DM_VK_INT_TEX=keep: the texture's own format always, as before (no views of another class)
+    if (!storage && !(x->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && r->sclass < 3) {
+        static int mode = -1;   // (bit 0: DM_VK_INT_TEX=keep, bit 1: DM_VK_INT_TEX_EMPTY; one value, so a thread never sees one switch decided and the other not)
+        if (mode < 0) { const char *e = getenv("DM_VK_INT_TEX"), *z = getenv("DM_VK_INT_TEX_EMPTY"); mode = (e && !strcmp(e, "keep") ? 1 : 0) | (z && atoi(z) > 0 ? 2 : 0); }
+        int keep = mode & 1, empty = mode & 2, have = fmt_int_class(f);
+        if (have && have != r->sclass && !keep) {
+            int wide = fmt_as_class(f, 0) != 0;   // (32-bit channels: fmt_as_class has a float format for them only)
+            VkFormat nf = wide ? fmt_as_class(f, r->sclass) : (VkFormat)0;
+            int ok = nf && (!x->fixed_fmt || nf == x->fmt || nf == x->twin);   // (a view in the image's own format or twin is always allowed)
+            int zero = !wide && !r->sclass && empty;
+            static int said; if (said++ < 8) VLOG("texture ID %d (vk format %d) read as %s by a shader: %s", tid, f, r->sclass == 0 ? "float" : r->sclass == 1 ? "uint" : "sint",
+                                                  ok ? "the same bits in a view of that class" : wide ? "its own format, as before (the image's formats are fixed: no view of that class here)"
+                                                  : zero ? "reads the empty texture of that class (0, as the Switch's flushed denormals: DM_VK_INT_TEX_EMPTY)"
+                                                  : r->sclass ? "its own format, as before (a narrower integer: the Switch extends it by the texture's own format)"
+                                                  : "its own format, as before (a narrower integer: its own bits on most drivers, as a shader that takes them as an integer gets them on the Switch)");
+            if (zero) return VK_NULL_HANDLE;
+            if (ok) f = nf;
+        }
+    }
     VkImageAspectFlags asp = x->aspect;
     if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) asp = rg.has_v && rg.v.set_dsmode && rg.v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL && fmt_has_stencil(x->fmt) ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
     if (storage) { if (!(x->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { RED_ONCE(16, "texture ID %d bound as an image lacks storage usage", tid); return VK_NULL_HANDLE; } memcpy(vk, SW_ID, 4); }
+    if (b10_on()) {   // DM_VK_B10_AS_RGBA16: the format the view is made in, and the stand-in as a storage image (see b10_on)
+        char who[96]; snprintf(who, sizeof who, "shader %s binding %s, texture ID %d", skey ? skey : "-", r->name, tid);
+        VkFormat bf = b10_view_fmt(x, f, storage ? B10V_STORAGE : B10V_SAMPLED, who); if (!bf) return VK_NULL_HANDLE; f = bf;
+        if (storage && !b10_storage_bind(x, r, f, st, img_writes, l0, s0, ns, who)) return VK_NULL_HANDLE;
+    }
     return view_get(x, vt, f, l0, nl, s0, ns, vk, asp);
 }
 
@@ -2698,8 +3178,9 @@ typedef struct vshader {
     uint64_t in_mask, out_mask;                 // user varyings by location (spv_io_masks)
     uint32_t *code; size_t nw;                  // fragment shaders: the (rebound) SPIR-V, for variants
     uint8_t out_cls[8];                         // fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
-    struct { uint64_t drop; uint32_t um, sm; int sw; VkShaderModule mod; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)
-    int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
+    uint8_t img_writes;                         // the shader stores into storage images (OpImageWrite)
+    struct { uint64_t drop; uint32_t um, sm; int sw; uint32_t qm; VkShaderModule mod; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)   // qm: outputs into R11G11B10F's stand-in, made what the packed format stores (spv_b10_outputs)
+    int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod, ptsmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
     uint8_t dp;                                 // reads draw parameters from push constants (a device without them: spv_no_drawparams; the draw pushes them, dp_push)
     uint32_t lacks;                             // SPV_NEED_* the shader needs and the device lacks (spv_feature_needs)
 } vshader;
@@ -2909,9 +3390,16 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     free(c1); free(meta);
     if (s->shift) spv_rebind(code, ns / 4, s->shift);
     ns = spv_strip_unused(code, ns / 4) * 4;   // capabilities declared but unused (Float64, fragment interlock): strict drivers refuse or mis-handle them
+    ns = spv_strip_clipcull(code, ns / 4) * 4;   // unused ClipDistance[8] + CullDistance[1]: over the limit of 8 (VUID-RuntimeSpirv-00710), CullDistance optional
     { size_t nw; uint32_t *c2 = spv_image_caps(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }   // and the format-less storage image ones they need
+    // DM_VK_B10_AS_RGBA16: a storage image the shader declares R11G11B10F is the RGBA16F stand-in: what the shader stores into it is made what the packed format holds
+    //   (spv_b10_image_writes, alpha 1), then the declaration names the view's format
+    if (b10_on()) { size_t nw; int left = 0; uint32_t *c2 = spv_b10_image_writes(code, ns / 4, &nw, &left);
+        if (c2) { free(code); code = c2; ns = nw * 4; b10_note("a shader's stores into an image declared R11G11B10F: made what the packed format holds, alpha 1", NULL, 0); }
+        if (left) RED_ONCE(160, "b10 swap: shader %s stores fewer than 3 components into an image declared R11G11B10F: left as they are", hex);
+        if (spv_image_format_swap(code, ns / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F)) b10_note("a shader's storage image declared R11G11B10F: declared RGBA16F (the image it is given)", NULL, 0); }
     // Adreno picks another 2x2 block than Maxwell for a gather on a texel centre: its gathers are nudged by 1/512 of a texel (spv_gather_bias). DM_VK_GATHER_BIAS=0 / 1 decides
-    static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = e ? atoi(e) != 0 : g_props.vendorID == 0x5143; if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
+    static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = quirk_note(Q_GATHER_BIAS, e ? atoi(e) != 0 : quirk_default(Q_GATHER_BIAS, &g_gpuid), e != NULL); if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
     if (gbias) { size_t nw; uint32_t *c2 = spv_gather_bias(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_fctl) { size_t nw; uint32_t *c2 = spv_float_controls(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_nanmm) { size_t nw; uint32_t *c2 = spv_nan_minmax(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_nanmm_n, 1); } }   // (before spv_clamp_zero, which knows both)
@@ -2921,12 +3409,16 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     if (g_probe && spst == 4) { size_t nw; uint32_t *c2 = spv_probe(code, ns / 4, &nw, (unsigned)g_probe); if (c2) { free(code); code = c2; ns = nw * 4; } }   // (DM_VK_PROBE, fragment shaders)
     if (g_exact) { size_t nw; uint32_t *c2 = spv_exact_math(code, ns / 4, &nw, g_exact); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_exact_n, 1); } }
     if (g_initloc) { size_t nw; uint32_t *c2 = spv_init_locals(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_initloc_n, 1); } }
+    if (g_qlod) { size_t nw; uint32_t *c2 = spv_query_lod(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_qlod_n, 1); } }
     if (spst == 0 || spst == 2) { size_t nw; uint32_t *c2 = spv_init_outputs(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }   // outputs start at (0, 0, 0, 1) as on the hardware
     if (st == 0 && glcode) {
         size_t nw;
         if (s->shift) spv_rebind(glcode, ngl / 4, s->shift);
         ngl = spv_strip_unused(glcode, ngl / 4) * 4;
+        ngl = spv_strip_clipcull(glcode, ngl / 4) * 4;
         uint32_t *c2 = spv_image_caps(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
+        if (b10_on()) { int left; if ((c2 = spv_b10_image_writes(glcode, ngl / 4, &nw, &left))) { free(glcode); glcode = c2; ngl = nw * 4; }
+                        spv_image_format_swap(glcode, ngl / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F); }
         if (gbias && (c2 = spv_gather_bias(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_fctl && (c2 = spv_float_controls(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_nanmm && (c2 = spv_nan_minmax(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
@@ -2935,7 +3427,9 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         if (g_fmz && (c2 = spv_fmz(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_exact && (c2 = spv_exact_math(glcode, ngl / 4, &nw, g_exact))) { free(glcode); glcode = c2; ngl = nw * 4; }
         if (g_initloc && (c2 = spv_init_locals(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
+        if (g_qlod && (c2 = spv_query_lod(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         c2 = spv_init_outputs(glcode, ngl / 4, &nw); if (c2) { free(glcode); glcode = c2; ngl = nw * 4; }
+        if (g_yflip && (c2 = spv_flip_y(glcode, ngl / 4, &nw))) { free(glcode); glcode = c2; ngl = nw * 4; }
         { spv_res gres[64]; int gnr = 0, gst; uint32_t gls[3]; if (spv_reflect(glcode, ngl / 4, gres, 64, &gnr, s->glin, 32, &s->nglin, &gst, gls)) s->nglin = 0; }
         if (!g_drawp) { nw = ngl / 4; glcode = dp_fix(s, glcode, &nw, hex); ngl = nw * 4; }
         VkShaderModuleCreateInfo gci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ngl, .pCode = glcode };
@@ -2950,6 +3444,20 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         tc = dp_fix(s, tc, &tw, hex);
         if (tc) { VkShaderModuleCreateInfo tci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = tw * 4, .pCode = tc }; if (vkCreateShaderModule(g_dev, &tci, NULL, &s->tfmod)) s->tfmod = VK_NULL_HANDLE; free(tc); }
         if (!s->tfmod) VLOG("[RED] shader %s: transform feedback capture variant failed", hex);
+        if (g_tf_pts > 0) { size_t pw; uint32_t *pc_ = spv_tf_points_variant(code, ns / 4, (const int (*)[2])s->tf, TFP_W, &pw);   // the point route (tf_points.h)
+            pc_ = dp_fix(s, pc_, &pw, hex);
+            if (pc_) { VkShaderModuleCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = pw * 4, .pCode = pc_ }; if (vkCreateShaderModule(g_dev, &pci, NULL, &s->ptsmod)) s->ptsmod = VK_NULL_HANDLE; free(pc_); }
+            if (!s->ptsmod) VLOG("[RED] shader %s: transform feedback point variant failed", hex); }
+    }
+    if (g_yflip && st == 0) { size_t nw; uint32_t *c2 = spv_flip_y(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } else RED_ONCE(127, "vertex shader %s: no position to flip (Vulkan 1.0 without maintenance1)", hex); }
+    if (!g_drawp) { size_t nw = ns / 4; code = dp_fix(s, code, &nw, hex); ns = nw * 4; }
+    // what it needs of the device's optional features: a missing geometry / tessellation stage skips its programs (pso_build); the rest is named once and passed on
+    if ((s->lacks = spv_feature_needs(code, ns / 4) & ~g_feat_have)) {
+        static _Atomic uint32_t said; uint32_t fresh = s->lacks & ~atomic_fetch_or(&said, s->lacks);
+        static const char *nm[] = { "geometry shaders", "tessellation", "64-bit floats", "64-bit integers", "16-bit integers", "tessellation / geometry point size", "gather offsets",
+            "multisampled storage images", "clip distances", "cull distances", "cube map arrays", "sample-rate shading", "sparse resources", "min LOD", "extended storage formats",
+            "storage image reads without a format", "storage image writes without a format", "multiple viewports", "fragment shader stores" };
+        for (int b = 0; b < 19; b++) if (fresh >> b & 1) VLOG("[RED] shader %s needs %s, which this device lacks: %s", hex, nm[b], b <= 1 ? "its programs are skipped" : "passed to the driver as it is");
     }
     if (!g_drawp) { size_t nw = ns / 4; code = dp_fix(s, code, &nw, hex); ns = nw * 4; }
     // what it needs of the device's optional features: a missing geometry / tessellation stage skips its programs (pso_build); the rest is named once and passed on
@@ -2960,6 +3468,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
             "storage image reads without a format", "storage image writes without a format", "multiple viewports", "fragment shader stores" };
         for (int b = 0; b < 19; b++) if (fresh >> b & 1) VLOG("[RED] shader %s needs %s, which this device lacks: %s", hex, nm[b], b <= 1 ? "its programs are skipped" : "passed to the driver as it is");
     }
+    for (size_t i = 5, nw = ns / 4; i < nw;) { uint32_t n = code[i] >> 16; if (!n || i + n > nw) break; if ((code[i] & 0xffff) == 99 /* OpImageWrite */) { s->img_writes = 1; break; } i += n; }
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
     atomic_fetch_add(&g_spv_mod_bytes, (uint64_t)ns); if (st == 1) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns);
@@ -3063,7 +3572,7 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
 void mtl_prog_release(prog_t *p) { (void)p; }   // programs are kept (keyed by serial; a released one is never looked up again)
 
 // ================= Render passes =================
-static struct { int open; uint32_t cfmt[8], dfmt, sfmt, samples, tw, th; int hd, hs, ncolor; uint32_t layers; uint64_t dkey, skey; int dnone, snone, dwrote, swrote; } P;   // dkey..: skip stores   // layers: a layered pass (a 3D target's slices) when > 1
+static struct { int open; uint32_t cfmt[8], dfmt, sfmt, samples, tw, th; int hd, hs, ncolor; uint32_t layers; uint64_t dkey, skey; int dnone, snone, dwrote, swrote; uint32_t b10; } P;   // dkey..: skip stores   // layers: a layered pass (a 3D target's slices) when > 1   // b10: colour targets that are R11G11B10F's RGBA16F stand-in (bit i: colour i, DM_VK_B10_AS_RGBA16)
 // DM_VK_PROF: what ended each open pass (0 a new render target, 1 a uniform update, 2 a buffer copy, 3 a buffer fill), and the cost of opening one split into its
 //   attachment views, the barrier before it and the driver's begin (g_pb_ns); g_brk_other: any work outside a pass that ended one (the causes above included)
 static uint64_t g_brk[4], g_pb_ns[3], g_brk_other;
@@ -3077,7 +3586,8 @@ static VkCommandBuffer CB(void) { return g_sub->cb; }
 // by the in-game menu (Bug reports: it writes capture.req in the game's folder, holding how many frames to wait first) or DM_VK_CAPTURE_AT=<present number>; written
 // as frame-capture.zip in the game's folder and in Download/. Nothing runs or is kept while not asked for. The Mali white scenes (#47, #53, #56) show no error in the
 // log: the pictures show which pass goes white, the notes what it read
-enum { CAPN = 192, CAPW = 320, CAPH = 180, CAPS = 256, CAPP = 12 };   // CAPS targets sampled, CAPP points each (4 x 3), 16 bytes a point
+enum { CAPN = 192, CAPS = 256, CAPP = 12 };   // CAPS targets sampled, CAPP points each (4 x 3), 16 bytes a point
+static uint32_t CAPW = 320, CAPH = 180;   // the pictures' size: DM_VK_CAPTURE_SIZE=<w>x<h> (up to 960x540: 192 of them are kept on the GPU and in a buffer), for a detail 320x180 loses
 static int g_cap_ns; static VkFormat g_cap_sfmt[CAPS]; static char g_cap_slabel[CAPS][40];
 static uint32_t fmt_texel_bytes(VkFormat f) {   // the formats render targets come in here; 0: not sampled
     switch ((int)f) {
@@ -3094,6 +3604,7 @@ static int g_cap_wait, g_cap_n, g_cap_layout, g_cap_draws, g_cap_ntex; static in
 //   fragment shader: on a GPU whose scene comes out white (Mali, #47 / #53 / #64 / #68 / #69) the first draw that leaves them at the format's maximum names the shader
 enum { CAPD = 128 };
 static int g_cap_dp, g_cap_nd; static char g_cap_dkey[CAPD][17];   // g_cap_dp: 0 not chosen yet, 1 in that pass, 2 done
+static VkFormat g_cap_dfmt;   // that pass's colour 0 as stored: B10G11R11, or the RGBA16F stand-in (DM_VK_B10_AS_RGBA16)
 static VkImage g_cap_img; static vmalloc_t g_cap_ia; static VkBuffer g_cap_buf; static vmalloc_t g_cap_ba;
 static char *g_cap_meta; static size_t g_cap_len, g_cap_size; static uint64_t g_cap_frame;
 static void cap_printf(const char *f, ...) {
@@ -3102,6 +3613,7 @@ static void cap_printf(const char *f, ...) {
     memcpy(g_cap_meta + g_cap_len, tmp, (size_t)n); g_cap_len += (size_t)n; g_cap_meta[g_cap_len] = 0;
 }
 static int cap_start(void) {
+    { const char *e = getenv("DM_VK_CAPTURE_SIZE"); unsigned w, h; if (e && sscanf(e, "%ux%u", &w, &h) == 2 && w >= 64 && h >= 36 && w <= 960 && h <= 540) { CAPW = w; CAPH = h; } }
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { CAPW, CAPH, 1 }, .mipLevels = 1,
         .arrayLayers = CAPN, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
     if (vkCreateImage(g_dev, &ci, NULL, &g_cap_img)) return 0;
@@ -3113,7 +3625,9 @@ static int cap_start(void) {
     cap_printf("Frame capture, present %llu. GPU %s (vendor %#x, driver %#x, Vulkan %u.%u). BC textures %s; BC layer %s; float controls %s.\n", (unsigned long long)g_cap_frame, g_props.deviceName, g_props.vendorID,
                g_props.driverVersion, VK_API_VERSION_MAJOR(g_props.apiVersion), VK_API_VERSION_MINOR(g_props.apiVersion),
                nvn_fmt_vk_transcode(0x46) ? "transcoded on upload" : nvn_fmt_vk_decode(0x46) ? "decoded on upload" : "sampled by the GPU", g_bcgpu ? "on" : "off", g_fctl ? "on" : "off");
-    cap_printf("Formats are Vulkan VkFormat numbers (vk) and NVN format numbers (nvn). Pictures: NNN.png, 320x180, values above 1.0 shown as white.\n\n");
+    cap_printf("Formats are Vulkan VkFormat numbers (vk) and NVN format numbers (nvn). Pictures: NNN.png, %ux%u, values above 1.0 shown as white.\n", CAPW, CAPH);
+    mw_capture_note();   // (the Mali white-screen check's state, when its ladder is on)
+    cap_printf("\n");
     return 1;
 }
 static void cap_pass(void) {
@@ -3126,7 +3640,7 @@ static void cap_pass(void) {
         uint32_t lv = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0, ly = R.rt.has_cview[i] && R.rt.cview[i].set_layers ? R.rt.cview[i].min_layer : 0;
         VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, x->fmt, &fp);
         const char *skip = x->samples > 1 ? "multisampled" : fmt_int_class(x->fmt) ? "integer format" : !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ? "format cannot be blitted" : g_cap_n >= CAPN ? "no room left" : NULL;
-        cap_printf("  colour %d: vk %d (nvn %#x) %ux%u level %u layer %u%s", i, x->fmt, ct->d.format, x->w, x->h, lv, ly, x->is3d ? " (3D)" : "");
+        cap_printf("  colour %d: vk %d (nvn %#x) %ux%u level %u layer %u%s%s", i, x->fmt, ct->d.format, x->w, x->h, lv, ly, x->is3d ? " (3D)" : "", b10_swapped_tex(x) ? " (R11G11B10F stored as RGBA16F)" : "");
         {   uint32_t tb = fmt_texel_bytes(x->fmt);
             if (tb && x->samples <= 1 && g_cap_ns < CAPS) {   // values.txt: the pixels' own numbers (the pictures clamp everything above 1.0 to white)
                 uint32_t sw = x->w >> lv ? x->w >> lv : 1, sh = x->h >> lv ? x->h >> lv : 1; VkBufferImageCopy pc[CAPP];
@@ -3200,12 +3714,14 @@ static void cap_write(void) {
                 }
                 if (g_cap_nd && len + 512 < cap) {   // draw by draw in the first lit pass (cap_draw_values): colour 0 (B10G11R11) after each draw
                     const uint8_t *dv = sv + (size_t)CAPS * CAPP * 16;
-                    len += (size_t)snprintf(t + len, cap - len, "\nDraw by draw, the frame's first full-screen B10G11R11 pass: its colour 0 at the same 12 points after each of its first %d draws."
-                                                                 "\n'max' counts the points at the format's maximum (65024: overflow); then the fragment shader and the 12 values.\n", g_cap_nd);
+                    len += (size_t)snprintf(t + len, cap - len, "\nDraw by draw, the frame's first full-screen B10G11R11 pass%s: its colour 0 at the same 12 points after each of its first %d draws."
+                                                                 "\n'max' counts the points at the format's maximum (65024: overflow); then the fragment shader and the 12 values.\n",
+                                            g_cap_dfmt == VK_FORMAT_R16G16B16A16_SFLOAT ? " (stored as RGBA16F: DM_VK_B10_AS_RGBA16; 'max' counts 60000 and up, infinity and NaN)" : "", g_cap_nd);
                     for (int d = 0; d < g_cap_nd && len + 1024 < cap; d++) {
                         float v[CAPP][3]; int nmax = 0;
-                        for (int k = 0; k < CAPP; k++) { uint32_t w; memcpy(&w, dv + ((size_t)d * CAPP + (size_t)k) * 16, 4); uint32_t c[3] = { w & 0x7ff, w >> 11 & 0x7ff, w >> 22 }; int mb[3] = { 6, 6, 5 };
-                            for (int j = 0; j < 3; j++) { uint32_t e = c[j] >> mb[j], m = c[j] & ((1u << mb[j]) - 1); v[k][j] = e == 31 ? (m ? NAN : INFINITY) : e ? ldexpf(1.0f + m / (float)(1u << mb[j]), (int)e - 15) : ldexpf(m / (float)(1u << mb[j]), -14); }
+                        for (int k = 0; k < CAPP; k++) { const uint8_t *q = dv + ((size_t)d * CAPP + (size_t)k) * 16;
+                            if (g_cap_dfmt == VK_FORMAT_R16G16B16A16_SFLOAT) { for (int j = 0; j < 3; j++) { uint16_t h; memcpy(&h, q + 2 * j, 2); v[k][j] = b10_half_to_float(h); } }   // (the stand-in's texels)
+                            else { uint32_t w; memcpy(&w, q, 4); for (int j = 0; j < 3; j++) v[k][j] = b10_chan_to_float(j == 0 ? w & 0x7ff : j == 1 ? w >> 11 & 0x7ff : w >> 22, j == 2 ? B10_MB : B10_MR); }
                             if (v[k][0] >= 6e4f || v[k][1] >= 6e4f || v[k][2] >= 6e4f || isnan(v[k][0]) || isnan(v[k][1]) || isnan(v[k][2])) nmax++; }
                         len += (size_t)snprintf(t + len, cap - len, "draw %3d, max %2d, fragment %s:", d + 1, nmax, g_cap_dkey[d]);
                         for (int k = 0; k < CAPP; k++) len += (size_t)snprintf(t + len, cap - len, " (%.3g %.3g %.3g)", v[k][0], v[k][1], v[k][2]);
@@ -3252,14 +3768,14 @@ static int P_tf;   // the open pass is transform feedback captures' (tf_pass_beg
 static struct { uint64_t lo, hi; } g_tfw[64]; static int g_ntfw;   // what the captures in the open capture pass wrote
 static void ubd_flush(void);
 static int g_nubd;
-static void pass_end(void) { g_rt_stale = 0; if (P.open) { rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0;
+static void pass_end(void) { g_rt_stale = 0; if (P.open) { rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0; if (g_mw_px) mw_pass_end();
     if (!P_tf && P.hd) sk_ro_note(P.dkey, P.dwrote, 0);
     if (!P_tf && P.hs) sk_ro_note(P.skey, P.swrote, 0);
     g_after_pass = !P_tf; g_bar_clean = 0;
     if (P_tf) {   // the captures' writes made visible to what reads them (vertex streams, shaders, copies)
         VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
         vkCmdPipelineBarrier(CB(), VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL); P_tf = 0; g_ntfw = 0; }
-    if (atomic_load(&g_cap) == 2) cap_pass(); }
+    if (g_rtq && g_sub && g_sub->rq_pend) report_ts_flush(CB(), g_sub); if (atomic_load(&g_cap) == 2) cap_pass(); }
     if (g_nubd) ubd_flush(); }
 static void tf_end(void) { if (P.open && P_tf) pass_end(); }   // before the game's own work: a capture pass is not the game's pass
 static int rt_dup_slot(const p_set_rt *r, int i) {
@@ -3306,6 +3822,8 @@ static VkImageView att_view(const tex_t *t, const view_t *v, int has_v, vtex **o
             has_v && v->set_layers ? v->nlayers : 0, has_v && v->set_layers); } }
     VkFormat f = x->fmt;
     if (has_v && v->set_format) { uint32_t vf = 0; uint8_t s[4]; if (nvn_fmt_to_vk(v->format, &vf, s) && vf) f = (VkFormat)vf; }
+    if (b10_on()) { char who[48]; snprintf(who, sizeof who, "render target ser=%llu", (unsigned long long)t->serial);   // (DM_VK_B10_AS_RGBA16; pass_begin gives the pass the same format)
+        f = b10_view_fmt(x, f, B10V_ATTACH, who); if (!f) return VK_NULL_HANDLE; }
     VkImageUsageFlags attachment_usage = x->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     VkFormatFeatureFlags features = 0;
     if (!format_supports_attachment(f, attachment_usage, &features)) {
@@ -3360,13 +3878,22 @@ static void td_note(vtex *x, uint64_t ser, uint32_t lv, uint32_t sl) {
 // makes the captures' writes visible. Captures in a row share one pass and that one barrier (Legends: Arceus skins about 180 times a frame, and on Adreno each barrier waits
 // for the GPU to go idle; from the Arceus engine, androidswithy 84fb5df) unless one reads or rewrites what an earlier one in the pass wrote (keep = 0); anything else
 // between them ends the pass (tf_end). DM_VK_TF_BATCH=0: one pass and one barrier each
+#include "tf_selftest.h"
+#include "tf_points.h"
+#include "vtx_canary.h"
 static int tf_batch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TF_BATCH"); v = !(e && !strcmp(e, "0")); } return v; }
 static int tf_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_ntfw; i++) if (lo < g_tfw[i].hi && g_tfw[i].lo < hi) return 1; return 0; }
 static void tf_pass_begin(int keep) {
     if (P.open && P_tf && keep && tf_batch_on()) return;
     pass_end(); memset(&P, 0, sizeof P); P_tf = 1; g_bar_clean = g_after_pass = 0;
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {1, 1}}, .layerCount = 1 };
-    rend_begin(CB(), &ri, NULL, 0, 1, 0); P.open = 1; P.tw = P.th = 1; P.samples = 1;
+    // a driver that drops the work of a pass with nothing attached (tf_selftest.h decides, g_tf_att): a 1x1 colour attachment it never writes (the pipelines get its
+    //   format through P.cfmt like any pass's: pso_get's key)
+    VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_tf_view, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                     .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE };
+    uint32_t cf[1] = { TF_ATT_FMT };
+    if (g_tf_att > 0 && g_tf_view) { ri.colorAttachmentCount = 1; ri.pColorAttachments = &ca; P.cfmt[0] = TF_ATT_FMT; P.ncolor = 1; }
+    rend_begin(CB(), &ri, cf, 0, 1, 0); P.open = 1; P.tw = P.th = 1; P.samples = 1;
 }
 static uint64_t g_stat_begins;   // vkCmdBeginRendering calls (the present line's statistics)
 static uint64_t g_ro_passes, g_ro_wrong;   // depth / stencil attachments begun with store op NONE, of them written after all (the pass restarted)
@@ -3386,7 +3913,7 @@ static void pass_writes(int depth, int stencil) {
 //   in vkCmdBeginRendering). A change while a pass is open now only records the new targets (g_rt_stale); the next draw or clear goes on in the open pass when they
 //   are the ones it was begun with (g_pass_resumed), and ends it as before when they are not. Pending clears belong to the old targets: then the change ends the pass at once
 static p_set_rt g_pass_rt; static uint64_t g_pass_resumed;
-static int pass_defer_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_DEFER"); v = e ? atoi(e) != 0 : g_props.vendorID == 0x5143;   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before)
+static int pass_defer_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PASS_DEFER"); v = quirk_note(Q_PASS_DEFER, e ? atoi(e) != 0 : quirk_default(Q_PASS_DEFER, &g_gpuid), e != NULL);   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before)
     if (v) VLOG("target changes that need no new pass keep it open (DM_VK_PASS_DEFER)"); } return v; }
 static int rt_same(const p_set_rt *a, const p_set_rt *b);
 static void sub_split_at_target(void);
@@ -3415,6 +3942,7 @@ static VkAttachmentStoreOp depth_store(vtex *x, int loads) {
     return VK_ATTACHMENT_STORE_OP_DONT_CARE;
 }
 static int pass_begin(void) {
+    tf_end();
     if (P.open && g_rt_stale) rt_resolve();
     if (P.open) return 1;
     if (!R.has_rt) { RED_ONCE(21, "draw with no render target set"); return 0; }
@@ -3449,7 +3977,9 @@ static int pass_begin(void) {
                         ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
         ca[i].loadOp = R.clear_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; ca[i].clearValue.color = R.cc[i];
         VkFormat f = x->fmt; if (R.rt.has_cview[i] && R.rt.cview[i].set_format) { uint32_t vf = 0; uint8_t s[4]; if (nvn_fmt_to_vk(R.rt.cview[i].format, &vf, s) && vf) f = (VkFormat)vf; }
+        f = b10_view_fmt(x, f, B10V_ATTACH, NULL); if (b10_swapped_tex(x) && f == x->fmt) P.b10 |= 1u << i;   // (DM_VK_B10_AS_RGBA16: the format att_view made the view in; the target has no alpha)
         P.cfmt[i] = (uint32_t)f; P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1; ncol = i + 1;
+        if (f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || (P.b10 >> i & 1)) mw_pass_target(x, R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0);   // (the white-screen check's lit target)
         x->hp_stamp = g_hp_seq + 1; if (!hp_c0) hp_c0 = x;
         if (atomic_load(&g_fgr.on) && fgn < 10) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)f, (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0),
             (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_layers ? R.rt.cview[i].min_layer : 0), (uint8_t)i, (uint8_t)(ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(ca[i].storeOp) };
@@ -3538,7 +4068,9 @@ static void outside_pass(void) { if (P.open) g_brk_other++; g_pass_last_by_rt = 
 typedef struct {
     void *sh[5]; uint32_t cfmt[8], dfmt, sfmt; uint32_t chmask; blend_st blend[8];
     struct { uint32_t fmt, off; uint8_t bind, used, inst, pad; uint32_t div; } attr[32];
-    uint8_t samples, a2c, poly, clamp, topo, logic_en, logic_op, blend_en, depth_zero, discard, ds_swap, pad[5];   // ds_swap: first half of an emulated dual-source blend (draw)
+    uint8_t samples, a2c, poly, clamp, topo, logic_en, logic_op, blend_en, depth_zero, discard, ds_swap, tfpts, yflip, b10, pad[2];   // tfpts: a capture drawn as points into that many targets (tf_points.h); yflip: y negated in the vertex shader (g_yflip, upper-left origin)   // ds_swap: first half of an emulated dual-source blend (draw)
+    // b10: colour targets that are R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16; bit i: colour i, cfmt RGBA16F): no alpha written, the target's alpha read as 1.
+    //   Only in memory: the lists on disk name such a target R11G11B10F with b10 0 (b10_key_disk / b10_key_here), as every phone records it without the test
 } pkey;
 static nvn_hmap g_pso = {.klen = sizeof(pkey)}, g_pso_fail = {.klen = sizeof(pkey)};
 // Without extended dynamic state (g_eds 0) the state the draws otherwise set per draw is part of the pipeline: cull mode, front face, exact topology, depth test / write /
@@ -3577,6 +4109,10 @@ static VkBlendOp bop(int e) { switch (e) { case 2: return VK_BLEND_OP_SUBTRACT; 
 static VkFormat vfmt_for(int nvn_fmt, int ct) {
     int fc; VkFormat f = (VkFormat)nvn_vfmt_to_vk(nvn_fmt, &fc);
     if (!f) return VK_FORMAT_UNDEFINED;
+    // (Eden's notes: Qualcomm's drivers read USCALED / SSCALED vertex formats wrong; noted once with whether the driver lists them for vertex buffers)
+    if (nvn_fmt >= 0x51 && nvn_fmt <= 0x68 && fc == 0) { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, f, &fp);
+        RED_ONCE(61, "vertex format %#x is integers read as floats (Vulkan format %d, scaled): the driver %s it for vertex buffers", nvn_fmt, (int)f,
+                 fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT ? "lists" : "does NOT list"); }
     if (ct == fc || (ct == 0 && fc == 0)) return f;
     static const VkFormat U[] = { VK_FORMAT_R8_UINT, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8B8_UINT, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16B16_UINT, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32A32_UINT };
     static const VkFormat I[] = { VK_FORMAT_R8_SINT, VK_FORMAT_R8G8_SINT, VK_FORMAT_R8G8B8_SINT, VK_FORMAT_R8G8B8A8_SINT, VK_FORMAT_R16_SINT, VK_FORMAT_R16G16_SINT, VK_FORMAT_R16G16B16_SINT, VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_R32_SINT, VK_FORMAT_R32G32_SINT, VK_FORMAT_R32G32B32_SINT, VK_FORMAT_R32G32B32A32_SINT };
@@ -3594,20 +4130,23 @@ static VkFormat vfmt_for(int nvn_fmt, int ct) {
 // The fragment module for a pipeline. On the Switch a varying the previous stage never writes reads (0, 0, 0, 1) and a float output to an integer colour target is written
 // as its bits; Vulkan (and Metal under MoltenVK) refuse both, so such a pipeline gets a variant of the fragment shader (made once per shader and combination)
 static int g_ds_swap;   // the draw being recorded is the first half of an emulated dual-source blend: its fragment outputs 0 and 1 swapped (draw, pso_get)
-static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw);
-static VkShaderModule frag_module(vprog *pr, const uint32_t *cfmt) { return frag_module_(pr, cfmt, 0); }
-static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw) {
+// qm: outputs into R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16, pso_make), made what the packed format stores (spv_b10_outputs; locations after the swap)
+static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw, uint32_t qm);
+static VkShaderModule frag_module(vprog *pr, const uint32_t *cfmt) { return frag_module_(pr, cfmt, 0, 0); }
+static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw, uint32_t qm) {
     vshader *fs = pr->sh[1], *pv = pr->sh[2] ? pr->sh[2] : pr->sh[4] ? pr->sh[4] : pr->sh[0];
     uint64_t drop = fs->in_mask & ~(pv ? pv->out_mask : 0); uint32_t um = 0, sm = 0;
     for (int i = 0; i < 8; i++) if (cfmt[i] && fs->out_cls[i] == 0) { int c = fmt_int_class((VkFormat)cfmt[i]); if (c == 1) um |= 1u << i; else if (c == 2) sm |= 1u << i; }
-    if ((!drop && !um && !sm && !sw) || !fs->code) return fs->mod;
+    if ((!drop && !um && !sm && !sw && !qm) || !fs->code) return fs->mod;
     pthread_mutex_lock(&g_psomu);
-    for (int i = 0; i < fs->nvar; i++) if (fs->var[i].drop == drop && fs->var[i].um == um && fs->var[i].sm == sm && fs->var[i].sw == sw) { VkShaderModule m = fs->var[i].mod; pthread_mutex_unlock(&g_psomu); return m; }
+    for (int i = 0; i < fs->nvar; i++) if (fs->var[i].drop == drop && fs->var[i].um == um && fs->var[i].sm == sm && fs->var[i].sw == sw && fs->var[i].qm == qm) { VkShaderModule m = fs->var[i].mod; pthread_mutex_unlock(&g_psomu); return m; }
     pthread_mutex_unlock(&g_psomu);
     size_t nw = fs->nw; uint32_t *c = NULL, *c2;
     if (drop && (c2 = spv_drop_inputs(fs->code, fs->nw, drop, &nw))) c = c2;
     if ((um || sm) && (c2 = spv_int_outputs(c ? c : fs->code, c ? nw : fs->nw, um, sm, &nw))) { free(c); c = c2; }
     if (sw && (c2 = spv_swap_out01(c ? c : fs->code, c ? nw : fs->nw, &nw))) { free(c); c = c2; }
+    if (qm) { if ((c2 = spv_b10_outputs(c ? c : fs->code, c ? nw : fs->nw, qm, &nw))) { free(c); c = c2; b10_note("a draw into the stand-in: its colour made what R11G11B10F stores (negative to 0, rounded, at most 65024 / 64512)", NULL, (int)qm); }
+              else RED_ONCE(161, "b10 swap: fragment shader %s: its output into the stand-in (targets %#x) could not be made what R11G11B10F stores: written as it is", fs->key, qm); }
     if (!c) return fs->mod;
     VkShaderModule m = VK_NULL_HANDLE; VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nw * 4, .pCode = c };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &m); free(c);
@@ -3616,7 +4155,7 @@ static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw) {
     if (um | sm) VLOG("fragment shader %s: float outputs %#x / %#x written as uint / int bits (integer colour targets)", fs->key, um, sm);
     if (sw) { static int said; if (said++ < 16) VLOG("fragment shader %s: a copy with outputs 0 and 1 swapped, for its dual-source blend in two steps", fs->key); }
     pthread_mutex_lock(&g_psomu);
-    if (fs->nvar < 8) { fs->var[fs->nvar].drop = drop; fs->var[fs->nvar].um = um; fs->var[fs->nvar].sm = sm; fs->var[fs->nvar].sw = sw; fs->var[fs->nvar].mod = m; fs->nvar++; }
+    if (fs->nvar < 8) { fs->var[fs->nvar].drop = drop; fs->var[fs->nvar].um = um; fs->var[fs->nvar].sm = sm; fs->var[fs->nvar].sw = sw; fs->var[fs->nvar].qm = qm; fs->var[fs->nvar].mod = m; fs->nvar++; }
     pthread_mutex_unlock(&g_psomu);
     return m;
 }
@@ -3625,11 +4164,17 @@ static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw) {
 // kept in a pipeline cache file (DM_VK_PCACHE), so a later start compiles nothing it already compiled
 typedef struct { uint8_t key[5][8]; pkey k; } pso_rec;   // k.sh zeroed
 #define PSO_MAGIC "NXPL"
+// the lists hold an R11G11B10F target as the game made it; in memory, with DM_VK_B10_AS_RGBA16, it is the RGBA16F stand-in (pkey.b10): written as the one, read as the other
+static void b10_key_disk(pkey *k) { for (int i = 0; i < 8; i++) if (k->b10 >> i & 1) k->cfmt[i] = VK_FORMAT_B10G11R11_UFLOAT_PACK32; k->b10 = 0; }
+static void b10_key_here(pkey *k) {
+    if (!b10_on()) return;
+    for (int i = 0; i < 8; i++) if (k->cfmt[i] == VK_FORMAT_B10G11R11_UFLOAT_PACK32) { k->cfmt[i] = VK_FORMAT_R16G16B16A16_SFLOAT; k->b10 |= (uint8_t)(1u << i); }
+}
 static FILE *g_psorec;
 static void pso_record(const vprog *pr, const pkey *k) {   // caller holds g_psomu
     static int tried; if (!tried++) { const char *e = getenv("DM_VK_PSO_RECORD"); if (e) { g_psorec = fopen(e, "ab"); if (g_psorec && ftell(g_psorec) == 0) { uint32_t v[2] = { 1, (uint32_t)sizeof(pso_rec) }; fwrite(PSO_MAGIC, 1, 4, g_psorec); fwrite(v, 4, 2, g_psorec); } } }
     if (!g_psorec) return;
-    pso_rec r; memset(&r, 0, sizeof r); r.k = *k; memset(r.k.sh, 0, sizeof r.k.sh);
+    pso_rec r; memset(&r, 0, sizeof r); r.k = *k; memset(r.k.sh, 0, sizeof r.k.sh); b10_key_disk(&r.k);
     for (int i = 0; i < 5; i++) if (pr->sh[i]) hexkey(pr->sh[i]->key, r.key[i]);
     fwrite(&r, sizeof r, 1, g_psorec); fflush(g_psorec);
 }
@@ -3642,7 +4187,7 @@ static void pso_record_s(const vprog *pr, const pkey *k, const sst *s) {   // ca
     static int tried; if (!tried++) { const char *e = getenv("DM_VK_PSO_RECORD"); if (e) { char p[1100]; snprintf(p, sizeof p, "%s.sst", e); g_psorec_s = fopen(p, "ab");
         if (g_psorec_s && ftell(g_psorec_s) == 0) { uint32_t v[2] = { 1, (uint32_t)sizeof(pso_rec_s) }; fwrite(PSO_MAGIC_S, 1, 4, g_psorec_s); fwrite(v, 4, 2, g_psorec_s); } } }
     if (!g_psorec_s) return;
-    pso_rec_s r; memset(&r, 0, sizeof r); r.r.k = *k; memset(r.r.k.sh, 0, sizeof r.r.k.sh); r.s = *s;
+    pso_rec_s r; memset(&r, 0, sizeof r); r.r.k = *k; memset(r.r.k.sh, 0, sizeof r.r.k.sh); r.s = *s; b10_key_disk(&r.r.k);
     for (int i = 0; i < 5; i++) if (pr->sh[i]) hexkey(pr->sh[i]->key, r.r.key[i]);
     fwrite(&r, sizeof r, 1, g_psorec_s); fflush(g_psorec_s);
 }
@@ -3656,9 +4201,8 @@ static nvn_hmap g_pso_used = {.klen = sizeof(VkPipeline)}, g_pso_rec = {.klen = 
 static uint64_t g_pso_evicted;
 static int pso_cap(void) {
     static int cap = -2; if (cap > -2) return cap;
-    const char *e = getenv("DM_VK_PIPE_KEEP"); long kb = 0;
-    if (!e) { FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemTotal: %ld kB", &kb) == 1) break; if (f) fclose(f); }
-    cap = e ? atoi(e) : (g_props.vendorID == 0x13B5 || (kb > 0 && kb < 7500000)) ? 800 : 0;
+    const char *e = getenv("DM_VK_PIPE_KEEP");
+    cap = quirk_note(Q_PIPE_KEEP, e ? atoi(e) : quirk_default(Q_PIPE_KEEP, &g_gpuid), e != NULL);   // (the phone's memory: g_gpuid.ram_kb, read with the GPU's description)
     if (cap > 0) VLOG("pipelines kept: at most %d (the least recently used ones destroyed when unused for 30 s)", cap); else cap = 0;
     return cap;
 }
@@ -3709,7 +4253,7 @@ static VkPipeline pso_lookup_s(vprog *pr, const pkey *k, const sst *ss, int reco
     pthread_mutex_unlock(&g_psomu);
     return p;
 }
-// Pipelines built in the background (DM_VK_ASYNC_PSO, on by default on Adreno; =0 / =1 decides on any GPU): one the game needs that neither the prewarm list nor the cache had is
+// Pipelines built in the background (DM_VK_ASYNC_PSO, on by default on every GPU since 2026-11-22, Adreno only before; =0 / =1 decides): one the game needs that neither the prewarm list nor the cache had is
 //   compiled by a worker, and the draws that need it are skipped until it is done (an object missing for a frame or two instead of a hitch, as emulators' asynchronous
 //   shaders do). The queue holds 256; a full queue compiles on the spot as before
 // Balance: three workers, and each frame may wait up to 8 ms in all (DM_VK_ASYNC_WAIT_MS) for pipelines being built before it skips their draws, so most come in on
@@ -3733,8 +4277,10 @@ static void *apso_main(void *a) { DM_THREAD_NAME("dm-pipelines");
 }
 static int apso_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = e ? atoi(e) != 0 : g_props.vendorID == 0x5143;   // (on by default on Adreno, Qualcomm 0x5143; Mali and the rest as before)
-   
+    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO"); v = quirk_note(Q_ASYNC_PSO, e ? atoi(e) != 0 : quirk_default(Q_ASYNC_PSO, &g_gpuid), e != NULL);   // (vk_quirks.h: on by default on every GPU: a hitch waiting for a
+        //   pipeline was the stutter left on Mali / Xclipse / PowerVR (the owner's call, 2026-11-22); Adreno only before. Profile engine_quirks async_pso_off through
+        //   gpu_id.eng (Legends: Arceus): off unless DM_VK_ASYNC_PSO=1, on a slower Adreno (710, #34) its skipped draws were objects missing for frames)
+
         if (v) { int nw = 0; for (int i = 0; i < APSO_WORKERS; i++) { pthread_t t; if (!pthread_create(&t, NULL, apso_main, NULL)) { pthread_detach(t); nw++; } }
             const char *w = getenv("DM_VK_ASYNC_WAIT_MS"); if (w && *w) { int ms = atoi(w); if (ms < 0) ms = 0; if (ms > 33) ms = 33; g_apso_frame_ns = ms * 1000000LL; g_apso_budget_ns = g_apso_frame_ns; }
             if (!nw) v = 0; else VLOG("pipelines the lists did not have: built in the background by %d workers; a frame waits up to %lld ms for them, then their draws are skipped until done (DM_VK_ASYNC_PSO)", nw, (long long)(g_apso_frame_ns / 1000000)); } }
@@ -3817,8 +4363,45 @@ static long mem_avail_mb(void) {
     return -1;
 #endif
 }
+// DM_VK_PREWARM: "all" (the default) builds every listed pipeline before the game draws its first frame, on several threads (the game waits at its first submission
+//   and the app shows the count, nvn_vk_prewarm_progress), so nothing is built while playing: on Adreno a pipeline still being built skips its draw (objects missing
+//   or popping in for the first minutes), elsewhere it is a hitch. An S25+ built its 1,400-1,600 recorded pipelines in 7-21 s one at a time. "background": as before,
+//   one at a time with a pause after each while the game plays
+static int prewarm_all(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREWARM"); v = !(e && !strcmp(e, "background")); } return v; }
+static atomic_int g_pw_done, g_pw_total, g_pw_hold;   // pipelines handled / listed, and 1 while the game waits for them
+static pthread_mutex_t g_pw_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pw_cv = PTHREAD_COND_INITIALIZER;
+// for the app's progress line (android_main.c nativePrewarm): 1 while the game waits for the pipelines
+int nvn_vk_prewarm_progress(int *done, int *total) { *done = atomic_load(&g_pw_done); *total = atomic_load(&g_pw_total); return atomic_load(&g_pw_hold); }
+static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
+// the game's first submission: waits until the prewarm is done (at most DM_VK_PREWARM_WAIT seconds, 300 by default; then the rest is built while it plays)
+// the game is playing (its first submission past prewarm_wait): from then on the prewarm builds on one thread, one pipeline after each present (prewarm_pace)
+static atomic_int g_pw_playing;
+static void prewarm_wait(void) {
+    if (!atomic_load(&g_pw_hold)) { atomic_store(&g_pw_playing, 1); return; }
+    const char *e = getenv("DM_VK_PREWARM_WAIT"); double lim = e ? atof(e) : 300; uint64_t t0 = mono_ns();
+    pthread_mutex_lock(&g_pw_mu);
+    while (atomic_load(&g_pw_hold) && (mono_ns() - t0) / 1e9 < lim) {
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_pw_cv, &g_pw_mu, &ts);
+    }
+    int late = atomic_load(&g_pw_hold); atomic_store(&g_pw_hold, 0); atomic_store(&g_pw_playing, 1); pthread_mutex_unlock(&g_pw_mu);
+    VLOG("prewarm: the game waited %.1f s for its pipelines (%d of %d)%s", (mono_ns() - t0) / 1e9, atomic_load(&g_pw_done), atomic_load(&g_pw_total),
+         late ? ": the wait ran out, the rest are built while it plays" : "");
+}
+// During play (S25+ Arceus, Xclipse 530 Violet: hitches of 60-580 ms with the render thread stuck in its submit while background pipelines were being built, the driver
+//   and the cores shared with it): one pipeline right after each present, so a build overlaps the start of the next frame's work, not its submission; at most
+//   one per frame, at a lower priority. DM_VK_PREWARM_PLAY=free: as before (3 ms apart)
+__attribute__((weak)) uint64_t dm_guest_frame(void) { return 0; }   // (presents so far: host hle_os.c's; this one only for the graphics tests, which run no prewarm)
+static int prewarm_play_free(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREWARM_PLAY"); v = e && !strcmp(e, "free"); } return v; }
+static void prewarm_pace_play(void) {
+    if (!atomic_load(&g_pw_playing) || prewarm_play_free()) return;
+    static __thread int lowered; if (!lowered) { lowered = 1; setpriority(PRIO_PROCESS, (id_t)gettid(), 10); }
+    static _Atomic uint64_t last; uint64_t f0 = atomic_load(&last);
+    for (int k = 0; k < 2000 && dm_guest_frame() <= f0; k++) usleep(2000);   // (the next present, at most 4 s: a paused game still gets its pipelines)
+    atomic_store(&last, dm_guest_frame());
+}
 static void prewarm_pace(int i, int *waits) {
-    usleep(3000);
+    if (!prewarm_all() && prewarm_play_free()) usleep(3000);
     if (i % 8) return;
     static long floor_mb = -1; if (floor_mb < 0) { const char *e = getenv("DM_VK_PREWARM_MIN_MB"); floor_mb = e ? atol(e) : 1536; }
     for (int k = 0; k < 600; k++) { long m = mem_avail_mb(); if (m < 0 || m >= floor_mb) break; if (!k) (*waits)++; usleep(100000); }   // at most a minute per wait
@@ -3833,8 +4416,9 @@ static void *prewarm_static(void) {
     uint64_t t0 = mono_ns(); int waits = 0, n = 0, built = 0, had = 0, failed = 0, noshader = 0;
     static nvn_hmap progs = {.klen = 40};
     pso_rec_s r;
+    { long here = ftell(f); fseek(f, 0, SEEK_END); long end = ftell(f); fseek(f, here, SEEK_SET); atomic_store(&g_pw_total, (int)((end - here) / (long)sizeof r)); }
     while (fread(&r, sizeof r, 1, f) == 1) {
-        n++;
+        n++; atomic_fetch_add(&g_pw_done, 1);
         vprog *pr = nvn_hm_get(&progs, r.r.key);
         if (!pr) {
             pr = calloc(1, sizeof *pr); int ok = 1;
@@ -3843,10 +4427,12 @@ static void *prewarm_static(void) {
             nvn_hm_put(&progs, r.r.key, pr);
         }
         pkey k = r.r.k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
+        b10_key_here(&k);   // (DM_VK_B10_AS_RGBA16: an R11G11B10F target is the stand-in here)
         prog_layout(pr, 0);
         pkey_s ks; memset(&ks, 0, sizeof ks); ks.k = k; ks.s = r.s;
         pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso_s, &ks) != NULL; pthread_mutex_unlock(&g_psomu);
         if (have) { had++; continue; }
+        prewarm_pace_play();
         if (pso_lookup_s(pr, &k, &r.s, 0)) built++; else failed++;
         prewarm_pace(built + failed, &waits);
     }
@@ -3856,44 +4442,127 @@ static void *prewarm_static(void) {
     pcache_save();
     return NULL;
 }
-static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm");
-    (void)arg; uint64_t t0 = mono_ns(); int waits = 0;
+// the main prewarm's shared state: the list, the next entry to take, the programs made so far (their layouts made once, under pw.mu: prog_layout is not for two threads)
+static struct { pso_rec *rs; int n, ns, cache_only; atomic_int next, unfit, built, had, failed, noshader, waits; pthread_mutex_t mu; nvn_hmap progs, seen; } g_pw = {
+    .mu = PTHREAD_MUTEX_INITIALIZER, .progs = {.klen = 40}, .seen = {.klen = sizeof(pso_rec)} };
+// a pipeline from the shipped list (recorded on another phone): its colour / depth / stencil targets and vertex formats must be ones this GPU has, or it is left
+//   out (a driver handed an unsupported format may fail or worse; this phone's own list only holds what it built)
+static int fmt_has(uint32_t f, VkFormatFeatureFlags need, int buffer) {
+    if (!f) return 1;
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, (VkFormat)f, &fp);
+    return ((buffer ? fp.bufferFeatures : fp.optimalTilingFeatures) & need) == need;
+}
+static int pso_formats_ok(const pkey *k) {
+    for (int i = 0; i < 8; i++) if (!fmt_has(k->cfmt[i], VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, 0)) return 0;
+    if (!fmt_has(k->dfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0) || !fmt_has(k->sfmt, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 0)) return 0;
+    for (int i = 0; i < 32; i++) if (k->attr[i].used && !fmt_has(k->attr[i].fmt, VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT, 1)) return 0;
+    return 1;
+}
+static void *prewarm_worker(void *arg) {
+    if (arg) DM_THREAD_NAME("dm-prewarm");   // (the threads started for it; the caller keeps its own name)
+    int waits = 0;
+    for (int i; (i = atomic_fetch_add(&g_pw.next, 1)) < g_pw.n; ) {
+        atomic_fetch_add(&g_pw_done, 1);
+        if (i < g_pw.ns && !pso_formats_ok(&g_pw.rs[i].k)) { atomic_fetch_add(&g_pw.unfit, 1); continue; }
+        pthread_mutex_lock(&g_pw.mu);
+        if (nvn_hm_get(&g_pw.seen, &g_pw.rs[i])) { pthread_mutex_unlock(&g_pw.mu); continue; }
+        nvn_hm_put(&g_pw.seen, &g_pw.rs[i], (void *)1);
+        vprog *pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key);
+        if (!pr) {
+            pr = calloc(1, sizeof *pr); int ok = 1;
+            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
+            if (!ok || !pr->sh[0]) { free(pr); pthread_mutex_unlock(&g_pw.mu); atomic_fetch_add(&g_pw.noshader, 1); continue; }
+            prog_layout(pr, 0);
+            nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, pr);
+        }
+        pthread_mutex_unlock(&g_pw.mu);
+        pkey k = g_pw.rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
+        b10_key_here(&k);   // (DM_VK_B10_AS_RGBA16: an R11G11B10F target is the stand-in here)
+        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
+        if (have) { atomic_fetch_add(&g_pw.had, 1); continue; }
+        int last_one = arg && atomic_load(&g_pw_playing) && !prewarm_play_free();   // (the game started: this extra thread builds the one it took, then one thread builds the rest)
+        prewarm_pace_play();
+        if (g_pw.cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); atomic_fetch_add(&g_pw.built, 1); } else atomic_fetch_add(&g_pw.failed, 1); }   // (into the driver's cache, not kept)
+        else if (pso_lookup(pr, &k, 0)) atomic_fetch_add(&g_pw.built, 1); else atomic_fetch_add(&g_pw.failed, 1);
+        prewarm_pace(atomic_load(&g_pw.built) + atomic_load(&g_pw.failed), &waits);
+        if (last_one) break;
+    }
+    atomic_fetch_add(&g_pw.waits, waits);
+    return NULL;
+}
+// how many build at once: one in the background; before the game, the cores less one (at most 6), 2 on phones with 6 GB or less (each build takes the driver's memory)
+static int prewarm_threads(void) {
+    if (!prewarm_all()) return 1;
+    const char *e = getenv("DM_VK_PREWARM_THREADS"); if (e && atoi(e) > 0) return atoi(e) > 16 ? 16 : atoi(e);
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN), pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE);
+    int t = cpus > 1 ? (int)cpus - 1 : 1; if (t > 6) t = 6;
+    if (pages > 0 && psz > 0 && (double)pages * psz < 6.5e9 && t > 2) t = 2;
+    return t;
+}
+// Compute pipelines in the prewarm. A compute pipeline was only ever built at its first dispatch, on the replay thread (dispatch below): the driver's compile sat
+//   in the middle of a frame the first time the game ran that shader (Scarlet / Violet's GPU culling and instancing as the open world loads; Sword / Shield have
+//   72 compute shaders, 41 distinct). The list of graphics pipelines (pso_rec) has no room for them (five stage keys), so the compute shaders the game has
+//   dispatched on this phone are kept beside it, <DM_VK_PSO_RECORD>.cs ("NXPC" + 8-byte shader keys; a shipped <DM_VK_PSO_SEED>.cs is read too when there is
+//   one). At the prewarm each is built once into the driver's pipeline cache and let go: the dispatch's own build then comes from the cache, with the game's own
+//   program and layout as before (nothing else changes there). DM_VK_PREWARM_COMPUTE=0: off
+#define PSO_MAGIC_C "NXPC"
+static void cs_record(const vshader *cs) {   // the replay thread only (dispatch): a compute shader's first pipeline on this run
+    static nvn_hmap known = {.klen = 8}; static FILE *f; static int tried;
+    uint8_t k[8]; if (hexkey(cs->key, k)) return;
+    if (!tried++) { const char *e = getenv("DM_VK_PSO_RECORD"); char p[1100];
+        if (e && *e && snprintf(p, sizeof p, "%s.cs", e) < (int)sizeof p) {
+            FILE *r = fopen(p, "rb"); char mg[4]; uint8_t o[8]; int have = 0;   // (what earlier runs wrote: not written twice)
+            if (r) { if (fread(mg, 1, 4, r) == 4 && !memcmp(mg, PSO_MAGIC_C, 4)) { have = 1; while (fread(o, 8, 1, r) == 1) nvn_hm_put(&known, o, (void *)1); } fclose(r); }
+            f = fopen(p, have ? "ab" : "wb"); if (f && !have) fwrite(PSO_MAGIC_C, 1, 4, f); } }
+    if (nvn_hm_get(&known, k)) return;
+    nvn_hm_put(&known, k, (void *)1);
+    if (f) { fwrite(k, 8, 1, f); fflush(f); }
+}
+static void prewarm_compute(void) {
+    { const char *e = getenv("DM_VK_PREWARM_COMPUTE"); if (e && !strcmp(e, "0")) return; }
+    const char *lists[2] = { getenv("DM_VK_PSO_SEED"), getenv("DM_VK_PSO_RECORD") }; static nvn_hmap seen = {.klen = 8};
+    int n = 0, built = 0, missing = 0, failed = 0; uint64_t t0 = mono_ns();
+    for (int l = 0; l < 2; l++) { char p[1100]; if (!lists[l] || !*lists[l] || snprintf(p, sizeof p, "%s.cs", lists[l]) >= (int)sizeof p) continue;
+        FILE *f = fopen(p, "rb"); if (!f) continue;
+        char mg[4]; uint8_t k[8];
+        if (fread(mg, 1, 4, f) == 4 && !memcmp(mg, PSO_MAGIC_C, 4)) while (fread(k, 8, 1, f) == 1) {
+            if (nvn_hm_get(&seen, k)) continue;
+            nvn_hm_put(&seen, k, (void *)1); n++;
+            prewarm_pace_play();   // (once the game plays: one build after each present, like the graphics pipelines)
+            pthread_mutex_lock(&g_pw.mu);   // (prog_layout is not for two threads: the graphics prewarm's lock)
+            vshader *cs = shader_get(k, 5); vprog *pr = cs ? calloc(1, sizeof *pr) : NULL; VkPipelineLayout pl = VK_NULL_HANDLE;
+            if (pr) { pr->sh[5] = cs; pl = prog_layout(pr, 1); }   // (a program of its own, kept: its layout lives as long as the cache entry is useful)
+            pthread_mutex_unlock(&g_pw.mu);
+            if (!cs || !pl) { missing++; continue; }
+            VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
+            VkPipeline pp = VK_NULL_HANDLE;
+            if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &pp)) failed++; else { vkDestroyPipeline(g_dev, pp, NULL); built++; } }
+        fclose(f); }
+    if (n) VLOG("prewarm: %d compute pipelines listed: %d built into the pipeline cache, %d failed, %d with a shader missing, %.1f s", n, built, failed, missing, (mono_ns() - t0) / 1e9);
+}
+static void *prewarm_run(void) {
+    uint64_t t0 = mono_ns();
+    prewarm_compute();   // (first: few, and the open world's first frames need them before most graphics pipelines)
     if (!g_eds) return prewarm_static();   // the shared lists leave out the draw state this driver needs built in: this phone's own list instead
     pso_rec *rs = NULL; int n = 0;
     int ns = pso_rec_load(getenv("DM_VK_PSO_SEED"), &rs, &n), nr = pso_rec_load(getenv("DM_VK_PSO_RECORD"), &rs, &n);
-    if (!n) return NULL;
-    static nvn_hmap progs = {.klen = 40}; static nvn_hmap seen = {.klen = sizeof(pso_rec)};
-    int built = 0, had = 0, failed = 0, noshader = 0;
-    // Phones with little memory (6.5 GB or less, or DM_VK_PREWARM=cache): every pipeline is built once into the driver's pipeline cache (saved below) and destroyed
-    //   at once, instead of kept. Kept, the 1157 of Sword / Shield's list held about 400 MB of the driver's own memory for the whole run (Galaxy S25+ [mem-by]:
-    //   scudo:primary 398 MB of the app's 551, 2026-11-20), which a 4 GB phone does not have; from the cache a pipeline the game asks for later is made in a few ms
-    //   instead of compiled (and on Adreno in the background, DM_VK_ASYNC_PSO). DM_VK_PREWARM=keep keeps them on any phone
-    int cache_only; { const char *e = getenv("DM_VK_PREWARM");
-        FILE *mf = fopen("/proc/meminfo", "r"); long tot = 0; char ln[128]; while (mf && fgets(ln, sizeof ln, mf)) if (!strncmp(ln, "MemTotal:", 9)) { tot = atol(ln + 9) / 1024; break; } if (mf) fclose(mf);
-        cache_only = e && !strcmp(e, "cache");   // (opt-in: on the S25+ it saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
-        if (cache_only) VLOG("prewarm: into the pipeline cache only, not kept (%s): this phone has %ld MB", e ? "DM_VK_PREWARM=cache" : "6.5 GB or less", tot); }
-    for (int i = 0; i < n; i++) {
-        if (nvn_hm_get(&seen, &rs[i])) continue; nvn_hm_put(&seen, &rs[i], (void *)1);
-        vprog *pr = nvn_hm_get(&progs, rs[i].key);
-        if (!pr) {
-            pr = calloc(1, sizeof *pr); int ok = 1;
-            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
-            if (!ok || !pr->sh[0]) { free(pr); noshader++; continue; }
-            nvn_hm_put(&progs, rs[i].key, pr);
-        }
-        pkey k = rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
-        prog_layout(pr, 0);
-        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
-        if (have) { had++; continue; }
-        if (cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); built++; } else failed++; }   // (into the driver's cache, not kept)
-        else if (pso_lookup(pr, &k, 0)) built++; else failed++;
-        prewarm_pace(built + failed, &waits);
-    }
-    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %.1f s (paused %d times for low memory)", n, ns, nr, built, cache_only ? " (cache only)" : "", had, failed, noshader, (mono_ns() - t0) / 1e9, waits);
-    free(rs);
+    if (!n) { free(rs); return NULL; }
+    g_pw.rs = rs; g_pw.n = n; g_pw.ns = ns; atomic_store(&g_pw_total, n);   // (the shipped list first: pso_rec_load appends)
+    int nt = prewarm_threads(); pthread_t th[16]; int started = 0;
+    // DM_VK_PREWARM=cache: every pipeline built once into the driver's pipeline cache (saved below) and destroyed at once, instead of kept (opt-in: on the S25+ it
+    //   saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
+    { const char *e = getenv("DM_VK_PREWARM"); g_pw.cache_only = e && !strcmp(e, "cache"); if (g_pw.cache_only) VLOG("prewarm: into the pipeline cache only, not kept (DM_VK_PREWARM=cache)"); }
+    for (int i = 1; i < nt; i++) if (!pthread_create(&th[started], NULL, prewarm_worker, (void *)1)) started++;
+    prewarm_worker(NULL);
+    for (int i = 0; i < started; i++) pthread_join(th[i], NULL);
+    VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %d shipped ones with formats this GPU lacks, %.1f s on %d thread(s)%s (paused %d times for low memory)",
+         n, ns, nr, atomic_load(&g_pw.built), g_pw.cache_only ? " (cache only)" : "", atomic_load(&g_pw.had), atomic_load(&g_pw.failed), atomic_load(&g_pw.noshader), atomic_load(&g_pw.unfit), (mono_ns() - t0) / 1e9, started + 1,
+         prewarm_all() ? ", before the game" : "", atomic_load(&g_pw.waits));
+    free(rs); g_pw.rs = NULL;
     pcache_save();
     return NULL;
 }
+static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm"); (void)arg; prewarm_run(); prewarm_finished(); return NULL; }
 // Builds the pipeline for key k (no lookup: pso_get and the prewarm do that); ss: the draw state built in, on a driver without extended dynamic state (else NULL)
 // A vertex attribute's format as the shader reads it. Vulkan wants the format's numeric type to match the shader input's (VUID-VkGraphicsPipelineCreateInfo-Input-08733;
 //   the driver is free to do anything otherwise); NVIDIA's hardware, which the game was made for, hands a 32-bit attribute's bits to the shader unchanged whatever its
@@ -3920,10 +4589,11 @@ static VkFormat attr_fmt_for(const vshader *vs, int depth_zero, uint32_t loc, Vk
 }
 static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     vshader *vs = pr->sh[0], *fs = pr->sh[1]; VkPipeline p = VK_NULL_HANDLE;
+    // a capture drawn as points (a key recorded while that route was on, or now): only with the route on and its shaders made. A recorded one built ahead at a start
+    //   with the route off had no point modules: Adreno's driver crashed in vkCreateGraphicsPipelines on the null module
+    if (k.tfpts && (g_tf_pts <= 0 || k.tfpts > 4 || !vs || !vs->ptsmod || !tfp_init() || !g_tfp_fs[k.tfpts - 1])) return VK_NULL_HANDLE;
     if (!g_eds && !ss) { RED_ONCE(110, "a pipeline without its draw state on a driver without extended dynamic state (vertex %s): not made", vs ? vs->key : "-"); return VK_NULL_HANDLE; }
-    VkPipelineShaderStageCreateInfo st[5]; uint32_t nst = 0;
     if (!g_clipctl && !k.depth_zero && vs && !vs->glmod) RED_ONCE(27, "GL depth mode without VK_EXT_depth_clip_control and no translated depth fallback for vertex shader %s", vs->key);
-    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && k.discard)) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap) : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
     VkVertexInputBindingDescription vb[17]; VkVertexInputAttributeDescription va[32]; VkVertexInputBindingDivisorDescriptionEXT vd[16]; uint32_t nvb = 0, nva = 0, nvd = 0; uint32_t have = 0;
     for (uint32_t loc = 0; loc < 32; loc++) {
         if (!k.attr[loc].used) continue;
@@ -3947,10 +4617,17 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
         cf[i] = (VkFormat)k.cfmt[i]; memset(&cb[i], 0, sizeof cb[i]);
         uint32_t m = (k.chmask >> (4 * i)) & 0xf;
         if (fs && fs->color_known && !(fs->color_mask >> i & 1)) m = 0;   // outputs the shader does not write keep their content (nvn_mtl.m pso_desc)
+        if (k.tfpts) m = 0xf;   // (a capture's targets: every channel)
+        if (k.b10 >> i & 1) m &= 7;   // R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16): the packed format has no alpha to write (the stand-in's stays 1)
         cb[i].colorWriteMask = m;
         if (k.blend_en >> i & 1 && m && !fmt_int_class(cf[i])) { cb[i].blendEnable = VK_TRUE;   // integer targets never blend (Vulkan: undefined)
             cb[i].srcColorBlendFactor = bfac_dev(k.blend[i].src_rgb); cb[i].dstColorBlendFactor = bfac_dev(k.blend[i].dst_rgb); cb[i].srcAlphaBlendFactor = bfac_dev(k.blend[i].src_a); cb[i].dstAlphaBlendFactor = bfac_dev(k.blend[i].dst_a);
-            cb[i].colorBlendOp = bop(k.blend[i].eq_rgb); cb[i].alphaBlendOp = bop(k.blend[i].eq_a); }
+            cb[i].colorBlendOp = bop(k.blend[i].eq_rgb); cb[i].alphaBlendOp = bop(k.blend[i].eq_a);
+            // ... and blending reads a target without alpha as alpha 1 (Vulkan's rule, the Switch's too): the stand-in's own alpha is never read
+            if (k.b10 >> i & 1) { VkBlendFactor *f4[4] = { &cb[i].srcColorBlendFactor, &cb[i].dstColorBlendFactor, &cb[i].srcAlphaBlendFactor, &cb[i].dstAlphaBlendFactor };
+                for (int q = 0; q < 4; q++) { VkBlendFactor f = *f4[q], g = f == VK_BLEND_FACTOR_DST_ALPHA ? VK_BLEND_FACTOR_ONE : f == VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA ? VK_BLEND_FACTOR_ZERO
+                                                  : f == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE && q < 2 ? VK_BLEND_FACTOR_ZERO : f;   // (saturate: min(source alpha, 1 - 1) for colour)
+                    if (g != f) { *f4[q] = g; b10_note("blending that reads the target's alpha: read as 1 (the packed format has none)", NULL, (int)f); } } } }
     }
     // Optional Vulkan 1.0 features the device may lack (mtl_init): the state that needs one is left out, never passed on
     if (!g_f_indblend && ncb > 1) {   // without independentBlend every target takes the same state: the first written target's (no blending if any target is an integer one)
@@ -3959,9 +4636,25 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
             if (differ) { VkPipelineColorBlendAttachmentState one = cb[t]; if (anyint) one.blendEnable = VK_FALSE; for (uint32_t i = 0; i < ncb; i++) cb[i] = one;
                 RED_ONCE(131, "targets blended differently on a device without independentBlend (vertex %s): every target as the first written one", vs ? vs->key : "-"); } }
     }
+    // R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16, see b10_on): what the draw writes into it made what the packed format stores (frag_module_ qm), where the
+    //   shader's output is what gets stored: no blending, or blending by min / max (rounding first or after gives the same there). A blended sum cannot be rounded
+    //   in a shader: it is kept as the blend makes it (logged once)
+    uint32_t qm = 0;
+    if (k.b10 && fs && !k.tfpts && !k.discard) for (uint32_t i = 0; i < ncb; i++) {
+        uint8_t cls = fs->out_cls[k.ds_swap && i <= 1 ? i ^ 1 : i];   // (the variant with outputs 0 and 1 swapped writes target i from output i ^ 1)
+        if (!(k.b10 >> i & 1) || !(cb[i].colorWriteMask & 7) || cls != 0) continue;
+        if (!cb[i].blendEnable || cb[i].colorBlendOp == VK_BLEND_OP_MIN || cb[i].colorBlendOp == VK_BLEND_OP_MAX) qm |= 1u << i;
+        else b10_note("a draw blended into the stand-in: the blend's result is kept as it is (R11G11B10F would store a sum below 0 as 0, one past 65024 as 65024)", NULL, (int)cb[i].colorBlendOp);
+    }
+    VkPipelineShaderStageCreateInfo st[5]; uint32_t nst = 0;
+    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && (k.discard || k.tfpts))) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap, qm) : i == 0 && k.tfpts && pr->sh[0]->ptsmod ? pr->sh[0]->ptsmod : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
+    if (k.tfpts && k.tfpts <= 4) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = g_tfp_fs[k.tfpts - 1], .pName = "main" };   // (the points' outputs into the targets)
+    // the y flip (spv_flip_y): -1 for the upper-left origin, 1 otherwise; a module without the constant (capture variants) ignores the entry
+    static const VkSpecializationMapEntry yfe = { SPV_FLIP_Y_SPEC_ID, 0, 4 }; const float yfv = k.yflip ? -1.0f : 1.0f; const VkSpecializationInfo yfi = { 1, &yfe, 4, &yfv };
+    if (g_yflip) for (uint32_t i = 0; i < nst; i++) if (st[i].stage == VK_SHADER_STAGE_VERTEX_BIT) st[i].pSpecializationInfo = &yfi;
     if (!g_f_clamp && rs.depthClampEnable) { rs.depthClampEnable = VK_FALSE; RED_ONCE(132, "depth clamp on a device without it: left off (geometry past the far plane is clipped)"); }
     if (!g_f_nonsolid && rs.polygonMode != VK_POLYGON_MODE_FILL) { rs.polygonMode = VK_POLYGON_MODE_FILL; RED_ONCE(133, "line / point fill on a device without fillModeNonSolid: filled"); }
-    int logic_en = k.logic_en;
+    int logic_en = k.tfpts ? 0 : k.logic_en;
     if (!g_f_logic && logic_en) { logic_en = 0; RED_ONCE(134, "a logic op (%u) on a device without logicOp: plain writes", (unsigned)k.logic_op); }
     // a geometry / tessellation stage the device does not have: the program is skipped
     for (int i = 0; i < 5; i++) if (pr->sh[i] && (pr->sh[i]->lacks & (SPV_NEED_GEOM | SPV_NEED_TESS))) { RED_ONCE(135, "a program with a geometry / tessellation stage this device lacks (shader %s): not drawn", pr->sh[i]->key); return VK_NULL_HANDLE; }
@@ -3993,7 +4686,7 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
     //   (VK_ATTACHMENT_UNUSED: a target with a gap): found and isolated by the Persona 5 Royal Android port (Brandon04Gonzalez/p5r-android, MIT). Such a pipeline
     //   is made without the cache on PowerVR; every other pipeline, and every other GPU, keeps it
     VkPipelineCache pc_ = g_pcache;
-    if (g_props.vendorID == 0x1010 && !g_dynren) for (uint32_t i = 0; i < ncb; i++) if (!cf[i]) { pc_ = VK_NULL_HANDLE; break; }
+    if (quirk_default(Q_PCACHE_GAPS_OFF, &g_gpuid) && !g_dynren) for (uint32_t i = 0; i < ncb; i++) if (!cf[i]) { pc_ = VK_NULL_HANDLE; break; }
     VkResult r = vkCreateGraphicsPipelines(g_dev, pc_, 1, &gi, NULL, &p);
     if (r == VK_INCOMPLETE && p) { RED_ONCE(107, "graphics pipeline creation answered VK_INCOMPLETE (out of spec; Mali, Adreno 5xx): the pipeline it made is used"); r = VK_SUCCESS; }
     if (r) { VLOG("[RED] graphics pipeline (vertex %s fragment %s) failed: %d", vs->key, fs ? fs->key : "-", r); return VK_NULL_HANDLE; }
@@ -4003,10 +4696,11 @@ static VkPipeline pso_get(vprog *pr, VkPrimitiveTopology topo) {
     vshader *vs = pr->sh[0], *fs = pr->sh[1];
     pkey k; memset(&k, 0, sizeof k);
     for (int i = 0; i < 5; i++) k.sh[i] = pr->sh[i];
-    memcpy(k.cfmt, P.cfmt, sizeof k.cfmt); k.dfmt = P.hd ? P.dfmt : 0; k.sfmt = P.hs ? P.sfmt : 0; k.samples = (uint8_t)P.samples;
+    memcpy(k.cfmt, P.cfmt, sizeof k.cfmt); k.dfmt = P.hd ? P.dfmt : 0; k.sfmt = P.hs ? P.sfmt : 0; k.samples = (uint8_t)P.samples; k.b10 = (uint8_t)P.b10;
     k.chmask = S.chmask.mask; k.blend_en = (uint8_t)S.color.blend_en; for (int i = 0; i < 8; i++) if (k.cfmt[i]) k.blend[i] = S.blend[i];
     k.a2c = S.ms.a2c; k.poly = S.poly.mode == NVN_POLYGON_MODE_LINE ? 1 : S.poly.mode == NVN_POLYGON_MODE_POINT ? 2 : 0; k.clamp = (uint8_t)!!S.depth_clamp; k.topo = (uint8_t)topo_class(topo);
-    k.logic_en = S.color.logic_op != NVN_LOGIC_OP_COPY; k.logic_op = (uint8_t)S.color.logic_op; k.depth_zero = (uint8_t)atomic_load(&g_depth_zero); k.discard = (uint8_t)!!S.rast_discard;
+    k.logic_en = S.color.logic_op != NVN_LOGIC_OP_COPY; k.logic_op = (uint8_t)S.color.logic_op; k.depth_zero = (uint8_t)atomic_load(&g_depth_zero); k.yflip = (uint8_t)(g_yflip && !atomic_load(&g_origin_ll)); k.discard = (uint8_t)!!S.rast_discard;
+    if (P_tf && g_tf_pts > 0) { k.discard = 0; k.tfpts = (uint8_t)P.ncolor; }   // (a capture drawn as points: tf_points.h)
     k.ds_swap = (uint8_t)g_ds_swap;
     int nvin; const spv_input *vin = vs_inputs(vs, k.depth_zero, &nvin);   // (the inputs of the vertex module this pipeline gets)
     for (int i = 0; i < nvin; i++) {
@@ -4113,6 +4807,10 @@ static VkDescriptorSet desc_set_alloc(VkDescriptorSetLayout dsl) {
 //   anew: vkAllocateDescriptorSets and vkUpdateDescriptorSets were ~18 % of the render thread on Qualcomm's own driver in another Android port of a Switch game, and consecutive
 //   draws of one material often bind exactly the same. Keyed by two 64-bit hashes of every write; the sets stay valid until the submission's pools reset (g_dsc_gen).
 //   DM_VK_DESC_REUSE=0: a new set for every draw as before
+// DM_VK_UBO_SNAPSHOT=1 (mtl_init sets it for a Mali-G615 on Arm's driver before r49, which needed it to start; the menu's Mali tests: Auto / Off = 0 / On = 1):
+//   uniform buffers copied when their draw is recorded (push_stage), uniform updates written into the game's memory as they are recorded (sub_update)
+static uint64_t g_snap_wt;   // uniform updates written through for the snapshots (the present line)
+static int ubo_snap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UBO_SNAPSHOT"); v = e && atoi(e) > 0; VLOG("uniform buffers: %s", v ? "copied when their draw is recorded, updates written through (DM_VK_UBO_SNAPSHOT)" : "read by the GPU from the pools"); } return v; }
 enum { DSC_N = 4096 };
 static struct { uint64_t h1, h2, gen; VkDescriptorSet ds; } g_dsc[DSC_N];
 static uint64_t g_dsc_hits, g_dsc_new;   // sets reused / written (the present line)
@@ -4179,6 +4877,7 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
                     else if (h->what == W_SSBO) u = h->reg < 16 ? &S.ssbo[st][h->reg] : NULL;
                     if (u) { addr = u->addr; size = u->size; }
                     if (h->what == W_SBUFU) { uint32_t lo = ubo_word(st, h->reg, h->off), hi = ubo_word(st, h->reg, h->off + 4); addr = (uint64_t)hi << 32 | lo; size = 0; }
+                    if (addr) GOLDEN_MEM(addr, r->kind == SPV_RES_UBO ? 65536 : size ? size + 4096 : (1u << 20));   // (what the shader can reach: bound below as the pool's rest)
                     if (TD_TRACE) { float f[8] = {0}; if (addr) memcpy(f, (const void *)(uintptr_t)addr, sizeof f);
                         VLOG("[trace]   %s %s stage %d reg %d at %#llx size %llu: %g %g %g %g %g %g %g %g", r->kind == SPV_RES_UBO ? "uniform" : "storage", r->name, st, h->reg, (unsigned long long)addr, (unsigned long long)size, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]); }
                     int shadowed = 0;   // written by uniform updates deferred in this pass (ubd_conflict ended the pass if they cover it only in part)
@@ -4194,8 +4893,7 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
                         if (want > left) want = left; if (want > cap) want = cap;
                         // DM_VK_UBO_SNAPSHOT=1 (diagnosis, Mali white #47 / #53 / #64 / #68): every uniform buffer copied when its draw is recorded, as Adreno's 64-byte alignment makes
                         //   most of them, instead of the GPU reading the pool live; the game's bound size + 4 KB (what the lighting reads past it), at most 64 KB
-                        static int ubo_snap = -1; if (ubo_snap < 0) { const char *e = getenv("DM_VK_UBO_SNAPSHOT"); ubo_snap = e && atoi(e); if (ubo_snap) VLOG("DM_VK_UBO_SNAPSHOT: uniform buffers copied at record time"); }
-                        if (ubo_snap && r->kind == SPV_RES_UBO) {
+                        if (ubo_snap_on() && r->kind == SPV_RES_UBO) {
                             VkDeviceSize m = size ? size + 4096 : 65536; if (m > want) m = want; if (m > 65536) m = 65536;
                             uint8_t *d = arena_alloc(g_sub, m, &b, &o); memcpy(d, (const void *)(uintptr_t)addr, m); n = m;
                         }
@@ -4212,7 +4910,7 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
                             static int snap = -1; if (snap < 0) snap = getenv("DM_VK_SSBO_GPU_COPY") == NULL;   // the CPU snapshot unless DM_VK_SSBO_GPU_COPY (that copy lost the device on an Adreno 830 at Violet's enrollment screen: experimental)
                             if (snap) { uint8_t *d = arena_alloc(g_sub, m, &b, &o); memcpy(d, (const void *)(uintptr_t)addr, m); n = m; } else {
                             (void)arena_alloc(g_sub, m, &b, &o); n = m;
-                            int reopen = P.open && bp == VK_PIPELINE_BIND_POINT_GRAPHICS; VkCommandBuffer ccb = CB(); pass_end();
+                            int reopen = P.open && !P_tf && bp == VK_PIPELINE_BIND_POINT_GRAPHICS; VkCommandBuffer ccb = CB(); pass_end();
                             VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
                             vkCmdPipelineBarrier(ccb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
                             VkBufferCopy bc = { po, o, m }; vkCmdCopyBuffer(ccb, pb, b, 1, &bc);
@@ -4235,8 +4933,19 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
                 if (h->skind == S_SEP) sid = h->sreg < 128 ? (int)(S.samp[st][h->sreg] >> 20) : 0;
                 else if (h->skind == S_UBO) sid = (int)(ubo_word(st, h->sreg, h->soff) >> 20);
                 else if (h->skind == S_ID) sid = h->sreg;
-                VkImageView v = tid ? tex_view_for(tid, r, storage) : VK_NULL_HANDLE;
+                VkImageView v = tid ? tex_view_for(tid, r, storage, s->key, st, s->img_writes) : VK_NULL_HANDLE;
                 if (TD_TRACE) VLOG("[trace]   %s %s tid %d ser=%llu%s", storage ? "image" : "texture", r->name, tid, 0ull, v ? "" : " (no view: dummy)");
+                // DM_VK_TEXOVR=<fs key>:<binding>=0|1,...: that binding reads 0 or 1. Without it, the game profile's tex_unwritten_one pairs read 1 (textures the game
+                // never draws on this host: Pokémon Legends: Arceus' ambient occlusion result, whose pass never runs); DM_VK_TEXOVR=none turns that off
+                if (!storage) { static const char *ov = (const char *)1; if (ov == (const char *)1) { ov = getenv("DM_VK_TEXOVR");
+                        if (ov && !strcmp(ov, "none")) ov = NULL;
+                        else if (!ov && DM_GAME_TEX_UNWRITTEN_ONE[0]) { static char def[4096]; size_t o = 0; const char *q = DM_GAME_TEX_UNWRITTEN_ONE;
+                            while (*q && o + 64 < sizeof def) { const char *e = strchr(q, ' '); size_t n = e ? (size_t)(e - q) : strlen(q); o += (size_t)snprintf(def + o, sizeof def - o, "%.*s=1,", (int)n, q); q += n; while (*q == ' ') q++; }
+                            ov = def; VLOG("textures the game never draws here, read as 1: %s", DM_GAME_TEX_UNWRITTEN_ONE); } }
+                    if (ov) { char pat[96]; snprintf(pat, sizeof pat, "%s:%s=", s->key, r->name); const char *m = strstr(ov, pat);
+                        if (m) { int k = vkind(r); vtex *dx = r->depth && k <= 3 ? g_dummy_depth[k] : g_dummy[k][r->sclass < 3 ? r->sclass : 0]; uint8_t c = m[strlen(pat)] == '1' ? VK_COMPONENT_SWIZZLE_ONE : VK_COMPONENT_SWIZZLE_ZERO;
+                                 uint8_t sw[4] = { c, c, c, c }; uint32_t nl = k == 2 || k == 3 ? 6 : 1;
+                                 v = view_get(dx, VK_OF_KIND[k], dx->fmt, 0, 1, 0, nl, sw, dx->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : dx->aspect); } } }
                 if (!v) v = dummy_view(r, storage);
                 VkSampler smp = storage ? VK_NULL_HANDLE : (tid && tex_is_int(tid) ? samp_nearest_by_id(sid) : samp_by_id(sid)); if (!storage && !smp) smp = g_dummy_samp;
                 ii[nw] = (VkDescriptorImageInfo){ smp, v, VK_IMAGE_LAYOUT_GENERAL }; w[nw].pImageInfo = &ii[nw]; nw++; break;
@@ -4257,6 +4966,10 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
 static void push_stage(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineLayout pl) { push_stage_h(s, st, bp, pl, 0); }
 
 // ================= Draws =================
+// draw_ binds a pipeline only when it is not the one it bound last in this command buffer (Vulkan keeps the binding across passes). Anything else that binds a
+//   graphics pipeline in the submission's command buffer (zcopy_draw) counts this up, so the game's next draw binds its own again. Its descriptors, push constants,
+//   vertex streams and dynamic state are not affected: draw_ sets them for every draw, after the bind
+static uint64_t g_gfx_bind_gen;
 // DM_VK_PROF: where the replay's CPU time goes per draw (pass + pipeline, dynamic state + vertex streams, descriptors, flush + draw), logged every 300 presents
 static int g_vprof = -1; static uint64_t g_vp_t[4], g_vp_n, g_vp_o[5], g_vp_pass, g_vp_pso;
 #define VPROF_ON (g_vprof < 0 ? (g_vprof = getenv("DM_VK_PROF") != NULL) : g_vprof)
@@ -4264,10 +4977,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark);
 // the frame capture's draw by draw values (g_cap_dp): after a draw of the chosen pass, the pass is ended (without logging it), colour 0's 12 points copied, and the pass
 //   opened again (loading: its clears were taken when it first began). Only in the one captured frame
 static void cap_draw_values(void) {
-    if (!P.open || g_cap_nd >= CAPD) return;
+    if (!P.open || P_tf || g_cap_nd >= CAPD) return;
     const tex_t *ct = R.rt.color[0]; vtex *x = ct ? tex_res(ct) : NULL; if (!x || !x->img || x->samples > 1) return;
     sk_read(x);
-    if (!g_cap_dp) { if (x->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || P.tw < 640) return; g_cap_dp = 1; }
+    if (!g_cap_dp) { if ((x->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 && !b10_swapped_tex(x)) || P.tw < 640) return; g_cap_dp = 1; g_cap_dfmt = x->fmt; }   // (the stand-in: the same pass, DM_VK_B10_AS_RGBA16)
     uint32_t lv = R.rt.has_cview[0] && R.rt.cview[0].set_levels ? R.rt.cview[0].base_level : 0, ly = R.rt.has_cview[0] && R.rt.cview[0].set_layers ? R.rt.cview[0].min_layer : 0;
     uint32_t sw = x->w >> lv ? x->w >> lv : 1, sh = x->h >> lv ? x->h >> lv : 1; VkBufferImageCopy pc[CAPP];
     for (int k = 0; k < CAPP; k++) pc[k] = (VkBufferImageCopy){ .bufferOffset = (VkDeviceSize)CAPN * CAPW * CAPH * 4 + (VkDeviceSize)CAPS * CAPP * 16 + ((VkDeviceSize)g_cap_nd * CAPP + (VkDeviceSize)k) * 16,
@@ -4288,7 +5001,23 @@ static void cap_draw_values(void) {
 static int ds_src_ok(int f) { return f == 1 || f == 2 || (f >= 3 && f <= 6) || (f >= 0x61 && f <= 0x64); }   // ZERO, ONE, SRC_*, CONSTANT_*: not the target, not output 1
 static int ds_dst_map(int f) { return f == 1 ? 1 : f == 2 ? 2 : f == 0x10 ? 3 : f == 0x11 ? 4 : f == 0x12 ? 5 : f == 0x13 ? 6 : -1; }   // SRC1_x as SRC_x; ZERO / ONE kept
 static void draw_one(const p_draw *dw, const p_draw_idx *di);
+// DM_SHADOWS=off (Scarlet / Violet 4.0.0 only, loader.c dm_shadow_off): the sun's shadow map is the one square DEPTH32F target drawn with no colour attachment
+//   (about 19 passes and 160 draws a frame docked, a quarter of the frame's draws). Its draws are dropped, so the map keeps the far depth it is cleared to and
+//   nothing comes out shadowed: the whole pass is replay and GPU work that never happens. Clears still run. The first target taken for it is logged with its size
+__attribute__((weak)) int dm_shadow_off;
+static int shadow_target(const p_set_rt *rt) {
+    static const tex_t *last; static int last_is, logged;
+    const tex_t *t = rt->depth;
+    if (!t) return 0;
+    for (int i = 0; i < rt->n && i < 8; i++) if (rt->color[i]) return 0;
+    if (t == last) return last_is;
+    last = t;
+    last_is = t->d.format == NVN_FORMAT_DEPTH32F && t->d.width == t->d.height && t->d.width >= 512;
+    if (last_is && !logged) { logged = 1; LOG("[nvn] shadows off: draws to the %ux%u depth-only target (target %d, %u layers) are dropped (DM_SHADOWS=off)", t->d.width, t->d.height, t->d.target, t->d.depth); }
+    return last_is;
+}
 static void draw(const p_draw *dw, const p_draw_idx *di) {
+    if (&dm_shadow_off && dm_shadow_off && R.has_rt && shadow_target(&R.rt)) return;
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_DUALSRC"); on = !(e && (!strcmp(e, "off") || !strcmp(e, "keep"))); }
     const blend_st b = S.blend[0];
     int ds = on && !S.rast_discard && (S.color.blend_en & 1) && ((b.dst_rgb >= 0x10 && b.dst_rgb <= 0x13) || (b.dst_a >= 0x10 && b.dst_a <= 0x13));
@@ -4343,10 +5072,11 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     // Rasterizer discard: the vertex stage alone. With transform feedback active the draw captures its outputs (the shader's capture variant stores them into the bound
     // feedback buffers, as nvn_mtl.m tf_draw: Pokémon Legends: Arceus / Z-A skin characters so); otherwise it changes nothing and is skipped
     VkBuffer tfb[4] = {0}; VkDeviceSize tfo[4] = {0}, tfr[4] = {0}; uint32_t tfpc[5] = {0}; int tfcap = 0;
+    uint32_t tfp_base[4] = {0}, tfp_rows = 0; int tfp_n = 0;   // a capture as points (tf_points.h): the buffers' first words, the target rows, how many targets
     if (S.rast_discard) {
         vshader *vs = pr->sh[0];
         if (!S.tf_on) return;
-        if (!vs->tfmod) { RED_ONCE(100, "transform feedback with vertex shader %s, which has no capture variant: nothing captured", vs->key); return; }
+        if (g_tf_pts > 0 ? !vs->ptsmod || !tfp_init() : !vs->tfmod) { RED_ONCE(100, "transform feedback with vertex shader %s, which has no capture variant: nothing captured", vs->key); return; }
         if (!dw || dw->ind || dw->mdi_cnt || dw->instances > 1 || dw->prim == 6 || dw->prim == 7) { RED_ONCE(101, "transform feedback draw that is indexed, indirect, instanced or a fan / quad list (vertex %s): not captured", vs->key); return; }
         if (dw->count <= 0) return;
         VkDeviceSize al = g_props.limits.minStorageBufferOffsetAlignment ? g_props.limits.minStorageBufferOffsetAlignment : 256;
@@ -4369,7 +5099,15 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         for (int st = 0; keep && st < 5; st++) for (int q = 0; keep && q < 16; q++) {
             if (S.ubo[st][q].addr && tf_hits(S.ubo[st][q].addr, S.ubo[st][q].addr + (S.ubo[st][q].size ? S.ubo[st][q].size : 65536))) keep = 0;
             if (S.ssbo[st][q].addr && tf_hits(S.ssbo[st][q].addr, S.ssbo[st][q].addr + (S.ssbo[st][q].size ? S.ssbo[st][q].size : 65536))) keep = 0; }
-        tf_pass_begin(keep);
+        if (g_tf_pts > 0) {   // as points: one target per capture buffer, the buffers numbered from 0 with stride = components x 4, TFP_W pixels a row
+            vshader *vs_ = pr->sh[0]; int nb_ = 0;
+            for (int b = 0; b < 4; b++) if (vs_->tf_stride[b]) { if (b != nb_ || vs_->tf_stride[b] != 4u * (uint32_t)vs_->tf[b][1]) nb_ = -1; else nb_++; if (nb_ < 0) break; }
+            if (nb_ <= 0 || (uint64_t)dw->count > (uint64_t)TFP_W * TFP_H) { RED_ONCE(126, "transform feedback as points: vertex %s's capture (%d vertices) does not fit the targets: not captured", vs_->key, dw->count); return; }
+            for (int b = 0; b < 4; b++) tfp_base[b] = tfpc[1 + b];
+            tfp_rows = ((uint32_t)dw->count + TFP_W - 1) / TFP_W; tfp_n = nb_;
+            tfpc[1] = tfp_rows; tfpc[2] = tfpc[3] = tfpc[4] = 0;   // (the point variant's push constants: { first, rows })
+            tfp_pass_begin(nb_, tfp_rows);
+        } else tf_pass_begin(keep);
     } else if (!pass_begin()) return;
     if (!tfcap && (P.hd || P.hs)) {   // a draw writing depth / stencil: noted; in a pass begun with store op NONE for it, the pass restarts storing (pass_writes)
         int st_w = P.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP ||
@@ -4378,14 +5116,16 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         if (!P.open) return;
     }
     int prim = dw ? dw->prim : di->prim; VkPrimitiveTopology topo = topo_of(prim);
+    if (tfcap && g_tf_pts > 0) topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;   // (a capture as points: one per vertex, tf_points.h)
     uint64_t pp1 = mark ? mono_ns() : 0;
     VkPipeline p = pso_get(pr, topo); if (!p) return;
     if (mark) { g_vp_pass += pp1 - pp0; g_vp_pso += mono_ns() - pp1; }   // (DM_VK_PROF: the "pass + pipeline" stage split)
     if (TD_TRACE) VLOG("[trace] draw vs %s fs %s blend_en %#x", pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-", (unsigned)S.color.blend_en);
     VkCommandBuffer cb = CB(); if (mark) mark[1] = mono_ns();
-    { static VkCommandBuffer bcb; static VkPipeline bp; static uint64_t bfence;   // the same pipeline already bound in this command buffer: no rebind (Vulkan keeps it across passes)
-      static int off = -1; if (off < 0) off = getenv("DM_VK_BIND_ALWAYS") != NULL;
-      if (off || cb != bcb || bp != p || bfence != g_sub->fence) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; if (pso_cap()) pso_used(p); } }
+    { static VkCommandBuffer bcb; static VkPipeline bp; static uint64_t bfence, bgen;   // the same pipeline already bound in this command buffer: no rebind (Vulkan keeps it across passes)
+      static int off = -1; if (off < 0) off = getenv("DM_VK_BIND_ALWAYS") != NULL;   // (bgen: g_gfx_bind_gen, another graphics pipeline bound there since)
+      if (off || cb != bcb || bp != p || bfence != g_sub->fence || bgen != g_gfx_bind_gen) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bcb = cb; bp = p; bfence = g_sub->fence; bgen = g_gfx_bind_gen; if (pso_cap()) pso_used(p);
+          cr_pipe(pr->sh[0] ? pr->sh[0]->key : NULL, pr->sh[1] ? pr->sh[1]->key : NULL); } }   // (breadcrumbs: the shaders bound, in this pass)
     // dynamic state
     float vx = 0, vy = 0, vw = (float)P.tw, vh = (float)P.th;
     if (S.has_vp) { vx = S.vp[0][0]; vy = S.vp[0][1]; vw = S.vp[0][2]; vh = S.vp[0][3]; }
@@ -4393,13 +5133,15 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     { static int on = -1, n; static float seen[48][6]; if (on < 0) on = getenv("DM_VK_LOG_VP") != NULL;   // DM_VK_LOG_VP: the first distinct viewports (with the target size) the game draws with
       if (on && n < 48) { float k[6] = { vx, vy, vw, vh, (float)P.tw, (float)P.th }; int i; for (i = 0; i < n && memcmp(seen[i], k, sizeof k); i++) {}
         if (i == n) { memcpy(seen[n++], k, sizeof k); VLOG("viewport %g,%g %gx%g depth %g..%g on a %ux%u target (scissor %s %d,%d %ux%u)", vx, vy, vw, vh, S.dr[0], S.dr[1], P.tw, P.th, R.has_sc ? "set" : "none", R.sc.x, R.sc.y, R.sc.w, R.sc.h); } } }
-    if (!atomic_load(&g_origin_ll)) { v.y = vy + vh; v.height = -vh; }   // NVN upper-left: NDC +1 on the first row (Vulkan puts -1 there)
+    if (!atomic_load(&g_origin_ll) && !g_yflip) { v.y = vy + vh; v.height = -vh; }   // NVN upper-left: NDC +1 on the first row (Vulkan puts -1 there); g_yflip: done in the vertex shader
     if (v.minDepth < 0) v.minDepth = 0; if (v.minDepth > 1) v.minDepth = 1; if (v.maxDepth < 0) v.maxDepth = 0; if (v.maxDepth > 1) v.maxDepth = 1;
     vkCmdSetViewport(cb, 0, 1, &v);
+    if (tfcap && tfp_n) { VkViewport pv = { 0, 0, (float)TFP_W, (float)tfp_rows, 0, 1 }; vkCmdSetViewport(cb, 0, 1, &pv); }   // (the targets, one pixel a vertex)
     VkRect2D sc = {{0, 0}, {P.tw, P.th}};
     if (R.has_sc && !tfcap) { long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h; if (x1 > (long)P.tw) x1 = P.tw; if (y1 > (long)P.th) y1 = P.th;
         if (x1 <= x0 || y1 <= y0) return; sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
     vkCmdSetScissor(cb, 0, 1, &sc);
+    if (g_mw_px) mw_draw_rect(vx, vy, vw, vh, &sc);   // (the white-screen check: the part of the lit target this draw covers)
     if (g_eds) {   // (without extended dynamic state these are built into the pipeline: pso_get's sst, the same values)
     // (points and lines never cull, so none is sent for them: Arm's driver culled them with a dynamic cull mode and those draws vanished, erratum 3786517, r41-r51)
     vkCmdSetCullMode(cb, topo_class(topo) < 2 ? VK_CULL_MODE_NONE : S.poly.cull == NVN_FACE_FRONT ? VK_CULL_MODE_FRONT_BIT : S.poly.cull == NVN_FACE_BACK ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
@@ -4442,11 +5184,23 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         if (g_np) D.n += nw; else if (nw) p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, nw, w);
         desc_flush(VK_PIPELINE_BIND_POINT_GRAPHICS, pl, pr->dsl[0]);
         vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof tfpc, tfpc);
+        // On Arm's own driver (or DM_VK_TF_CHECK=1): the first capture's output starts as a marker, read back 60 frames later (tf_check): still the marker = the captures
+        //   wrote nothing on this driver (#6). Written through the guest's memory before the submission runs, as a host write (mirrored pools take it in at submit).
+        //   vk_quirks.h Q_TF_CHECK
+        { static int chk = -1; if (chk < 0) { const char *e = getenv("DM_VK_TF_CHECK"); chk = quirk_note(Q_TF_CHECK, e ? atoi(e) != 0 : quirk_default(Q_TF_CHECK, &g_gpuid), e != NULL); }
+          extern uint64_t g_tfchk_at, g_tfchk_frame; extern uint32_t g_tfchk_n;
+          if (chk == 1 && tfb[0] && pr->sh[0]->tf_stride[0]) { chk = 2; uint64_t at = S.tf[0].addr + S.tf_off[0], n = (uint64_t)dw->count * pr->sh[0]->tf_stride[0]; if (n > 64) n = 64;
+              n &= ~3ull; if (n) { dm_guest_write_prepare((void *)(uintptr_t)at, n); for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(uintptr_t)(at + i) = 0x7fc0deadu;
+                  g_tfchk_at = at; g_tfchk_n = (uint32_t)n; g_tfchk_frame = g_frame_no; } } }
         if (pr->sh[0]->dp) { uint32_t dv[3] = { (uint32_t)dw->first, (uint32_t)dw->base_instance, 0 }; vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, SPV_DRAWP_PC_OFFSET, sizeof dv, dv); }
         vkCmdDraw(cb, (uint32_t)dw->count, 1, (uint32_t)dw->first, (uint32_t)dw->base_instance);
         vshader *vs = pr->sh[0];
-        for (int b = 0; b < 4; b++) if (tfb[b]) { uint64_t n = (uint64_t)dw->count * vs->tf_stride[b]; wb_note(S.tf[b].addr + S.tf_off[b], n); S.tf_off[b] += n; }
-        pass_end();   // (a capture pass: its end makes the writes visible to what reads them, one barrier)
+        if (tfp_n) {   // as points: the targets into the capture buffers
+            int nc_[4]; for (int b = 0; b < 4; b++) nc_[b] = vs->tf[b][1];
+            pass_end(); tfp_repack(CB(), tfp_n, (uint32_t)dw->count, tfb, tfo, tfr, tfp_base, nc_); }
+        for (int b = 0; b < 4; b++) if (tfb[b]) { uint64_t n = (uint64_t)dw->count * vs->tf_stride[b], at = S.tf[b].addr + S.tf_off[b]; wb_note(at, n); S.tf_off[b] += n;
+            if (g_ntfw < 64) { g_tfw[g_ntfw].lo = at; g_tfw[g_ntfw].hi = at + n; g_ntfw++; } }
+        if (!tf_batch_on()) pass_end();   // (batched: the pass stays open for the next capture; its end makes the writes visible)
         { static int once; if (!once++) VLOG("transform feedback: first capture (vertex %s, %d vertices)", vs->key, dw->count); }
         return;
     }
@@ -4499,6 +5253,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     vkCmdDrawIndexed(cb, (uint32_t)di->count, inst, 0, di->base_vertex, (uint32_t)di->base_instance);
 }
 static nvn_hmap g_cps = {.klen = sizeof(void *)};
+static int b10_quantize_region(VkCommandBuffer cb, vtex *x, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h);
 static void dispatch(const p_dispatch *dp) {
     if (!S.cprog) { RED_ONCE(39, "dispatch with no program bound"); return; }
     vprog *pr = prog_get(S.cprog); vshader *cs = pr->sh[5]; if (!cs) { RED_ONCE(40, "dispatched program has no compute shader (or it is not mapped)"); return; }
@@ -4506,12 +5261,13 @@ static void dispatch(const p_dispatch *dp) {
     void *key = pr; VkPipeline p = nvn_hm_get(&g_cps, &key);
     if (!p) { VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
         if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &p)) { VLOG("[RED] compute pipeline %s failed", cs->key); return; }
-        nvn_hm_put(&g_cps, &key, p); }
+        nvn_hm_put(&g_cps, &key, p); cs_record(cs); }   // (listed for the next start's prewarm: prewarm_compute)
     outside_pass();
     VkCommandBuffer cb = CB();
     if (atomic_load(&g_cap) == 2) { cap_printf("compute dispatch %ux%ux%u%s: shader %s\n", (unsigned)dp->x, (unsigned)dp->y, (unsigned)dp->z, dp->ind ? " (indirect)" : "", cs->key); g_cap_ntex = 0; }
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z; g_c0_buf = VK_NULL_HANDLE;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    g_nb10q = 0;   // (the stand-in bound below as a storage image declared without a format: b10_storage_bind)
     push_stage(cs, 5, VK_PIPELINE_BIND_POINT_COMPUTE, pl);
     desc_flush(VK_PIPELINE_BIND_POINT_COMPUTE, pl, pr->dsl[1]);
     if (dp->ind) { VkBuffer ab; VkDeviceSize ao; if (!pool_buf(dp->ind, 12, &ab, &ao, NULL)) { RED_ONCE(41, "indirect dispatch arguments in no pool"); return; }
@@ -4519,6 +5275,11 @@ static void dispatch(const p_dispatch *dp) {
         vkCmdDispatchIndirect(cb, ab, ao); }
     else vkCmdDispatch(cb, (uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z);
     barrier_all(cb);
+    // DM_VK_B10_AS_RGBA16: what the dispatch stored into the stand-in through an image declared without a format, made what R11G11B10F holds (range, rounding, alpha 1)
+    for (int i = 0; i < g_nb10q; i++) { vtex *x = g_b10q[i].x; uint32_t lv = g_b10q[i].lv;
+        if (x->samples > 1 || !b10_quantize_region(cb, x, lv, g_b10q[i].z0, g_b10q[i].nz, 0, 0, x->w >> lv ? x->w >> lv : 1, x->h >> lv ? x->h >> lv : 1))
+            RED_ONCE(162, "b10 swap: what a dispatch stored into the stand-in (declared without a format) could not be made what R11G11B10F holds (no conversion shader): kept as it is"); }
+    g_nb10q = 0;
 }
 
 // ================= Buffer operations (in submission order) =================
@@ -4536,6 +5297,10 @@ static void sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
 static void sub_update(const void *data, uint64_t dst, uint64_t n) {   // the data is copied now (the game may reuse its command memory before the GPU runs)
     if (!n) return;
     VkBuffer db; VkDeviceSize dof; if (!pool_buf(dst, n, &db, &dof, NULL)) { RED_ONCE(43, "uniform update outside the pools"); return; }
+    // With the uniform snapshots (ubo_snap_on) every draw reads its uniform data as the game's memory holds it when the draw is recorded, so an update recorded
+    //   before it must be there by then: written into that memory now, in recording order, as well as by the copy below (which lands only when the GPU runs it,
+    //   after every snapshot of this submission was taken: those draws read the data from before the update)
+    if (ubo_snap_on()) { dm_guest_write_prepare((void *)(uintptr_t)dst, n); memcpy((void *)(uintptr_t)dst, data, n); g_snap_wt++; }
     if (P.open && !P_tf && g_nubd < UBD_MAX && ubd_on()) {   // kept until the pass ends (see ubd_flush); draws after it read it through ubd_shadow
         VkBuffer tb; VkDeviceSize to; uint8_t *m = arena_alloc(g_sub, n, &tb, &to); memcpy(m, data, n);
         g_ubd[g_nubd++] = (ubd_ent){ dst, dst + n, tb, to, m }; g_ubd_deferred++; return; }
@@ -4554,10 +5319,199 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 }
 
 // ================= Texture copies and clears =================
+// A scaled / mirrored / format-changing copy into a depth / stencil image whose format is no blit destination (D24S8 on the Adreno 830: vkCmdBlitImage into it is
+//   invalid, VUID-vkCmdBlitImage-dstImage-02000, found by the Khronos layer 2026-11-20): drawn instead. One pass with the destination as its depth / stencil attachment:
+//   the depth from the source's depth (zcopy_d.frag, gl_FragDepth, nearest like a depth blit), then the stencil one bit a draw (zcopy_s.frag discards where the source's
+//   bit is clear; write mask = that bit; Vulkan 1.0 has no stencil export), after the depth draw set it to 0. Plain descriptor sets (no push descriptors), Vulkan 1.0.
+//   Anything it cannot take (the same image, multisample, 3D, an image not made for this) keeps the blit. DM_VK_ZCOPY=0: the blit always, as before
+#include "overlay/zcopy_spv.h"
+typedef struct { float m[4]; int32_t lim[4]; } zcopy_pc;   // source texel = pixel * m.xy + m.zw; lim.xy: the source level's last texel, lim.z: the stencil bit
+static struct { VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkSampler samp; int failed, n; VkFormat fmt[6]; VkPipeline pd[6], ps[6]; } ZC;
+static int fmt_feat(VkFormat f, VkFormatFeatureFlags want) { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, f, &fp); return (fp.optimalTilingFeatures & want) == want; }
+static VkPipeline zc_pipe(VkFormat fmt, int sbits) {
+    VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE; VkPipeline p = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo mv = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof zcopy_vert_spv, .pCode = zcopy_vert_spv },
+                             mf = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sbits ? sizeof zcopy_s_frag_spv : sizeof zcopy_d_frag_spv, .pCode = sbits ? zcopy_s_frag_spv : zcopy_d_frag_spv };
+    if (vkCreateShaderModule(g_dev, &mv, NULL, &vm) || vkCreateShaderModule(g_dev, &mf, NULL, &fm)) goto out;
+    int st = fmt_has_stencil(fmt);
+    VkPipelineShaderStageCreateInfo sg[2] = { { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vm, .pName = "main" },
+                                              { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fm, .pName = "main" } };
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkPipelineViewportStateCreateInfo vp = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1 };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+    VkStencilOpState so = { VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS, 0xff, 0, 0 };   // (write mask and reference: dynamic)
+    VkPipelineDepthStencilStateCreateInfo dss = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = !sbits, .depthWriteEnable = !sbits,
+        .depthCompareOp = VK_COMPARE_OP_ALWAYS, .stencilTestEnable = st, .front = so, .back = so, .maxDepthBounds = 1 };
+    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    VkDynamicState dyn[4] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE };
+    VkPipelineDynamicStateCreateInfo dy = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 4, .pDynamicStates = dyn };
+    VkPipelineRenderingCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .depthAttachmentFormat = fmt, .stencilAttachmentFormat = st ? fmt : VK_FORMAT_UNDEFINED };
+    VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rci, .stageCount = 2, .pStages = sg, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+        .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &dss, .pColorBlendState = &cb, .pDynamicState = &dy, .layout = ZC.pl };
+    if (!g_dynren) { gi.pNext = NULL; gi.renderPass = rp_for_pipeline(0, NULL, (uint32_t)fmt, 1, 0); }
+    if (vkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gi, NULL, &p)) p = VK_NULL_HANDLE;
+out:
+    if (vm) vkDestroyShaderModule(g_dev, vm, NULL); if (fm) vkDestroyShaderModule(g_dev, fm, NULL);
+    return p;
+}
+static int zc_setup(VkFormat fmt, VkPipeline *pd, VkPipeline *ps) {   // the two pipelines for a destination format (ps: none without stencil)
+    if (ZC.failed) return 0;
+    if (!ZC.pl) {
+        VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+        VkDescriptorSetLayoutBinding b[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL }, { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };
+        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = b };
+        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(zcopy_pc) };
+        VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &ZC.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+        if (vkCreateSampler(g_dev, &sci, NULL, &ZC.samp) || vkCreateDescriptorSetLayout(g_dev, &dli, NULL, &ZC.dsl) || vkCreatePipelineLayout(g_dev, &pli, NULL, &ZC.pl)) {
+            ZC.failed = 1; ZC.pl = VK_NULL_HANDLE; RED_ONCE(137, "depth / stencil texture copy: cannot make its sampler / layouts: blitted as before"); return 0; }
+    }
+    for (int i = 0; i < ZC.n; i++) if (ZC.fmt[i] == fmt) { *pd = ZC.pd[i]; *ps = ZC.ps[i]; return !!*pd; }
+    if (ZC.n == 6) return 0;
+    VkPipeline a = zc_pipe(fmt, 0), b = fmt_has_stencil(fmt) ? zc_pipe(fmt, 1) : VK_NULL_HANDLE;
+    if (!a || (fmt_has_stencil(fmt) && !b)) { if (a) vkDestroyPipeline(g_dev, a, NULL); if (b) vkDestroyPipeline(g_dev, b, NULL); a = b = VK_NULL_HANDLE;
+        RED_ONCE(138, "depth / stencil texture copy: its pipelines failed for format %d: blitted as before", fmt); }
+    else VLOG("depth / stencil texture copy ready (format %d%s)", fmt, b ? ", with stencil" : "");
+    ZC.fmt[ZC.n] = fmt; ZC.pd[ZC.n] = a; ZC.ps[ZC.n++] = b; *pd = a; *ps = b;
+    return !!a;
+}
+// Draws the copy (outside a pass; the caller orders it after); 0: not taken (blit it). s0 / s1: the source box's corners as a blit's (s1 < s0: mirrored)
+static int zcopy_draw(vtex *s, vtex *d, const VkImageSubresourceLayers *ss, const VkImageSubresourceLayers *ds, VkOffset2D s0, VkOffset2D s1, VkOffset2D d0, VkExtent2D de) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_ZCOPY"); on = !e || atoi(e) != 0; }
+    if (!on || s == d || s->img == d->img || s->samples > 1 || d->samples > 1 || s->is3d || d->is3d || !de.width || !de.height) return 0;
+    if (!(s->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || !(d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || !(s->usage & VK_IMAGE_USAGE_SAMPLED_BIT) || !(d->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return 0;
+    if (!fmt_feat(s->fmt, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || ss->layerCount != ds->layerCount) return 0;
+    VkPipeline pd, ps; if (!zc_setup(d->fmt, &pd, &ps)) return 0;
+    int stencil = (s->aspect & d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) && ps;
+    uint32_t sw = s->w >> ss->mipLevel, sh = s->h >> ss->mipLevel, dw = d->w >> ds->mipLevel, dh = d->h >> ds->mipLevel; if (!sw) sw = 1; if (!sh) sh = 1; if (!dw) dw = 1; if (!dh) dh = 1;
+    int32_t x0 = d0.x > 0 ? d0.x : 0, y0 = d0.y > 0 ? d0.y : 0, x1 = d0.x + (int32_t)de.width, y1 = d0.y + (int32_t)de.height;
+    if (x1 > (int32_t)dw) x1 = (int32_t)dw; if (y1 > (int32_t)dh) y1 = (int32_t)dh;
+    if (x1 <= x0 || y1 <= y0) return 1;   // (nothing of it inside the image)
+    zcopy_pc pc; pc.m[0] = (float)(s1.x - s0.x) / (float)de.width; pc.m[1] = (float)(s1.y - s0.y) / (float)de.height;
+    pc.m[2] = (float)s0.x - (float)d0.x * pc.m[0]; pc.m[3] = (float)s0.y - (float)d0.y * pc.m[1]; pc.lim[0] = (int32_t)sw - 1; pc.lim[1] = (int32_t)sh - 1; pc.lim[2] = pc.lim[3] = 0;
+    VkViewport vpt = { (float)d0.x, (float)d0.y, (float)de.width, (float)de.height, 0, 1 }; VkRect2D sc = { { x0, y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
+    g_gfx_bind_gen++;   // (draw_ binds the game's pipeline again at its next draw: this command buffer's is the copy's now)
+    for (uint32_t z = 0; z < ss->layerCount; z++) {
+        VkImageView sv = view_get(s, VK_IMAGE_VIEW_TYPE_2D, s->fmt, ss->mipLevel, 1, ss->baseArrayLayer + z, 1, SW_ID, VK_IMAGE_ASPECT_DEPTH_BIT),
+                    stv = stencil ? view_get(s, VK_IMAGE_VIEW_TYPE_2D, s->fmt, ss->mipLevel, 1, ss->baseArrayLayer + z, 1, SW_ID, VK_IMAGE_ASPECT_STENCIL_BIT) : VK_NULL_HANDLE,
+                    dv = view_get(d, VK_IMAGE_VIEW_TYPE_2D, d->fmt, ds->mipLevel, 1, ds->baseArrayLayer + z, 1, SW_ID, d->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT));
+        if (!sv || !dv || (stencil && !stv)) return z ? 1 : 0;
+        VkDescriptorSet set = desc_set_alloc(ZC.dsl);
+        VkDescriptorImageInfo ii[2] = { { ZC.samp, sv, VK_IMAGE_LAYOUT_GENERAL }, { ZC.samp, stv, VK_IMAGE_LAYOUT_GENERAL } };
+        VkWriteDescriptorSet wr[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0] },
+                                       { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[1] } };
+        vkUpdateDescriptorSets(g_dev, stencil ? 2 : 1, wr, 0, NULL);
+        VkRenderingAttachmentInfo za = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dv, .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = sc, .layerCount = 1, .pDepthAttachment = &za, .pStencilAttachment = fmt_has_stencil(d->fmt) ? &za : NULL };
+        // Begun through rend_begin, as the game's own passes: in a held frame (DM_VK_FRAME_HOLD=2: Faster rendering's Auto on Adreno) the submission's command
+        //   buffer outside a pass is a secondary (a gap, seg_gap_begin), where a render pass cannot begin (VUID-vkCmdBeginRenderPass-bufferlevel: Adreno's render
+        //   passes, Q_NO_DYNREN). rend_begin makes the copy a pass of its own there: recorded into a secondary that inherits it, the pass begun around it in the primary
+        //   at the flush (seg_record_prim). CB () is that secondary until rend_end; elsewhere it is the submission's command buffer, as before
+        rend_begin(CB(), &ri, NULL, (uint32_t)d->fmt, 1, 0);
+        VkCommandBuffer cb = CB();
+        vkCmdSetViewport(cb, 0, 1, &vpt); vkCmdSetScissor(cb, 0, 1, &sc);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ZC.pl, 0, 1, &set, 0, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pd);
+        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, stencil ? 0xff : 0); vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);   // (the stencil to 0, its bits drawn next)
+        vkCmdPushConstants(cb, ZC.pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+        vkCmdDraw(cb, 3, 1, 0, 0);
+        if (stencil) {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ps); vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+            for (int bit = 0; bit < 8; bit++) { pc.lim[2] = bit; vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 1u << bit);
+                vkCmdPushConstants(cb, ZC.pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc); vkCmdDraw(cb, 3, 1, 0, 0); }
+            pc.lim[2] = 0;
+        }
+        rend_end(cb);
+        if (z + 1 < ss->layerCount) barrier_all(CB());   // (a held frame: in the gap after the copy's pass)
+    }
+    static int said; if (!said++) VLOG("a texture copy into a depth / stencil image (format %d, no blit destination on this GPU) drawn instead (%s)", d->fmt, stencil ? "depth and stencil" : "depth");
+    return 1;
+}
 // DM_VK_LOG_COPY (diagnosis): each distinct copy (source / destination serials) once, up to 400
 static int log_copy_pair(uint64_t a, uint64_t b) { static int on = -1, n; static uint64_t seen[400][2]; if (on < 0) on = getenv("DM_VK_LOG_COPY") != NULL;
     if (!on) return 0; for (int i = 0; i < n; i++) if (seen[i][0] == a && seen[i][1] == b) return 0;
     if (n >= 400) return 0; seen[n][0] = a; seen[n][1] = b; n++; return 1; }
+// ---- R11G11B10F's stand-in in copies (DM_VK_B10_AS_RGBA16, see b10_on): the game's 4-byte packed texels and the 8-byte stand-in meet in a compute shader on buffers
+//   (b10_conv.comp: the rules of b10_conv.h bit for bit), between the game's memory and a copy of the region in the submission's arena, which the image is copied to or
+//   from. On the GPU, in the submission's order: the copy sees what the GPU wrote before it, and what it writes is there for what follows. Any Vulkan 1.0 GPU (no
+//   format features asked of R11G11B10F: lavapipe and Adreno 5xx cannot blit into it); the stand-in's usage is not changed (a storage image would lose Mali's AFBC)
+#include "b10_conv_spv.h"
+static VkShaderModule g_b10c_sm; static VkDescriptorSetLayout g_b10c_dsl; static VkPipelineLayout g_b10c_pl; static VkPipeline g_b10c_cs; static int g_b10c_ready;
+static int b10c_init(void) {
+    if (g_b10c_ready) return g_b10c_ready > 0;
+    g_b10c_ready = -1;
+    VkShaderModuleCreateInfo mi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof b10_conv_spv, .pCode = b10_conv_spv };
+    VkDescriptorSetLayoutBinding lb[2] = { { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL }, { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL } };
+    VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = g_nopush ? 0 : VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 2, .pBindings = lb };
+    VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 36 };
+    if (vkCreateShaderModule(g_dev, &mi, NULL, &g_b10c_sm) || vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_b10c_dsl)) goto fail;
+    { VkPipelineLayoutCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_b10c_dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+      if (vkCreatePipelineLayout(g_dev, &pi, NULL, &g_b10c_pl)) goto fail;
+      VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = g_b10c_sm, .pName = "main" }, .layout = g_b10c_pl };
+      if (vkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &ci, NULL, &g_b10c_cs)) goto fail; }
+    g_b10c_ready = 1; VLOG("b10 swap: R11G11B10F <-> RGBA16F conversion shader ready (copies between the stand-in and the game's memory)");
+    return 1;
+fail:
+    VLOG("[RED] b10 swap: the conversion shader could not be made: copies in from the game's memory are expanded on the CPU, copies out are left out");
+    return 0;
+}
+// mode 0 pack / 1 expand / 2 quantize (b10_conv.comp) of w x h x n texels: the RGBA16F ones at hoff in hbuf (tight), the packed ones at koff in kbuf (krow / kimg words
+//   apart; mode 2: none). 0 when it cannot run here (the shader, a binding past the device's storage-buffer range): nothing recorded then
+static int b10c_run(VkCommandBuffer cb, int mode, VkBuffer hbuf, VkDeviceSize hoff, VkBuffer kbuf, VkDeviceSize koff, VkDeviceSize kbytes, uint32_t w, uint32_t h, uint32_t n, uint32_t krow, uint32_t kimg) {
+    if (!b10c_init()) return 0;
+    VkDeviceSize al = g_props.limits.minStorageBufferOffsetAlignment ? g_props.limits.minStorageBufferOffsetAlignment : 256, hb0 = hoff / al * al, kb0 = koff / al * al;
+    VkDeviceSize nt = (VkDeviceSize)w * h * n, hr = hoff - hb0 + nt * 8, kr = koff - kb0 + kbytes;
+    if (mode == 2) { kbuf = hbuf; kb0 = hb0; koff = hoff; kr = hr; }
+    if (!nt || hr > g_props.limits.maxStorageBufferRange || kr > g_props.limits.maxStorageBufferRange || ((hoff - hb0) | (koff - kb0)) & 3) return 0;
+    VkDescriptorBufferInfo bi[2] = { { hbuf, hb0, hr }, { kbuf, kb0, kr } };
+    VkWriteDescriptorSet wd[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[0] },
+                                   { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[1] } };
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (g_nopush && !(ds = desc_set_alloc(g_b10c_dsl))) return 0;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_b10c_cs);
+    if (!g_nopush) p_push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_b10c_pl, 0, 2, wd);
+    else { wd[0].dstSet = wd[1].dstSet = ds; vkUpdateDescriptorSets(g_dev, 2, wd, 0, NULL); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_b10c_pl, 0, 1, &ds, 0, NULL); }
+    uint32_t pc[9] = { w, h, n, (uint32_t)mode, (uint32_t)((hoff - hb0) / 4), (uint32_t)((koff - kb0) / 4), krow, kimg, 0 };
+    uint32_t most = (g_props.limits.maxComputeWorkGroupCount[0] < 65535u ? g_props.limits.maxComputeWorkGroupCount[0] : 65535u) * 64u;   // (texels a dispatch takes)
+    for (VkDeviceSize i0 = 0; i0 < nt; i0 += most) { pc[8] = (uint32_t)i0; VkDeviceSize left = nt - i0 < most ? nt - i0 : most;
+        vkCmdPushConstants(cb, g_b10c_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc); vkCmdDispatch(cb, (uint32_t)((left + 63) / 64), 1, 1); }
+    return 1;
+}
+// the game's packed texels (buffer kb at ko, row / img bytes apart) to or from the stand-in x (level, first layer / slice z0, nz of them, at x0, y0, w x h).
+//   1: done; 0: not here (nothing recorded)
+static int b10_copy_buf(VkCommandBuffer cb, vtex *x, int to_buffer, VkBuffer kb, VkDeviceSize ko, size_t row, size_t img, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h) {
+    // DM_VK_B10_CPU_COPY=1 (a test switch, golden_check.py b10): copies from the game's memory into the stand-in take the CPU route, as where the shader cannot run
+    static int cpu = -1; if (cpu < 0) { const char *e = getenv("DM_VK_B10_CPU_COPY"); cpu = e && atoi(e) > 0; if (cpu && b10_on()) VLOG("b10 swap: copies from the game's memory into the stand-in expanded on the CPU (DM_VK_B10_CPU_COPY, a test)"); }
+    if (cpu && !to_buffer) return 0;
+    if (!w || !h || !nz || (ko | row | img) & 3 || !g_sub || !b10c_init()) return 0;
+    VkDeviceSize kbytes = (VkDeviceSize)img * (nz - 1) + (VkDeviceSize)row * (h - 1) + (VkDeviceSize)w * 4;
+    VkBuffer hb; VkDeviceSize ho; arena_alloc(g_sub, (VkDeviceSize)w * h * nz * 8, &hb, &ho);
+    VkBufferImageCopy ic = { .bufferOffset = ho, .bufferRowLength = w, .bufferImageHeight = h, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, x->is3d ? 0 : z0, x->is3d ? 1 : nz },
+        .imageOffset = { x0, y0, x->is3d ? (int32_t)z0 : 0 }, .imageExtent = { w, h, x->is3d ? nz : 1 } };
+    if (to_buffer) {
+        vkCmdCopyImageToBuffer(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, hb, 1, &ic); barrier_all(cb);
+        if (!b10c_run(cb, 0, hb, ho, kb, ko, kbytes, w, h, nz, (uint32_t)(row / 4), (uint32_t)(img / 4))) { RED_ONCE(152, "b10 swap: a copy into the game's memory too big for one binding: left out"); return 1; }
+    } else {
+        if (!b10c_run(cb, 1, hb, ho, kb, ko, kbytes, w, h, nz, (uint32_t)(row / 4), (uint32_t)(img / 4))) return 0;
+        barrier_all(cb); vkCmdCopyBufferToImage(cb, hb, x->img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+    }
+    barrier_all(cb);
+    return 1;
+}
+// a region of the stand-in as R11G11B10F stores it (its range and rounding, alpha 1): what a copy or blit from another format wrote into it
+static int b10_quantize_region(VkCommandBuffer cb, vtex *x, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h) {
+    if (!w || !h || !nz || !g_sub || !b10c_init()) return 0;
+    VkBuffer hb; VkDeviceSize ho; arena_alloc(g_sub, (VkDeviceSize)w * h * nz * 8, &hb, &ho);
+    VkBufferImageCopy ic = { .bufferOffset = ho, .bufferRowLength = w, .bufferImageHeight = h, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, x->is3d ? 0 : z0, x->is3d ? 1 : nz },
+        .imageOffset = { x0, y0, x->is3d ? (int32_t)z0 : 0 }, .imageExtent = { w, h, x->is3d ? nz : 1 } };
+    vkCmdCopyImageToBuffer(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, hb, 1, &ic); barrier_all(cb);
+    if (!b10c_run(cb, 2, hb, ho, VK_NULL_HANDLE, 0, 0, w, h, nz, 0, 0)) return 0;
+    barrier_all(cb); vkCmdCopyBufferToImage(cb, hb, x->img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); barrier_all(cb);
+    return 1;
+}
 static void copy_b2t(const p_copy_b2t *c, int to_buffer) {
     vtex *x = tex_res(c->tex);
     sk_read(x);   // copied from, or written in part
@@ -4571,6 +5525,20 @@ static void copy_b2t(const p_copy_b2t *c, int to_buffer) {
     int nz = c->r.depth ? c->r.depth : 1;
     VkBuffer b; VkDeviceSize o; if (!pool_buf(c->src, img * nz, &b, &o, NULL)) { RED_ONCE(46, "texture copy buffer side outside the pools"); return; }
     if (row % bpb || (img % row)) { RED_ONCE(47, "texture copy pitch %zu not a whole number of %d-byte blocks", row, bpb); return; }
+    if (b10_swapped_tex(x) && bpb == 4) {   // R11G11B10F's stand-in (DM_VK_B10_AS_RGBA16): the game's packed texels converted on the GPU (b10_copy_buf), in order
+        if (x->samples > 1 || c->r.width <= 0 || c->r.height <= 0) { b10_note("a multisampled or empty copy between the stand-in and a buffer: left out", x, 0); return; }
+        outside_pass();
+        if (b10_copy_buf(CB(), x, to_buffer, b, o, row, img, level, x->is3d ? (uint32_t)c->r.zoffset : layer0 + (uint32_t)c->r.zoffset, (uint32_t)nz, c->r.xoffset, c->r.yoffset, (uint32_t)c->r.width, (uint32_t)c->r.height)) {
+            if (to_buffer) wb_note(c->src, img * nz);
+            b10_note(to_buffer ? "a copy into the game's memory: packed on the GPU" : "a copy from the game's memory: expanded on the GPU", x, 0); return; }
+        // no blit between the formats on this GPU: in, from the CPU's view of the game's memory (what the GPU wrote there earlier in the frame is not seen); out, left out
+        if (to_buffer) { b10_note("a copy into the game's memory: left out (no blit between the formats on this GPU)", x, 0); return; }
+        const uint8_t *src = (const uint8_t *)(uintptr_t)c->src; size_t orow = (size_t)c->r.width * 8, oimg = orow * rows;
+        VkBuffer sb; VkDeviceSize so; uint8_t *sp = arena_alloc(g_sub, oimg * nz > 0 ? oimg * nz : 16, &sb, &so);
+        for (int s = 0; s < nz; s++) b10_rows_expand(src + (size_t)s * img, row, (uint32_t)c->r.width, rows, sp + (size_t)s * oimg, orow);
+        b10_note("a copy from the game's memory: expanded on the CPU (no blit between the formats on this GPU)", x, 0);
+        b = sb; o = so; row = orow; img = oimg; bpb = 8;
+    } else {
     int bck = nvn_fmt_vk_decode(c->tex->d.format);
     if (bck && to_buffer) { RED_ONCE(98, "a BC texture decoded on upload copied back to a buffer: skipped (format %#x)", c->tex->d.format); return; }
     if (bck && (g_bcgpu & 2) && bc_gpu_can(bck, nvn_fmt_vk_transcode(c->tex->d.format) ? 1 : 0)) {   // the BC layer: from the pool's GPU-side blocks, so blocks the GPU wrote come out right too
@@ -4585,6 +5553,7 @@ static void copy_b2t(const p_copy_b2t *c, int to_buffer) {
         VkBuffer sb; VkDeviceSize so; uint8_t *sp = arena_alloc(g_sub, oimg * nz ? oimg * nz : 16, &sb, &so);
         for (int s = 0; s < nz; s++) (etk ? bc_transcode_image : bc_decode_image_mt)(bck, src + s * img, row, c->r.width, c->r.height, sp + s * oimg, orow);
         b = sb; o = so; row = orow; img = oimg; bpb = tb; if (!blk) bw = bh = 1;
+    }
     }
     outside_pass();
     VkBufferImageCopy r = { .bufferOffset = o, .bufferRowLength = (uint32_t)(row / bpb * bw), .bufferImageHeight = (uint32_t)(img / row * bh),
@@ -4646,9 +5615,20 @@ static void copy_t2t(const p_copy_t2t *c) {
         VkImageBlit r = { ss, {{sx0, sy0, 0}, {sx1, sy1, 1}}, ds, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}} };
         int lin = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) && !(s->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT);
         if (s->samples > 1 || d->samples > 1) RED_ONCE(49, "multisample texture blit not supported");
+        else if ((d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !fmt_feat(d->fmt, VK_FORMAT_FEATURE_BLIT_DST_BIT)
+                 && zcopy_draw(s, d, &ss, &ds, (VkOffset2D){ sx0, sy0 }, (VkOffset2D){ sx1, sy1 }, (VkOffset2D){ c->dr.xoffset, c->dr.yoffset }, (VkExtent2D){ (uint32_t)c->dr.width, (uint32_t)c->dr.height })) {}
         else vkCmdBlitImage(CB(), s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
     barrier_all(CB());
+    // R11G11B10F's stand-in (DM_VK_B10_AS_RGBA16, see b10_on) on one side only. Into it from another format: what the copy or blit wrote is then made what R11G11B10F
+    //   would hold (its range and rounding, alpha 1: b10_quantize_region). Out of it: read as it is (its alpha is 1)
+    if (b10_swapped_tex(s) != b10_swapped_tex(d)) {
+        int q = b10_swapped_tex(d) && d->samples == 1 && c->dr.width > 0 && c->dr.height > 0 &&
+                b10_quantize_region(CB(), d, dl, d->is3d ? (uint32_t)c->dr.zoffset : ds.baseArrayLayer, d->is3d ? (uint32_t)nz : ds.layerCount, c->dr.xoffset, c->dr.yoffset, (uint32_t)c->dr.width, (uint32_t)c->dr.height);
+        b10_note(b10_swapped_tex(s) ? "a texture copy out of the stand-in into another format: read as it is (alpha 1)"
+                 : q ? "a texture copy into the stand-in from another format: made what R11G11B10F holds (its range and rounding)" : "a texture copy into the stand-in from another format: copied as it is",
+                 b10_swapped_tex(s) ? s : d, b10_swapped_tex(s) ? d->fmt : s->fmt);
+    }
     // A linear texture is plain rows in the game's memory, which its CPU reads: the copied area goes there too. Violet takes the player's ID photo so: the screen
     //   copied into a linear texture, read and compressed on the CPU, and uploaded again for the enrollment form; with the copy left in the GPU image the CPU
     //   read zeros and the photo came out black. DM_VK_NO_LINEAR_WB=1: the image only, as before
@@ -4675,7 +5655,9 @@ static void clear_tex(const p_clear_tex *c) {
     if (c->r.xoffset || c->r.yoffset || (uint32_t)c->r.width != w || (uint32_t)c->r.height != h || (c->mask & 0xf) != 0xf) RED_ONCE(50, "partial texture clear (region / mask): cleared whole");
     outside_pass();
     VkImageSubresourceRange rg = { x->aspect, lv, 1, x->is3d ? 0 : l0 + (uint32_t)c->r.zoffset, x->is3d ? 1 : (uint32_t)nz };
-    if (x->aspect & VK_IMAGE_ASPECT_COLOR_BIT) { VkClearColorValue v; memcpy(&v, c->c.u, 16); vkCmdClearColorImage(CB(), x->img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &rg); }
+    if (x->aspect & VK_IMAGE_ASPECT_COLOR_BIT) { VkClearColorValue v; memcpy(&v, c->c.u, 16);
+        if (b10_swapped_tex(x)) { v = b10_clear(c->c.f); b10_note("a texture clear: the colour as the packed format stores it, alpha 1", x, 0); }   // (DM_VK_B10_AS_RGBA16)
+        vkCmdClearColorImage(CB(), x->img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &rg); }
     else { VkClearDepthStencilValue v = { c->c.f[0], x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? c->c.u[1] : c->c.u[0] }; vkCmdClearDepthStencilImage(CB(), x->img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &rg); }
     barrier_all(CB());
 }
@@ -4686,9 +5668,10 @@ static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
 // Samsung's Xclipse driver crashes recording vkCmdClearAttachments in a layered pass over a 3D image (probe self-test 3d-layered: Xclipse 940 driver 24.0.534 and
 //   Xclipse 540 24.0.560, SIGSEGV "while recording the per-layer vkCmdClearAttachments"; a pass per slice drew right on both: 3d-slices). There the same clear (the
 //   pass's layer 0, that rectangle) is a pass of its own on that slice, cleared by its load op; the game's pass then opens again on its next draw (loading what is there).
-//   DM_VK_CLEAR_BY_PASS=1 / 0 decides on any driver
+//   DM_VK_CLEAR_BY_PASS=1 / 0 decides on any driver (the driver check's 3d-layered test records the clear the same way here, and asks for =1 on a driver that crashes
+//   recording the vkCmdClearAttachments: probe selftest.c t_3d_mode)
 static int clear_by_pass(void) {
-    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = e ? atoi(e) != 0 : g_props.vendorID == 0x144D;
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_BY_PASS"); v = quirk_note(Q_CLEAR_BY_PASS, e ? atoi(e) != 0 : quirk_default(Q_CLEAR_BY_PASS, &g_gpuid), vkq_env_src("DM_VK_CLEAR_BY_PASS"));
                                     if (v) VLOG("clears inside a layered pass over a 3D target: a pass of their own on the slice (Samsung Xclipse driver, or DM_VK_CLEAR_BY_PASS)"); }
     return v;
 }
@@ -4756,6 +5739,7 @@ static int state_op(uint32_t op, const void *a) {
     return 1;
 }
 static uint64_t g_stat_draws, g_stat_passes, g_stat_rt_same;
+#include "mali_white_vk.inc"   // the Mali white-screen ladder and its detector (counts draws by g_stat_draws)
 // The same render targets set again while their pass is open: the pass goes on (on a tiler every pass end stores the attachments and every begin loads them back;
 // Legends: Arceus sets render targets about 120 times a frame). Views compared field by field where set
 static int rt_same(const p_set_rt *a, const p_set_rt *b) {
@@ -4788,13 +5772,18 @@ void mtl_exec(const uint8_t *p) {
             case OP_JUMP: memcpy(&p, a, 8); continue;
             case OP_CALL: { const uint8_t *t; memcpy(&t, a, 8); mtl_exec(t); break; }
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4); post((post_op){1, val, m, v, 0, 0}); break; }
-            case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); post((post_op){2, NULL, 0, 0, ad, (uint32_t)t}); break; }
+            case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); uint32_t q = 0;
+                if (g_rtq && g_sub && g_sub->nrq < RQ_END) {   // its GPU timestamp (report_ts): now outside a pass, else when the open pass ends
+                    q = ++g_sub->nrq;
+                    if (P.open) g_sub->rq_pend++; else vkCmdWriteTimestamp(CB(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rtq, (uint32_t)(g_sub - g_subs) * RQ_PER + q - 1);
+                }
+                post((post_op){2, NULL, 0, 0, ad, (uint32_t)t, q}); break; }
             case OP_RESET_COUNTER: case OP_RENDER_COND: break;
             case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_fence + 1; s->fenced = 2; break; }   // (2: fenced inside a command list, DM_VK_PROF tells them apart)
             case OP_CLEAR_BUF: { const p_clear_buf *cb = (const p_clear_buf *)a; mtl_sub_fill(cb->addr, cb->size, cb->value); break; }
             case OP_COPY_B2B: { uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); sub_copy(s, d, n); break; }
             case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8); sub_update(a + 16, d, n); break; }
-            case OP_SET_RT: g_stat_passes++; if (P.open && R.has_rt && !getenv_nomerge() && rt_same(&R.rt, (const p_set_rt *)a)) { g_stat_rt_same++; break; }
+            case OP_SET_RT: g_stat_passes++; tf_end(); if (P.open && R.has_rt && !getenv_nomerge() && rt_same(&R.rt, (const p_set_rt *)a)) { g_stat_rt_same++; break; }
                 if (P.open && pass_defer_on() && !getenv_nomerge()) {   // (deferred: rt_resolve at the next draw or clear)
                     int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
                     if (!pend) { R.rt = *(const p_set_rt *)a; g_rt_stale = 1; break; } }
@@ -4802,20 +5791,21 @@ void mtl_exec(const uint8_t *p) {
                 if (P.open) { g_brk[0]++; g_pass_last_by_rt = 1; }
                 sub_split_at_target();
                 pass_flush(); R.rt = *(const p_set_rt *)a; R.has_rt = 1; break;
-            case OP_CLEAR_COLOR: {
+            case OP_CLEAR_COLOR: { tf_end();
                 rt_resolve();
                 const p_clear_color *c = (const p_clear_color *)a;
                 if (c->index < 0 || c->index >= R.rt.n || !R.rt.color[c->index]) { RED_ONCE(53, "colour clear target %d invalid", c->index); break; }
                 VkClearColorValue cv; memcpy(cv.float32, c->rgba, 16);
                 { vtex *cx = tex_res(R.rt.color[c->index]); VkFormat cf = cx ? cx->fmt : VK_FORMAT_UNDEFINED;
                   if (R.rt.has_cview[c->index] && R.rt.cview[c->index].set_format) { uint32_t vf = 0; uint8_t sw[4]; if (nvn_fmt_to_vk(R.rt.cview[c->index].format, &vf, sw) && vf) cf = (VkFormat)vf; }
-                  cv = clear_for(cf, c->rgba); }
+                  cv = clear_for(cf, c->rgba);
+                  if (b10_swapped_tex(cx) && b10_view_fmt(cx, cf, B10V_ATTACH, NULL) == cx->fmt) { cv = b10_clear(c->rgba); b10_note("a render target clear: the colour as the packed format stores it, alpha 1", cx, 0); } }
                 if (P.open || c->mask != 0xf || !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) {
                     if (c->mask != 0xf) RED_ONCE(54, "colour clear with a partial channel mask: all channels cleared");
                     VkClearValue v = { .color = cv }; clear_in_pass(c->index, &v, VK_IMAGE_ASPECT_COLOR_BIT); break; }
                 R.clear_c[c->index] = 1; R.cc[c->index] = cv; break;
             }
-            case OP_CLEAR_DS: {
+            case OP_CLEAR_DS: { tf_end();
                 rt_resolve();
                 const p_clear_ds *c = (const p_clear_ds *)a;
                 if (P.open || (R.rt.depth && !scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview))) {
@@ -4853,13 +5843,16 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (r->height + bh - 1) / bh; int nz = r->depth ? r->depth : 1;
     vtex *x = tex_res(t); if (!x || !x->img) return;
     sk_read(x);
-    VkDeviceSize n = wb * hb * nz; vmalloc_t a; void *m; VkBuffer b = buf_make(n ? n : 16, &a, &m);
+    int b10 = b10_swapped_tex(x) && bpb == 4; size_t xb = b10 ? wb * 2 : wb;   // (R11G11B10F's stand-in, DM_VK_B10_AS_RGBA16: read as RGBA16F, packed below)
+    VkDeviceSize n = xb * hb * nz; vmalloc_t a; void *m; VkBuffer b = buf_make(n ? n : 16, &a, &m);
     VkCommandBuffer cb = once_begin();
     VkBufferImageCopy rg = { .bufferOffset = 0, .imageSubresource = { x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : x->aspect, level, x->is3d ? 0 : layer0 + (uint32_t)r->zoffset, x->is3d ? 1 : (uint32_t)nz },
         .imageOffset = { r->xoffset, r->yoffset, x->is3d ? r->zoffset : 0 }, .imageExtent = { (uint32_t)r->width, (uint32_t)r->height, x->is3d ? (uint32_t)nz : 1 } };
     vkCmdCopyImageToBuffer(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, b, 1, &rg);
     once_end(cb);
-    for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + z * img + y * row, (uint8_t *)m + (z * hb + y) * wb, wb);
+    if (b10) { for (int z = 0; z < nz; z++) b10_rows_pack((uint8_t *)m + (size_t)z * hb * xb, xb, (uint32_t)r->width, hb, dst + z * img, row);
+               b10_note("the CPU read the texture: packed", x, 0); }
+    else for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + z * img + y * row, (uint8_t *)m + (z * hb + y) * wb, wb);
     vkDestroyBuffer(g_dev, b, NULL); vk_free(a);
 }
 
@@ -5357,7 +6350,7 @@ static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, Vk
     for (int i = 0; i < n; i++) {
         dm_ovl_item *q = &it[i];
         ovl_pc pc = { { q->x, q->y, q->w, q->h }, { q->r, q->g, q->b, q->a }, { (float)q->shape, q->ring, q->radius, q->h > 0 ? q->w / q->h : 1 },
-                      { (float)q->glyph, q->gscale > 0 ? q->gscale : 0.5f, q->galpha, 0 }, { (float)lext.width, (float)lext.height }, (float)rot };
+                      { (float)q->glyph, q->gscale > 0 ? q->gscale : 0.5f, q->galpha, q->gdark }, { (float)lext.width, (float)lext.height }, (float)rot };
         vkCmdPushConstants(cb, O.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
         vkCmdDraw(cb, 6, 1, 0, 0);
     }
@@ -5673,6 +6666,7 @@ static void fg_mem_put(VkDevice dev, fg_mem m) { (void)dev; vk_free(m); }
 // DM_LSFG_DIR: the folder of the shaders converted from the player's Lossless.dll (<id>.spv; the app's import puts them there), DM_LSFG_FLOW: the motion search's
 // size in percent of the frame (25..100; default 50 for frames 1000 lines or taller, else 75)
 #include "nvn_lsfg.h"
+#include "nvn_fgcut.h"
 __attribute__((weak)) volatile int dm_framegen_mode = -1;   // 0 off, 1 on, 2 on with the motion drawn over the picture (DM_FRAMEGEN=debug), 3 Lossless Scaling's (DM_FRAMEGEN=lsfg);
                                                             // -1: not read yet; the in-game menu sets it
 static int framegen_mode(void) {
@@ -5690,7 +6684,14 @@ static struct { fgen g; lsfg ls; int ls_tried, mult_cap; uint64_t ivl, ivl_last;
                 int slow, mode_seen, held, min_fps; uint64_t rate_ivl, rate_last, rate_n; char note[48];
                 // fg_adapt: 3 s windows of the game's own frames (aw_*), its rate without pictures (base_fps), the lighter settings taken (flow_cut: the motion search a
                 // quarter smaller each; mult_cap above), windows in a row that kept the game's rate (ok_win), windows since the last step up (since_up), the wait before one
-                uint64_t aw_t, aw_max, aw_prev, last_gen_t; int aw_n, aw_gen, aw_skip, flow_cut, ok_win, since_up, up_wait; double base_fps; } FGE;
+                uint64_t aw_t, aw_max, aw_prev, last_gen_t; int aw_n, aw_gen, aw_skip, flow_cut, ok_win, since_up, up_wait; double base_fps;
+                // the floor's time rule (a pause after 2 s under it, back after 5 s over it; grace_t: the guard took the cost, no pause before then); hot_win: windows hot
+                uint64_t flip_t, grace_t; int flip_to, hot_win;
+                // camera cuts and still frames (nvn_fgcut.h): its state, whether it was tried; still_n: read-backs in a row that barely moved; hf_ever: HUD-free has worked
+                //   (a frame without the scene then is a full-screen menu or a loading screen); counts for the 10-s line
+                fgc cut; int cut_tried, still_n, hf_ever; uint64_t n_cut, n_still, n_menu;
+                // work size (Lossless Scaling HUD-free): the scale the chain runs at (1: the frame's own size), the one asked and since when
+                float ws, ws_want; uint64_t ws_t; int ls_fell; } FGE;
 // The real frame that waits behind its in-between picture goes to the display: at its time (fg_thread), or at once when the next frame, a new swapchain or the
 // window's end comes first. Called with the window lock held
 static void fg_flush_one_locked(void) {   // the oldest waiting picture
@@ -5734,7 +6735,10 @@ static uint64_t fg_period(uint64_t t_arr) {
 static int lsfg_mult(void) {
     int m = dm_lsfg_mult;
     if (m < 0) { const char *e = getenv("DM_LSFG_MULT"); m = e ? atoi(e) : 0; if (m < 2 || m > 4) m = 0; dm_lsfg_mult = m; }
-    if (!m) m = 2;   // auto: 2x, light (the game at a locked 60 shown at 120; frame generation runs only then, see the floor in present_window_locked)
+    if (!m) {   // auto: as many pictures as the display's refreshes a game frame (fg_period: measured, whole refreshes): a 30 fps game at 120 Hz 4x, at 90 Hz 3x, at 60 Hz 2x;
+                //   a 60 fps game at 120 Hz 2x. 6 refreshes: 3x (two each), 8: 4x; 5 or 7: 4x (the steps one refresh uneven); 1 (the game at the display's rate): 2x
+        uint64_t r = g_refresh_ns, p = g_fg_period; int n = r && p ? (int)((p + r / 2) / r) : 0;
+        m = n >= 4 && n % 4 == 0 ? 4 : n >= 3 && n % 3 == 0 ? 3 : n == 2 ? 2 : n >= 5 ? 4 : 2; }
     if (m > FGE.mult_cap) m = FGE.mult_cap;
     return m < 2 ? 2 : m;
 }
@@ -5743,12 +6747,25 @@ static void fg_off(const char *why) {
     FGE.n_gen = FGE.n_plain = FGE.gpu_sum = FGE.gpu_n = FGE.gpu_max = FGE.cpu_sum = FGE.lag_sum = FGE.lag_n = 0; FGE.last_log = 0;
     VLOG("[RED] frame generation off until the next start (%s): normal presentation", why);
 }
+// One governor (android_main.c graphics_auto): the 3D render scale, the pictures a frame and the motion search's size share the GPU. When frame generation costs the
+//   game its frames, the render scale gives way first (the guard steps it down and judges the step as its own); only when it has no room left (at its lowest, a CPU
+//   limit, or a step that did not help) does frame generation get lighter. The guard counts frame generation's GPU time into its budget (nvn_vk_fg_gpu_ms), and heat:
+//   hot with the scale already at its heat step, frame generation steps down too (fg_adapt). Returns 1 when the guard took it
+int dm_guard_fg_absorb(void) __attribute__((weak)); int dm_guard_heat(void) __attribute__((weak));
+static int fg_gov_absorb(const char *why, uint64_t now) {
+    if (!dm_guard_fg_absorb || !dm_guard_fg_absorb()) return 0;
+    VLOG("frame generation costs the game frames (%s): the 3D render scale gives way first", why);
+    FGE.grace_t = now + 15000000000ull; FGE.aw_skip = 4; FGE.ok_win = 0; memset(&FGE.plan, 0, sizeof FGE.plan); return 1;
+}
+static _Atomic uint64_t g_fg_gpu_ema;   // frame generation's GPU time a game frame (ns, slow mean), for the guard's budget
+double nvn_vk_fg_gpu_ms(void) { return framegen_mode() && !FGE.off && FGE.last_gen_t && mono_ns() - FGE.last_gen_t < 2000000000ull ? atomic_load(&g_fg_gpu_ema) / 1e6 : 0.0; }
 // One step lighter: Lossless Scaling's pictures a frame one fewer (4x, 3x, 2x), then its motion search a quarter smaller (75 %, 50 %, 25 % of the frame), then off
 // (tried again when the menu switches it on). The window after a step is left to settle; a step down soon after a step up doubles the wait before the next one up
 static void fg_step_down(const char *why, const char *note) {
     int m = framegen_mode(), cur = m == 3 ? lsfg_mult() : 2;
     if (m == 3 && cur > 2) { FGE.mult_cap = cur - 1; VLOG("[RED] frame generation lighter (%s): %dx from now on", why, cur - 1); }
     else if (m == 3 && FGE.flow_cut < 2) { FGE.flow_cut++; VLOG("[RED] frame generation lighter (%s): the motion search a quarter smaller (%d %% less)", why, 25 * FGE.flow_cut); }
+    else if (!strcmp(note, "heat")) { memset(&FGE.plan, 0, sizeof FGE.plan); return; }   // (heat alone never switches it off: the guard keeps the scale down meanwhile)
     else { char w[192]; snprintf(w, sizeof w, "%s, at its lightest; switching it on again in the menu tries again", why); fg_off(w); FGE.slow = 1; snprintf(FGE.note, sizeof FGE.note, "%s", note); }
     memset(&FGE.plan, 0, sizeof FGE.plan); FGE.aw_skip = 1; FGE.ok_win = 0;
     if (FGE.since_up < 10 && FGE.up_wait < 160) FGE.up_wait *= 2;   // (a step up that did not hold: wait longer before the next, 1 min .. 8 min)
@@ -5772,7 +6789,13 @@ static void fg_adapt(uint64_t now, int gen) {
     if (!all || FGE.base_fps <= 0) return;
     double tgt = game_fps(), ref = FGE.base_fps < tgt * 0.97 ? FGE.base_fps : tgt; FGE.since_up++;
     if (fps < ref * 0.92) { char w[96], n[24]; snprintf(w, sizeof w, "the game's own frames %.1f fps with it, %.1f without", fps, FGE.base_fps); snprintf(n, sizeof n, "cost:%.0f", fps);
-        fg_step_down(w, n); return; }
+        if (!fg_gov_absorb(w, now)) fg_step_down(w, n);
+        return; }
+    // heat: hot for 20 s with the render scale already at its heat step (the guard's 2): a step lighter, the same way (the scale gave way first)
+    int heat = dm_guard_heat ? dm_guard_heat() : 0;
+    FGE.hot_win = heat == 2 ? FGE.hot_win + 1 : 0;
+    if (FGE.hot_win >= 7 && (FGE.mult_cap > 2 || FGE.flow_cut < 2)) { FGE.hot_win = 0; fg_step_down("the phone is hot and the 3D render scale is already down for it", "heat"); return; }
+    if (heat) { FGE.ok_win = 0; return; }   // (no step back up while warm)
     if (++FGE.ok_win >= FGE.up_wait && (FGE.flow_cut || FGE.mult_cap < 4)) {
         FGE.ok_win = 0; FGE.since_up = 0; FGE.aw_skip = 1; memset(&FGE.plan, 0, sizeof FGE.plan);
         if (FGE.flow_cut) { FGE.flow_cut--; VLOG("frame generation heavier again: the motion search back to %d %% less (the game kept %.1f fps for %d s)", 25 * FGE.flow_cut, fps, FGE.up_wait * 3); }
@@ -5782,7 +6805,27 @@ static void fg_adapt(uint64_t now, int gen) {
 // time (until switched on again), "off" off for another reason until the next start
 void nvn_vk_framegen_note(char *buf, size_t n) { if (!n) return; pthread_mutex_lock(&g_wmu); snprintf(buf, n, "%s", framegen_mode() ? FGE.note : ""); pthread_mutex_unlock(&g_wmu); }
 // Frame generation can take this frame (the crop cx cy cw ch of x): its semaphores, thread and GPU timer once, its images for this size and format
-static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
+// Lossless Scaling cannot run on this driver or with these shaders: our own frame generation instead, not off (what it lacks said once; the menu's note says "ours")
+static int fg_ls_fallback(const char *why) {
+    if (!FGE.ls_fell) VLOG("[RED] Lossless Scaling frame generation cannot run here (%s): our own frame generation instead", why ? why : "?");
+    FGE.ls_fell = 1; dm_framegen_mode = 1; snprintf(FGE.note, sizeof FGE.note, "ours");
+    return 0;
+}
+// The work size (Lossless Scaling, HUD-free): the scale of the game's 3D render size (dm_scene_scale: what the game and the guard draw the 3D at; 1 where unknown) in
+//   eighths, rounded up; a new scale is taken after 5 s at it, so the images are not made again on every short swing. DM_FG_WORK=0: the frame's own size;
+//   DM_FG_WORK=50..100: that percentage
+float dm_scene_scale(void) __attribute__((weak));
+static float fg_work_scale(uint64_t now) {
+    static int fixed = -2; if (fixed == -2) { const char *e = getenv("DM_FG_WORK"); fixed = !e ? -1 : !strcmp(e, "0") ? 100 : atoi(e) >= 50 && atoi(e) <= 100 ? atoi(e) : -1; }
+    if (fixed > 0) return fixed / 100.0f;
+    float s = dm_scene_scale ? dm_scene_scale() : 1.0f; if (!(s >= 0.3f && s <= 1.0f)) s = 1.0f;
+    float q = ceilf(s * 8.0f - 0.01f) / 8.0f; if (q < 0.5f) q = 0.5f; if (q > 1.0f) q = 1.0f;
+    if (!(FGE.ws > 0)) FGE.ws = 1.0f;
+    if (q != FGE.ws_want) { FGE.ws_want = q; FGE.ws_t = now; }
+    if (q != FGE.ws && now - FGE.ws_t >= 5000000000ull) { VLOG("frame generation: works at %.0f %% of the frame (the game's 3D at %.0f %%), its pictures brought back to the frame's size after", q * 100, s * 100); FGE.ws = q; }
+    return FGE.ws;
+}
+static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch, float ws) {
     if (x->is3d || !(x->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || (uint32_t)(cx + cw) > x->w || (uint32_t)(cy + ch) > x->h) {
         RED_ONCE(120, "frame generation: the game's frame cannot be copied (usage %#x, %ux%u, crop %d,%d %dx%d): normal presentation", (unsigned)x->usage, x->w, x->h, cx, cy, cw, ch); return 0; }
     if (!FGE.up) {
@@ -5800,26 +6843,38 @@ static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
             VLOG("frame generation: DM_FRAMEGEN_TUNE: the in-between picture asked %.2f refreshes ahead, the real frame handed over %.2f refreshes before that time", a / 100.0, b / 100.0); } }
         FGE.up = 1;
     }
-    fgen *g = &FGE.g; lsfg *ls = framegen_mode() == 3 ? &FGE.ls : NULL; float flow = 1;
+    if (!FGE.cut_tried) { FGE.cut_tried = 1;
+        if (fgc_init(&FGE.cut, g_dev, g_pd)) VLOG("frame generation: camera cuts %s (the newer frame shown instead of a blend), still frames and full-screen menus left without pictures%s",
+                                                    !FGE.cut.on ? "not handled (DM_FG_CUT=0)" : FGE.cut.can_select ? "handled" : "handled for our own frame generation only (no storage writes without a format)", "");
+        else VLOG("frame generation: no cut / still check (%s)", FGE.cut.why ? FGE.cut.why : "?"); }
+    fgen *g = &FGE.g; lsfg *ls = framegen_mode() == 3 ? &FGE.ls : NULL; float flow = 1; uint32_t cw_work = (uint32_t)cw, ch_work = (uint32_t)ch;
     if (ls) {
         if (!FGE.ls_tried) { FGE.ls_tried = 1; const char *d = getenv("DM_LSFG_DIR");
-            if (g_api < VK_API_VERSION_1_3) { fg_off("Lossless Scaling frame generation needs a Vulkan 1.3 driver"); return 0; }
-            if (!d || !*d || !ls_load(ls, d)) { fg_off(d && *d ? ls->why : "the Lossless Scaling shaders are not imported"); return 0; } }
+            if (g_api < VK_API_VERSION_1_3) return fg_ls_fallback("it needs a Vulkan 1.3 driver");
+            if (!d || !*d || !ls_load(ls, d)) return fg_ls_fallback(d && *d ? ls->why : "the Lossless Scaling shaders are not imported"); }
         { const char *e = getenv("DM_LSFG_FLOW"); int pc = e && atoi(e) > 0 ? atoi(e) : 50;   // (light: half the frame's size, any height)
           pc -= 25 * FGE.flow_cut; flow = (pc < 25 ? 25 : pc > 100 ? 100 : pc) / 100.0f; }   // (S25+, 1080p: 100% took 6 ms a picture, 50% 2.9-4.4 ms)
-        if (ls->w == (uint32_t)cw && ls->h == (uint32_t)ch && ls->fmt == x->fmt && ls->flow == flow) return 1; }
+        { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, x->fmt, &fp); const VkFormatFeatureFlags bl = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+          if ((fp.optimalTilingFeatures & bl) != bl) ws = 1.0f; }   // (the frame is scaled down with a blit)
+        uint32_t ww = ws < 1.0f ? ((uint32_t)((float)cw * ws + 1.0f) & ~1u) : (uint32_t)cw, wh = ws < 1.0f ? ((uint32_t)((float)ch * ws + 1.0f) & ~1u) : (uint32_t)ch;
+        if (ww > (uint32_t)cw) ww = (uint32_t)cw;
+        if (wh > (uint32_t)ch) wh = (uint32_t)ch;
+        if (ls->w == ww && ls->h == wh && ls->ow == (uint32_t)cw && ls->oh == (uint32_t)ch && ls->fmt == x->fmt && ls->flow == flow) return 1;
+        cw_work = ww; ch_work = wh; }
     else if (g->w == (uint32_t)cw && g->h == (uint32_t)ch && g->fmt == x->fmt) return 1;
     uint64_t now = mono_ns();   // a game that changes its frame size all the time (dynamic resolution) would rebuild the images each time: not for it
     if (now - FGE.resize_t > 20000000000ull) { FGE.resize_t = now; FGE.resizes = 0; }
-    if (++FGE.resizes > 8) { fg_off("the game's frame size changed 8 times in 20 s"); return 0; }
+    int ws_only = ls && ls->w && ls->ow == (uint32_t)cw && ls->oh == (uint32_t)ch && ls->fmt == x->fmt;   // (only the work size changed: at most every 5 s, fg_work_scale)
+    if (!ws_only && ++FGE.resizes > 8) { fg_off("the game's frame size changed 8 times in 20 s"); return 0; }
     if (ls ? ls->w : g->w) { pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu); }   // (its images are destroyed: nothing in flight may use them)
     FGE.have_prev = 0; memset(FGE.q_live, 0, sizeof FGE.q_live);
     if (ls) {
-        if (!ls_setup(ls, g_dev, g_pd, x->fmt, (uint32_t)cw, (uint32_t)ch, flow)) {
-            if (ls->failed) fg_off(ls->why ? ls->why : "setup failed"); else RED_ONCE(122, "Lossless Scaling frame generation: %s (%dx%d): normal presentation", ls->why ? ls->why : "not for this frame", cw, ch);
+        if (!ls_setup_work(ls, g_dev, g_pd, x->fmt, cw_work, ch_work, flow, (uint32_t)cw, (uint32_t)ch)) {
+            if (ls->failed) return fg_ls_fallback(ls->why ? ls->why : "setup failed");
+            RED_ONCE(122, "Lossless Scaling frame generation: %s (%dx%d): normal presentation", ls->why ? ls->why : "not for this frame", cw, ch);
             return 0; }
-        VLOG("Lossless Scaling frame generation ready: %dx%d frames (format %d), motion on %ux%u (%.0f%%), %d images, %dx now (display %.1f Hz, game %d fps%s)%s; the GPU's time for it %s; "
-             "off above %.1f ms a picture, half that more for each picture after the first", cw, ch, (int)x->fmt, ls->fw, ls->fh, flow * 100, ls->nall, lsfg_mult(),
+        VLOG("Lossless Scaling frame generation ready: %dx%d frames (format %d), working at %ux%u, motion on %ux%u (%.0f%%), %d images, %dx now (display %.1f Hz, game %d fps%s)%s; the GPU's time for it %s; "
+             "off above %.1f ms a picture, half that more for each picture after the first", cw, ch, (int)x->fmt, ls->w, ls->h, ls->fw, ls->fh, flow * 100, ls->nall, lsfg_mult(),
              g_refresh_ns ? 1e9 / (double)g_refresh_ns : 0.0, game_fps(), dm_lsfg_mult > 0 ? ", DM_LSFG_MULT" : ", auto", ls->stripped ? "; without the shaders' float controls (the driver has none)" : "",
              FGE.qp ? "measured" : "cannot be measured on this driver (no timestamps)", FGE.budget / 1e6);
         return 1; }
@@ -5829,6 +6884,121 @@ static int fg_ready(vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
     VLOG("frame generation ready: %dx%d frames (format %d), motion on %ux%u down to %ux%u; the GPU's time for it %s; off above %.1f ms a picture", cw, ch, (int)x->fmt,
          g->lw[0], g->lh[0], g->lw[FG_LEVELS - 1], g->lh[FG_LEVELS - 1], FGE.qp ? "measured" : "cannot be measured on this driver (no timestamps)", FGE.budget / 1e6);
     return 1;
+}
+// ---------- Frame generation's PC score: real frames recorded for tests/t_fg_score.c (DM_FG_DUMP) ----------
+// DM_FG_DUMP=<start present>:<count>[:<scale %>]: from that present on (g_present_n; 0: once fgdump.req appears in the output folder, looked for every 30 presents),
+//   count consecutive presented frames (the frame x with its crop, as frame generation gets it) are read back into one host buffer as they are presented: copied
+//   when kept at their size in an 8-bit RGBA / BGRA format, else blitted (scaled to scale %, or converted to RGBA8). After the last one the GPU is waited for once
+//   and a thread writes them to <DM_CAPTURE_DIR, else the files folder>/fgdump/NNNN.ppm with info.txt, so the writing does not slow the frames being recorded.
+//   The score needs consecutive frames: a present that did not reach the recording (returned early) ends it there. Off: one getenv, then a test of one int a present
+static struct { int st, want, n, scale, flip, bgra, conv; long start; uint64_t first, last; uint32_t sw, sh, cw, ch; VkFormat fmt; VkImage img; VkDeviceMemory imem, bmem; VkBuffer buf;
+                uint8_t *map; char dir[1024]; } FGD;   // st: 0 not read yet, -1 off, 1 waiting for its start, 2 recording, 3 recorded (written at the next present), 5 writing, 4 written
+static void fgd_free(void) {
+    if (FGD.buf) vkDestroyBuffer(g_dev, FGD.buf, NULL);
+    if (FGD.bmem) vkFreeMemory(g_dev, FGD.bmem, NULL);
+    if (FGD.img) vkDestroyImage(g_dev, FGD.img, NULL);
+    if (FGD.imem) vkFreeMemory(g_dev, FGD.imem, NULL);
+    FGD.buf = VK_NULL_HANDLE; FGD.bmem = FGD.imem = VK_NULL_HANDLE; FGD.img = VK_NULL_HANDLE; FGD.map = NULL;
+}
+static void *fgd_write(void *arg) {   // (its own thread: the frames are the GPU's no more, and nothing else touches FGD until st 4)
+    (void)arg; char p[1200]; snprintf(p, sizeof p, "%s/fgdump", FGD.dir); mkdir(p, 0755);
+    for (int i = 0; i < 100000; i++) { snprintf(p, sizeof p, "%s/fgdump/%04d.ppm", FGD.dir, i); if (unlink(p)) break; }   // (a longer recording's frames from before)
+    size_t fs = (size_t)FGD.sw * FGD.sh * 4; uint8_t *row = malloc((size_t)FGD.sw * 3); int ok = row != NULL, i = 0;
+    for (; i < FGD.n && ok; i++) {
+        snprintf(p, sizeof p, "%s/fgdump/%04d.ppm", FGD.dir, i); FILE *f = fopen(p, "wb"); if (!f) { ok = 0; break; }
+        fprintf(f, "P6\n%u %u\n255\n", FGD.sw, FGD.sh);
+        for (uint32_t y = 0; y < FGD.sh; y++) {   // (rows as a display shows them: a GL-origin frame is stored upside down)
+            const uint8_t *s = FGD.map + (size_t)i * fs + (size_t)(FGD.flip ? FGD.sh - 1 - y : y) * FGD.sw * 4;
+            for (uint32_t x = 0; x < FGD.sw; x++) { row[x * 3] = s[x * 4 + (FGD.bgra ? 2 : 0)]; row[x * 3 + 1] = s[x * 4 + 1]; row[x * 3 + 2] = s[x * 4 + (FGD.bgra ? 0 : 2)]; }
+            if (fwrite(row, 1, (size_t)FGD.sw * 3, f) != (size_t)FGD.sw * 3) ok = 0; }
+        if (fclose(f)) ok = 0; }
+    free(row);
+    snprintf(p, sizeof p, "%s/fgdump/info.txt", FGD.dir); FILE *f = fopen(p, "w");
+    if (f) { fprintf(f, "frames %d\nsize %u %u\nsource %u %u\nformat %d\nscale %d\nconverted %d\nfirst present %llu\n", i, FGD.sw, FGD.sh, FGD.cw, FGD.ch, (int)FGD.fmt, FGD.scale, FGD.conv,
+                     (unsigned long long)FGD.first); fclose(f); }
+    VLOG("%sfg dump: %d frames written to %s/fgdump (%ux%u of the frame's %ux%u, format %d)%s", ok ? "" : "[RED] ", i, FGD.dir, FGD.sw, FGD.sh, FGD.cw, FGD.ch, (int)FGD.fmt,
+         ok ? "" : ": writing failed");
+    fgd_free(); FGD.st = 4;
+    return NULL;
+}
+// In the present's cb (after its first barrier): x's crop read back when this present is one of the recorded ones; also arms the recording and starts the writing
+static void fgd_frame(VkCommandBuffer cb, vtex *x, int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
+    if (FGD.st < 0 || FGD.st >= 4) return;
+    uint64_t n = atomic_load(&g_present_n);
+    if (!FGD.st) {
+        const char *e = getenv("DM_FG_DUMP"); long s = 0; int c = 0, sc = 100;
+        if (!e || sscanf(e, "%ld:%d:%d", &s, &c, &sc) < 2 || s < 0 || c < 3) { FGD.st = -1; return; }
+        FGD.start = s; FGD.want = c > 2000 ? 2000 : c; FGD.scale = sc < 10 ? 10 : sc > 100 ? 100 : sc;
+        const char *d = getenv("DM_CAPTURE_DIR"), *t = getenv("DM_TEX_CACHE");   // (the files folder: DM_TEX_CACHE is its texcache/)
+        if (d && *d) snprintf(FGD.dir, sizeof FGD.dir, "%s", d);
+        else { snprintf(FGD.dir, sizeof FGD.dir, "%s", t ? t : "."); char *sl = t ? strrchr(FGD.dir, '/') : NULL; if (sl) *sl = 0; }
+        FGD.st = 1; VLOG("fg dump: %d frames at %d %% from %s, then written to %s/fgdump", FGD.want, FGD.scale, s ? "the present given (DM_FG_DUMP)" : "when fgdump.req appears there", FGD.dir); }
+    if (FGD.st == 3) {   // the last recorded frame went to the GPU with the present before: waited for once, then written on a thread of its own
+        pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);
+        pthread_t th; FGD.st = 5; if (pthread_create(&th, NULL, fgd_write, NULL)) fgd_write(NULL); else pthread_detach(th);
+        return; }
+    if (FGD.st == 1) {
+        if (FGD.start) { if ((long)n < FGD.start) return; }
+        else { if (n % 30) return; char r[1100]; snprintf(r, sizeof r, "%s/fgdump.req", FGD.dir); if (access(r, F_OK)) return; unlink(r); }
+        // the first frame: its size and format decide how the frames are read back (the buffer for all of them made now, not while recording)
+        VkFormat f = x->fmt; int raw = f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB;
+        const char *bad = x->is3d || x->samples > 1 || !(x->aspect & VK_IMAGE_ASPECT_COLOR_BIT) || !(x->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ? "the frame cannot be copied" : NULL;
+        uint32_t sw = (uint32_t)cw, sh = (uint32_t)ch;
+        if (FGD.scale < 100) { sw = ((uint32_t)cw * (uint32_t)FGD.scale / 100) & ~1u; sh = ((uint32_t)ch * (uint32_t)FGD.scale / 100) & ~1u; }
+        VkFormat imf = raw ? f : VK_FORMAT_R8G8B8A8_UNORM; int blit = !raw || sw != (uint32_t)cw || sh != (uint32_t)ch;
+        if (!bad && blit) { VkFormatProperties a, b; vkGetPhysicalDeviceFormatProperties(g_pd, f, &a); vkGetPhysicalDeviceFormatProperties(g_pd, imf, &b);
+            if (!(a.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !(b.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+                if (raw) { sw = (uint32_t)cw; sh = (uint32_t)ch; blit = 0; VLOG("fg dump: the frame's format cannot be blitted here: recorded at its own size"); }
+                else bad = "its format can be neither copied as it is nor blitted"; } }
+        if (sw < 16 || sh < 16) bad = "the frame is too small";
+        uint64_t fs = (uint64_t)sw * sh * 4; int want = FGD.want;
+        if (fs * (uint64_t)want > (1ull << 30)) { want = (int)((1ull << 30) / fs); VLOG("fg dump: %d frames of %ux%u would need over 1 GB: %d frames", FGD.want, sw, sh, want); }
+        if (!bad && want < 3) bad = "not even 3 frames fit in 1 GB";
+        if (!bad && blit) {
+            VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = imf, .extent = { sw, sh, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+            VkMemoryRequirements rq = { 0 }; int t = -1;
+            if (!vkCreateImage(g_dev, &ci, NULL, &FGD.img)) { vkGetImageMemoryRequirements(g_dev, FGD.img, &rq); t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); }
+            else FGD.img = VK_NULL_HANDLE;
+            VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = (uint32_t)t };
+            if (t < 0 || vkAllocateMemory(g_dev, &ai, NULL, &FGD.imem) || vkBindImageMemory(g_dev, FGD.img, FGD.imem, 0)) bad = "no memory for its scaling image"; }
+        if (!bad) {
+            VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = fs * (uint64_t)want, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+            VkMemoryRequirements rq = { 0 }; int t = -1; void *m = NULL;
+            if (!vkCreateBuffer(g_dev, &bci, NULL, &FGD.buf)) { vkGetBufferMemoryRequirements(g_dev, FGD.buf, &rq);   // (cached first: the CPU reads all of it back)
+                t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+                if (t < 0) t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0); }
+            else FGD.buf = VK_NULL_HANDLE;
+            VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = (uint32_t)t };
+            if (t < 0 || vkAllocateMemory(g_dev, &ai, NULL, &FGD.bmem) || vkBindBufferMemory(g_dev, FGD.buf, FGD.bmem, 0) || vkMapMemory(g_dev, FGD.bmem, 0, VK_WHOLE_SIZE, 0, &m))
+                bad = "no host memory for the frames";
+            FGD.map = m; }
+        if (bad) { VLOG("[RED] fg dump: not recorded (%s; %ux%u, format %d)", bad, (unsigned)cw, (unsigned)ch, (int)f); fgd_free(); FGD.st = -1; return; }
+        FGD.want = want; FGD.n = 0; FGD.sw = sw; FGD.sh = sh; FGD.cw = (uint32_t)cw; FGD.ch = (uint32_t)ch; FGD.fmt = f; FGD.first = n; FGD.last = n - 1;
+        FGD.flip = atomic_load(&g_origin_ll); FGD.bgra = f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB; FGD.conv = !raw; FGD.st = 2;
+        VLOG("fg dump: recording %d frames from present %llu (%ux%u, format %d, %s)", want, (unsigned long long)n, sw, sh, (int)f, blit ? "blitted" : "copied");
+        if (FGD.img) { VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = FGD.img,
+                .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib); } }
+    // recording: this present's frame, unless the frame changed (size, format) or a present was missed, which ends the recording with the frames so far
+    if (n != FGD.last + 1 || x->fmt != FGD.fmt || (uint32_t)cw != FGD.cw || (uint32_t)ch != FGD.ch) {
+        VLOG("fg dump: ended after %d frames (%s)", FGD.n, n != FGD.last + 1 ? "a present was missed" : "the frame's size or format changed");
+        if (FGD.n >= 3) FGD.st = 3; else { fgd_free(); FGD.st = -1; }
+        return; }
+    VkDeviceSize off = (VkDeviceSize)FGD.n * FGD.sw * FGD.sh * 4;
+    if (!FGD.img) { VkBufferImageCopy bc = { off, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { cx, cy, 0 }, { (uint32_t)cw, (uint32_t)ch, 1 } };
+        vkCmdCopyImageToBuffer(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, FGD.buf, 1, &bc); }
+    else {   // (the full barrier before this in cb orders the blit after the last frame's copy out of the image)
+        VkImageBlit b = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { cx, cy, 0 }, { cx + cw, cy + ch, 1 } }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)FGD.sw, (int32_t)FGD.sh, 1 } } };
+        vkCmdBlitImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, FGD.img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+        VkBufferImageCopy bc = { off, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { FGD.sw, FGD.sh, 1 } };
+        vkCmdCopyImageToBuffer(cb, FGD.img, VK_IMAGE_LAYOUT_GENERAL, FGD.buf, 1, &bc); }
+    VkMemoryBarrier hb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };   // (read by the CPU later)
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL);
+    FGD.last = n; if (++FGD.n >= FGD.want) FGD.st = 3;
 }
 static void present_window_locked(vtex *x, const int crop[4]);
 static void present_window(vtex *x, const int crop[4]) { pthread_mutex_lock(&g_wmu); present_window_locked(x, crop); pthread_mutex_unlock(&g_wmu); }
@@ -5872,46 +7042,70 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         uint64_t t[2]; FGE.q_live[sl] = 0;
         if (vkGetQueryPoolResults(g_dev, FGE.qp, sl * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] >= t[0]) {
             uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * FGE.tsper); FGE.gpu_sum += ns; FGE.gpu_n++; if (ns > FGE.gpu_max) FGE.gpu_max = ns;
+            { uint64_t e = atomic_load(&g_fg_gpu_ema); atomic_store(&g_fg_gpu_ema, e ? (e * 15 + ns) / 16 : ns); }
             int np = FGE.q_pics[sl] > 0 ? FGE.q_pics[sl] : 1; uint64_t lim = FGE.budget + (uint64_t)(np - 1) * FGE.budget / 2;   // (each picture after the first: half the budget more)
             if (!FGE.off && fg_plan_cost(&FGE.plan, ns, t_arr, lim)) {
                 char why[96], n[24]; snprintf(why, sizeof why, "the GPU needs over %.1f ms for %d picture%s, %.1f ms the last frame", lim / 1e6, np, np > 1 ? "s" : "", ns / 1e6);
-                snprintf(n, sizeof n, "slow:%.1f", ns / 1e6); fg_step_down(why, n); } } }
+                snprintf(n, sizeof n, "slow:%.1f", ns / 1e6);
+                // (working at the 3D render size, a lower scale makes the pictures cheaper too: the scale gives way first)
+                if (!(FGE.ls.w && FGE.ls.w < FGE.ls.ow && fg_gov_absorb(why, t_arr))) fg_step_down(why, n); } } }
+    {   // this slot's cut / still numbers, now its fence has signalled (three presents ago): two still pairs in a row leave the next pictures out
+        fgc_result cr; float mean = 0; static float still = -1;
+        if (still < 0) { const char *e = getenv("DM_FG_STILL"); still = e && atof(e) >= 0 ? (float)atof(e) : 0.0015f; }
+        if (fgc_read(&FGE.cut, (int)sl, &cr, &mean)) { FGE.still_n = mean < still ? FGE.still_n + 1 : 0; if (cr.flag) FGE.n_cut++; } }
     int fgm = framegen_mode();
+#if DM_GAME_PROGRAM_ID == 0x0100A3D008C5C000ull || DM_GAME_PROGRAM_ID == 0x01008F6008C5E000ull
+    // Scarlet / Violet: off until the game holds a steady 30 (pictures between uneven frames look worse than none); DM_FG_PALDEA=1 tries it anyway
+    { static int ok = -1; if (ok < 0) { const char *e = getenv("DM_FG_PALDEA"); ok = e && !strcmp(e, "1"); if (fgm && !ok) VLOG("frame generation: off for Scarlet / Violet until the game holds a steady 30 (DM_FG_PALDEA=1 tries it)"); }
+      if (!ok) fgm = 0; }
+#endif
     if (fgm != FGE.mode_seen) {   // switched in the menu (off and on again, or the other kind): a GPU-time cut-off gets a fresh try, measured and cut off again the same way
         if (fgm && FGE.off && FGE.slow) { FGE.off = FGE.slow = 0; FGE.note[0] = 0; memset(FGE.q_live, 0, sizeof FGE.q_live);
             VLOG("frame generation switched on again in the menu: tried again from its full setting, made lighter again step by step if it costs too much"); }
         if (fgm && FGE.up) FGE.mult_cap = 4;
         FGE.flow_cut = 0; FGE.ok_win = 0; FGE.since_up = 99; FGE.up_wait = 20; FGE.base_fps = 0; FGE.aw_t = 0; FGE.aw_skip = 0; memset(&FGE.plan, 0, sizeof FGE.plan);
         FGE.mode_seen = fgm; FGE.held = 1; FGE.rate_n = 0; FGE.rate_ivl = 0; FGE.rate_last = 0; }
-    if (fgm) {   // Frame generation runs only on a game at a locked 60 (the frame rate setting at 60 and the game holding it), and lightly: 2x, the motion search at half
-        //   size. The game's own frame rate (pauses over a second left out) must stay at DM_FRAMEGEN_MIN_FPS (default 58) or more: paused under 57, back from 59.
-        //   Under 60 the in-between pictures cost the game frames it could not spare (#189, Adreno 613: the game at 14-22 fps, 4x of it moved worse). Decided after
-        //   16 frames; until then held. At the 30 fps setting it stays off (the note says why)
-        if (!FGE.min_fps) { const char *e = getenv("DM_FRAMEGEN_MIN_FPS"); int f = e ? atoi(e) : 0; FGE.min_fps = f >= 1 && f <= 120 ? f : 58; }
-        if (game_fps() < 60 && FGE.min_fps >= 30) { if (strcmp(FGE.note, "need60")) VLOG("frame generation off at the %d fps setting: it needs the game at a locked 60", game_fps());
-            FGE.held = 1; FGE.rate_n = 0; FGE.rate_ivl = 0; FGE.rate_last = 0; FGE.base_fps = 0; FGE.aw_t = 0;   // (the game's own rate is measured again at 60)
-            if (!FGE.off) snprintf(FGE.note, sizeof FGE.note, "need60"); }
-        else {
+    if (fgm) {   // Frame generation runs while the game holds its own frame rate: DM_FRAMEGEN_MIN_FPS (default the target less 2: 28 at 30, 58 at 60) or more, paused
+        //   under it, back from 2 over it. Under its target the in-between pictures cost the game frames it could not spare (#189, Adreno 613: the game at 14-22 fps,
+        //   4x of it moved worse). Time rule: paused after 2 s under, back after 5 s over (no flicking on and off at the edge); when its own cost took the game under,
+        //   the render scale gives way first (fg_gov_absorb: no pause for 15 s while the guard steps). Decided after 16 frames; until then held
+        if (!FGE.min_fps) { const char *e = getenv("DM_FRAMEGEN_MIN_FPS"); int f = e ? atoi(e) : 0; FGE.min_fps = f >= 1 && f <= 120 ? f : game_fps() - 2 >= 10 ? game_fps() - 2 : 28; }
         uint64_t d = FGE.rate_last ? t_arr - FGE.rate_last : 0; FGE.rate_last = t_arr;
         if (d && d < 1000000000ull) { FGE.rate_ivl = FGE.rate_ivl ? (FGE.rate_ivl * 15 + d) / 16 : d; FGE.rate_n++; }
         if (FGE.rate_n >= 16) {
-            uint64_t lo = 1000000000ull / (uint64_t)(FGE.min_fps - 1), hi = 1000000000ull / (uint64_t)(FGE.min_fps + 1);   // (under 57 fps: paused; 59 or more: on)
-            int was = FGE.held, now = FGE.rate_ivl > lo ? 1 : FGE.rate_ivl < hi ? 0 : was; double fps = 1e9 / (double)FGE.rate_ivl;
+            uint64_t lo = 1000000000ull / (uint64_t)(FGE.min_fps > 1 ? FGE.min_fps - 1 : 1), hi = 1000000000ull / (uint64_t)(FGE.min_fps + 1);   // (under min-1 fps: paused; min+1 or more: on)
+            int was = FGE.held, want = FGE.rate_ivl > lo ? 1 : FGE.rate_ivl < hi ? 0 : was; double fps = 1e9 / (double)FGE.rate_ivl;
+            if (want != was) {
+                if (FGE.flip_to != want + 1) { FGE.flip_to = want + 1; FGE.flip_t = t_arr; }
+                if (t_arr - FGE.flip_t < (want ? 2000000000ull : 5000000000ull) || (want && t_arr < FGE.grace_t)) want = was; }
+            else FGE.flip_to = 0;
+            int now = want;
+            if (now && !was && !FGE.off && FGE.last_gen_t && t_arr - FGE.last_gen_t < 3000000000ull) {   // (it was making pictures: its cost took the game under the floor)
+                char w[96], n[24]; snprintf(w, sizeof w, "the game fell to %.1f fps with it", fps); snprintf(n, sizeof n, "cost:%.0f", fps);
+                if (fg_gov_absorb(w, t_arr)) now = was; else fg_step_down(w, n); }
             if (now != was) {
-                FGE.held = now;
-                if (now && !FGE.off && FGE.last_gen_t && t_arr - FGE.last_gen_t < 1000000000ull) {   // (it was making pictures: its cost took the game under the floor)
-                    char w[96], n[24]; snprintf(w, sizeof w, "the game fell to %.1f fps with it", fps); snprintf(n, sizeof n, "cost:%.0f", fps); fg_step_down(w, n); }
-                if (now) VLOG("[RED] frame generation paused: the game itself runs at %.1f fps, under the %d fps it needs (DM_FRAMEGEN_MIN_FPS): normal presentation until it holds %d", fps, FGE.min_fps - 1, FGE.min_fps + 1);
+                FGE.held = now; FGE.flip_to = 0;
+                if (now) VLOG("[RED] frame generation paused: the game itself runs at %.1f fps, under the %d fps it needs (DM_FRAMEGEN_MIN_FPS): normal presentation until it holds %d for 5 s", fps, FGE.min_fps - 1, FGE.min_fps + 1);
                 else if (FGE.n_gen + FGE.n_plain || FGE.last_log) VLOG("frame generation back on: the game runs at %.1f fps", fps); }
-            if (!FGE.off) { if (FGE.held) snprintf(FGE.note, sizeof FGE.note, "paused:%.0f", fps); else FGE.note[0] = 0; } } } }
-    int fg = fgm && !FGE.off && !FGE.held && FGE.base_fps > 0 && fg_ready(x, cx, cy, cw, ch), gen = 0;   // (the first 3 s: the game's own rate measured, fg_adapt)
+            if (!FGE.off && strcmp(FGE.note, "ours")) { if (FGE.held) snprintf(FGE.note, sizeof FGE.note, "paused:%.0f", fps); else FGE.note[0] = 0; } } }
+    // the work size: Lossless Scaling HUD-free only (its pictures go back to the frame's size in its HUD pass; without one, the HUD would be drawn at the smaller size)
+    int hf_can = g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt;
+    float wsc = fgm == 3 && hf_can && FGE.ls.hbase ? fg_work_scale(t_arr) : FGE.ls.w && FGE.ls.w < FGE.ls.ow && fgm == 3 ? FGE.ws : 1.0f;
+    int fg = fgm && !FGE.off && !FGE.held && FGE.base_fps > 0 && fg_ready(x, cx, cy, cw, ch, wsc), gen = 0;   // (the first 3 s: the game's own rate measured, fg_adapt)
+    fgm = framegen_mode() && fgm ? framegen_mode() : fgm;   // (fg_ready may have fallen back from Lossless Scaling to ours)
     if (!fg) { FGE.have_prev = 0; FGE.ls.n = 0; }   // (the copy of the frame before goes stale the moment a frame is not copied; Lossless Scaling's history starts again)
     // HUD-free: the frames it works from are the scene copies, the HUD put back from the frame as shown (nvn_fgen.h hud, nvn_lsfg.h ls_hud). A switch between the two
     //   kinds: the frames before are of the other kind, no picture from them (decided before the swapchain images are asked for)
-    int hf = fg && g_hp_scene_ok && g_hp_simg && cx == 0 && cy == 0 && g_hp_sw == (uint32_t)cw && g_hp_sh == (uint32_t)ch && g_hp_sfmt == x->fmt && (fgm != 3 || ls_hud_ok(&FGE.ls));
+    int hf = fg && hf_can && (fgm != 3 || ls_hud_ok(&FGE.ls));
+    if (hf) FGE.hf_ever = 1;
     if (fg && hf != FGE.hf_last) { FGE.have_prev = 0; FGE.ls.n = 0; }
     FGE.hf_last = hf;
     if (fg) { FGE.g.debug = fgm == 2; gen = fg_plan_frame(&FGE.plan, t_arr, period) && FGE.have_prev && (fgm != 3 || FGE.ls.n >= 2); }   // (lsfg: three frames of history first)
+    // left out: a still pair (two read-backs in a row, nvn_fgcut.h) and a frame without the scene once HUD-free has worked (a full-screen menu, a loading screen:
+    //   DM_FG_MENU_SKIP=0 keeps them)
+    if (gen && FGE.still_n >= 2) { gen = 0; FGE.n_still++; }
+    { static int ms = -1; if (ms < 0) { const char *e = getenv("DM_FG_MENU_SKIP"); ms = !(e && !strcmp(e, "0")); }
+      if (gen && ms && FGE.hf_ever && !hf && hudfree_on()) { gen = 0; FGE.n_menu++; } }
     uint32_t ii, imgs[LS_MAXGEN + 1]; int npic = 0; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, UINT64_MAX, W.acq[sl], VK_NULL_HANDLE, &ii);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return; }
     if (r && r != VK_SUBOPTIMAL_KHR) return;
@@ -5926,6 +7120,7 @@ static void present_window_locked(vtex *x, const int crop[4]) {
     VkCommandBuffer cb = W.cb[sl]; vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT }; vkBeginCommandBuffer(cb, &bi);
     barrier_all(cb);
+    fgd_frame(cb, x, cx, cy, cw, ch);   // (DM_FG_DUMP: real frames for the PC score; nothing while off)
     int flip = atomic_load(&g_origin_ll);
     pres_src real = { x, VK_NULL_HANDLE, VK_NULL_HANDLE, 0, 0, cx, cy, cw, ch };
     if (fg) {   // the frame copied (the game draws over its own next), its brightness pyramid, and with a frame before it the picture between the two
@@ -5934,21 +7129,32 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         if (ls) ls_begin(ls, cb); else fg_begin(g, cb);
         VkImageCopy ic = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { cx, cy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { (uint32_t)cw, (uint32_t)ch, 1 } };
         if (!ls) g->hud_on = hf;
-        if (hf) { VkImageCopy sc = ic; sc.srcOffset = (VkOffset3D){ 0, 0, 0 };
+        if (ls && ls->w != (uint32_t)cw) {   // work size: the frame (or its scene) scaled down into c[p]; HUD-free: the scene also kept at the frame's size for the HUD rule
+            VkImageBlit b = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { hf ? 0 : cx, hf ? 0 : cy, 0 }, { (hf ? 0 : cx) + cw, (hf ? 0 : cy) + ch, 1 } },
+                              { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)ls->w, (int32_t)ls->h, 1 } } };
+            vkCmdBlitImage(cb, hf ? g_hp_simg : x->img, VK_IMAGE_LAYOUT_GENERAL, ls->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+            if (hf) { VkImageCopy sc = ic; sc.srcOffset = (VkOffset3D){ 0, 0, 0 };
+                vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, ls->sfull.img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
+                vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); } }
+        else if (hf) { VkImageCopy sc = ic; sc.srcOffset = (VkOffset3D){ 0, 0, 0 };
             vkCmdCopyImage(cb, g_hp_simg, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &sc);
             vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->hud.img : g->hud.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic); }
         else vkCmdCopyImage(cb, x->img, VK_IMAGE_LAYOUT_GENERAL, ls ? ls->c[p].img : g->c[p].img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
         if (ls) {   // (its own barriers: the copy is made visible to its compute passes)
             ls_ingest(ls, cb, p);
+            if (FGE.have_prev) fgc_stat(&FGE.cut, cb, (int)sl, ls->c[p ^ 1].view, ls->c[p].view);   // (the two frames the pictures go between; read back for stills)
             if (gen) { for (int k = 0; k < npic; k++) ls_generate(ls, cb, npic, k);
+                for (int k = 0; k < npic; k++) fgc_select(&FGE.cut, cb, (int)sl, k, ls->c[p].view, ls->m[k].view, ls->w, ls->h);   // (a cut: the newer frame instead)
                 if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = npic; }
                 for (int k = 0; k < npic; k++) { ls_img *e = &ls->m[k];
                     if (hf) { ls_hud(ls, cb, k); e = &ls->o; }   // (its HUD back on top; o is drawn here before the next picture's pass writes it)
-                    pres_src mid = { NULL, e->img, e->pview, ls->w, ls->h, 0, 0, cw, ch }; present_compose(cb, imgs[k], &mid, flip); } }
+                    uint32_t ew = e == &ls->o ? ls->ow : ls->w, eh = e == &ls->o ? ls->oh : ls->h;   // (the work size: m is smaller than the frame, o is the frame's)
+                    pres_src mid = { NULL, e->img, e->pview, ew, eh, 0, 0, (int32_t)ew, (int32_t)eh }; present_compose(cb, imgs[k], &mid, flip); } }
         } else {
         VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
         fg_ingest(g, cb, p);
+        if (FGE.have_prev) fgc_stat(&FGE.cut, cb, (int)sl, g->c[p ^ 1].view, g->c[p].view);   // (ours: its picture is a render target: fgc_select_rt below)
         {   // depth guidance: this frame's scene depth (copied with the scene) → its nearness. A new copy image: named to frame generation once nothing in flight uses the old one
             int zgen = g_hp_zimg ? g_hp_zgen : 0;
             if (FGE.zgen != zgen) { pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);
@@ -5956,7 +7162,18 @@ static void present_window_locked(vtex *x, const int crop[4]) {
                 if (g_hp_zimg) VLOG("frame generation, depth guidance: %s (%ux%u, format %d)", ok ? "on" : "the driver cannot sample that depth format: off", g_hp_zw, g_hp_zh, (int)g_hp_zfmt); }
             g->z_on = fg_depth_on(); g->z_far1 = g_hp_zfar1;
             fg_depth_ingest(g, cb, p, hf && g_hp_zimg && g_hp_zseq == g_hp_scene_seq && g_hp_Z); }
+        {   // camera guidance: the game's own view-projection for this frame and the one before (dm_cam_viewproj, where the game's camera is known)
+            static float vp[2][16]; static int vok[2], said;
+            vok[p] = fg_cam_on() && dm_cam_viewproj && dm_cam_viewproj(vp[p]);
+            float m[16]; int ok = gen && vok[p] && vok[p ^ 1] && fg_cam_m(vp[p ^ 1], vp[p], m);
+            fg_camera(g, p, ok ? m : NULL, atomic_load(&g_depth_zero));
+            if (ok && g->camb[0] > 0.5f && !said) { said = 1; VLOG("frame generation, camera guidance: on (the game's camera and depth start the motion search; DM_FG_CAMERA=0 off)"); }
+            static unsigned n, nread, nz; n++; nread += vok[p] != 0; nz += g->z_on && g->z_ok[p];   // (why not, once a while: the camera read or the depth)
+            if (n == 300 && !said) VLOG("frame generation, camera guidance: not on yet: camera read %u of %u frames%s, depth %u of %u", nread, n,
+                                        !dm_cam_viewproj ? " (no reader for this game)" : "", nz, n);
+            if (n >= 300) n = nread = nz = 0; }
         if (gen) { fg_generate(g, cb, p);
+            fgc_select_rt(&FGE.cut, cb, (int)sl, hf ? g->hud.view : g->c[p].view, g->m.view, g->fmt, g->w, g->h);   // (a cut: the newer frame as shown instead)
             if (FGE.qp) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FGE.qp, sl * 2 + 1); FGE.q_live[sl] = 1; FGE.q_pics[sl] = 1; }
             pres_src mid = { NULL, g->m.img, g->m.view, g->w, g->h, 0, 0, cw, ch };
             present_compose(cb, ii, &mid, flip); }
@@ -5993,10 +7210,10 @@ static void present_window_locked(vtex *x, const int crop[4]) {
     if (fgm && t_arr - FGE.last_log >= 10000000000ull) {
         if (FGE.last_log && FGE.n_gen + FGE.n_plain)
             VLOG("frame generation: %llu in-between pictures in the last 10 s, %llu frames without one; GPU %.2f ms a picture (longest %.2f), recorded in %.2f ms; "
-                 "the real frame reaches the display %.1f ms after the game finished it (the input delay it adds)", (unsigned long long)FGE.n_gen, (unsigned long long)FGE.n_plain,
+                 "the real frame reaches the display %.1f ms after the game finished it (the input delay it adds); camera cuts %llu, left out still %llu / menu %llu", (unsigned long long)FGE.n_gen, (unsigned long long)FGE.n_plain,
                  FGE.gpu_n ? FGE.gpu_sum / 1e6 / (double)FGE.gpu_n : 0.0, FGE.gpu_max / 1e6, FGE.n_gen + FGE.n_plain ? FGE.cpu_sum / 1e6 / (double)(FGE.n_gen + FGE.n_plain) : 0.0,
-                 FGE.lag_n ? FGE.lag_sum / 1e6 / (double)FGE.lag_n : 0.0);
-        FGE.n_gen = FGE.n_plain = FGE.gpu_sum = FGE.gpu_n = FGE.gpu_max = FGE.cpu_sum = FGE.lag_sum = FGE.lag_n = 0; FGE.last_log = t_arr; }
+                 FGE.lag_n ? FGE.lag_sum / 1e6 / (double)FGE.lag_n : 0.0, (unsigned long long)FGE.n_cut, (unsigned long long)FGE.n_still, (unsigned long long)FGE.n_menu);
+        FGE.n_gen = FGE.n_plain = FGE.gpu_sum = FGE.gpu_n = FGE.gpu_max = FGE.cpu_sum = FGE.lag_sum = FGE.lag_n = 0; FGE.n_cut = FGE.n_still = FGE.n_menu = 0; FGE.last_log = t_arr; }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { fg_flush_locked(); swap_destroy(); }
 }
 // Once a minute: where the renderer's memory is, so growth can be told apart (caches that level off: shaders, pipelines; anything else that keeps rising is a leak)
@@ -6101,6 +7318,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (sk_on()) { vtex *px = tex_res(t); if (px) { pthread_mutex_lock(&g_skmu); px->presented = 1; pthread_mutex_unlock(&g_skmu); sk_read(px); } }   // shown: never skips its stores
     uint64_t n = atomic_fetch_add(&g_present_n, 1) + 1;
     cap_present(n);
+    mw_present(n, t, crop);   // the Mali white-screen check: finished samples read, this frame's lit target and the picture shown sampled when due (nothing unless its ladder is on)
     { vtex *px = tex_res(t); fgr_present(n, px, px ? px->w : 0, px ? px->h : 0, px ? (uint32_t)px->fmt : 0); }   // (the frame recorder: frame boundary, the shown image)
     // the heap route's crash marker goes after 20 s of play on it: 600 presents, or 20 s of wall time and 60 presents (a hot Xclipse 530 building 2,000 pipelines on the
     //   way into Motostoke drew about 300 frames in a minute; the player closed it as stuck, the marker stayed, and the next start took the mirrored route and crashed, #74)
@@ -6139,6 +7357,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (n % 1800 == 0 && (g_nanmm || g_clampzero || g_fmz)) VLOG("shaders changed so far: %d for NaN in min / max / saturate, %d for Arm erratum 3779215, %d for FMZ", atomic_load(&g_nanmm_n), atomic_load(&g_clampzero_n), atomic_load(&g_fmz_n));
     if ((n == 1 || n % 300 == 0) && atomic_load(&g_pre_done) + atomic_load(&g_pre_late) + atomic_load(&g_pre_full))
         VLOG("textures uploaded ahead %llu (%ld MB of them not drawn yet), used before the worker got to them %llu, left to their first use (budget or queue full) %llu; in %llu batches", (unsigned long long)atomic_load(&g_pre_done), atomic_load(&g_pre_unused) >> 20, (unsigned long long)atomic_load(&g_pre_late), (unsigned long long)atomic_load(&g_pre_full), (unsigned long long)atomic_load(&g_pre_batches));
+    if (n % 300 == 0 && ubo_snap_on()) VLOG("present %llu: uniform snapshots: %llu updates written through so far", (unsigned long long)n, (unsigned long long)g_snap_wt);
     if (n % 300 == 0 && (sk_on() || ubd_on() || barrier_relaxed()))
         VLOG("present %llu: barriers before passes full %llu / narrowed %llu / left out %llu; uniform updates deferred in a pass %llu (passes ended to land them %llu); "
              "stores skipped %llu (read after all %llu), depth / stencil begun store-none %llu (written after all %llu)", (unsigned long long)n,
@@ -6154,6 +7373,10 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (n % 300 == 0 && g_dsc_hits + g_dsc_new) VLOG("present %llu: descriptor sets written %llu, reused %llu (%.0f %%)", (unsigned long long)n, (unsigned long long)g_dsc_new, (unsigned long long)g_dsc_hits, 100.0 * (double)g_dsc_hits / (double)(g_dsc_hits + g_dsc_new));
     if (n % 1800 == 0 && (g_nanmm || g_clampzero || g_exact || g_initloc)) VLOG("shaders changed so far: %d for NaN in min / max / saturate, %d for Arm erratum 3779215, %d for Maxwell's special-function edge cases, %d with registers starting at zero",
                                                                 atomic_load(&g_nanmm_n), atomic_load(&g_clampzero_n), atomic_load(&g_exact_n), atomic_load(&g_initloc_n));
+    { if (g_tfchk_at && g_frame_no >= g_tfchk_frame + 60) { uint32_t left = 0; for (uint32_t i = 0; i < g_tfchk_n; i += 4) left += *(const uint32_t *)(uintptr_t)(g_tfchk_at + i) == 0x7fc0deadu;
+          if (left == g_tfchk_n / 4) VLOG("[RED] transform feedback check: the captures wrote nothing on this driver (the marker is still there 60 frames later): skinned and swaying models get no vertices");
+          else VLOG("transform feedback check: the captures write their vertices (%u of %u marker words replaced)", g_tfchk_n / 4 - left, g_tfchk_n / 4);
+          g_tfchk_at = 0; } }
     if (n == 1 || n % 300 == 0) VLOG("present %llu: %llu render target sets (%llu kept the open pass, %llu passes begun), %llu draws so far; textures uploaded %llu (re-uploaded %llu, %.1f MB)%s", (unsigned long long)n, (unsigned long long)g_stat_passes, (unsigned long long)g_stat_rt_same, (unsigned long long)g_stat_begins,
                                      (unsigned long long)g_stat_draws, (unsigned long long)g_pkg_uploads, (unsigned long long)g_pkg_reuploads, g_up_bytes / 1048576.0,
                                      g_bcgpu ? (snprintf(g_bc_line, sizeof g_bc_line, "; BC layer: %llu levels, %llu copies", (unsigned long long)g_bc_gpu_levels, (unsigned long long)g_bc_gpu_copies), g_bc_line) : "");
@@ -6205,3 +7428,4 @@ void mtl_ubd_stats(uint64_t *deferred, uint64_t *conflicts) { *deferred = g_ubd_
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full) { *skip = g_bar_none + g_bar_narrow; *full = g_bar_full; }
 uint64_t mtl_blit_splits(void) { return 0; }
 uint64_t mtl_cut_count(void) { return 0; }
+#include "golden_vk.inc"   // golden-frame recordings: the backend side (golden_rec.h golden_be_*)

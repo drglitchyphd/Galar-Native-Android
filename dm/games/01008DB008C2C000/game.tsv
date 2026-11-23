@@ -52,3 +52,11 @@ shader_note	Pokémon Shield shaders
 # ---- After the rewrite ----
 # the rewritten modules are larger than the default 64 MB of used memory (Age of Calamity: 66.6 MB → 72 MB)
 mem_used	0x4c00000
+
+# ---- Port (engine unification: docs/ENGINE_UNIFY.md) ----
+# the released app (Galar Native; Pokémon Sword takes these through tables_from); the shared save folder Documents/<docs_dir>/<title id>/save
+port	galar
+docs_dir	Galar Native
+# the game's own GPU choices (dm/games/game.py ENGINE_QUIRKS; Pokémon Sword takes them through tables_from): on Arm's own Mali driver, the lit R11G11B10F target drawn
+# as an RGBA16F stand-in and checked for the white screen while playing (#47 #110 #111 #172)
+engine_quirks	mali_lit_standin

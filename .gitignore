@@ -30,3 +30,9 @@ shaders.pak
 bin/
 dm/android/spirv_cross/src/
 dm/android/spirv_cross/out/
+# Golden-frame recordings and their pictures are made from the game (dm/gfx/golden/README.md): they live outside the repository, never committed
+*.nxgold
+*.nxgold.tmp
+*.phone.png
+*.expected.png
+*.tolerance

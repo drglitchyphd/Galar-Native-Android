@@ -20,6 +20,25 @@ sys.path.insert(0, os.path.join(DM, 'games')); import game as _game
 PROFILE = _game.load()
 NAME = PROFILE.get('name')
 
+_TOOLS = None
+def chain_tool(name):
+    """dmsh_chain.py / dmsh_build.py of this game's shader chain generation (dm/gfx/chains/chain_tree.py, the profile's xlate_chain): dm/gfx/tools itself when it
+    is that generation (an APK carries its game's generation there, named in gfx/tools/CHAIN; a checkout's live tools for a game on them), else a tool tree with
+    the generation's frozen files, made once a run in the temp folder (a checkout setting up Legends: Arceus or Scarlet / Violet: the translator before FMZ)"""
+    global _TOOLS
+    if _TOOLS is None:
+        live = os.path.join(DM, 'gfx/tools'); mark = os.path.join(live, 'CHAIN'); chains = os.path.join(DM, 'gfx/chains')
+        have = open(mark).read().strip() if os.path.isfile(mark) else ''
+        _TOOLS = live
+        if os.path.isdir(chains):   # (an APK has no gfx/chains: its gfx/tools is the generation already)
+            sys.path.insert(0, chains); import chain_tree
+            gen = chain_tree.gen_of(PROFILE)
+            if gen != have:
+                import tempfile; t = os.path.join(tempfile.gettempdir(), f'dm-chain-{gen or "live"}-{os.getpid()}')
+                _TOOLS = os.path.join(chain_tree.materialize(gen, t), 'gfx/tools')
+                print(f'shader tools: chain generation {gen or "live"} ({_TOOLS})', flush=True)
+    return os.path.join(_TOOLS, name)
+
 def write_runtime_shader_map(found_map, profile_map, output):
     """Use shader locations found in this dump, retaining profile slots for runtime-captured shaders."""
     with open(found_map, encoding='utf-8') as f: rows = f.readlines()
@@ -60,6 +79,58 @@ def watch_files(d, end, total, stop):
         except OSError: done = 0
         done = min(done, total - 1)
         if done != shown: shown = done; print(f'PROGRESS {done}/{total}', flush=True)
+
+def distinct_shaders(found_map, pkg, fact_tables, never, out_map):
+    """The shaders that are another shader's program under a different key are left out of the map the shader build reads (out_map), so each distinct program is
+    translated once; → {left-out key: the key translated for it}. About half of Sword / Shield's 38,501 shaders are such repeats (census 2026-11-22: 18,689
+    distinct, 0 exceptions). Two shaders are the same program when everything the translation reads of them is the same: the stage, the code area (with the
+    c1 tables in it), the control section (the transform feedback layout is read from it) and their rows in the answer tables. The control sections of such
+    repeats differ only in the 8 bytes at +0x7d0, which nothing reads, so those are left out of the comparison. Shaders inside the game's main program, shaders
+    that wait for capture and shaders with a hand-written replacement (never) are always kept. The shader build itself is unchanged (any edit to it changes the
+    shader chain version): it only gets a shorter map"""
+    facts = {}
+    for t in fact_tables:
+        if not os.path.isfile(t): continue
+        for ln in open(t, encoding='utf-8'):
+            if ln.strip() and not ln.startswith('#'): k, _, v = ln.rstrip('\n').partition('\t'); facts.setdefault(k, []).append(v)
+    first, same, kept, lines = {}, {}, set(), []; pack = (None, b'', [])
+    for ln in open(found_map, encoding='utf-8'):
+        c = ln.rstrip('\n').split('\t')
+        if len(c) <= 4 or c[0] == 'package' or c[0].startswith('#'): lines.append(ln); continue
+        key = c[3]
+        if key in same: continue
+        fp = None
+        if key not in kept and key not in never and c[0].endswith('.bin') and c[1].isdigit() and os.path.isfile(os.path.join(pkg, c[0])):
+            if pack[0] != c[0]:
+                d = open(os.path.join(pkg, c[0]), 'rb').read(); pack = (c[0], d, [m.start() for m in re.finditer(b'BTCDBTCD', d)])
+            _, d, at = pack; k = int(c[1])
+            if k < len(at):
+                rec = d[at[k]:at[k + 1] if k + 1 < len(at) else len(d)]; ci = rec.find(bytes.fromhex('34127698'))
+                if ci >= 0x38 and len(rec) >= ci + 0x7d8:
+                    ctl = bytearray(rec[ci:ci + 0x880]); ctl[0x7d0:0x7d8] = bytes(8)
+                    fp = hashlib.sha256(b'\0'.join([c[0][:2].encode(), str(ci).encode(), rec[0x38:ci], bytes(ctl), '\n'.join(facts.get(key, [])).encode()])).digest()
+        if fp is not None and fp in first: same[key] = first[fp]; continue
+        if fp is not None: first[fp] = key
+        kept.add(key); lines.append(ln)
+    with open(out_map, 'w', encoding='utf-8') as f: f.writelines(lines)
+    return same
+
+def share_translated(vk, same):
+    """Each left-out shader gets the files of the one translated for it (distinct_shaders): its SPIR-V, the vertex shaders' GL depth variant and the reflection,
+    which hold nothing of the key. A link where the storage has them (no bytes written), else a copy; → how many shaders got theirs"""
+    n = 0
+    for key, rep in same.items():
+        got = False
+        for end in ('.spv', '.gl.spv', '.vkr'):
+            src = os.path.join(vk, rep + end); dst = os.path.join(vk, key + end)
+            try: os.remove(dst)
+            except FileNotFoundError: pass
+            if not os.path.isfile(src): continue
+            try: os.link(src, dst)
+            except OSError: shutil.copyfile(src, dst)
+            got = got or end == '.spv'
+        n += got
+    return n
 
 def translated_mark(work):
     return os.path.join(work, 'translated.json')
@@ -123,14 +194,17 @@ def main():
     ap.add_argument('--shaders-only', action='store_true', help='translate the shaders again from the game already set up in --out (its RomFS and patched/main.patched.bin): '
                     'no dump and no keys, for an app version whose shader translation changed')
     ap.add_argument('--scratch', help='the folder for the shader steps\' many small files (the scan\'s packages, the translation, its cache, the reflection, the raw pack): the app\'s private storage, where a file costs a fraction of what it does in shared storage (#262: 10,000 small files written in 0.5 s there, 26 s in /sdcard); default --work')
+    ap.add_argument('--installed', help='the folder of an installed app\'s APKs that already hold this game (assets/game: RomFS and the rewritten code; the Legends: Arceus app built on a PC): set up from them instead of a dump')
+    ap.add_argument('--flat-normals', action='store_true', help='only make the profile\'s flat normal maps (flat_normals: Legends: Arceus "No reflections") for the game set up in --out')
     ap.add_argument('--resume', action='store_true', help='go on from the shader translation when an earlier run of this setup got that far (resume.json in --work)')
     a = ap.parse_args()
     if a.mod_shaders is not None: return mod_shaders(a)
+    if a.flat_normals: return flat_normals(a)
     if a.games and not a.root: ap.error('--games needs --root')
     if a.captures:
         if a.live: live_yield()
         return captures(a)
-    if not a.shaders_only and not (a.keys and a.base): ap.error('--keys and --base are needed (or --captures, or --shaders-only)')
+    if not a.shaders_only and not (a.installed or (a.keys and a.base)): ap.error('--keys and --base are needed (or --installed, --captures, or --shaders-only)')
     os.makedirs(a.work, exist_ok=True); os.makedirs(a.out, exist_ok=True)
     S = a.scratch or a.work; os.makedirs(S, exist_ok=True)   # the shader steps' small files (--scratch); setup.log, the unpacked game and the marks stay in --work
     log = open(os.path.join(a.work, 'setup.log'), 'a', buffering=1)
@@ -146,7 +220,7 @@ def main():
         e = kw.pop('env', env)
         for attempt in range(retry_killed + 1):
             log.write('$ ' + ' '.join(map(str, cmd)) + '\n')
-            r = subprocess.run(list(map(str, cmd)), stdout=log, stderr=subprocess.STDOUT, env=e, **kw)
+            r = subprocess.run(list(map(str, cmd)), cwd=a.bin, stdout=log, stderr=subprocess.STDOUT, env=e, **kw)
             if r.returncode >= 0 or attempt == retry_killed: break
             slots = max(1, int(e.get('DM_GATE_SLOTS', e.get('J', '8'))) // 2); e = dict(e, J=str(slots), DM_GATE_SLOTS=str(slots))
             log.write(f'{os.path.basename(str(cmd[1]))} was stopped ({r.returncode}): again with {slots} at a time\n')
@@ -172,12 +246,12 @@ def main():
         try: run([py, os.path.join(DM, 'android/tools/vk_meta.py'), built, vk, built])
         finally: stop5.set()
     keys = os.path.join(a.keys, 'prod.keys') if a.keys else None
-    if not a.shaders_only and not os.path.isfile(keys): raise RuntimeError(f'no prod.keys in {a.keys}')
+    if not a.shaders_only and not a.installed and not (keys and os.path.isfile(keys)): raise RuntimeError(f'no prod.keys in {a.keys}')
     ex = os.path.join(a.work, 'extract')
 
     # --resume (the setup screen, after Android stopped this setup, #51 / #52: exit 137 during the shader translation): resume.json, written once the shader scan is done,
     #   says what steps 1-3 found; the unpacked game, the rewritten code and the scanned shaders are still in place, and the translation goes on from what it had done
-    state = os.path.join(a.work, 'resume.json'); resumed = False
+    state = os.path.join(a.work, 'resume.json'); resumed = False; from_app = False
     if a.resume and os.path.isfile(state) and (a.shaders_only or os.path.isfile(os.path.join(ex, 'ExeFS', 'main'))) and os.path.isdir(os.path.join(S, 'shader_pkg')):
         import json
         st = json.load(open(state, encoding='utf-8'))
@@ -201,6 +275,69 @@ def main():
         if not (os.path.isdir(romfs) and os.path.isfile(main_src)):
             raise RuntimeError('this game was set up without the files a shaders-only update reads (RomFS, patched/main.patched.bin): choose your files and set it up again')
         log.write(f'== {time.strftime("%H:%M:%S")} shaders only: from {romfs} and {main_src}\n')
+    elif not resumed and a.installed:
+        # --installed: the game from an app that already holds it (the Legends: Arceus app built on a PC: its APKs carry assets/game/RomFS and assets/game/patched, the code
+        #   rewritten by this same patch_nso.py). Steps 1 and 2 take them from there; the shaders are scanned and translated as for a dump (the old app's pack is another chain)
+        import zipfile
+        step(1, ' (from the installed app)')
+        apks = sorted(os.path.join(a.installed, f) for f in os.listdir(a.installed) if f.endswith('.apk'))
+        if not apks: raise RuntimeError(f'no APKs in {a.installed}')
+        if os.path.isdir(ex): shutil.rmtree(ex)
+        romfs = os.path.join(ex, 'RomFS'); exefs = os.path.join(ex, 'ExeFS'); files = apks; games = [g for g in (a.games or '').split(',') if g]; aoc = None
+        zs = [zipfile.ZipFile(f) for f in apks]
+        # its RomFS is in two trees: assets/game/RomFS (files kept as they are) and assets/gamez/RomFS (files that compress, in the app's block format: "NXZ1", u32 block
+        #   size, u64 size, u32 block count, u32 block offsets [count + 1] from the end of the table, then the blocks: zlib, or raw when stored at their full size;
+        #   that app's compat/apkfs.c, dm/android/tools/nxz_pack.py there). Most of the game's shader files (.bnsh, .ptcl) are in the second
+        RP, ZP, PP = 'assets/game/RomFS/', 'assets/gamez/RomFS/', 'assets/game/patched/'
+        mem = [(z, i, False) for z in zs for i in z.infolist() if i.filename.startswith(RP) and not i.is_dir()] + \
+              [(z, i, True) for z in zs for i in z.infolist() if i.filename.startswith(ZP) and not i.is_dir()]
+        def nxz_size(z, i):
+            with z.open(i) as f: h = f.read(20)
+            return struct.unpack_from('<Q', h, 8)[0] if h[:4] == b'NXZ1' else i.file_size
+        need = sum(nxz_size(z, i) if c else i.file_size for z, i, c in mem) + (1 << 30); free = shutil.disk_usage(a.work).free
+        log.write(f'installed app: {len(apks)} APKs, {len(mem)} RomFS files ({need >> 20} MB with room for the shaders), {free >> 20} MB free\n')
+        if not mem: raise RuntimeError('the installed app holds no game files (assets/game/RomFS)')
+        if free < need: raise RuntimeError(f'not enough free storage: the setup needs about {need / (1 << 30):.1f} GB free and the phone has {free / (1 << 30):.1f} GB')
+        cuts = next((z.read(PP + 'main.cuts.tsv').decode() for z in zs if PP + 'main.cuts.tsv' in z.namelist()), '')
+        build_id = next((l.split('\t')[1].strip() for l in cuts.splitlines() if l.startswith('# BUILD_ID')), '')
+        builds = PROFILE.builds()
+        if build_id not in {b.get('main') for b in builds.values()}:
+            raise RuntimeError(f'the installed app holds {NAME} of another version (main {build_id or "unknown"}): this app needs update ' + ', '.join(sorted(b['display'] for b in builds.values())))
+        try: os.remove(os.path.join(a.out, 'ready'))
+        except FileNotFoundError: pass
+        done = 0
+        import zlib
+        for z, i, comp in mem:
+            dst = os.path.join(romfs, i.filename[len(ZP if comp else RP):]); os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with z.open(i) as src, open(dst, 'wb') as out:
+                if not comp: shutil.copyfileobj(src, out, 1 << 22)
+                else:
+                    h = src.read(20)
+                    if h[:4] != b'NXZ1': raise RuntimeError(f'{i.filename} is not in the block format')
+                    bs, size, n = struct.unpack_from('<IQI', h, 4); offs = struct.unpack(f'<{n + 1}I', src.read(4 * (n + 1)))
+                    for k in range(n):
+                        blk = src.read(offs[k + 1] - offs[k]); rawn = min(bs, size - k * bs)
+                        out.write(blk if len(blk) == rawn else zlib.decompress(blk))
+                    if out.tell() != size: raise RuntimeError(f'{i.filename}: {out.tell()} bytes unpacked, not {size}')
+            done += 1
+            if done % 200 == 0: print(f'PROGRESS {done}/{len(mem)}', flush=True)
+        step(2, ' (from the installed app)')
+        pat = os.path.join(a.out, 'patched'); shutil.rmtree(pat, ignore_errors=True); os.makedirs(pat)
+        for z in zs:
+            for i in z.infolist():
+                if i.filename.startswith(PP) and not i.is_dir():
+                    with z.open(i) as src, open(os.path.join(pat, i.filename[len(PP):]), 'wb') as out: shutil.copyfileobj(src, out, 1 << 22)
+        if not all(os.path.isfile(os.path.join(pat, m + '.patched.bin')) for m in PROFILE.words('modules')): raise RuntimeError('the installed app lacks some of the rewritten code (assets/game/patched)')
+        log.write(f'from the installed app: main {build_id}, rewritten code {sorted(os.listdir(pat))[:3]}...\n')
+        step(3)
+        pkg = os.path.join(S, 'shader_pkg'); shutil.rmtree(pkg, ignore_errors=True)
+        if PROFILE.get('shader_oodle', 'off') == 'on':
+            if not os.path.isfile(tool('dmoodle')): raise RuntimeError(f'{NAME} needs the dmoodle tool, which this app build does not have')
+            env.update(DM_OODLE_HOST=tool('dmoodle'), DM_OODLE_MODULES=pat, DM_OODLE_FILTER='BNSH')
+        run([py, os.path.join(DM, 'gfx/tools/shader_split.py'), romfs, '-', pkg,   # ('-': no main; this game has no shaders in it)
+             os.path.join(a.work, 'shader_map.found.tsv'), os.path.join(a.work, 'shader_facts.found.tsv'), os.path.join(a.work, 'shader_pairs.found.tsv')],
+            env=dict(env, DM_NVN_CAPTURE=os.path.join(a.out, 'nvn_capture')))
+        from_app = True   # (steps 1-3 done: on to the translation)
     elif not resumed:
         step(1)
         if os.path.isdir(ex): shutil.rmtree(ex)
@@ -295,7 +432,7 @@ def main():
         import json
         json.dump({'out': a.out, 'game': env.get('DM_GAME'), 'games': games, 'files': files}, open(state, 'w', encoding='utf-8'))
     step(4)
-    chain = subprocess.run([py, os.path.join(DM, 'gfx/tools/dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
+    chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     # The other game of the pair already set up with the same translation chain (Scarlet and Violet share every one of their 35,937 shaders; Sword and Shield most of
     # theirs): its pack is linked (or copied) in, and only the shaders it lacks are translated and merged into it, instead of the hours of translating them all
     found_keys = {bytes.fromhex(c[3][:16]) for c in (l.rstrip('\n').split('\t') for l in open(os.path.join(a.work, 'shader_map.found.tsv'), encoding='utf-8'))
@@ -325,7 +462,7 @@ def main():
             os.makedirs(vk, exist_ok=True)
             gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
             xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=S) if gate else dict(XLATE=tool('dmsh_xlate'))
-            run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *missing], retry_killed=3,
+            run([py, chain_tool('dmsh_build.py'), pkg, cache, *missing], retry_killed=3,
                 env=dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(S, 'cas'), WORK=S,
                          DMSH_SOURCE_MAP=os.path.join(a.work, 'shader_map.found.tsv'), DMSH_FACTS=os.path.join(a.work, 'shader_facts.found.tsv'),
                          DMSH_PAIRS=os.path.join(a.work, 'shader_pairs.found.tsv'), MAIN=os.path.join(exefs, 'main')))
@@ -346,24 +483,40 @@ def main():
         if not resumed:
             for d in glob.glob(os.path.join(S, 'dmsh_*')): shutil.rmtree(d, ignore_errors=True)   # an interrupted run's scratch dir would count toward the progress
         os.makedirs(vk, exist_ok=True)
-        stop = threading.Event(); found = os.path.join(a.work, 'shader_map.found.tsv')
+        stop = threading.Event(); found = os.path.join(a.work, 'shader_map.found.tsv'); same = {}
+        # each distinct program translated once (distinct_shaders), with DM_SETUP_DEDUP=1 only: OFF by default. It gives the same pack, but a full PC setup of Shield
+        #   (22 translators, 2026-11-22) took 75 min with it against 7 min without, twice in either order; why the shader build is that much slower on the shorter
+        #   map is not known yet. Every shader is translated for itself, as before, until that is found
+        if os.environ.get('DM_SETUP_DEDUP', '0') == '1':
+            uniq = os.path.join(a.work, 'shader_map.distinct.tsv')
+            try:
+                over = PROFILE.table('msl_override')
+                same = distinct_shaders(found, pkg, [str(PROFILE.table('shader_facts.tsv')), os.path.join(a.work, 'shader_facts.found.tsv')],
+                                        {f.name[:-len('_b.metal')] for f in over.glob('*_b.metal')} if over.is_dir() else set(), uniq)
+            except (OSError, ValueError) as e: log.write(f'shaders: the repeats could not be found ({e}): every shader is translated\n'); same = {}
+            if same: log.write(f'shaders: {len(same)} are repeats of another one, {len(found_keys) - len(same)} to translate\n'); log.flush(); found = uniq
         threading.Thread(target=watch_translation, args=(found, S, os.path.join(cache, 'b-' + chain), stop), daemon=True).start()
         # the translators go through dmsh_gate when the app has it: each beyond the first starts only while the phone has the memory for it (dmsh_gate.c)
         gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
         xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=S) if gate else dict(XLATE=tool('dmsh_xlate'))
         log.write(f'translators: {env.get("J", "8")} at most, ' + ('started as memory allows (dmsh_gate)\n' if gate else 'all at once (no dmsh_gate)\n'))
-        try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache], retry_killed=3,
+        try: run([py, chain_tool('dmsh_build.py'), pkg, cache], retry_killed=3,
             env=dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(S, 'cas'), WORK=S,
-                     DMSH_SOURCE_MAP=os.path.join(a.work, 'shader_map.found.tsv'),
+                     DMSH_SOURCE_MAP=found,
                      DMSH_FACTS=os.path.join(a.work, 'shader_facts.found.tsv'),
                      DMSH_PAIRS=os.path.join(a.work, 'shader_pairs.found.tsv'),
                      MAIN=os.path.join(exefs, 'main')))
         finally: stop.set()
         built = os.path.join(cache, 'b-' + chain)
+        # No shader came out (every one failed in the shader build, e.g. spirv-cross could not be started): the setup stops here. It used to go on, write a pack
+        #   of 0 shaders over the player's working one and mark the game ready (seen on the Android emulator, 2026-11-21)
+        if not any(f.endswith('.spv') and not f.endswith('.gl.spv') for f in os.listdir(vk)):
+            raise RuntimeError(f'the shader translation produced no shaders (its last lines are in {log.name}); the shader pack was left as it was')
         write_translated(a.work, chain)
 
         step(5)
         reflect(vk, built)
+        if same: log.write(f'shaders: {share_translated(vk, same)} repeats take their translated shader\'s files\n'); log.flush()
         # the pack compressed (zlib per shader, the engine inflates each as it loads it: nvn_vk.c pak_blob): about 3.4 times smaller on the phone (Violet 2.9 GB → 0.85 GB, Sword 2.3 → 0.7)
         raw = os.path.join(S, 'shaders.raw.pak')
         run([py, os.path.join(DM, 'android/tools/spv_pak.py'), vk, raw])
@@ -390,10 +543,32 @@ def main():
     # the new pack holds every capture there is, so the launcher's list of captures already added is stale: the next start checks them against the pack again
     try: os.remove(os.path.join(a.out, 'captures_done'))
     except FileNotFoundError: pass
+    if PROFILE.get('flat_normals', ''):   # (Legends: Arceus: No reflections, from the packs just set up; a failure leaves the game playable as the game draws it)
+        try: flat_normals(a, log)
+        except Exception as e: log.write(f'flat normals: {e}\n')
     open(os.path.join(a.out, 'ready'), 'w').write(chain + '\n')
     try: os.remove(state)
     except FileNotFoundError: pass
     print('DONE', flush=True)
+
+def flat_normals(a, log=None):
+    """The profile's flat normal maps (flat_normals: the RomFS folder of the packs, flat_normals_names: the textures) into <out>/flat_normals, from the game's own packs in
+    <out>/RomFS, decoded with the game's own Oodle decoder (dmoodle and the rewritten modules of this setup). The engine lays the folder over the RomFS while the
+    setting is on (android_main.c flat_normals). <out>/flat_normals/done holds the profile's names, so a changed list makes them again (SetupActivity)"""
+    folder, names = PROFILE.get('flat_normals', ''), PROFILE.get('flat_normals_names', '')
+    if not folder: return
+    own = log is None
+    if own: os.makedirs(a.work, exist_ok=True); log = open(os.path.join(a.work, 'setup.log'), 'a', buffering=1)
+    dst = os.path.join(a.out, 'flat_normals'); dmo = os.path.join(a.bin, 'dmoodle')
+    if not os.path.isfile(dmo): raise RuntimeError(f'{NAME} needs the dmoodle tool for its flat normal maps, which this app build does not have')
+    if own: print('STEP 1/1 flat normal maps', flush=True)
+    cmd = [sys.executable, os.path.join(DM, 'android/tools/flat_normals.py'), '--romfs', os.path.join(a.out, 'RomFS'), '--out', dst, '--folder', folder, '--names', names,
+           '--oodle', dmo, '--modules', os.path.join(a.out, 'patched')]
+    log.write('$ ' + ' '.join(cmd) + '\n')
+    r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONUNBUFFERED='1'))
+    if r.returncode: raise RuntimeError(f'flat_normals.py failed ({r.returncode}); see {log.name}')
+    open(os.path.join(dst, 'done'), 'w').write(names + '\n')
+    if own: print('DONE', flush=True)
 
 def pak_keys(path):   # the keys an NXSP shader pack holds, and its chain version
     with open(path, 'rb') as f:
@@ -488,13 +663,13 @@ def mod_shaders(a):
     tool = lambda n: os.path.join(a.bin, n)
     def run(cmd, **kw):
         log.write('$ ' + ' '.join(map(str, cmd)) + '\n')
-        r = subprocess.run(list(map(str, cmd)), stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
+        r = subprocess.run(list(map(str, cmd)), cwd=a.bin, stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
         if r.returncode: raise RuntimeError(f'{os.path.basename(str(cmd[1]))} failed ({r.returncode}): see {log.name}')
     roots = [r for r in a.mod_shaders.split(':') if r and os.path.isdir(r)]
     log.write(f'== {time.strftime("%H:%M:%S")} mod shaders: {", ".join(roots) or "no mod folders"}\n')
     trinity_index(a, roots, log)
     if not roots: print('DONE', flush=True); return
-    chain = subprocess.run([py, os.path.join(DM, 'gfx/tools/dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
+    chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     pak = os.path.join(a.out, 'shaders.pak'); have, pchain = pak_keys(pak)
     if pchain != chain: raise RuntimeError(f'the shader pack is version {pchain}, this app makes {chain}: set the game up again')
     mw = os.path.join(a.work, 'mods'); shutil.rmtree(mw, ignore_errors=True)
@@ -516,7 +691,7 @@ def mod_shaders(a):
     gate = os.path.isfile(tool('dmsh_gate')) and os.path.isfile('/proc/meminfo')
     xenv = dict(XLATE=tool('dmsh_gate'), DM_GATE_EXEC=tool('dmsh_xlate'), DM_GATE_SLOTS=env.get('J', '8'), DM_GATE_DIR=mw) if gate else dict(XLATE=tool('dmsh_xlate'))
     benv = dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, **xenv, DMSH_CAS=os.path.join(mw, 'cas'), WORK=mw, DMSH_SOURCE_MAP=smap, DMSH_FACTS=facts, DMSH_PAIRS=pairs)
-    try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *keys], env=benv)
+    try: run([py, chain_tool('dmsh_build.py'), pkg, cache, *keys], env=benv)
     except RuntimeError as e: log.write(f'mod shaders: {e}; the ones translated are kept\n')
     ok = [k for k in keys if os.path.exists(os.path.join(vk, k + '.spv')) and os.path.exists(os.path.join(built, k + '_b.json'))]
     for k in keys:
@@ -575,9 +750,9 @@ def captures(a):
     env = dict(os.environ, PYTHONUNBUFFERED='1', PATH=a.bin + os.pathsep + os.environ.get('PATH', ''))
     def run(cmd, **kw):
         log.write('$ ' + ' '.join(map(str, cmd)) + '\n')
-        r = subprocess.run(list(map(str, cmd)), stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
+        r = subprocess.run(list(map(str, cmd)), cwd=a.bin, stdout=log, stderr=subprocess.STDOUT, env=kw.pop('env', env), **kw)
         if r.returncode: raise RuntimeError(f'{os.path.basename(str(cmd[1]))} failed ({r.returncode}): see {log.name}')
-    chain = subprocess.run([py, os.path.join(DM, 'gfx/tools/dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
+    chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     pak = os.path.join(a.out, 'shaders.pak'); have, pchain = pak_keys(pak)
     if pchain != chain: raise RuntimeError(f'the shader pack is version {pchain}, this app makes {chain}: set the game up again')
     slots = {}
@@ -625,9 +800,9 @@ def captures(a):
     with open(smap, 'w', encoding='utf-8') as f: f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n'); f.writelines('\t'.join(map(str, r)) + '\n' for r in rows)
     print(f'STEP 2/3 translate {len(new) + len(extra)} shaders', flush=True)
     benv = dict(env, DMSH_SPV_ONLY='1', VK_SPV_OUT=vk, XLATE=os.path.join(a.bin, 'dmsh_xlate'), DMSH_CAS=os.path.join(cw, 'cas'), WORK=cw, DMSH_SOURCE_MAP=smap)
-    if got: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *got], env=benv)
+    if got: run([py, chain_tool('dmsh_build.py'), pkg, cache, *got], env=benv)
     if added:
-        try: run([py, os.path.join(DM, 'gfx/tools/dmsh_build.py'), pkg, cache, *(r[3] for r in added)], env=benv)
+        try: run([py, chain_tool('dmsh_build.py'), pkg, cache, *(r[3] for r in added)], env=benv)
         except RuntimeError as e: log.write(f'the captured shaders not in the shader map: {e}; the ones translated are kept\n')
         ok = [r for r in added if os.path.exists(os.path.join(vk, r[3] + '.spv')) and os.path.exists(os.path.join(built, r[3] + '_b.json'))]
         for r in added:

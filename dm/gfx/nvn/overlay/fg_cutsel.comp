@@ -1,0 +1,13 @@
+#version 450
+// After a camera cut (fg_cut.comp's flag): the in-between picture becomes the newer real frame, so no picture blends two unrelated shots. Nothing written otherwise.
+//   Raw values (UNORM views): no sRGB conversion either way
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) buffer R { uint flag, changed, cells, sum; } r;
+layout(set = 0, binding = 1) uniform sampler2D real;            // the newer real frame (the size of the picture)
+layout(set = 0, binding = 2) uniform writeonly image2D o;        // the in-between picture (no format: shaderStorageImageWriteWithoutFormat)
+void main() {
+    if (r.flag == 0u) return;
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy), s = imageSize(o);
+    if (p.x >= s.x || p.y >= s.y) return;
+    imageStore(o, p, texelFetch(real, p, 0));
+}

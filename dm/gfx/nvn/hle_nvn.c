@@ -17,6 +17,7 @@
 #include "nvn_fstep.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+#include "vk_quirks.h"   // (Q_NVN_ASYNC: rq_on asks nvn_vk.c's table)
 #include <mach/mach_time.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -107,6 +108,7 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
+#include "golden_rec.h"   // golden-frame recordings (DM_GOLDEN_REC): GOLDEN_SUB_BEGIN / _END around a submission, GOLDEN_PRESENT before a present
 
 // ---------- Device ----------
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
@@ -561,11 +563,12 @@ NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; stat
 NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 _Atomic uint64_t g_wait_sync_ns, g_wait_sync_n;   // DM_VK_PROF: the game thread's time in sync waits (GPU not done yet)
+static _Atomic uint64_t g_st_sync_ns;   // the same, never reset (the long-frame log's per-frame differences)
 static NVNsyncWaitResult sync_wait_(const sync_t *o, uint64_t timeout);
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s; uint64_t last = mtl_last_fence(), behind = o->fenced && o->fence <= last ? last - o->fence : 99;
     uint64_t t0 = now_ns(); NVNsyncWaitResult r = sync_wait_(o, timeout); uint64_t d = now_ns() - t0;
-    if (timeout) { atomic_fetch_add(&g_wait_sync_ns, d); atomic_fetch_add(&g_wait_sync_n, 1);
+    if (timeout) { atomic_fetch_add(&g_wait_sync_ns, d); atomic_fetch_add(&g_wait_sync_n, 1); atomic_fetch_add(&g_st_sync_ns, d);
         // DM_VK_PROF: which submission the game waits for, counted back from the newest (0: the one it just submitted), and how long that took
         static int prof = -1; if (prof < 0) prof = getenv("DM_VK_PROF") != NULL;
         if (prof) { static uint64_t n, cnt[4], ns[4]; int k = behind > 2 ? 3 : (int)behind; cnt[k]++; ns[k] += d; static uint64_t inl, inl_ns; if (o->fenced == 2) { inl++; inl_ns += d; }
@@ -838,6 +841,13 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
+    { static const char *tr = (const char *)1; if (tr == (const char *)1) tr = getenv("DM_VK_TRACE_FS");   // debugging: the programs DM_VK_TRACE_FS names, as the game records them
+      if (tr && p) for (unsigned st = 0; st < ((const prog_t *)p)->nstage; st++) { uint8_t k[8]; char hex[17]; if (!prog_key((const prog_t *)p, st, k)) continue;
+          for (int q = 0; q < 8; q++) sprintf(hex + 2 * q, "%02x", k[q]);
+          if (strstr(tr, hex)) { static int n_; if (n_++ < 40) { char all[160] = ""; size_t o = 0;
+                  for (unsigned s2 = 0; s2 < ((const prog_t *)p)->nstage && o + 20 < sizeof all; s2++) { uint8_t k2[8]; if (!prog_key((const prog_t *)p, s2, k2)) continue;
+                      for (int q = 0; q < 8; q++) o += (size_t)sprintf(all + o, "%02x", k2[q]); all[o++] = ' '; all[o] = 0; }
+                  LOG("[trace] recorded: BindProgram %s (stages %#x; all stages: %s) into command buffer %p, recording %d", hex, stages, all, (void *)c, CB(c)->recording); } break; } } }
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = REC(c, OP_BIND_STATE, p_bind_state); r->kind = kind; memcpy(r->bytes, st, n); }
@@ -1069,11 +1079,16 @@ enum { RQ_N = 512 };
 static rq_item g_rq[RQ_N]; static uint64_t g_rq_head, g_rq_tail; static int g_rq_presents;
 static pthread_mutex_t g_rq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_rq_cv = PTHREAD_COND_INITIALIZER;
 // DM_NVN_ASYNC=1 on, 0 / off off; unset (Auto): on for Adreno, where it is tested (a Galaxy S25+ went from 42 ms frames to a steady 33 at 30 fps, the replay's 28-33 ms
-//   moved off the game's thread), off for other GPUs until it has been run there
-const char *nvn_vk_gpu_name(void) __attribute__((weak));
-static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ASYNC"); const char *g = nvn_vk_gpu_name ? nvn_vk_gpu_name() : NULL;
-    int autoon = !(e && *e) && g && strstr(g, "Adreno");
+//   moved off the game's thread), off for other GPUs until it has been run there. Auto is the quirk table's Q_NVN_ASYNC (vk_quirks.h: by the GPU's name, Turnip too; off for
+//   a game whose profile says nvn_async_never), asked from nvn_vk.c once its device exists (weak: a build without the Vulkan replay has Auto off, as before)
+int nvn_vk_quirk_default(int q) __attribute__((weak)); int nvn_vk_quirk_note(int q, int value, int from_env) __attribute__((weak));
+static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ASYNC");
+    int autoon = !(e && *e) && nvn_vk_quirk_default && nvn_vk_quirk_default(Q_NVN_ASYNC) > 0;
     v = autoon || (e && *e && strcmp(e, "off") && strcmp(e, "0"));
+#if DM_GAME_ENG_NVN_ASYNC_NEVER   // (profile engine_quirks nvn_async_never, Legends: Arceus: the game crashed at loading screens with it, Arceus-Native-Android#3; android_main.c drops the setting too.
+    v = 0; autoon = 0;            //   Q_NVN_ASYNC's default is off for it already; this also refuses the player's own setting: a crash workaround, not a GPU rule)
+#endif
+    if (nvn_vk_quirk_note) nvn_vk_quirk_note(Q_NVN_ASYNC, v, e && *e);
     LOG("[nvn] the replay %s (DM_NVN_ASYNC %s)", v ? "runs on its own thread" : "runs on the game's thread", e && *e ? e : autoon ? "Auto: on for Adreno" : "Auto: off for this GPU"); } return v; }
 static const char *volatile g_rq_at = "idle";
 // A wait on the replay thread that takes this long has gone wrong: said in the log with who is waiting and what the replay thread is doing
@@ -1104,7 +1119,7 @@ static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
         pthread_mutex_unlock(&g_rq_mu);
         if (it.kind == RQ_SUBMIT) { g_rq_at = "submit"; sub_run(it.q, it.n, (const NVNcommandHandle *)it.h); free(it.h); }
         else if (it.kind == RQ_FENCE) { g_rq_at = "fence"; it.s->fence = mtl_last_fence(); }
-        else { g_rq_at = "present"; gfx_enter(); uint64_t t = mtl_present(CTX(it.o->tex[it.idx]), it.period, it.crop); it.o->ticket[it.idx] = t; gfx_leave(); }
+        else { g_rq_at = "present"; gfx_enter(); GOLDEN_PRESENT(CTX(it.o->tex[it.idx]), it.crop); uint64_t t = mtl_present(CTX(it.o->tex[it.idx]), it.period, it.crop); it.o->ticket[it.idx] = t; gfx_leave(); }
         g_rq_at = "idle";
         pthread_mutex_lock(&g_rq_mu);
         g_rq_tail++; if (it.kind == RQ_PRESENT) g_rq_presents--;
@@ -1142,12 +1157,14 @@ static void sub_run(NVNqueue *q, int n, const NVNcommandHandle *h) {
     pthread_mutex_lock(&g_sub_mu);
     uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
     ((queue_t *)q)->submits++;
+    GOLDEN_SUB_BEGIN(n, h);
     mtl_sub_begin();
     nvn_ft_poll();
     mtl_sub_index((const uint64_t *)h, n);
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
     mtl_sub_commit();
+    GOLDEN_SUB_END();
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
@@ -1231,7 +1248,11 @@ static int report_interval(int real) {
     int k = r == 1000 ? reported_hold() : 0; return k > 0 ? k : real;
 }
 NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { return report_interval(((const win_t *)w)->interval); }   // Link's Awakening reads it back every frame
-NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) LOG("[nvn] the game sets present interval %d → %d", ((win_t *)w)->interval, v); ((win_t *)w)->interval = v; }
+NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {   // (with the game's call site: the function that picks its frame rate, for a high-frame-rate patch)
+    if (((win_t *)w)->interval != v) { void *lr = __builtin_return_address(0); module_t *m = module_of(lr);
+        if (m) LOG("[nvn] the game sets present interval %d → %d (called from %s+%#llx)", ((win_t *)w)->interval, v, m->name, (unsigned long long)((uint8_t *)lr - m->base));
+        else LOG("[nvn] the game sets present interval %d → %d", ((win_t *)w)->interval, v); }
+    ((win_t *)w)->interval = v; }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
     if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
@@ -1349,7 +1370,8 @@ uint64_t dm_nvn_sub_cpu_ns(void) { return atomic_load(&g_cum_sub_cpu_ns); }   //
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac); overridden by iOS front_ios.m   // default (Mac); the strong definition in the iOS front end front_ios.m overrides it
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup; } lf_rec;
+// (the waits inside the frame: the game's GPU sync waits, a free submission slot, the queue submissions, the swapchain image, the present queue; ms)
+typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms, w_sync, w_slot, w_sub, w_acq, w_pq; unsigned pso, lib, up, rup; } lf_rec;
 static lf_rec g_lf[LFN];
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
@@ -1541,8 +1563,8 @@ static int vstep_on(void) { return &dm_step_hz && dm_step_hz > 0 && &dm_step_wor
 static int live_fps(void) { return &dm_fps_live ? __atomic_load_n(&dm_fps_live, __ATOMIC_RELAXED) : 0; }
 // the hold in use (report_interval): at 60 Hz slots only, where a slot is the Switch's own vsync and the hold is the interval the game would set itself
 static int reported_hold(void) { return vstep_on() && dm_step_hz == 60 ? atomic_load(&g_fs_k) : 0; }
-// Scarlet / Violet's built-in Dynamic FPS (loader.c dm_dynfps): the game steps by the time each frame took, so only presentation is paced, in whole vsyncs of 60 Hz
-__attribute__((weak)) int dm_dynfps;
+// Scarlet / Violet up to 60 (loader.c paldea_fps_patch, dm_dynfps): presentation paced in whole vsyncs of 60 Hz, and the game's step the time each frame took (dm_dyn_step)
+__attribute__((weak)) int dm_dynfps; __attribute__((weak)) uint8_t *dm_dyn_step;   // graphics unit tests have no loader
 static int dyn_on(void) { return &dm_dynfps && dm_dynfps; }
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
 int nvn_game_fps(void) { int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
@@ -1644,8 +1666,10 @@ static void vstep_tick(const win_t *o) {
     if (o->presents % 1800 == 0) { LOG("[nvn] frame step: held 1 / 2 / 3 slots %llu / %llu / %llu frames, %llu late", (unsigned long long)held[1], (unsigned long long)held[2],
                                        (unsigned long long)held[3], (unsigned long long)g_vs.late); memset(held, 0, sizeof held); }
 }
-// Scarlet / Violet at 60 (Dynamic FPS): the same controller as vstep_tick, for presentation only: 2 vsyncs (30 fps) while frames do not fit in one, 1 (60 fps) after a run
-//   that fits, never 3. Frames steady at 30 rather than swinging between 24 and 50 as each one finished
+// Scarlet / Violet at up to 60: the same controller as vstep_tick: 2 vsyncs (30 fps) while frames do not fit in one, 1 (60 fps) after a run that fits, never 3.
+//   Frames steady at 30 rather than swinging between 24 and 50 as each one finished. The game's next step is the hold it is shown for (paldea_fps.h): 16.67 ms at 1,
+//   the game's own 33.33 ms at 2 (and before the first hold), so the world moves at real speed at 60 and at 30; the hold changes only after late frames or a trial
+//   run, never frame by frame, so the step does not swing between frames
 static void dyn_tick(const win_t *o) {
     static uint64_t prev; static nvn_fstep vs; static int nlog;
     const double v = 1e9 / 60;
@@ -1657,7 +1681,35 @@ static void dyn_tick(const win_t *o) {
     double cost = cpu > gpu ? cpu : gpu;
     int k0 = vs.k; nvn_fstep_next(&vs, shown, cost, 1, 2, 0);
     atomic_store(&g_fs_k, vs.k);
+    if (&dm_dyn_step && dm_dyn_step) { static uint64_t last; uint64_t ns = vs.k == 1 ? 16666667ull : 33333334ull;   // (the game's frame-time table entry, u64 ns)
+        if (ns != last) { dm_guest_write_prepare(dm_dyn_step, 8); __atomic_store_n((uint64_t *)dm_dyn_step, ns, __ATOMIC_RELAXED); last = ns;
+            LOG("[nvn] game step: %.2f ms a frame (the hold it is shown for)", ns / 1e6); } }
     if (k0 && vs.k != k0 && nlog < 40) LOG("[nvn] dynamic fps: %d fps at present %llu (cost %.2f slots of 16.67 ms, GPU %.2f)%s", 60 / vs.k, (unsigned long long)o->presents, cost, gpu, ++nlog == 40 ? "; further changes not logged" : "");
+}
+// Legends: Arceus at 60 fps (DM_FPS_TARGET=60; the in-game menu): the game advances its logic by a frame time it keeps in its data at main+0x397e8d8, in nanoseconds
+//   (33,333,334: 1/30 s), and asks NVN for present interval 2. The community's "60 FPS Regular Game Speed" cheat for 1.1.1 does the same two things as here: it skips
+//   the interval-2 call (main+0x2aa2780; here the present interval is not followed instead, android_main.c DM_PRESENT_INTERVAL=display) and writes 16,666,667 there.
+//   Here the frame time written is the time each frame really took, in whole refreshes of 60 Hz: 16,666,667 ns for one, the game's own 33,333,334 (never more) for two
+//   or more, so the game keeps to real time when a frame comes late. Only for the 1.1.1 main build holding 33,333,334 there, in memory it may write; otherwise nothing
+static uint32_t *g_arc_step;
+static void arc_step(uint64_t frame_ns) {
+    static int init; if (!init) { init = 1;
+        const char *e = getenv("DM_FPS_TARGET"); if (!e || atoi(e) < 60) return;
+        module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+        if (!m || strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32) || m->size < 0x397e8dc) {   // (the build id may come in capitals)
+            LOG("[RED] 60 fps: not Legends: Arceus 1.1.1's main (build %s): the game's frame time left alone", m ? m->build_id : "-"); return; }
+        // Fl4sh's Dynamic FPS mod (a .pchtxt in the mods folder) sets the same frame time from its own timer, and presents every refresh (MOV W1, #1 at +0x2aa278c):
+        //   with it in, the frame time is left to the mod
+        if (*(uint32_t *)(m->base + 0x2aa278c) == 0x52800021u) { LOG("60 fps: the Dynamic FPS mod is in: the game's frame time is left to it"); return; }
+        uint32_t *t = (uint32_t *)(m->base + 0x397e8d8);
+        if (*t != 33333334u) { LOG("[RED] 60 fps: the game's frame time is %u ns here, not 33333334: left alone, the game stays at 30", *t); return; }
+        int w = 0; FILE *f = fopen("/proc/self/maps", "r"); char ln[512];   // (writable where it is: a write to a read-only page would close the game)
+        if (f) { while (fgets(ln, sizeof ln, f)) { unsigned long lo, hi; char pm[8];
+            if (sscanf(ln, "%lx-%lx %7s", &lo, &hi, pm) == 3 && (uintptr_t)t >= lo && (uintptr_t)t + 4 <= hi) { w = pm[1] == 'w'; break; } } fclose(f); }
+        if (!w) { LOG("[RED] 60 fps: the game's frame time is in memory that is not writable: left alone"); return; }
+        g_arc_step = t; LOG("60 fps: the game's frame time follows the time each frame takes (16.7 ms, or 33.3 ms for a late frame)"); }
+    if (!g_arc_step || !frame_ns) return;
+    *g_arc_step = frame_ns >= 25000000ull ? 33333334u : 16666667u;   // (25 ms: halfway between one refresh and two)
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
@@ -1680,7 +1732,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           atomic_store(&g_nvn_game_work_avg_ns, a ? a + (uint64_t)(((int64_t)w - (int64_t)a) / 16) : w); } }   // (the average over about 16 frames: the fps guard's CPU test)
     if (idx >= 0 && idx < o->ntex && idx < 4) {
         if (rq_on()) { rq_item it = { .kind = RQ_PRESENT, .o = o, .idx = idx, .period = present_period(o) / 1e9 }; memcpy(it.crop, o->crop, sizeof it.crop); gfx_leave(); rq_push(it); gfx_enter(); }
-        else { o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
+        else { GOLDEN_PRESENT(CTX(o->tex[idx]), o->crop); o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
@@ -1701,6 +1753,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         tpush(4, rec * tb.numer / tb.denom / 1e6); tpush(5, sub * tb.numer / tb.denom / 1e6);
     }
     if (prev_in) {
+        arc_step(t0 - prev_in);
         double fr = (t0 - prev_in) / 1e6, wk = (t0 - prev_out) / 1e6, nv = atomic_exchange(&g_nvn_ns, 0) / 1e6;
         tpush(0, fr); tpush(1, wk); tpush(2, nv);
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@itv", (double)present_itv(o));
@@ -1739,6 +1792,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
             plns = lns; ppns = pns; pup = up; prup = rup; pub = ub;
+            { extern _Atomic uint64_t g_st_slot_ns, g_st_submit_ns; static uint64_t psy, psl, psu; uint64_t sy = atomic_load(&g_st_sync_ns), sl = atomic_load(&g_st_slot_ns), su = atomic_load(&g_st_submit_ns);
+              r->w_sync = (sy - psy) / 1e6; r->w_slot = (sl - psl) / 1e6; r->w_sub = (su - psu) / 1e6; r->w_acq = g_acq_wait_ns / 1e6; r->w_pq = g_pq_wait_ns / 1e6; psy = sy; psl = sl; psu = su; }
         }
         plib = lib_; ppso = pso_;
         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
@@ -1752,9 +1807,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           // "Long" is relative to recent conditions: when running steadily at 30 fps (menus / windowless host) or under sustained overload, every frame is > 20 ms; those are not long frames and must not flood the log - a frame has to be 40% above the sliding mean of the last 16 frames to count
           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;
           if (r->f == f - 8) { ef += ((r->fr < 3 * ef ? r->fr : 3 * ef) - ef) / 16; eg += ((g < 3 * eg ? g : 3 * eg) - eg) / 16; }
-          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[512];
-              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms",
-                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms);
+          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[640];
+              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; "
+                       "waits: GPU sync %.1f, submission slot %.1f, queue submit %.1f, image acquire %.1f, present queue %.1f ms",
+                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->w_sync, r->w_slot, r->w_sub, r->w_acq, r->w_pq);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
@@ -2082,7 +2138,11 @@ NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, in
 // Handle for texel fetches only (Monster Hunter Rise): a fetch reads the texture descriptor and no sampler, so the handle is the texture ID with sampler ID 0
 NVN(nvnDeviceGetTexelFetchHandle, NVNtextureHandle, const NVNdevice *d, int tex) { (void)d; return (NVNtextureHandle)(uint64_t)(uint32_t)tex; }
 // Counter timestamps are 19.2 MHz GPU ticks (nvn_mtl.m gpu_ticks: ns × 12 / 625); convert back to ns. They used to be returned as is, about 52 times smaller than GetCurrentTimestampInNanoseconds, so subtracting one from the other gave garbage
-NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return c->timestamp * 625 / 12; }
+// DM_GPU_TS=614 (a test switch for the stadium-crowd flicker at 60; off by default): counter timestamps in the Switch GPU's own 614.4 MHz ticks (ns x 384 / 625), as
+//   the hardware writes them. Sword / Shield read the two timestamps of a frame straight from memory and convert them as 614.4 MHz ticks, so on the 19.2 MHz clock
+//   the GPU time they measure is 32 times too small (their step index, main+0x5df360). This conversion follows the same switch
+int dm_gpu_ts614(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_GPU_TS"); v = e && !strcmp(e, "614"); } return v; }
+NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return dm_gpu_ts614() ? c->timestamp * 625 / 384 : c->timestamp * 625 / 12; }
 // Current GPU time (ns): the same clock as the counter timestamps -- the guest clock (guest_ns, nvn_mtl.m gpu_ticks)
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) { (void)d; return guest_ns(); }
 NVN(nvnDeviceRegisterFastClearColor, NVNboolean, NVNdevice *d, const float *c, NVNformat f) { (void)d; (void)c; (void)f; return 1; }

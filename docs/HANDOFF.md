@@ -35,7 +35,7 @@ Nothing was published tonight. Built, signed with the release key (`a5f49b44…`
 |---|---|
 | Galar Native (Sword, Shield) | `simipoB/Galar-Native-Android`, `main`. Package `com.nxnative.pokemonshield` |
 | Paldea Native (Scarlet, Violet) | `simipoB/Paldea-Native-Android` (private), `main` = branch `violet` here. Package `com.nxnative.pokemonviolet` |
-| Arceus port | `simipoB/androidswithy`, branch `arceus-windows`, checkout `C:\Users\daniel\androidswithy`. **Holds the owner's own uncommitted work**: see problem 4 |
+| Arceus Native (Legends: Arceus) | Branch `arceus` of this repo (worktree `C:\Users\daniel\arceus-native`): Galar's engine, setup, menu and launcher with the Arceus profile and the Arceus work from `androidswithy` `84fb5df`. Package `com.nxnative.pokemonlegendsarceus`. See "Arceus on the Galar engine" |
 | Game profiles | Violet `dm/games/01008F6008C5E000`, Scarlet `0100A3D008C5C000`, Shield `01008DB008C2C000`, Sword `0100ABF008968000`, Arceus `01001F5010DFA000` (androidswithy) |
 | Handoff files | [docs/handoff/](handoff/): the uncommitted Arceus changes as patches, and the test scripts used tonight |
 
@@ -70,7 +70,7 @@ Galar and Paldea (both apps, `violet` and `main`):
 - **Setup screen**: a first install opens a three-step setup (game files, keys, set up) in the launcher's style instead of the launcher. Picked files are checked (NSP/XCI only, NSZ refused, NSPs cut short refused, keys told apart by content, files of two different games refused), Clear button, unfinished copies reused, Back returns to the launcher.
 - **Setup script** (`setup_game.py`): no longer deletes the other game's DLC; the `ready` file is removed before the game folder changes; free space checked first; plain explanations of unpacker failures; "Set up anyway" (`--allow-damaged`) offered for damaged dumps.
 - **NSP extractor** (`dm/tools/nx_extract/Program.cs`): finds NSPs cut short from their PFS0 header; names the damaged file (base or update) when the RomFS header fails its hash; `LinkedListEmpty` counted as damage.
-- **Scarlet / Violet built-in mods** (Fl4sh): Frame rate 60 applies Dynamic FPS (ASM), Shadows Sharp applies 2K Shadows; Auto picks 2K shadows on top phones only. Sources in `dm/games/0100A3D008C5C000/builtin_mods/`. Violet's main is the same code at every patched site.
+- **Scarlet / Violet frame rate and shadows**: Frame rate 60 / Dynamic applies our own patch (`dm/host/paldea_fps.h`, `loader.c paldea_fps_patch`: present interval 1, the step the frame took written into the game's frame-time table by `hle_nvn.c dyn_tick`); the shadow map size patches (`DM_SHADOWS=low` / `2k`, test only) are .pchtxt files in `dm/games/0100A3D008C5C000/builtin_mods/`. Violet's main is the same code at every patched site.
 - **60 fps**: a frame-rate guard (`android_main.c graphics_auto`) drops to 720p when the target is missed, back to 1080p after a calm minute. The frame step's cost now uses the game's measured work (it held 30 fps forever before: `hle_nvn.c vstep_tick`). Sword then held 60 fps (16.7 ms) on the S25+.
 - **Galar Auto frame rate is 30** again (`GameSettings.AUTO_60 = false`): see problem 2. Sword and Shield no longer use split submissions by default (`GameActivity`: `DM_VK_SPLIT=0` unless `env.txt` sets it), because with them Sword flashed white.
 - Diagnostics added: `DM_VK_LOG_ALIAS`, `DM_VK_LOG_COPY` (nvn_vk.c), `DM_NVN_REPORT_INTERVAL=<n>` (hle_nvn.c).
@@ -116,7 +116,7 @@ Next steps:
 
 That checkout already had the owner's uncommitted work (touch menu, gestures, `game.tsv` entries and more). Tonight's changes there are **not committed**, so as not to sweep that work in:
 - `nvn_vk.c`: the layered 3D render targets and the shared image for a render target read through a second texture object, both from Galar / Paldea ([handoff/arceus-layered-3d-only.patch](handoff/arceus-layered-3d-only.patch) is exactly these).
-- **Lower specs** (the POTATO mod, for low-end phones; off by default): a choice in `Settings.java` (Off / On / Lowest, `DM_LOWSPEC=1|2`) and `lowspec()` in `android_main.c`, which writes the three files from `lowspec_files.h` to `<files>/lowspec/romfs` and puts that first in `DM_ROMFS_OVERLAY`. Files: [handoff/arceus-lowspec-android_main.c](handoff/arceus-lowspec-android_main.c), [handoff/arceus-lowspec_files.h](handoff/arceus-lowspec_files.h), the source `.bin` files in [handoff/arceus-lowspec-bins](handoff/arceus-lowspec-bins). Not checked against the game's own files (no Arceus RomFS on the PC); the overlay itself was confirmed working on the phone.
+- **Lower specs** (the POTATO mod, for low-end phones; off by default): a choice in `Settings.java` (Off / On / Lowest, `DM_LOWSPEC=1|2`) and `lowspec()` in `android_main.c`. Since 2026-11-20 no mod files ship: `lowspec()` reads the player's own `field_common_config.bin` / `field_shadow_config.bin`, changes the same values the POTATO mod changed (checked equal to the mod on the phone's files), writes them to `<files>/lowspec/romfs` and puts that first in `DM_ROMFS_OVERLAY`. Style move effects (`style_fx()`) are cut from the player's own `cmn_battle_waza_{pow,teq}_start.wbin` the same way.
 - Ask the owner before committing in that repo.
 
 ### 5. Requested, not started
@@ -133,6 +133,53 @@ That checkout already had the owner's uncommitted work (touch menu, gestures, `g
 - Unimplemented stubs `nvnDeviceGetWindowOriginMode` / `nvnDeviceGetDepthMode`; `no render target could be attached` once per run.
 - Not tested: Mali / Xclipse / PanVK phones in this round (PanVK cannot run on the owner's Adreno phone), multiplayer, Bink video, long background play.
 - Sword / Shield share no game files (about 13 GB twice).
+
+## Arceus on the Galar engine (2026-11-08)
+
+Legends: Arceus is now one more profile on this tree (`dm/games/01001F5010DFA000`), built like Paldea Native: `GAME=01001F5010DFA000 bash scripts/build_apk_pc.sh`,
+or `win_build_lib.py 01001F5010DFA000` + `build_apk.py --game 01001F5010DFA000`. The app sets the game up on the phone from the player's dump (update 1.1.1), as Galar
+does; no game data ships in it. It does not touch the owner's Mac-built `com.nxnative.arceus` (another package).
+
+Taken from `androidswithy` `84fb5df` (the rest of that commit was older copies of Galar features, or is replaced by Galar's own):
+- the profile, with `app_name` / `app_repo` / `app_icon`, `android_heavy on`, `shader_nvn_capture on`; `dmsh_chain.h` regenerated (`3f2830fcd2cf` → `ba40200b20b8`: the old one would
+  have refused every pack the phone makes)
+- touch controls: the game's Back prompt, the item selector's gestures, lock-on, the throw ring, menu swipes and drag scrolling (`touch_ui.c`, `touch_menu.c`), mapped through
+  `dm_picture_box`; Galar's ☰ menu and layout editor replace the Arceus settings button
+- `DM_VK_TEXOVR` and the profile key `tex_unwritten_one` (`nvn_vk.c`): the purple-shadow test of problem 3 runs on this engine
+- Lower specs (`DM_LOWSPEC`, generated from the player's own config files), in the in-game menu for Arceus only, built into the Arceus engine only
+- presses held for a number of game frames (`dm_input_press_frames`), a mouse as touch, WASD as the left stick, the emulator's fault kind without ESR (`crash.c`),
+  LSE-free NVN thunks (`elf_asm.py`)
+- split submissions stay on for Arceus (as Scarlet / Violet); no 60 fps choice (the game counts frames); no Lowest graphics (that is Sword / Shield's render scale)
+
+Left out on purpose: the Arceus render thread (off by default there; a crash entering the Fieldlands followed it; Galar's `DM_NVN_ASYNC` is the replay thread), its present path
+(FXAA / CAS through the overlay shader: Galar's scaler and SGSR present), scene FXAA, its copy of the crypto emulator (`dm/host/crypto_emu.c` is Galar's), its core pinning / hint
+threads / PC sampler (Galar's `pin_update` and hint session), its driver copy (Galar's DriverPackages), and **four performance passes, on by default there and not yet measured on
+this engine**: uniform updates deferred inside a pass (`DM_VK_UB_DEFER`), transform feedback captures batched (`DM_VK_TF_BATCH`), learnt attachment stores / `STORE_OP_NONE`
+(`DM_VK_SKIP_STORES`) and relaxed barriers between passes (`DM_VK_BARRIER`). Port them one at a time behind profile keys after measuring Arceus here with `DM_VK_PROF=1`
+(they were written for Arceus: about 59 passes and 180 captures a frame). The code is in `androidswithy` `84fb5df`, `dm/gfx/nvn/nvn_vk.c`.
+
+`dm/android/tools/lang_src.py` is behind the committed `assets/lang/*.tsv` (about 70 texts): running it would drop them. Add texts to the `.tsv` files (or bring lang_src.py up to date first).
+
+Not yet run on a phone. First test: the setup from the owner's 1.1.1 dump, then the title screen, the save, the field at 30 fps (frame-time p95 under 33.3 ms).
+
+### Added 2026-11-09
+
+- **No reflections** (Arceus, on by default, a menu choice; `DM_FLAT_NORMALS=0` off): `dm/android/tools/flat_normals.py` makes the ground and tree-bark normal maps flat in the
+  player's own terrain packs (profile keys `flat_normals`, `flat_normals_names`), at the end of setup or at the next Play (`setup_game.py --flat-normals`), into
+  `<game>/flat_normals`; `android_main.c flat_normals` lays it under the RomFS after every mod. This is what the community's `no_reflections_v2_bc5de` mod does (its 10 packs
+  decoded in the Android Emulator with the game's own Oodle decoder: flat BC5 normal maps, R 133 G 124, plus higher-resolution albedo, nothing else). Checked against the
+  owner's packs: the mod's flat set plus `plants_tree01_02_nrm`, `plants_tree02_nrm`, `area00_glass01_nrm` (flat in some of the mod's packs only); every rewritten entry decodes
+  back to the original texture with only its texels changed. The engine-side cause of the purple (how detailed normals are lit here) is still open.
+- **GPU timestamps for counter reports** (`nvn_vk.c report_ts`, every game; `DM_VK_REPORT_TS=0` off): each report gets a Vulkan timestamp query where it is recorded (between passes,
+  never inside one), anchored at the submission's end. Before, all reports of a submission got the CPU's time at completion, so Game Freak's engines saw no GPU time and never
+  lowered their own 3D render scale. Arceus has one: `main+0xcc35a4` (state: level `+0x34`, mode `+0x28`/`+0x0`, cooldown `+0x40`) reads the GPU time at `[[main+0x42ef568]+0x158]` (ns),
+  averages 2 frames, steps one level lighter at 95 % of 33.3 ms and one sharper after 15 checks under 80 %; levels 0-3 = 3D buffer scale 1.0x1.0, 0.9x0.85, 0.85x0.8, 0.8x0.7, set
+  through the renderer's named parameters `3DBufferWidthScale` / `3DBufferHeightScale` (`main+0xcc386c` sets fixed ones per mode). Verify on the phone: the scale should drop in
+  heavy scenes (frame capture: the 3D targets' viewport).
+- **Transform feedback captures batched** (from the Arceus engine; `DM_VK_TF_BATCH=0` off): captures in a row share one 1x1 pass and one barrier unless one reads or rewrites what
+  an earlier one wrote; any game work ends the capture pass (`tf_end`). Arceus skins about 180 times a frame; each used to end the game's pass, open its own and wait on a full barrier.
+- **Lower specs on Auto**: Arceus on a low CPU or GPU gets Lower specs 1; Lower specs is now applied after the mods (before, `mods_romfs` saw the overlay set and skipped every mod).
+- Still to port from the Arceus engine, after measuring: deferred uniform updates (`DM_VK_UB_DEFER`), learnt attachment stores (`DM_VK_SKIP_STORES`), relaxed barriers (`DM_VK_BARRIER`).
 
 ## Phone state left behind
 

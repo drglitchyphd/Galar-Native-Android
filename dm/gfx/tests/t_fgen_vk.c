@@ -33,6 +33,7 @@ static void zbar(VkCommandBuffer cb) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
+static const float *CAM;   // camera guidance (nvn_fgen.h fg_camera): the matrix from the current frame's clip space to the frame before's, or NULL
 static int HF;   // HUD-free (nvn_fgen.h hud): c[] get the frames without the HUD, hud the frame as shown (from buf[2], before the result goes there)
 static void run(void) {
     VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
@@ -49,6 +50,7 @@ static void run(void) {
         if (ZD) { VkBufferImageCopy zc = { 0, 0, 0, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, { 0, 0, 0 }, { W, H, 1 } };
                   zbar(cb); vkCmdCopyBufferToImage(cb, zbuf[k], zimg, VK_IMAGE_LAYOUT_GENERAL, 1, &zc); zbar(cb); }
         fg_ingest(&G, cb, k); fg_depth_ingest(&G, cb, k, ZD != NULL); }
+    fg_camera(&G, 1, CAM, 1);
     fg_generate(&G, cb, 1);
     vkCmdCopyImageToBuffer(cb, G.m.img, VK_IMAGE_LAYOUT_GENERAL, buf[2], 1, &bc);
     bc.imageExtent = (VkExtent3D){ 1, 1, 1 }; vkCmdCopyImageToBuffer(cb, G.st.img, VK_IMAGE_LAYOUT_GENERAL, buf[3], 1, &bc);
@@ -89,6 +91,7 @@ static void p_obj(int x, int y, int w, float *c) {   // a still scene, a texture
     scene(x, y, 4, c);
 }
 static float z_obj(int x, int y, int w) { float t = w == 0 ? 0 : w == 1 ? 1 : 0.5f, ox = 200 + 16 * t, oy = 120; return x >= ox && x < ox + 120 && y >= oy && y < oy + 90 ? 0.5f : 0.05f; }
+static float z_flat(int x, int y, int w) { (void)x; (void)y; (void)w; return 0.05f; }
 static int in_char(int x, int y) { return x >= 560 && x < 720 && y >= 280 && y < 440; }
 static void p_turn(int x, int y, int w, float *c) {   // the camera turns past a character that stays put on the screen (third person): the background pans, the character does not
     if (in_char(x, y)) { scene(x * 1.3f, y * 1.3f, 77, c); c[1] = 0.2f + 0.8f * c[1]; return; }
@@ -115,7 +118,10 @@ int main(int argc, char **argv) {
         while (t < mp.memoryTypeCount && !((rq.memoryTypeBits >> t & 1) && (mp.memoryTypes[t].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) t++;
         VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = t }; vkAllocateMemory(dev, &mai, NULL, &bmem[i]);
         vkBindBufferMemory(dev, buf[i], bmem[i], 0); void *m; vkMapMemory(dev, bmem[i], 0, VK_WHOLE_SIZE, 0, &m); map[i] = m; }
-    if (!fg_setup(&G, dev, pd, VK_FORMAT_R8G8B8A8_UNORM, W, H)) { printf("FAIL: frame generation cannot be set up on %s: %s\n", pp.deviceName, G.why ? G.why : "?"); return 1; }
+    // a GPU whose formats cannot carry frame generation: it is refused (the game runs without it), which is right, not a failure
+    int set_up = fg_setup(&G, dev, pd, VK_FORMAT_R8G8B8A8_UNORM, W, H);
+    if (!set_up && G.why && strstr(G.why, "the driver cannot")) { printf("SKIP: no frame generation on %s: %s\n", pp.deviceName, G.why); return 0; }
+    if (!set_up) { printf("FAIL: frame generation cannot be set up on %s: %s\n", pp.deviceName, G.why ? G.why : "?"); return 1; }
     {   // the depth copy (as nvn_vk.c's: the game's depth format, here D16, which every driver samples) and its two frames' data
         VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_D16_UNORM, .extent = { W, H, 1 }, .mipLevels = 1, .arrayLayers = 1,
             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
@@ -178,6 +184,21 @@ int main(int argc, char **argv) {
             printf("depth: a turn of %3.0f,%3.0f px a frame past a character: around it %.2f without depth, %.2f with (plain mix %.2f); the character %.2f (worst %d), the scene away from it %.2f\n",
                    PX, PY, t0, t1, tb, tc, worst, sc);
             CHECK(t1 < 0.8 * t0, "depth: the turn %g,%g: %.2f with depth, %.2f without", PX, PY, t1, t0); CHECK(sc < 4.0, "depth: the scene away from the character %.2f", sc); } }
+    {   // camera guidance: pans past the search's reach (the coarsest level's 4 texels = 128 pixels), the game's camera telling how the whole picture moved; flat depth
+        static const float fast[][2] = { { 200, 60 }, { -260, -30 } };
+        for (unsigned i = 0; i < sizeof fast / sizeof *fast; i++) {
+            PX = fast[i][0]; PY = fast[i][1]; char nm[32];
+            snprintf(nm, sizeof nm, "fast%u", i); ZD = z_flat; do_case(dir, nm, p_pan);
+            double e0 = err(map[2], truth, M, M, W - M, H - M, NULL), eb = err(blend, truth, M, M, W - M, H - M, NULL);
+            float m[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  2 * PX / W, 2 * PY / H, 0, 1 };   // (the frame before's clip space: the picture shifted back by the pan)
+            CAM = m; snprintf(nm, sizeof nm, "fast%u_cam", i); do_case(dir, nm, p_pan); CAM = NULL; ZD = NULL;
+            double e1 = err(map[2], truth, M, M, W - M, H - M, NULL);
+            printf("camera: a pan of %4.0f,%4.0f px a frame: off by %.2f without the camera, %.2f with (plain mix %.2f)\n", PX, PY, e0, e1, eb);
+            CHECK(e1 < 4.0 && e1 < 0.35 * eb, "camera: the pan %g,%g: %.2f with the camera, plain mix %.2f", PX, PY, e1, eb); }
+        float bad[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -0.7f, 0.4f, 0, 1 };   // a camera that disagrees with the pictures loses to the search
+        PX = 12; PY = -8; ZD = z_flat; CAM = bad; do_case(dir, "cam_wrong", p_pan); CAM = NULL; ZD = NULL;
+        { double e = err(map[2], truth, M, M, W - M, H - M, NULL), eb = err(blend, truth, M, M, W - M, H - M, NULL);
+          printf("camera: a wrong camera over a 12,-8 pan: off by %.2f (plain mix %.2f)\n", e, eb); CHECK(e < 1.0, "a wrong camera spoiled a slow pan: %.2f (0.6 without one)", e); } }
     printf(fails ? "t_fgen_vk: %d FAILED\n" : "t_fgen_vk: all passed\n", fails);
     return fails != 0;
 }
