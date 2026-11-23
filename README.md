@@ -56,7 +56,7 @@
 - **Touch:** on-screen controls, with **☰** (settings) next to −. Two-finger tap = B.
 - **Controllers:** hide the touch controls automatically. Hold **−** and **+** together for 1 s for ☰, or **−** for 3 s to remap buttons. Rumble works on controllers and phones.
 - **Handhelds** (AYN Odin / Thor, Retroid Pocket, AYANEO, Anbernic, Logitech G Cloud...): detected; the built-in controls are used from the start.
-- **Logs:** `Download/PokemonSword-log.txt` or `Download/PokemonShield-log.txt` (the run before: `…-log-previous.txt`).
+- **Logs:** `Documents/Galar Native/Logs/PokemonSword-log.txt` or `…/PokemonShield-log.txt` (the run before: `…-log-previous.txt`). If that folder cannot be written, they go to `Download/` as before.
 
 ## Settings (☰)
 

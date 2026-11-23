@@ -496,7 +496,13 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
 _Atomic uint64_t dm_fs_read_bytes;   // bytes the game has read from its files (android_main.c: a burst of reads is a load)
 _Atomic uint64_t dm_fs_read_ns;   // time spent inside those reads, all threads together (android_main.c: a load's report)
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
-    if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
+    if (!out) return RES_FAIL;
+    *out = 0;
+    if (!h) return RES_FAIL;   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
+    if (!sz) return RES_OK;
+    // a null destination: the game's own allocation failed (one of its memory pools ran dry, the #211 family) and it reads into the result anyway. pread into it
+    //   would end in EFAULT or a fault in the host; the game gets a failed read instead, as for a file it could not read
+    if (!buf) { static int n; if (n++ < 8) LOG("[RED] fs: a read of %zu bytes into a null buffer (the game's allocation failed): refused", sz); return RES_FAIL; }
     size_t got = 0;
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     struct timespec rt0; clock_gettime(CLOCK_MONOTONIC, &rt0);
