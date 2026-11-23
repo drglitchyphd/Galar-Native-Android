@@ -294,7 +294,10 @@ JNIEXPORT jboolean JNICALL Java_com_nxnative_GameMenu_nativeSetting(JNIEnv *env,
             fprintf(stderr, "mode: %s: 3D render scale %.0f %% (TV mode kept), set while playing\n", m == 2 ? "performance" : m == 1 ? "quality" : "auto", c * 100);
         } else {
             int tv = m == 1 ? 1 : m == 2 ? 0 : !(g && (!strcmp(g, "low") || !strcmp(g, "lowest")));   // (Auto: what the Graphics level gives)
-            dm_set_opmode(tv); fprintf(stderr, "mode: %s: %s, set while playing\n", m == 2 ? "performance" : m == 1 ? "quality" : "auto", tv ? "TV mode (docked)" : "handheld mode");
+            // Scarlet / Violet: never handheld → TV mode while playing (a player's Scarlet 4.0.0 crashed 5 s after that switch: a null read at main+0xc281d0,
+            //   paldea-renderer 83a7fa1); TV mode is then taken from the next start
+            if (DM_PORT_PALDEA && tv) { now = 0; fprintf(stderr, "mode: %s: TV mode (docked) from the next start (Scarlet / Violet are not switched to TV mode while playing)\n", m == 1 ? "quality" : "auto"); }
+            else { dm_set_opmode(tv); fprintf(stderr, "mode: %s: %s, set while playing\n", m == 2 ? "performance" : m == 1 ? "quality" : "auto", tv ? "TV mode (docked)" : "handheld mode"); }
         } }
 #if DM_PORT_ARCEUS
     else if (!strcmp(k, "DM_RES_CAP")) {   // Legends: Arceus's 3D render scale (loader.c arc_scale): live; Auto = the game's own (1.0)
@@ -1291,7 +1294,7 @@ static void graphics_auto(void) {
             if (hot) fprintf(stderr, "graphics auto: the phone is hot: handheld mode (720p)\n");
             else fprintf(stderr, "fps guard: %.1f fps, short of %d: handheld mode (720p); TV mode again after %d s steady\n", fps, g_fps_guard, wait * 5);
         }
-    } else if (cool >= wait) {
+    } else if (cool >= wait && !DM_PORT_PALDEA) {   // (Scarlet / Violet: handheld mode is kept once there: the crash after a handheld → TV switch, see DM_DISPLAY_MODE)
         mode = 1; dm_set_opmode(1); slow = 0; held = 0;
         fprintf(stderr, "graphics auto: %s: TV mode (1080p)\n", g_fps_guard ? "steady and cool" : "cooled down");
     }

@@ -420,7 +420,7 @@ static void quirk_checks(void) {
           "the replay thread's Auto and the start-up self-tests for this game");
     // Mali's white-screen fix as mali-all e6f6d0c decided it (mw_default_route / mw_enabled with arm_own = Arm's own driver, galar = DM_PORT_GALAR): route A and the
     //   check on Arm's own driver with Sword / Shield, nowhere else (PanVK's driver ID included)
-    CHECK(quirk_default(Q_B10_STANDIN, g) == (g->arm_rel != 0 && DM_PORT_GALAR) && quirk_default(Q_MALI_WHITE_CHECK, g) == (g->arm_rel != 0 && DM_PORT_GALAR),
+    CHECK(quirk_default(Q_B10_STANDIN, g) == (MALI_LIT_DEFAULT && g->arm_rel != 0 && DM_PORT_GALAR) && quirk_default(Q_MALI_WHITE_CHECK, g) == (MALI_LIT_DEFAULT && g->arm_rel != 0 && DM_PORT_GALAR),
           "the white-screen fix's defaults: stand-in %d, check %d (Arm's own driver %d, Sword / Shield %d)", quirk_default(Q_B10_STANDIN, g), quirk_default(Q_MALI_WHITE_CHECK, g),
           g->arm_rel != 0, DM_PORT_GALAR);
     if (!getenv("DM_VK_BARRIER")) CHECK(g_qset[Q_BARRIER_RELAXED] && g_qval[Q_BARRIER_RELAXED] == quirk_default(Q_BARRIER_RELAXED, g), "barriers decided as the table says");

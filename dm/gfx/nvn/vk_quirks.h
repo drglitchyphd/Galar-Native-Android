@@ -176,8 +176,13 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     // Mali's white lit scene on Arm's own driver (#47 #110 #111 #172), for a game whose profile says mali_lit_standin (Sword / Shield): route A (the lit target as
     //   an RGBA16F stand-in) and the white-screen check that moves on to route B and the PanVK offer when it stays white. Arm's own driver only (by its release:
     //   not PanVK, which reports Arm's vendor ID and draws the scene right); other games draw their own G-buffer and bloom in R11G11B10F (Legends: Arceus) and
-    //   were never white this way
-    case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: return (g->eng & ENG_MALI_LIT_STANDIN) && g->arm_rel != 0;
+    //   were never white this way.
+    //   OFF by default for v0.96 (2026-11-22): on a Mali-G615 MC6 (r44p1) route A and route B both stayed white; the cause is small varyings arriving at
+    //   world-position size, which neither route changes. The menu's "White screen tests (Mali)" still turn them on; MALI_LIT_DEFAULT 1 restores the old rule
+#ifndef MALI_LIT_DEFAULT
+#define MALI_LIT_DEFAULT 0
+#endif
+    case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: return MALI_LIT_DEFAULT && (g->eng & ENG_MALI_LIT_STANDIN) && g->arm_rel != 0;
     // PowerVR, every game: BC textures converted on the CPU, not by the BC layer, and decoded, not transcoded (Tensor G5, Arceus #32: objects purple, meshes lavender)
     case Q_BC_GPU_OFF: case Q_BC_DECODE: case Q_PCACHE_GAPS_OFF: return g->vendor == VEN_IMG;
     case Q_GPU_TIME_OFF: return g->vendor == VEN_ARM || g->vendor == VEN_IMG;

@@ -50,9 +50,9 @@ static int ref_mw_enabled(int arm_own, int galar, const char *ladder_env, const 
     int l = ladder_env && *ladder_env ? atoi(ladder_env) : -1, s = sim_env && *sim_env ? atoi(sim_env) : 0;
     if (l == 0) return 0;
     if (l > 0 || s > 0) return 2;
-    return arm_own && galar ? 1 : 0;
+    return MALI_LIT_DEFAULT && arm_own && galar ? 1 : 0;   // v0.96: off by default (vk_quirks.h MALI_LIT_DEFAULT)
 }
-static int ref_mw_default_route(int arm_own, int galar) { return arm_own && galar ? 1 : 0; }
+static int ref_mw_default_route(int arm_own, int galar) { return MALI_LIT_DEFAULT && arm_own && galar ? 1 : 0; }
 static int ref(int q, const gpu_id *g, const profile *P) {
     int v = g->arm_rel * 100 + g->arm_p;
     int arm = g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5;     // :599 arm = drvp ? dp.driverID == VK_DRIVER_ID_ARM_PROPRIETARY : g_props.vendorID == 0x13B5
@@ -315,7 +315,7 @@ int main(int argc, char **argv) {
         CHECK(PROFILES[i].async_pso_off ? c.apso_changed == 0 : c.apso_changed > 0, "%s: background pipelines unlike 6e0e1dd on %ld GPU descriptions (async_pso_off %d)", PROFILES[i].app,
               c.apso_changed, PROFILES[i].async_pso_off);
         printf("%s: the white-screen fix (route A and the check) by default on %ld of them\n", PROFILES[i].app, c.mali_on);
-        CHECK(PROFILES[i].port == PORT_GALAR ? c.mali_on > 0 : c.mali_on == 0, "%s: the white-screen fix by default on %ld GPU descriptions (Sword / Shield only)", PROFILES[i].app, c.mali_on);
+        CHECK(PROFILES[i].port == PORT_GALAR && MALI_LIT_DEFAULT ? c.mali_on > 0 : c.mali_on == 0, "%s: the white-screen fix by default on %ld GPU descriptions (Sword / Shield only)", PROFILES[i].app, c.mali_on);
     }
     // 5. (the rest) every late rule reads what comes after the device somewhere in the grid
     for (int q = 0; q < Q_N; q++) CHECK(!quirk_late(q) || g_late_reads[q], "quirk %d (%s) is in quirk_late but reads neither the driver ID nor Arm's release anywhere in the grid", q, Q_INFO[q].what);
