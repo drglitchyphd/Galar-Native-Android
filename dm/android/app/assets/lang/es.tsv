@@ -12,7 +12,6 @@ Adaptive	Adaptable
 Adaptive: High, a lighter picture while the phone is hot or slow	Adaptable: Alto, una imagen más ligera mientras el teléfono está caliente o lento
 Add %s to the home screen	Añadir %s a la pantalla de inicio
 Adding %d shader(s) the game made last time...	Añadiendo %d shader(s) que el juego creó la última vez...
-Allow access to all files so the app can read your dump where it is (it is several GB; nothing is copied).	Permite el acceso a todos los archivos para que la app lea tu volcado donde está (son varios GB; no se copia nada).
 Applies next start	Se aplica al reiniciar
 Auto	Auto
 Auto (the phone's language)	Auto (el idioma del teléfono)
@@ -34,12 +33,9 @@ Controller buttons	Botones del mando
 Controller buttons reset.	Botones del mando restablecidos.
 Controllers only	Solo mandos
 Controls	Controles
-Copying %d selected file(s) into app storage...	Copiando %d archivo(s) seleccionado(s) al almacenamiento de la app...
-Copying %d selected game file(s) into app storage; large files need extra free space...	Copiando %d archivo(s) del juego al almacenamiento de la app; los archivos grandes necesitan espacio libre extra...
 Could not add the new shaders (%s); the game still plays without them.	No se pudieron añadir los nuevos shaders (%s); el juego funciona sin ellos.
 Could not add your mods' shaders (%s); the game still plays, some mod effects may not show.	No se pudieron añadir los shaders de tus mods (%s); el juego funciona, pero algunos efectos pueden no verse.
 Could not export the save: %s	No se pudo exportar la partida: %s
-Could not import game file: %s	No se pudo importar el archivo del juego: %s
 Could not import the save: %s	No se pudo importar la partida: %s
 Could not install the mod: %s	No se pudo instalar el mod: %s
 Delete	Eliminar
@@ -67,7 +63,6 @@ Full decode: more memory, no conversion (Snapdragon is not affected either way)	
 Full: the game's textures as they are	Completas: las texturas del juego tal cual
 GPU	GPU
 GPU memory reported to the game	Memoria de GPU que se indica al juego
-Game file(s) copied into app storage and selected.	Archivo(s) del juego copiado(s) y seleccionado(s).
 Game files	Archivos del juego
 Graphics	Gráficos
 Graphics driver	Controlador gráfico
@@ -125,7 +120,6 @@ Please wait for the current setup or file copy to finish.	Espera a que termine l
 Preparing...	Preparando...
 Press a key…	Pulsa un botón…
 Press the controller button for %s.	Pulsa el botón del mando para %s.
-Previously copied selections are ready.	Las selecciones copiadas antes están listas.
 Put each mod in its own folder in Android/data/%s/files/mods/ — <mod>/romfs for files, <mod>/exefs for .pchtxt code patches (they must be made for %s %s).	Pon cada mod en su propia carpeta en Android/data/%s/files/mods/ — <mod>/romfs para archivos, <mod>/exefs para parches .pchtxt (deben ser para %s %s).
 Reading the shaders of your mods...	Leyendo los shaders de tus mods...
 Ready. The setup log is in Android/data/%s/files/setup_work.	Listo. El registro está en Android/data/%s/files/setup_work.
@@ -143,7 +137,6 @@ Saved: applies the next time you start the game.	Guardado: se aplica la próxima
 Saved: close the game and start it again, then use the game's local link options.	Guardado: cierra el juego, vuelve a iniciarlo y usa las opciones de conexión local del juego.
 Saves	Partidas
 Screen	Pantalla
-Set the game up from your own dump. No game files or keys come with this app; yours never leave the phone.	Configura el juego con tu propio volcado. Esta app no incluye archivos del juego ni claves; los tuyos nunca salen del teléfono.
 Set up the game	Configurar el juego
 Settings (picture, graphics, textures, controller buttons, touch controls, mods) are in the game: tap the menu button at the top left, or hold − on a controller for 3 seconds for the controller buttons.	Los ajustes (imagen, gráficos, texturas, botones del mando, controles táctiles, mods) están en el juego: toca el botón de menú arriba, o mantén − en un mando 3 segundos para los botones.
 Setup failed: %s	La configuración falló: %s
@@ -159,8 +152,6 @@ Tap a button, then press the controller key you want for it.	Toca un botón y lu
 Texture format	Formato de texturas
 Textures	Texturas
 The %s shortcut is on the home screen.	El acceso directo de %s está en la pantalla de inicio.
-The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.	El selector no devolvió un archivo. Prueba con la app Archivos del teléfono y elige un archivo de Descargas o Documentos.
-The file picker returned no selected file. Try the phone's Files app and select a file from Downloads or Documents.	El selector no devolvió ningún archivo. Prueba con la app Archivos del teléfono y elige un archivo de Descargas o Documentos.
 The game closed while starting its graphics	El juego se cerró al iniciar sus gráficos
 The new driver is used from the next start.	El nuevo controlador se usa desde el próximo inicio.
 The phone's own driver	El controlador del teléfono
@@ -198,25 +189,16 @@ server (address:port)	servidor (dirección:puerto)
 shares files with %d other mod(s)	comparte archivos con %d mod(s) más
 translate %s shaders	traducir %s shaders
 translate the shaders	traducir los shaders
-unpack the game	desempaquetar el juego
 warm	tibio
-%s is compressed (NSZ): decompress it to .nsp / .xci first, then choose that.	%s está comprimido (NSZ): descomprímelo primero a .nsp / .xci y elige ese.
-%s is not a Switch game file (.nsp or .xci).	%s no es un archivo de juego de Switch (.nsp o .xci).
-%s is not a game file: choose it under Your keys.	%s no es un archivo de juego: elígelo en Tus claves.
-%s is not a key file: choose prod.keys (and title.keys).	%s no es un archivo de claves: elige prod.keys (y title.keys).
-(kept in the app's private storage)	(guardado en el almacenamiento privado de la app)
 Background	Segundo plano
 Change the driver (only if the game does not start)	Cambiar el controlador (solo si el juego no arranca)
 Choose	Elegir
-Choose game files	Elegir archivos del juego
-Choose keys	Elegir claves
 Clear	Quitar
 Could not read %s.	No se pudo leer %s.
 Game	Juego
 Keep playing	Seguir jugando
 Keep playing: the game and its sound go on in the background	Seguir jugando: el juego y su sonido siguen en segundo plano
 Leaving the game	Al salir del juego
-No game files or keys come with this app; yours never leave the phone.	Esta app no incluye archivos del juego ni claves; los tuyos nunca salen del teléfono.
 Pause	Pausar
 Pause: the game stops while it is not on screen	Pausar: el juego se detiene mientras no está en pantalla
 Ready: tap Play.	Listo: toca Jugar.
@@ -225,21 +207,11 @@ Set up	Configurar
 Set up again	Configurar de nuevo
 Set up or manage a game	Configurar o gestionar un juego
 Tap Clear and choose your files again.	Toca Quitar y elige tus archivos de nuevo.
-The base game (.nsp or .xci), the %s update and any DLC. You can choose them all at once.	El juego base (.nsp o .xci), la actualización %s y cualquier DLC. Puedes elegirlos todos a la vez.
 The setup log is in Android/data/%s/files/setup_work.	El registro de la configuración está en Android/data/%s/files/setup_work.
-These files are from different games (%s): set up one game at a time. Tap Clear and choose the files of one game.	Estos archivos son de juegos distintos (%s): configura un juego cada vez. Toca Quitar y elige los archivos de un solo juego.
-Welcome! To play, set up %s from your own Switch dump. It takes three steps.	¡Bienvenido! Para jugar, configura %s desde tu propio volcado de Switch. Son tres pasos.
 Your game files	Tus archivos del juego
-Your keys	Tus claves
 none chosen	nada elegido
 or	o
-prod.keys from your own Switch (and title.keys if your dump needs it).	prod.keys de tu propia Switch (y title.keys si tu volcado lo necesita).
 the phone's own Vulkan driver	el controlador Vulkan del propio teléfono
-Set up anyway	Configurar de todos modos
-Set up anyway?	¿Configurar de todos modos?
-The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	Las partes dañadas de tus archivos se dejan tal cual. El juego puede cerrarse o mostrar fallos donde las use. Copiar de nuevo tus archivos completos es la solución real.
-the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	la copia de %s se detuvo antes de tiempo (%s de %s MB): elígelo de nuevo, mejor desde el almacenamiento del propio teléfono
-%s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s está incompleto: tiene %s de sus %s MB. Se cortó al copiarlo o descargarlo: vuelve a copiar el archivo completo.
 Up to 60 fps: smoother where the phone can, the game keeps its real speed	Hasta 60 fps: más fluido donde el teléfono puede, el juego mantiene su velocidad real
 Shadows	Sombras
 Standard	Estándar
@@ -252,7 +224,6 @@ Running for %s	En marcha desde hace %s
 Almost done with this step: its last part shows no progress and can take several minutes.	Este paso casi ha terminado: su última parte no muestra avance y puede tardar varios minutos.
 Imported %d save file(s) into %s (%s). Tap Play to load it; your current save is kept as a backup.	Se importaron %d archivo(s) de guardado en %s (%s). Pulsa Jugar para cargarlo; tu guardado actual se conserva como copia.
 Could not import save data: %s	No se pudo importar el guardado: %s
-Your files are the base game only: this app needs the %s update too. Choose the update (.nsp, its title ID ends in 800) as well.	Tus archivos son solo el juego base: esta app necesita también la actualización %s. Elige también la actualización (.nsp, su ID de título termina en 800).
 Bug reports	Informes de errores
 Capture a frame	Capturar un fotograma
 Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue.	Cierra este menú en 3 segundos y quédate donde se ve el problema: el siguiente fotograma se guarda, paso a paso, como imágenes y notas en Download (un ZIP que termina en frame-capture.zip). Adjúntalo a tu reporte.
@@ -285,7 +256,6 @@ No replacement driver supports this GPU yet. Please report it with the log in Do
 Faster rendering (experimental)	Renderizado más rápido (experimental)
 On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub	Activado: el trabajo gráfico se ejecuta en su propio hilo, junto al del juego. Aún no se ha probado en todos los teléfonos: si el juego falla, desactívalo y avísanos en GitHub
 Freed %s GB left over from an earlier setup.	Se liberaron %s GB que quedaban de una configuración anterior.
-Or use the game from the %s app already on this phone (no dump or keys needed):	O usa el juego de la app %s que ya está en este teléfono (sin volcado ni claves):
 Set up from the installed app	Preparar desde la app instalada
 Min / max as on the Switch	Mín / máx como en la Switch
 Auto: on with ARM's driver (v0.57)	Auto: activado con el driver de ARM (v0.57)
@@ -524,3 +494,28 @@ Could not check for updates. Check the internet connection.	No se pudo buscar ac
 The update could not be downloaded: %s	No se pudo descargar la actualización: %s
 The downloaded file is not an official %s release, so it was not installed.	El archivo descargado no es una versión oficial de %s, así que no se instaló.
 The update could not be installed: %s	No se pudo instalar la actualización: %s
+%s has no file named main: it is not an ExeFS folder.	%s no tiene ningún archivo llamado main: no es una carpeta ExeFS.
+%s is empty.	%s está vacía.
+%s: update %s	%s: actualización %s
+Add DLC	Añadir DLC
+Allow access to all files so the app can read your game folders where they are.	Permite el acceso a todos los archivos para que la app pueda leer las carpetas del juego donde están.
+Choose a folder	Elegir una carpeta
+DLC: %s	DLC: %s
+ExeFS chosen. Now choose the RomFS folder.	ExeFS elegida. Ahora elige la carpeta RomFS.
+ExeFS: %s	ExeFS: %s
+Move the files instead	Mover los archivos
+Move them	Moverlos
+Move your files instead?	¿Mover tus archivos?
+Moving your files into the app...	Moviendo tus archivos a la app...
+No game files come with this app; yours never leave the phone.	Esta app no incluye archivos del juego; los tuyos nunca salen del teléfono.
+Nothing was chosen. Try again, through the phone's own storage.	No se eligió nada. Inténtalo de nuevo desde el almacenamiento del teléfono.
+Or use the game from the %s app already on this phone (nothing to choose):	O usa el juego de la app %s que ya está en este teléfono (no hay que elegir nada):
+RomFS chosen. Now choose the ExeFS folder.	RomFS elegida. Ahora elige la carpeta ExeFS.
+RomFS: %s	RomFS: %s
+Set the game up from your own game files. No game files come with this app; yours never leave the phone.	Configura el juego con tus propios archivos del juego. Esta app no incluye archivos del juego; los tuyos nunca salen del teléfono.
+The ExeFS and RomFS folders extracted from your own game, with the update included. Choose the folder that holds both, or each one in turn.	Las carpetas ExeFS y RomFS extraídas de tu propio juego, con la actualización incluida. Elige la carpeta que contiene ambas, o cada una por separado.
+The app can't read %s. Allow it access to all files in Android's settings, then choose the folder again.	La app no puede leer %s. Permítele el acceso a todos los archivos en los ajustes de Android y vuelve a elegir la carpeta.
+There isn't room for a copy of your game files. The setup can move your RomFS and DLC folders into the app instead: nothing is copied, but they leave the folder you chose, and uninstalling the app deletes them. If the setup fails, they are moved back.	No hay espacio para copiar tus archivos del juego. La configuración puede mover tus carpetas RomFS y DLC a la app: no se copia nada, pero salen de la carpeta que elegiste y desinstalar la app las borra. Si la configuración falla, se devuelven a su sitio.
+This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	No se puede leer esta carpeta. Elígela desde el almacenamiento del teléfono (no desde Recientes ni Descargas).
+Welcome! To play, set up %s from your own game files. It takes two steps.	¡Bienvenido! Para jugar, configura %s con tus propios archivos del juego. Son dos pasos.
+copy the game files	copiar los archivos del juego

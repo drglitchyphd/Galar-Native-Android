@@ -12,7 +12,6 @@ Adaptive	自動調整
 Adaptive: High, a lighter picture while the phone is hot or slow	自動調整：通常は高、端末が熱いときや重いときは軽い画質
 Add %s to the home screen	%sをホーム画面に追加
 Adding %d shader(s) the game made last time...	前回ゲームが作ったシェーダー%d個を追加中...
-Allow access to all files so the app can read your dump where it is (it is several GB; nothing is copied).	ダンプをその場所のまま読めるよう、すべてのファイルへのアクセスを許可してください（数GBあり、コピーはしません）。
 Applies next start	次回起動から
 Auto	自動
 Auto (the phone's language)	自動（端末の言語）
@@ -34,12 +33,9 @@ Controller buttons	コントローラーのボタン
 Controller buttons reset.	コントローラーのボタンをリセットしました。
 Controllers only	コントローラーのみ
 Controls	操作
-Copying %d selected file(s) into app storage...	選択した%d個のファイルをアプリの保存領域にコピー中...
-Copying %d selected game file(s) into app storage; large files need extra free space...	ゲームファイル%d個をアプリの保存領域にコピー中。大きなファイルには追加の空き容量が必要です...
 Could not add the new shaders (%s); the game still plays without them.	新しいシェーダーを追加できませんでした（%s）。なくてもゲームは遊べます。
 Could not add your mods' shaders (%s); the game still plays, some mod effects may not show.	Modのシェーダーを追加できませんでした（%s）。ゲームは遊べますが、一部の効果が表示されないことがあります。
 Could not export the save: %s	セーブを書き出せませんでした：%s
-Could not import game file: %s	ゲームファイルを読み込めませんでした：%s
 Could not import the save: %s	セーブを読み込めませんでした：%s
 Could not install the mod: %s	Modをインストールできませんでした：%s
 Delete	削除
@@ -67,7 +63,6 @@ Full decode: more memory, no conversion (Snapdragon is not affected either way)	
 Full: the game's textures as they are	フル：ゲームのテクスチャそのまま
 GPU	GPU
 GPU memory reported to the game	ゲームに伝えるGPUメモリ
-Game file(s) copied into app storage and selected.	ゲームファイルをコピーして選択しました。
 Game files	ゲームファイル
 Graphics	グラフィック
 Graphics driver	グラフィックドライバー
@@ -125,7 +120,6 @@ Please wait for the current setup or file copy to finish.	現在のセットア�
 Preparing...	準備中...
 Press a key…	ボタンを押してください…
 Press the controller button for %s.	%sに割り当てるボタンを押してください。
-Previously copied selections are ready.	以前コピーしたものは使えます。
 Put each mod in its own folder in Android/data/%s/files/mods/ — <mod>/romfs for files, <mod>/exefs for .pchtxt code patches (they must be made for %s %s).	各ModはAndroid/data/%s/files/mods/内の個別フォルダーへ — ファイルは<mod>/romfs、.pchtxtパッチは<mod>/exefs（%s %s用であること）。
 Reading the shaders of your mods...	Modのシェーダーを読み込み中...
 Ready. The setup log is in Android/data/%s/files/setup_work.	完了。ログはAndroid/data/%s/files/setup_workにあります。
@@ -143,7 +137,6 @@ Saved: applies the next time you start the game.	保存しました：次にゲ�
 Saved: close the game and start it again, then use the game's local link options.	保存しました：ゲームを再起動し、ゲーム内のローカル通信を使ってください。
 Saves	セーブ
 Screen	画面
-Set the game up from your own dump. No game files or keys come with this app; yours never leave the phone.	ご自身でダンプしたデータからセットアップします。このアプリにゲームファイルや鍵は含まれず、あなたのデータが端末の外に出ることはありません。
 Set up the game	ゲームをセットアップ
 Settings (picture, graphics, textures, controller buttons, touch controls, mods) are in the game: tap the menu button at the top left, or hold − on a controller for 3 seconds for the controller buttons.	設定（画面、グラフィック、テクスチャ、ボタン、タッチ操作、Mod）はゲーム内にあります：上部のメニューボタンをタップ、またはコントローラーの−を3秒長押しでボタン設定。
 Setup failed: %s	セットアップに失敗しました：%s
@@ -159,8 +152,6 @@ Tap a button, then press the controller key you want for it.	ボタンをタッ�
 Texture format	テクスチャ形式
 Textures	テクスチャ
 The %s shortcut is on the home screen.	%sのショートカットはホーム画面にあります。
-The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.	ファイルが返されませんでした。端末のファイルアプリで「ダウンロード」か「ドキュメント」から選んでください。
-The file picker returned no selected file. Try the phone's Files app and select a file from Downloads or Documents.	ファイルが選択されませんでした。端末のファイルアプリで「ダウンロード」か「ドキュメント」から選んでください。
 The game closed while starting its graphics	グラフィックの起動中にゲームが終了しました
 The new driver is used from the next start.	新しいドライバーは次回起動から使われます。
 The phone's own driver	端末標準のドライバー
@@ -198,25 +189,16 @@ server (address:port)	サーバー（アドレス:ポート）
 shares files with %d other mod(s)	他の%d個のModとファイルが重複
 translate %s shaders	シェーダー%s個を変換
 translate the shaders	シェーダーを変換
-unpack the game	ゲームを展開
 warm	やや高温
-%s is compressed (NSZ): decompress it to .nsp / .xci first, then choose that.	%s は圧縮されています (NSZ)。先に .nsp / .xci に展開してから、そちらを選んでください。
-%s is not a Switch game file (.nsp or .xci).	%s は Switch のゲームファイル (.nsp または .xci) ではありません。
-%s is not a game file: choose it under Your keys.	%s はゲームファイルではありません。「鍵」で選んでください。
-%s is not a key file: choose prod.keys (and title.keys).	%s は鍵ファイルではありません。prod.keys (と title.keys) を選んでください。
-(kept in the app's private storage)	(アプリ専用の保存領域に保管)
 Background	バックグラウンド
 Change the driver (only if the game does not start)	ドライバーを変更 (ゲームが起動しない場合のみ)
 Choose	選択
-Choose game files	ゲームファイルを選択
-Choose keys	鍵を選択
 Clear	クリア
 Could not read %s.	%s を読み込めませんでした。
 Game	ゲーム
 Keep playing	プレイを続ける
 Keep playing: the game and its sound go on in the background	プレイを続ける: ゲームと音声はバックグラウンドで続きます
 Leaving the game	ゲームを離れたとき
-No game files or keys come with this app; yours never leave the phone.	このアプリにゲームファイルや鍵は含まれず、あなたのデータが端末の外に出ることはありません。
 Pause	一時停止
 Pause: the game stops while it is not on screen	一時停止: 画面に表示されていない間、ゲームは止まります
 Ready: tap Play.	準備完了: 「プレイ」をタップしてください。
@@ -225,21 +207,11 @@ Set up	セットアップ
 Set up again	もう一度セットアップ
 Set up or manage a game	ゲームのセットアップ・管理
 Tap Clear and choose your files again.	「クリア」をタップして、ファイルを選び直してください。
-The base game (.nsp or .xci), the %s update and any DLC. You can choose them all at once.	本編 (.nsp または .xci)、%s の更新データ、DLC。まとめて選べます。
 The setup log is in Android/data/%s/files/setup_work.	セットアップのログは Android/data/%s/files/setup_work にあります。
-These files are from different games (%s): set up one game at a time. Tap Clear and choose the files of one game.	異なるゲームのファイルです (%s)。1 本ずつセットアップしてください。「クリア」をタップして、1 本分のファイルを選んでください。
-Welcome! To play, set up %s from your own Switch dump. It takes three steps.	ようこそ! プレイするには、ご自身の Switch のダンプから %s をセットアップします。3 ステップです。
 Your game files	ゲームファイル
-Your keys	鍵
 none chosen	未選択
 or	または
-prod.keys from your own Switch (and title.keys if your dump needs it).	ご自身の Switch の prod.keys (ダンプに必要なら title.keys も)。
 the phone's own Vulkan driver	端末標準の Vulkan ドライバー
-Set up anyway	このままセットアップ
-Set up anyway?	このままセットアップしますか?
-The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	ファイルの壊れた部分はそのまま使われます。その部分を使う場面でゲームが落ちたり表示が乱れたりすることがあります。ファイルをもう一度完全にコピーするのが本当の解決策です。
-the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	%s のコピーが途中で止まりました (%s / %s MB)。もう一度選んでください。できれば端末本体のストレージから選んでください
-%s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s は不完全です (%s / %s MB)。コピーまたはダウンロードの途中で切れています。ファイル全体をもう一度コピーしてください。
 Up to 60 fps: smoother where the phone can, the game keeps its real speed	最大60fps: 端末が出せる場面では滑らかに、ゲーム速度は実時間のまま
 Shadows	影
 Standard	標準
@@ -252,7 +224,6 @@ Running for %s	経過時間 %s
 Almost done with this step: its last part shows no progress and can take several minutes.	このステップはもうすぐ終わります。最後の部分は進み具合が表示されず、数分かかることがあります。
 Imported %d save file(s) into %s (%s). Tap Play to load it; your current save is kept as a backup.	%d 個のセーブファイルを %s に取り込みました (%s)。プレイを押すと読み込みます。今のセーブはバックアップとして残ります。
 Could not import save data: %s	セーブデータを取り込めませんでした: %s
-Your files are the base game only: this app needs the %s update too. Choose the update (.nsp, its title ID ends in 800) as well.	選んだファイルは本体ソフトのみです。このアプリには更新データ %s も必要です。更新データ (.nsp、タイトルIDの末尾が 800) も選んでください。
 Bug reports	不具合の報告
 Capture a frame	1 フレームを記録
 Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue.	3 秒以内にこのメニューを閉じ、問題が見える場所にいてください。次のフレームが段階ごとの画像とメモとして Download に保存されます (frame-capture.zip で終わる ZIP)。報告に添付してください。
@@ -285,7 +256,6 @@ No replacement driver supports this GPU yet. Please report it with the log in Do
 Faster rendering (experimental)	高速レンダリング（実験的）
 On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub	オン：グラフィック処理をゲームとは別のスレッドで動かします。まだすべての端末で試されていません。ゲームの動作がおかしい場合はオフにして、GitHubでお知らせください
 Freed %s GB left over from an earlier setup.	以前のセットアップで残っていた %s GB を解放しました。
-Or use the game from the %s app already on this phone (no dump or keys needed):	またはこのスマホにある %s アプリのゲームを使う（ダンプもキーも不要）：
 Set up from the installed app	インストール済みアプリから準備
 Min / max as on the Switch	Switchと同じ最小／最大
 Auto: on with ARM's driver (v0.57)	自動：ARMのドライバーでオン (v0.57)
@@ -524,3 +494,28 @@ Could not check for updates. Check the internet connection.	アップデート�
 The update could not be downloaded: %s	アップデートをダウンロードできませんでした: %s
 The downloaded file is not an official %s release, so it was not installed.	ダウンロードしたファイルは%sの公式版ではないため、インストールしませんでした。
 The update could not be installed: %s	アップデートをインストールできませんでした: %s
+%s has no file named main: it is not an ExeFS folder.	%s に main というファイルがありません。ExeFS フォルダーではありません。
+%s is empty.	%s は空です。
+%s: update %s	%s：アップデート %s
+Add DLC	DLC を追加
+Allow access to all files so the app can read your game folders where they are.	ゲームのフォルダーをその場所のまま読めるよう、すべてのファイルへのアクセスを許可してください。
+Choose a folder	フォルダーを選ぶ
+DLC: %s	DLC：%s
+ExeFS chosen. Now choose the RomFS folder.	ExeFS を選びました。次に RomFS フォルダーを選んでください。
+ExeFS: %s	ExeFS：%s
+Move the files instead	代わりにファイルを移動
+Move them	移動する
+Move your files instead?	代わりにファイルを移動しますか？
+Moving your files into the app...	ファイルをアプリに移動しています...
+No game files come with this app; yours never leave the phone.	このアプリにゲームのファイルは含まれていません。あなたのファイルがスマホの外に出ることはありません。
+Nothing was chosen. Try again, through the phone's own storage.	何も選ばれませんでした。スマホ本体のストレージからもう一度選んでください。
+Or use the game from the %s app already on this phone (nothing to choose):	または、このスマホにすでにある %s アプリのゲームを使う（選ぶものはありません）：
+RomFS chosen. Now choose the ExeFS folder.	RomFS を選びました。次に ExeFS フォルダーを選んでください。
+RomFS: %s	RomFS：%s
+Set the game up from your own game files. No game files come with this app; yours never leave the phone.	あなた自身のゲームファイルからゲームを準備します。このアプリにゲームのファイルは含まれていません。あなたのファイルがスマホの外に出ることはありません。
+The ExeFS and RomFS folders extracted from your own game, with the update included. Choose the folder that holds both, or each one in turn.	あなた自身のゲームから取り出した ExeFS と RomFS のフォルダー（アップデート適用済み）。両方を含むフォルダーを選ぶか、1 つずつ選んでください。
+The app can't read %s. Allow it access to all files in Android's settings, then choose the folder again.	アプリが %s を読めません。Android の設定ですべてのファイルへのアクセスを許可してから、もう一度フォルダーを選んでください。
+There isn't room for a copy of your game files. The setup can move your RomFS and DLC folders into the app instead: nothing is copied, but they leave the folder you chose, and uninstalling the app deletes them. If the setup fails, they are moved back.	ゲームファイルをコピーする空き容量がありません。代わりに RomFS と DLC のフォルダーをアプリ内に移動できます。コピーはしませんが、選んだフォルダーからはなくなり、アプリをアンインストールすると削除されます。準備に失敗した場合は元の場所に戻します。
+This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	このフォルダーは読めません。スマホ本体のストレージから選んでください（「最近」や「ダウンロード」からではなく）。
+Welcome! To play, set up %s from your own game files. It takes two steps.	ようこそ！遊ぶには、あなた自身のゲームファイルから %s を準備してください。2 ステップで終わります。
+copy the game files	ゲームファイルをコピー
