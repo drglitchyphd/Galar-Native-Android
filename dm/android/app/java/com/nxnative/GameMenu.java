@@ -569,18 +569,12 @@ public final class GameMenu {
     }
 
     // ---------- saves, online, system ----------
-    // the folder the save is in now (android_main.c save_place: save_place.txt says "shared" while it is in Documents/<docs dir>/<title id>/save: GameSettings.docsDir)
-    static File activeSave(Activity a, File files) {
-        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(new File(files, "save_place.txt")))) {
-            String l = r.readLine();
-            if (l != null && l.trim().equals("shared")) return new File("/storage/emulated/0/Documents/" + GameSettings.docsDir(a) + "/" + GameSettings.game(a)[0].toUpperCase(java.util.Locale.ROOT) + "/save");
-        } catch (java.io.IOException e) { }
-        return new File(files, "save");
-    }
+    // (the save's folder: the chosen player's, in the app's folder or Documents: GameSettings.activeSave. The player cannot change while the game runs)
     private static void saves(Activity a) {
         heading(a, t(a, "Saves"));
+        note(a, t(a, "Player: %s. Players are changed on the setup screen, with the game closed.", Profiles.currentName(GameSettings.root(a))));
         action(a, t(a, "Export save data"), t(a, "Save in the game first: the export is the last save the game wrote."),
-               () -> pick(a, Intent.ACTION_CREATE_DOCUMENT, GameSettings.game(a)[2] + "-save.zip", REQ_EXPORT));
+               () -> pick(a, Intent.ACTION_CREATE_DOCUMENT, GameSettings.saveZipName(a), REQ_EXPORT));
         action(a, t(a, "Import save data"), t(a, "Your current save is kept as a backup."), () -> pick(a, Intent.ACTION_OPEN_DOCUMENT, null, REQ_IMPORT));
         // where the save lives (android_main.c save_place, Arceus-Native-Android#8): Documents for a sync tool; copied over at the next start, the earlier save there kept as a backup
         choice(a, "DM_SAVE_SHARED", t(a, "Save folder"), new String[][] { { "", t(a, "App folder"), t(a, "App folder: Android/data, as before") },
@@ -820,10 +814,10 @@ public final class GameMenu {
                     msg = why == null ? t(a, "Lossless Scaling imported. Choose it under Frame generation.") : t(a, "Could not import Lossless Scaling: %s", why); }
                 else if (req == REQ_EXPORT) {
                     try (OutputStream o = a.getContentResolver().openOutputStream(u, "wt"); ZipOutputStream z = new ZipOutputStream(o)) {
-                        File save = activeSave(a, files).getCanonicalFile(); int n = zipTree(save, save, z); msg = t(a, "Exported %d save file(s).", n); }
+                        File save = GameSettings.activeSave(a).getCanonicalFile(); int n = zipTree(save, save, z); msg = t(a, "Exported %d save file(s).", n); }
                 } else if (req == REQ_IMPORT) {
                     try (InputStream in = a.getContentResolver().openInputStream(u)) {
-                        int n = SaveImport.install(in, new File(files, "save_import"), displayName(a, u));
+                        int n = SaveImport.install(in, new File(GameSettings.saveRoot(a), "save_import"), displayName(a, u));
                         msg = t(a, "Imported %d save file(s). Close the game and start it again to load it (your current save is kept as a backup).", n) + " (" + SaveImport.lastFiles + ")"; }
                 } else {
                     String name = displayName(a, u).replaceAll("(?i)\\.zip$", "").replaceAll("[^A-Za-z0-9 ._()\\[\\]-]", "_").trim();

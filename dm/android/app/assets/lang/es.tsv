@@ -519,3 +519,33 @@ There isn't room for a copy of your game files. The setup can move your RomFS an
 This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	No se puede leer esta carpeta. Elígela desde el almacenamiento del teléfono (no desde Recientes ni Descargas).
 Welcome! To play, set up %s from your own game files. It takes two steps.	¡Bienvenido! Para jugar, configura %s con tus propios archivos del juego. Son dos pasos.
 copy the game files	copiar los archivos del juego
+Player: %s. Players are changed on the setup screen, with the game closed.	Jugador: %s. El jugador se cambia en la pantalla de configuración, con el juego cerrado.
+Playing as %s. Tap Play, or change the player below.	Juega %s. Toca Jugar o cambia de jugador abajo.
+Player: %s	Jugador: %s
+Change player	Cambiar de jugador
+Add a player	Añadir jugador
+Rename	Renombrar
+Delete player	Eliminar jugador
+Start over	Empezar de nuevo
+Restore the previous save	Recuperar la partida anterior
+Who is playing?	¿Quién juega?
+Now playing as %s.	Ahora juega %s.
+That did not work: %s	No se pudo: %s
+Player %d	Jugador %d
+New player	Nuevo jugador
+Rename player	Renombrar jugador
+Add	Añadir
+Type a name.	Escribe un nombre.
+That name is taken.	Ese nombre ya existe.
+Added %s. Their game starts from the beginning.	%s añadido. Su partida empieza desde el principio.
+Delete %s?	¿Eliminar a %s?
+The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.	Las partidas de %s en todos los juegos de esta app se eliminan para siempre. Expórtalas antes si quieres conservarlas.
+%s deleted. Now playing as %s.	%s eliminado. Ahora juega %s.
+Start over?	¿Empezar de nuevo?
+%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.	%s empieza %s de nuevo desde el principio. La partida actual se guarda como copia de seguridad, y Recuperar la partida anterior la devuelve. Solo se guarda una copia: la más antigua se elimina.
+Done: the game starts from the beginning. The old save is kept as a backup.	Listo: el juego empieza desde el principio. La partida anterior se guarda como copia de seguridad.
+There is no save yet: the game already starts from the beginning.	Aún no hay partida: el juego ya empieza desde el principio.
+Restore the previous save?	¿Recuperar la partida anterior?
+The backup becomes the save again, and the save you have now becomes the backup, so you can switch back.	La copia de seguridad vuelve a ser la partida, y la partida actual pasa a ser la copia, así que puedes volver a cambiar.
+Restore	Recuperar
+The previous save is back.	La partida anterior ha vuelto.

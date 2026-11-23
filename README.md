@@ -18,6 +18,7 @@
 
 - One app runs both games, each with its own setup, saves, settings and mods. With both installed, the app icon lets you choose; each game's home screen shortcut has its own name and icon.
 - It updates PKShield in place (package `com.nxnative.pokemonshield`), so your setup and saves are kept.
+- **Players and Start over:** sharing the phone? Under **Save data** on the setup screen (with two games, **Set up or manage a game**; with one, hold the app icon → **Settings**), add a player for each person: each gets their own save in both games, your existing save stays as **Player 1**, and the app shows who is playing before the game starts. **Start over** begins a new game for the current player and keeps the old save as a backup (**Restore the previous save** brings it back). No reinstall, no Android/data access needed.
 - Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`. Any other build says "Unofficial build".
 - **Updates:** ☰ → About → Updates checks this repository's releases for a newer full release (never a pre-release) and installs it after you confirm. It only installs the official build signed with the key above. Turn off **Look for updates when the app starts** to stop the check.
 

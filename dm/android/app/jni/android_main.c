@@ -62,6 +62,25 @@ static void choose_game(char *files, size_t n) {
         fprintf(stderr, "boot: game %s (%s)\n", g_family[i].id, g_family[i].stem); return; }
     setenv("DM_PROGRAM_ID", g_family[0].id, 1);
 }
+// The player (the setup screen's Save data → Player, Profiles.java): <app folder>/current_profile names one of <app folder>/profiles.tsv's "id TAB name" lines (an id
+// not in the list: the list's first, as Profiles.current). Player 1 (id 1; also no list, or anything unreadable) keeps the save every player had before,
+// <game folder>/save, never moved; another player's is <game folder>/profiles/<id>/save, with its save_place.txt, save_import and backups beside it. One list for
+// every game of the app: Sword and Shield (Scarlet and Violet) follow the same player, each game with its own save
+static char g_prof[1100], g_prof_id[20] = "1", g_prof_name[128];
+static int prof_id_ok(const char *s) { size_t n = strlen(s); if (!n || n > 16) return 0; for (; *s; s++) if (!((*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9'))) return 0; return 1; }
+static void choose_profile(const char *root) {
+    char p[1100], want[20] = "", ln[512], first[20] = "", firstname[128] = ""; snprintf(p, sizeof p, "%s/current_profile", root); FILE *f = fopen(p, "r");
+    if (f) { if (fscanf(f, "%19s", want) != 1) want[0] = 0; fclose(f); }
+    snprintf(p, sizeof p, "%s/profiles.tsv", root); f = fopen(p, "r"); int found = 0;
+    while (f && fgets(ln, sizeof ln, f)) { ln[strcspn(ln, "\r\n")] = 0; char *t = strchr(ln, '\t'); if (!t) continue; *t++ = 0;
+        if (!prof_id_ok(ln) || !*t) continue;
+        if (!first[0]) { snprintf(first, sizeof first, "%s", ln); snprintf(firstname, sizeof firstname, "%s", t); }
+        if (!found && !strcmp(ln, want)) { found = 1; snprintf(g_prof_id, sizeof g_prof_id, "%s", ln); snprintf(g_prof_name, sizeof g_prof_name, "%s", t); } }
+    if (f) fclose(f);
+    if (!found && first[0]) { snprintf(g_prof_id, sizeof g_prof_id, "%s", first); snprintf(g_prof_name, sizeof g_prof_name, "%s", firstname); }
+    if (!strcmp(g_prof_id, "1")) snprintf(g_prof, sizeof g_prof, "%s", g_files);
+    else { snprintf(p, sizeof p, "%s/profiles", g_files); mkdir(p, 0755); snprintf(g_prof, sizeof g_prof, "%s/%s", p, g_prof_id); mkdir(g_prof, 0755); }
+}
 void *front_metal_layer(void) { return atomic_load(&g_window); }   // the window the Vulkan replay presents to (the name is the Apple front ends' interface)
 void *front_android_window(void) { return atomic_load(&g_window); }
 // The game's keyboard (its name entry): the app's Android dialog (app/java/com/nxnative/TextInput.java) with the phone's keyboard, on the UI thread; this game thread
@@ -908,17 +927,21 @@ static void move_aside(const char *p) {   // an existing save folder becomes sav
 static int g_save_imported;   // a save archive was installed into the app's folder at this start: with the save in Documents, it is copied there
 static void save_place(void) {
     char app[1100], shared[1100], par[1100], st[1200], cur[16] = "app"; const char *e = getenv("DM_SAVE_SHARED"); int want = e && atoi(e) == 1;
-    snprintf(app, sizeof app, "%s/save", g_files); snprintf(st, sizeof st, "%s/save_place.txt", g_files);
+    snprintf(app, sizeof app, "%s/save", g_prof); snprintf(st, sizeof st, "%s/save_place.txt", g_prof);   // (the chosen player's: choose_profile)
     // (Documents/<the profile's docs_dir>: Galar Native, NXNative (Legends: Arceus), Paldea Native: as each app's releases made it; Paldea Native took it from
     //   DM_APP_NAME, its app name, which is the same folder for it. Arceus Native's app name differs from its folder, so the profile decides)
     const char *an = DM_GAME_DOCS_DIR;
     char top[300]; snprintf(top, sizeof top, "/storage/emulated/0/Documents/%s", an);
     { const char *pid = getenv("DM_PROGRAM_ID"); char up[20] = ""; if (pid) for (int k = 0; pid[k] && k < 16; k++) up[k] = (char)toupper((unsigned char)pid[k]);   // (Galar: the running game, Sword or Shield)
-      if (up[0]) snprintf(par, sizeof par, "%s/%s", top, up); else snprintf(par, sizeof par, "%s/%016llX", top, (unsigned long long)DM_GAME_PROGRAM_ID); } snprintf(shared, sizeof shared, "%s/save", par);
+      if (up[0]) snprintf(par, sizeof par, "%s/%s", top, up); else snprintf(par, sizeof par, "%s/%016llX", top, (unsigned long long)DM_GAME_PROGRAM_ID); }
+    char gpar[1100]; snprintf(gpar, sizeof gpar, "%s", par);   // another player than Player 1: <title id>/profiles/<id>/save (GameSettings.sharedSave)
+    if (strcmp(g_prof_id, "1")) snprintf(par, sizeof par, "%s/profiles/%s", gpar, g_prof_id);
+    snprintf(shared, sizeof shared, "%s/save", par);
     { FILE *f = fopen(st, "r"); if (f) { if (fscanf(f, "%15s", cur) != 1) strcpy(cur, "app"); fclose(f); } }
     int in_shared = !strcmp(cur, "shared");
     if (want && !in_shared) {   // to Documents
-        mkdir("/storage/emulated/0/Documents", 0770); mkdir(top, 0770); mkdir(par, 0770);
+        mkdir("/storage/emulated/0/Documents", 0770); mkdir(top, 0770); mkdir(gpar, 0770);
+        if (strcmp(g_prof_id, "1")) { char pp[1200]; snprintf(pp, sizeof pp, "%s/profiles", gpar); mkdir(pp, 0770); } mkdir(par, 0770);
         char probe[1200]; snprintf(probe, sizeof probe, "%s/.write-test", par); int fd = open(probe, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { fprintf(stderr, "boot: [RED] save folder: %s cannot be written (errno %d: All files access not given?): the save stays in the app's folder\n", par, errno); return; }
         close(fd); unlink(probe);
@@ -1454,7 +1477,7 @@ static void seed_from_assets(void);   // (below: the pipeline list shipped with 
 static void host_start(void) {
     if (g_started++) return;
     const char *f = g_app->activity->externalDataPath; snprintf(g_files, sizeof g_files, "%s", f ? f : "/sdcard/nxnative");
-    mkdir(g_files, 0755); choose_game(g_files, sizeof g_files);
+    mkdir(g_files, 0755); choose_game(g_files, sizeof g_files); choose_profile(f ? f : "/sdcard/nxnative");   // (the app's folder: the player list is the app's, the game folder below it)
     { void touch_ui_set_dir(const char *dir); touch_ui_set_dir(g_files); }   // the player's control layout (touch_ui.c's editor)
     char p[1200], q[1200];
     snprintf(p, sizeof p, "%s/log.txt", g_files); snprintf(q, sizeof q, "%s/log.prev.txt", g_files); rename(p, q);
@@ -1582,17 +1605,23 @@ static void host_start(void) {
     { snprintf(p, sizeof p, "%s/aoc", g_game); struct stat as; if (!stat(p, &as)) setenv("DM_AOC_DIR", p, 0); }   // the DLC the player owns (Shield: the Expansion Pass keys; its content is in the update)
     SETP("DM_NVN_CAPTURE", "nvn_capture");   // shaders the game builds in memory, saved for the setup to translate (nvn_vk.c mtl_shader_seen)
     SETG("DM_ROMFS", "RomFS"); SETG("DM_SPV_DIR", "vk"); SETG("DM_NVN_SHMAP", "shader_map.tsv"); SETG("DM_FONT_DIR", "font");
-    SETP("DM_SAVE", "save"); SETP("DM_TEMP", "temp");
-    // A save archive imported by SetupActivity is staged as save_import/. Rename the directories on the same
+    // the chosen player's save (choose_profile: Player 1's is <files>/save as always); env.txt's DM_SAVE still wins
+    snprintf(p, sizeof p, "%s/save", g_prof); setenv("DM_SAVE", p, 0); SETP("DM_TEMP", "temp");
+    fprintf(stderr, "boot: player %s: save in %s\n", g_prof_id, g_prof);
+    // the game's account nickname (hle_account.c DM_NICK) is the player's name, cut to its 32 bytes at a whole character; an unchanged Player 1 stays "Player", as before
+    if (g_prof_name[0] && (strcmp(g_prof_id, "1") || strcmp(g_prof_name, "Player 1"))) {
+        char nick[33]; size_t n = strlen(g_prof_name); if (n > 32) { n = 32; while (n && ((unsigned char)g_prof_name[n] & 0xC0) == 0x80) n--; }
+        memcpy(nick, g_prof_name, n); nick[n] = 0; setenv("DM_NICK", nick, 0); }
+    // A save archive imported by SetupActivity is staged as save_import/ (the chosen player's). Rename the directories on the same
     // filesystem so nested save layouts survive and the old save remains intact if the import cannot be installed.
     { char imp[1200], old[1300]; struct stat is, ss;
-      snprintf(imp, sizeof imp, "%s/save_import", g_files);
-      snprintf(p, sizeof p, "%s/save", g_files);
+      snprintf(imp, sizeof imp, "%s/save_import", g_prof);
+      snprintf(p, sizeof p, "%s/save", g_prof);
       if (!lstat(imp, &is) && S_ISDIR(is.st_mode)) {
           int moved_old = 0, can_install = 1;
           int save_status = stat(p, &ss);
           if (!save_status) {
-              snprintf(old, sizeof old, "%s/save.before-import-%ld-%d", g_files, (long)time(NULL), (int)getpid());
+              snprintf(old, sizeof old, "%s/save.before-import-%ld-%d", g_prof, (long)time(NULL), (int)getpid());
               if (!rename(p, old)) moved_old = 1;
               else { fprintf(stderr, "[RED] save import: could not preserve the current save: %s\n", strerror(errno)); can_install = 0; }
           } else if (errno != ENOENT) {
@@ -1605,7 +1634,7 @@ static void host_start(void) {
               fprintf(stderr, "[RED] save import: could not install imported save; it remains in %s\n", imp);
           }
       } }
-    snprintf(p, sizeof p, "%s/save", g_files); mkdir(p, 0755); snprintf(p, sizeof p, "%s/temp", g_files); mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/save", g_prof); mkdir(p, 0755); snprintf(p, sizeof p, "%s/temp", g_files); mkdir(p, 0755);
     save_place();   // (DM_SAVE_SHARED: the save in Documents, copied over at this start when the choice changed; after an import, which lands in the app's folder)
     snprintf(p, sizeof p, "%s/RomFS", g_game);
     if (stat(p, &st)) { fprintf(stderr, "boot: game files not found: %s (install the bundle, or copy RomFS, patched, shaders.pak, shader_map.tsv and font there)\n", p); ALOG("game files missing in %s", g_files); return; }

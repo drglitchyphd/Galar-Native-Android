@@ -50,6 +50,27 @@ final class GameSettings {
         String[] g = game(c); if (g == games(c).get(0)) return root(c);
         File d = new File(root(c), g[0]); d.mkdirs(); return d;
     }
+    // every game's folder (the first game's is the app's own)
+    static List<File> dirs(Context c) { List<File> d = new ArrayList<>(); List<String[]> g = games(c); for (int i = 0; i < g.size(); i++) d.add(i == 0 ? root(c) : new File(root(c), g.get(i)[0])); return d; }
+    // The chosen player's save in the chosen game (Profiles; android_main.c choose_profile): the folder holding save/, save_place.txt and save_import/
+    static File saveRoot(Context c) { File d = Profiles.saveRoot(dir(c), Profiles.current(root(c))); d.mkdirs(); return d; }
+    // that save in Documents (android_main.c save_place, the menu's Save folder → Documents): Documents/<docs dir>/<title id>/save, another player's under profiles/<id>/
+    static File sharedSave(Context c) {
+        File t = new File("/storage/emulated/0/Documents/" + docsDir(c) + "/" + game(c)[0].toUpperCase(java.util.Locale.ROOT)); String id = Profiles.current(root(c));
+        return new File(Profiles.saveRoot(t, id), "save");
+    }
+    static boolean saveShared(Context c) {
+        try (BufferedReader r = new BufferedReader(new FileReader(new File(saveRoot(c), "save_place.txt")))) { String l = r.readLine(); return l != null && l.trim().equals("shared"); } catch (IOException e) { return false; }
+    }
+    // the folder the save is in now: in Documents while save_place.txt says "shared", else the app's
+    static File activeSave(Context c) { return saveShared(c) ? sharedSave(c) : new File(saveRoot(c), "save"); }
+    // what Start over and Restore move: the app's copy, and the Documents copy while that is the save (the engine falls back to the app's copy when Documents is empty)
+    static List<File> saveDirs(Context c) { List<File> l = new ArrayList<>(); l.add(new File(saveRoot(c), "save")); if (saveShared(c)) l.add(sharedSave(c)); return l; }
+    // an export's file name: <game>-save.zip, with the player's name in it once there is more than one player
+    static String saveZipName(Context c) {
+        String n = game(c)[2]; if (Profiles.list(root(c)).size() > 1) n += "-" + Profiles.currentName(root(c)).replaceAll("[^\\p{L}\\p{N} ._-]", "_");
+        return n + "-save.zip";
+    }
     static File envFile(Context c) { return new File(dir(c), "env.txt"); }
     static String get(Context c, String key) {
         try (BufferedReader r = new BufferedReader(new FileReader(envFile(c)))) { String l; while ((l = r.readLine()) != null) if (l.startsWith(key + "=")) return l.substring(key.length() + 1); } catch (IOException e) { }

@@ -516,3 +516,33 @@ There isn't room for a copy of your game files. The setup can move your RomFS an
 This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	Esta pasta não pode ser lida. Escolha-a pelo armazenamento do celular (não por Recentes nem Downloads).
 Welcome! To play, set up %s from your own game files. It takes two steps.	Bem-vindo! Para jogar, configure %s com seus próprios arquivos do jogo. São duas etapas.
 copy the game files	copiar os arquivos do jogo
+Player: %s. Players are changed on the setup screen, with the game closed.	Jogador: %s. O jogador é trocado na tela de configuração, com o jogo fechado.
+Playing as %s. Tap Play, or change the player below.	Jogando como %s. Toque em Jogar ou troque o jogador abaixo.
+Player: %s	Jogador: %s
+Change player	Trocar de jogador
+Add a player	Adicionar jogador
+Rename	Renomear
+Delete player	Excluir jogador
+Start over	Começar de novo
+Restore the previous save	Restaurar o salvamento anterior
+Who is playing?	Quem vai jogar?
+Now playing as %s.	Agora jogando como %s.
+That did not work: %s	Não deu certo: %s
+Player %d	Jogador %d
+New player	Novo jogador
+Rename player	Renomear jogador
+Add	Adicionar
+Type a name.	Digite um nome.
+That name is taken.	Esse nome já existe.
+Added %s. Their game starts from the beginning.	%s adicionado. O jogo dele começa do início.
+Delete %s?	Excluir %s?
+The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.	Os salvamentos de %s em todos os jogos deste app serão excluídos para sempre. Exporte-os antes se quiser guardá-los.
+%s deleted. Now playing as %s.	%s excluído. Agora jogando como %s.
+Start over?	Começar de novo?
+%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.	%s começa %s de novo, do início. O salvamento atual fica como backup, e Restaurar o salvamento anterior o traz de volta. Só um backup é mantido: um mais antigo é excluído.
+Done: the game starts from the beginning. The old save is kept as a backup.	Pronto: o jogo começa do início. O salvamento antigo fica como backup.
+There is no save yet: the game already starts from the beginning.	Ainda não há salvamento: o jogo já começa do início.
+Restore the previous save?	Restaurar o salvamento anterior?
+The backup becomes the save again, and the save you have now becomes the backup, so you can switch back.	O backup volta a ser o salvamento, e o salvamento atual vira o backup, então você pode voltar.
+Restore	Restaurar
+The previous save is back.	O salvamento anterior voltou.

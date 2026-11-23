@@ -519,3 +519,33 @@ There isn't room for a copy of your game files. The setup can move your RomFS an
 This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	このフォルダーは読めません。スマホ本体のストレージから選んでください（「最近」や「ダウンロード」からではなく）。
 Welcome! To play, set up %s from your own game files. It takes two steps.	ようこそ！遊ぶには、あなた自身のゲームファイルから %s を準備してください。2 ステップで終わります。
 copy the game files	ゲームファイルをコピー
+Player: %s. Players are changed on the setup screen, with the game closed.	プレイヤー：%s。プレイヤーはゲームを閉じてからセットアップ画面で切り替えます。
+Playing as %s. Tap Play, or change the player below.	%sでプレイします。プレイをタップするか、下でプレイヤーを切り替えてください。
+Player: %s	プレイヤー：%s
+Change player	プレイヤーを切り替え
+Add a player	プレイヤーを追加
+Rename	名前を変更
+Delete player	プレイヤーを削除
+Start over	最初から始める
+Restore the previous save	前のセーブに戻す
+Who is playing?	誰がプレイしますか？
+Now playing as %s.	%sでプレイします。
+That did not work: %s	できませんでした：%s
+Player %d	プレイヤー%d
+New player	新しいプレイヤー
+Rename player	プレイヤー名を変更
+Add	追加
+Type a name.	名前を入力してください。
+That name is taken.	その名前はすでに使われています。
+Added %s. Their game starts from the beginning.	%sを追加しました。ゲームは最初から始まります。
+Delete %s?	%sを削除しますか？
+The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.	このアプリのすべてのゲームにある%sのセーブは完全に削除されます。残したい場合は先に書き出してください。
+%s deleted. Now playing as %s.	%sを削除しました。%sでプレイします。
+Start over?	最初から始めますか？
+%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.	%sは%sを最初から始めます。現在のセーブはバックアップとして残り、「前のセーブに戻す」で元に戻せます。バックアップは1つだけ残り、古いものは削除されます。
+Done: the game starts from the beginning. The old save is kept as a backup.	完了：ゲームは最初から始まります。前のセーブはバックアップとして残っています。
+There is no save yet: the game already starts from the beginning.	まだセーブがありません。ゲームはすでに最初から始まります。
+Restore the previous save?	前のセーブに戻しますか？
+The backup becomes the save again, and the save you have now becomes the backup, so you can switch back.	バックアップが現在のセーブになり、今のセーブがバックアップになります。いつでも元に戻せます。
+Restore	戻す
+The previous save is back.	前のセーブに戻しました。

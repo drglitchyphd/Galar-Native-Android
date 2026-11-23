@@ -53,6 +53,7 @@ public final class SetupActivity extends Activity {
     // the folders chosen (real paths, read in place): the ExeFS, the RomFS, and each DLC's RomFS (setup_game.py --exefs / --romfs / --dlc-dir)
     private String exefsDir, romfsDir; private final List<String> dlcDirs = new ArrayList<>();
     private TextView status, gameText; private ProgressBar bar; private Button setup, play, shortcut, saveExport, saveImport; private ImageView logo;
+    private TextView playerText; private Button switchBtn, addBtn, renameBtn, deleteBtn, startOverBtn, restoreBtn;
     // static: the setup runs in its own thread and outlives this screen; a new screen (Android may still make one, despite configChanges in the manifest, which keeps it
     // across rotation: #42) must not start a second setup next to it
     private static volatile boolean running;
@@ -153,8 +154,12 @@ public final class SetupActivity extends Activity {
         if (ready() && !asked && !running && DebugBundle.offerAfterCrash(this, () -> { if (pendingWork(gameDir())) startCaptures(); else startGame(); })) asked = true;
         // both of the Mali white-screen fixes were white on this phone's own driver (the engine's check, MaliLadder): PanVK offered once, before the game starts
         if (ready() && !asked && !running && MaliLadder.offer(this, this::startGame, () -> pick(PICK_DRIVER, false))) asked = true;
+        // more than one player (Profiles): this screen waits on Play, naming the player, so whoever is about to play can change it (the launcher names the player itself)
+        boolean whoPlays = ready() && !asked && !running && Profiles.list(GameSettings.root(this)).size() > 1 && !getIntent().getBooleanExtra("from_launcher", false);
+        if (whoPlays) asked = true;
         if (ready() && !asked && !running) { gameIcon(); if (!pendingWork(gameDir())) { startGame(); return; } }
         setupScreen(official);
+        if (whoPlays) status.setText(T.t(this, "Playing as %s. Tap Play, or change the player below.", Profiles.currentName(GameSettings.root(this))));
         if (getIntent().getBooleanExtra("from_app", false)) startSetupFromApp();   // am start ... --ez setup true --ez from_app true: set up (again) from the installed app, over adb
         if (ready() && !asked) startCaptures();
         else if (!running && shadersOnly()) startShadersOnly();
@@ -222,7 +227,7 @@ public final class SetupActivity extends Activity {
             .setMessage(T.t(this, "There isn't room for a copy of your game files. The setup can move your RomFS and DLC folders into the app instead: nothing is copied, but they leave the folder you chose, and uninstalling the app deletes them. If the setup fails, they are moved back."))
             .setPositiveButton(T.t(this, "Move them"), (d, w) -> startSetup(true)).setNegativeButton(T.t(this, "Cancel"), null).show());
         ((LinearLayout.LayoutParams) moveBtn.getLayoutParams()).topMargin = px(8); moveBtn.setVisibility(android.view.View.GONE);
-        play = pill(root, T.t(this, "Play"), acc, 0xFFFFFFFF, v -> startGame()); play.setTextSize(18);
+        play = pill(root, T.t(this, "Play"), acc, 0xFFFFFFFF, v -> { if (pendingWork(gameDir())) startCaptures(); else startGame(); }); play.setTextSize(18);   // (as a start would: shaders captured last time first)
         ((LinearLayout.LayoutParams) play.getLayoutParams()).topMargin = px(16);
         // the rest
         more = new LinearLayout(this); more.setOrientation(LinearLayout.VERTICAL); root.addView(more, new LinearLayout.LayoutParams(-1, -2));
@@ -237,9 +242,20 @@ public final class SetupActivity extends Activity {
             cg.addView(gs);
         }
         saveBox = card(more, null, T.t(this, "Save data"), acc);
-        LinearLayout r4 = hrow(saveBox);
+        // the player whose saves these are (Profiles: one list for every game of the app, each player with their own save in each game)
+        playerText = text(saveBox, "", 15, 0xFFF2F3F5, true); playerText.setPadding(0, 0, 0, px(4));
+        LinearLayout rp = hrow(saveBox);
+        switchBtn = pill(rp, T.t(this, "Change player"), 0xFF2A2E37, 0xFFF2F3F5, v -> switchPlayer());
+        addBtn = pill(rp, T.t(this, "Add a player"), 0xFF2A2E37, 0xFFF2F3F5, v -> nameDialog(null));
+        LinearLayout rp2 = hrow(saveBox); ((LinearLayout.LayoutParams) rp2.getLayoutParams()).topMargin = px(8);
+        renameBtn = pill(rp2, T.t(this, "Rename"), 0xFF2A2E37, 0xFFF2F3F5, v -> nameDialog(Profiles.current(GameSettings.root(this))));
+        deleteBtn = pill(rp2, T.t(this, "Delete player"), 0xFF2A2E37, 0xFFC4C9D2, v -> deletePlayer());
+        LinearLayout r4 = hrow(saveBox); ((LinearLayout.LayoutParams) r4.getLayoutParams()).topMargin = px(14);
         saveExport = pill(r4, T.t(this, "Export save data"), 0xFF2A2E37, 0xFFF2F3F5, v -> chooseSaveExport());
         saveImport = pill(r4, T.t(this, "Import edited save data"), 0xFF2A2E37, 0xFFF2F3F5, v -> chooseSaveImport());
+        LinearLayout r6 = hrow(saveBox); ((LinearLayout.LayoutParams) r6.getLayoutParams()).topMargin = px(8);
+        startOverBtn = pill(r6, T.t(this, "Start over"), 0xFF2A2E37, 0xFFF2F3F5, v -> startOver());
+        restoreBtn = pill(r6, T.t(this, "Restore the previous save"), 0xFF2A2E37, 0xFFF2F3F5, v -> restoreSave());
         shortcut = pill(saveBox, T.t(this, "Add %s to the home screen", gameName()), 0xFF2A2E37, 0xFFF2F3F5, v -> pinShortcut());
         ((LinearLayout.LayoutParams) shortcut.getLayoutParams()).topMargin = px(8);
         // the Vulkan driver: the phone's own, or an Adreno driver package (a zip with meta.json and the library, e.g. Mesa Turnip) opened through libadrenotools;
@@ -360,10 +376,15 @@ public final class SetupActivity extends Activity {
             android.graphics.drawable.GradientDrawable gb = new android.graphics.drawable.GradientDrawable(); gb.setCornerRadius(20 * dp); gb.setColor(ok ? accent : 0xFF262A33); go.setBackground(gb);
             card.addView(go, new LinearLayout.LayoutParams(iconS, -2));
             card.setOnClickListener(v -> { GameSettings.choose(this, id);   // Play goes the way a home screen shortcut goes, not straight to the game: captured shaders are translated into the pack first (pendingWork)
-                if (ok) { Intent it = new Intent(this, SetupActivity.class); it.putExtra("game", id); startActivity(it); finish(); } else openSetup(); });
+                if (ok) { Intent it = new Intent(this, SetupActivity.class); it.putExtra("game", id); it.putExtra("from_launcher", true); startActivity(it); finish(); } else openSetup(); });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.leftMargin = lp.rightMargin = (int) (14 * dp); row.addView(card, lp);
         }
         root.addView(row);
+        if (Profiles.list(GameSettings.root(this)).size() > 1) {   // who plays (Profiles): changed on the setup screen
+            TextView who = new TextView(this); who.setText(T.t(this, "Player: %s", Profiles.currentName(GameSettings.root(this))) + "  ·  " + T.t(this, "Change player"));
+            who.setTextColor(0xFFF2F3F5); who.setTextSize(15); who.setGravity(Gravity.CENTER); who.setPadding(0, (int) (2 * dp), 0, (int) (4 * dp));
+            who.setOnClickListener(v -> openSetup()); root.addView(who);
+        }
         TextView manage = new TextView(this); manage.setText(T.t(this, "Set up or manage a game")); manage.setTextColor(0xFFC4C9D2); manage.setTextSize(14); manage.setGravity(Gravity.CENTER);
         manage.setPadding((int) (18 * dp), (int) (7 * dp), (int) (18 * dp), (int) (7 * dp));
         android.graphics.drawable.GradientDrawable mb = new android.graphics.drawable.GradientDrawable(); mb.setCornerRadius(16 * dp); mb.setColor(0x33FFFFFF); manage.setBackground(mb);
@@ -453,6 +474,11 @@ public final class SetupActivity extends Activity {
         on(setup, !running && exefsDir != null && romfsDir != null); on(play, !running && ready()); on(clear, !running && chosen);
         play.setVisibility(ready() ? android.view.View.VISIBLE : android.view.View.GONE);
         on(saveExport, !running && setUp()); on(saveImport, !running && setUp());
+        { File r = GameSettings.root(this); int n = Profiles.list(r).size();
+          playerText.setText(T.t(this, "Player: %s", Profiles.currentName(r)));
+          switchBtn.setVisibility(n > 1 ? android.view.View.VISIBLE : android.view.View.GONE);
+          on(switchBtn, !running); on(addBtn, !running); on(renameBtn, !running); on(deleteBtn, !running && n > 1); on(startOverBtn, !running && setUp());
+          restoreBtn.setVisibility(Profiles.hasBackup(GameSettings.saveDirs(this)) ? android.view.View.VISIBLE : android.view.View.INVISIBLE); on(restoreBtn, !running); }
         saveBox.setVisibility(setUp() ? android.view.View.VISIBLE : android.view.View.GONE);
         if (running && status.getText().length() == 0)   // a new screen while the setup (or a copy) another one started still runs
             status.setText(T.t(this, "Setup is still running in the background. Wait a few minutes, then close and reopen the app to see whether it has finished."));
@@ -542,7 +568,7 @@ public final class SetupActivity extends Activity {
 
     private void chooseSaveExport() {
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.setType("application/zip"); i.putExtra(Intent.EXTRA_TITLE, game()[2] + "-save.zip");
+        i.setType("application/zip"); i.putExtra(Intent.EXTRA_TITLE, GameSettings.saveZipName(this));
         startActivityForResult(i, PICK_SAVE_EXPORT);
     }
     private void chooseSaveImport() {   // any file: a ZIP a browser or a chat app saved is often typed octet-stream / x-zip-compressed and the picker greyed it out
@@ -557,7 +583,7 @@ public final class SetupActivity extends Activity {
             String result;
             try (InputStream input = getContentResolver().openInputStream(source)) {
                 if (input == null) throw new IOException("the file provider could not open the selected archive");
-                int files = SaveImport.install(input, new File(gameDir(), "save_import"), nameOf(source));
+                int files = SaveImport.install(input, new File(GameSettings.saveRoot(this), "save_import"), nameOf(source));   // (the chosen player's: android_main.c installs it at the next start)
                 result = T.t(this, "Imported %d save file(s) into %s (%s). Tap Play to load it; your current save is kept as a backup.", files, game()[1], SaveImport.lastFiles);
             } catch (IOException | SecurityException e) {
                 result = T.t(this, "Could not import save data: %s", e.getMessage());
@@ -568,7 +594,7 @@ public final class SetupActivity extends Activity {
     }
     private void exportSave(Uri destination) {
         if (destination == null) return;
-        File save = new File(gameDir(), "save");
+        File save = GameSettings.activeSave(this);   // (the chosen player's, in Documents when the Save folder is set there)
         status.setText(T.t(this, "Exporting save data..."));
         new Thread(() -> {
             String result;
@@ -582,6 +608,77 @@ public final class SetupActivity extends Activity {
             final String message = result;
             runOnUiThread(() -> status.setText(message));
         }).start();
+    }
+    // ---------- Players (Profiles) and Start over. Only here, with the game closed (onCreate sends the app's icon back to a running game), and not during a setup or an import.
+    //   The engine takes the chosen player's save at its next start (android_main.c choose_profile)
+    private boolean busy() { if (!running && !GameActivity.alive) return false; status.setText(T.t(this, "Please wait for the current setup or file copy to finish.")); return true; }
+    private void switchPlayer() {
+        if (busy()) return;
+        File r = GameSettings.root(this); List<String[]> ps = Profiles.list(r); String cur = Profiles.current(r);
+        String[] names = new String[ps.size()]; int at = 0;
+        for (int k = 0; k < ps.size(); k++) { names[k] = ps.get(k)[1]; if (ps.get(k)[0].equals(cur)) at = k; }
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Who is playing?"))
+            .setSingleChoiceItems(names, at, (d, w) -> { d.dismiss(); if (busy()) return;
+                try { Profiles.choose(r, ps.get(w)[0]); status.setText(T.t(this, "Now playing as %s.", ps.get(w)[1])); } catch (IOException e) { status.setText(T.t(this, "That did not work: %s", e.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    // id null: a new player (chosen straight away); else that player's new name
+    private void nameDialog(String id) {
+        if (busy()) return;
+        File r = GameSettings.root(this); List<String[]> ps = Profiles.list(r); String[] p = id == null ? null : Profiles.find(ps, id);
+        android.widget.EditText e = new android.widget.EditText(this); e.setSingleLine(true);
+        e.setFilters(new android.text.InputFilter[] { new android.text.InputFilter.LengthFilter(Profiles.MAX_NAME) });
+        int k = ps.size() + 1; while (Profiles.nameProblem(ps, T.t(this, "Player %d", k), null) != null) k++;   // (the first "Player n" not taken)
+        e.setText(p != null ? p[1] : T.t(this, "Player %d", k)); e.selectAll();
+        android.widget.FrameLayout box = new android.widget.FrameLayout(this); box.setPadding(px(20), px(8), px(20), 0); box.addView(e);
+        new android.app.AlertDialog.Builder(this).setTitle(p == null ? T.t(this, "New player") : T.t(this, "Rename player")).setView(box)
+            .setPositiveButton(p == null ? T.t(this, "Add") : T.t(this, "Rename"), (d, w) -> { if (busy()) return;
+                String name = Profiles.clean(e.getText().toString()), why = Profiles.nameProblem(Profiles.list(r), name, id);
+                if (why != null) { status.setText(why.startsWith("Type") ? T.t(this, "Type a name.") : T.t(this, "That name is taken.")); return; }
+                try {
+                    if (p == null) { Profiles.choose(r, Profiles.add(r, name)); status.setText(T.t(this, "Added %s. Their game starts from the beginning.", name)); }
+                    else { Profiles.rename(r, id, name); status.setText(""); }
+                } catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    private void deletePlayer() {
+        if (busy()) return;
+        File r = GameSettings.root(this); String id = Profiles.current(r), name = Profiles.currentName(r);
+        if (Profiles.list(r).size() <= 1) return;
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Delete %s?", name))
+            .setMessage(T.t(this, "The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.", name))
+            .setPositiveButton(T.t(this, "Delete"), (d, w) -> { if (busy()) return;
+                try { Profiles.delete(r, id, GameSettings.dirs(this)); status.setText(T.t(this, "%s deleted. Now playing as %s.", name, Profiles.currentName(r))); }
+                catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    private static String stamp() { return new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT).format(new java.util.Date()); }
+    // Start over: the chosen player's save in this game put aside as a backup (save.bak-<date> beside it, the older backup deleted), so the game starts anew
+    private void startOver() {
+        if (busy()) return;
+        String name = Profiles.currentName(GameSettings.root(this));
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Start over?"))
+            .setMessage(T.t(this, "%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.", name, gameName()))
+            .setPositiveButton(T.t(this, "Start over"), (d, w) -> { if (busy()) return;
+                try { int n = Profiles.startOver(GameSettings.saveDirs(this), stamp());
+                      status.setText(n > 0 ? T.t(this, "Done: the game starts from the beginning. The old save is kept as a backup.") : T.t(this, "There is no save yet: the game already starts from the beginning.")); }
+                catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    // Restore: the backup and the save change places, so nothing is lost and the player can switch back
+    private void restoreSave() {
+        if (busy()) return;
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Restore the previous save?"))
+            .setMessage(T.t(this, "The backup becomes the save again, and the save you have now becomes the backup, so you can switch back."))
+            .setPositiveButton(T.t(this, "Restore"), (d, w) -> { if (busy()) return;
+                try { Profiles.restore(GameSettings.saveDirs(this), stamp()); status.setText(T.t(this, "The previous save is back.")); }
+                catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
     }
     private int addSaveFiles(File root, File directory, java.util.zip.ZipOutputStream zip) throws IOException {
         File[] children = directory.listFiles();

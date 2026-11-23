@@ -516,3 +516,33 @@ There isn't room for a copy of your game files. The setup can move your RomFS an
 This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	Ce dossier ne peut pas être lu. Choisissez-le depuis le stockage du téléphone (pas Récents ni Téléchargements).
 Welcome! To play, set up %s from your own game files. It takes two steps.	Bienvenue ! Pour jouer, installez %s à partir de vos propres fichiers de jeu. Cela se fait en deux étapes.
 copy the game files	copier les fichiers du jeu
+Player: %s. Players are changed on the setup screen, with the game closed.	Joueur : %s. Le joueur se change sur l'écran de configuration, jeu fermé.
+Playing as %s. Tap Play, or change the player below.	Joueur actuel : %s. Touchez Jouer, ou changez de joueur plus bas.
+Player: %s	Joueur : %s
+Change player	Changer de joueur
+Add a player	Ajouter un joueur
+Rename	Renommer
+Delete player	Supprimer le joueur
+Start over	Recommencer
+Restore the previous save	Restaurer la sauvegarde précédente
+Who is playing?	Qui joue ?
+Now playing as %s.	Joueur actuel : %s.
+That did not work: %s	Échec : %s
+Player %d	Joueur %d
+New player	Nouveau joueur
+Rename player	Renommer le joueur
+Add	Ajouter
+Type a name.	Saisissez un nom.
+That name is taken.	Ce nom est déjà pris.
+Added %s. Their game starts from the beginning.	%s ajouté. Sa partie commence depuis le début.
+Delete %s?	Supprimer %s ?
+The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.	Les sauvegardes de %s dans tous les jeux de cette appli sont supprimées définitivement. Exportez-les d'abord pour les garder.
+%s deleted. Now playing as %s.	%s supprimé. Joueur actuel : %s.
+Start over?	Recommencer ?
+%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.	%s recommence %s depuis le début. La sauvegarde actuelle est conservée en secours, et Restaurer la sauvegarde précédente la ramène. Une seule copie est gardée : une plus ancienne est supprimée.
+Done: the game starts from the beginning. The old save is kept as a backup.	C'est fait : le jeu commence depuis le début. L'ancienne sauvegarde est conservée en secours.
+There is no save yet: the game already starts from the beginning.	Pas encore de sauvegarde : le jeu commence déjà depuis le début.
+Restore the previous save?	Restaurer la sauvegarde précédente ?
+The backup becomes the save again, and the save you have now becomes the backup, so you can switch back.	La copie de secours redevient la sauvegarde, et la sauvegarde actuelle devient la copie : vous pouvez revenir en arrière.
+Restore	Restaurer
+The previous save is back.	La sauvegarde précédente est revenue.
