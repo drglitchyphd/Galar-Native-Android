@@ -9,7 +9,7 @@ enum { OpName = 5, OpEntryPoint = 15, OpExecutionMode = 16, OpTypeInt = 21, OpTy
 enum { DecBlock = 2, DecBufferBlock = 3, DecBuiltIn = 11, DecLocation = 30, DecBinding = 33, DecDescriptorSet = 34 };
 enum { SC_UniformConstant = 0, SC_Input = 1, SC_Uniform = 2, SC_StorageBuffer = 12 };
 
-typedef struct { uint16_t op; uint32_t a, b, c, d, e, f; uint8_t block, bufblock, has_binding, has_set, has_loc, builtin; uint32_t binding, set, loc; char name[48]; } ent;
+typedef struct { uint16_t op; uint32_t a, b, c, d, e, f, g; uint8_t block, bufblock, has_binding, has_set, has_loc, builtin; uint32_t binding, set, loc; char name[48]; } ent;
 
 int spv_reflect(const uint32_t *code, size_t words, spv_res *res, int max_res, int *nres, spv_input *in, int max_in, int *nin, int *stage, uint32_t ls[3]) {
     *nres = 0; if (nin) *nin = 0; *stage = -1; if (ls) ls[0] = ls[1] = ls[2] = 0;
@@ -36,7 +36,7 @@ int spv_reflect(const uint32_t *code, size_t words, spv_res *res, int max_res, i
         else if ((op == OpTypeInt || op == OpTypeFloat || op == OpTypeVector || op == OpTypeImage || op == OpTypeSampler || op == OpTypeSampledImage || op == OpTypeArray
                   || op == OpTypeRuntimeArray || op == OpTypeStruct || op == OpTypePointer) && n >= 2 && x[1] < bound) {
             ent *t = &e[x[1]]; t->op = (uint16_t)op;
-            if (n > 2) t->a = x[2]; if (n > 3) t->b = x[3]; if (n > 4) t->c = x[4]; if (n > 5) t->d = x[5]; if (n > 6) t->e = x[6]; if (n > 7) t->f = x[7];
+            if (n > 2) t->a = x[2]; if (n > 3) t->b = x[3]; if (n > 4) t->c = x[4]; if (n > 5) t->d = x[5]; if (n > 6) t->e = x[6]; if (n > 7) t->f = x[7]; if (n > 8) t->g = x[8];
         }
         else if (op == OpConstant && n >= 4 && x[2] < bound) { e[x[2]].op = OpConstant; e[x[2]].a = x[1]; e[x[2]].b = x[3]; }   // result type first, then the result: the value is in b
         else if (op == OpVariable && n >= 4 && x[2] < bound) { e[x[2]].op = OpVariable; e[x[2]].a = x[1]; e[x[2]].b = x[3]; vars[nv++] = x[2]; }   // a = pointer type, b = storage class
@@ -70,8 +70,8 @@ int spv_reflect(const uint32_t *code, size_t words, spv_res *res, int max_res, i
             if (t->op == OpTypeSampledImage) im = t->a < bound ? &e[t->a] : NULL;
             if (t->op == OpTypeSampler) r->kind = SPV_RES_SAMP;
             else if (im && im->op == OpTypeImage) {
-                // OpTypeImage: a = sampled type, b = dim, c = depth, d = arrayed, e = ms, f = sampled (1 with a sampler, 2 storage)
-                r->dim = (uint8_t)im->b; r->depth = im->c == 1; r->arrayed = (uint8_t)im->d; r->ms = (uint8_t)im->e;
+                // OpTypeImage: a = sampled type, b = dim, c = depth, d = arrayed, e = ms, f = sampled (1 with a sampler, 2 storage), g = image format
+                r->dim = (uint8_t)im->b; r->depth = im->c == 1; r->arrayed = (uint8_t)im->d; r->ms = (uint8_t)im->e; r->ifmt = (uint8_t)(im->g < 256 ? im->g : 0);
                 ent *st = im->a < bound ? &e[im->a] : NULL; r->sclass = st && st->op == OpTypeInt ? (st->b ? 2 : 1) : 0;
                 if (im->f == 2) r->kind = im->b == SPV_DIM_BUFFER ? SPV_RES_IBUF : SPV_RES_IMG;
                 else if (im->b == SPV_DIM_BUFFER) r->kind = SPV_RES_TBUF;
@@ -269,6 +269,66 @@ size_t spv_strip_unused(uint32_t *code, size_t words) {
         if (op == 10 /* OpExtension */ && !ilk && n >= 2 && !strncmp((const char *)(x + 1), "SPV_EXT_fragment_shader_interlock", 4 * (n - 1))) drop = 1;
         if (op == OpExecutionMode && n >= 3 && x[2] >= 5366 && x[2] <= 5371 && !ilk) drop = 1;   // the interlock execution modes
         if (!drop) { memmove(code + w, x, 4 * n); w += n; }
+        i += n; }
+    return w;
+}
+
+// Unused ClipDistance / CullDistance members of the per-vertex block, dropped. The translator declares every vertex shader's gl_PerVertex with ClipDistance[8] and
+//   CullDistance[1], written by none of them (Shield's 18,300): 9 is over the 8 of maxCombinedClipAndCullDistances most GPUs have (VUID-RuntimeSpirv-00710), and the
+//   CullDistance capability needs shaderCullDistance, which some drivers lack. Only when they are the block's last members and nothing reaches them: every use of a
+//   variable of the block is an access chain whose first index is a constant naming another member (else the shader is left as it is). Their capabilities go
+//   when no ClipDistance / CullDistance is left. In place; the new word count
+size_t spv_strip_clipcull(uint32_t *code, size_t words) {
+    enum { OpMemberName = 6, OpFunctionCall = 57, OpLoad = 61, OpStore = 62, OpCopyMemory = 63, OpAccessChain = 65, OpInBoundsAccessChain = 66, OpPtrAccessChain = 67,
+           OpMemberDecorate = 72, OpCopyObject = 83, OpSelect = 169, OpPhi = 245, MAXS = 4 };
+    if (words < 5 || code[0] != 0x07230203u) return words;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return words;
+    uint32_t sid[MAXS], smask[MAXS], skeep[MAXS], sbits[MAXS][2]; int ns = 0, var_clip = 0, var_cull = 0;   // sbits: the members that are ClipDistance / CullDistance
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) return words; const uint32_t *x = code + i;
+        if (op == OpMemberDecorate && n >= 5 && x[3] == DecBuiltIn && (x[4] == 3 || x[4] == 4)) {
+            if (x[2] >= 32) return words;
+            int k = 0; while (k < ns && sid[k] != x[1]) k++;
+            if (k == ns) { if (ns == MAXS) return words; sid[ns] = x[1]; smask[ns] = sbits[ns][0] = sbits[ns][1] = 0; skeep[ns] = 32; ns++; }
+            smask[k] |= 1u << x[2]; sbits[k][x[4] - 3] |= 1u << x[2]; }
+        else if (op == OpDecorate && n >= 4 && x[2] == DecBuiltIn) { if (x[3] == 3) var_clip = 1; else if (x[3] == 4) var_cull = 1; }
+        i += n; }
+    if (!ns) return words;
+    uint8_t *of = calloc(bound, 1); uint32_t *cv = calloc(bound, 4);   // of: 1 + the struct's index for its pointer types and variables (bit 7: a variable); cv: constants + 1
+    if (!of || !cv) { free(of); free(cv); return words; }
+    int ok = 1, seen = 0;
+    for (size_t i = 5; i < words && ok;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpTypeStruct && n >= 2) {
+            for (int k = 0; k < ns; k++) if (sid[k] == x[1]) {   // the dropped members must be the last ones
+                uint32_t cnt = n - 2, lo = 0; while (lo < cnt && !(smask[k] >> lo & 1)) lo++;
+                if (cnt > 32 || !lo || lo == cnt || smask[k] != (uint32_t)(((uint64_t)1 << cnt) - ((uint64_t)1 << lo))) ok = 0;
+                skeep[k] = lo; seen++; }
+            for (uint32_t m = 2; m < n; m++) for (int k = 0; k < ns; k++) if (x[m] == sid[k]) ok = 0;   // (nested in another struct)
+        }
+        else if ((op == OpTypeArray || op == OpTypeRuntimeArray) && n >= 3) { for (int k = 0; k < ns; k++) if (x[2] == sid[k]) ok = 0; }   // (arrays of it: geometry / tessellation)
+        else if (op == OpTypePointer && n >= 4 && x[1] < bound) { for (int k = 0; k < ns; k++) if (x[3] == sid[k]) of[x[1]] = (uint8_t)(1 + k); }
+        else if (op == OpConstant && n == 4 && x[2] < bound) cv[x[2]] = x[3] + 1;
+        else if (op == OpVariable && n >= 4 && x[1] < bound && x[2] < bound && of[x[1]]) of[x[2]] = (uint8_t)(of[x[1]] | 0x80);
+        else if ((op == OpAccessChain || op == OpInBoundsAccessChain) && n >= 4 && x[3] < bound && (of[x[3]] & 0x80)) {
+            int k = (of[x[3]] & 0x7f) - 1;
+            if (n < 5 || x[4] >= bound || !cv[x[4]] || cv[x[4]] - 1 >= skeep[k]) ok = 0; }
+        else {   // any other use of such a variable: left as it is
+            uint32_t a = 0, b = 0;
+            switch (op) { case OpLoad: case OpCopyObject: case OpPtrAccessChain: a = 3; b = 4; break; case OpStore: a = 1; b = 2; break; case OpCopyMemory: a = 1; b = 3; break;
+                          case OpFunctionCall: case OpSelect: a = 4; b = n; break; case OpPhi: a = 3; b = n; break; default: break; }
+            for (uint32_t m = a; m < b && m < n; m++) if (x[m] < bound && (of[x[m]] & 0x80)) ok = 0;
+        }
+        i += n; }
+    free(of); free(cv);
+    if (!ok || seen != ns) return words;
+    int left_clip = var_clip, left_cull = var_cull;
+    for (int k = 0; k < ns; k++) { uint32_t keep = (1u << skeep[k]) - 1; if (sbits[k][0] & keep) left_clip = 1; if (sbits[k][1] & keep) left_cull = 1; }
+    size_t w = 5;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i; int drop = 0; uint32_t nn = n;
+        int k = -1; if ((op == OpTypeStruct || op == OpMemberDecorate || op == OpMemberName) && n >= 2) for (int j = 0; j < ns; j++) if (sid[j] == x[1]) k = j;
+        if (k >= 0 && op == OpTypeStruct) nn = 2 + skeep[k];
+        else if (k >= 0 && n >= 3 && x[2] >= skeep[k]) drop = 1;   // (their member decorations and names)
+        if (op == 17 /* OpCapability */ && n == 2 && ((x[1] == 32 && !left_clip) || (x[1] == 33 && !left_cull))) drop = 1;
+        if (!drop) { memmove(code + w, x, 4 * nn); code[w] = nn << 16 | op; w += nn; }
         i += n; }
     return w;
 }
@@ -589,6 +649,17 @@ uint32_t *spv_image_caps(const uint32_t *code, size_t words, size_t *out_words) 
     memcpy(o + w, code + last_cap, 4 * (words - last_cap)); w += words - last_cap;
     *out_words = w; return o;
 }
+// Storage images declared in one format re-declared in another, in place (the operand only): an R11G11B10F image the engine stands in for by RGBA16F
+//   (DM_VK_B10_AS_RGBA16) is given to the shader as RGBA16F, which its declaration must then name. Rgba16f needs no capability beyond Shader. Storage texel
+//   buffers (Dim Buffer) keep their format: a buffer texture stays in the packed format (its texels are the game's memory). Returns how many changed
+int spv_image_format_swap(uint32_t *code, size_t words, uint32_t from, uint32_t to) {
+    if (words < 5 || code[0] != 0x07230203u) return 0;
+    int n = 0;
+    for (size_t i = 5; i < words;) { uint32_t wc = code[i] >> 16, op = code[i] & 0xffff; if (!wc || i + wc > words) return n;
+        if (op == OpTypeImage && wc >= 9 && code[i + 8] == from && code[i + 3] != SPV_DIM_BUFFER) { code[i + 8] = to; n++; }
+        i += wc; }
+    return n;
+}
 // Gathers nudged by 1/512 of a texel (Adreno). On a coordinate right at a texel centre the host picks another 2x2 block than Maxwell does; Ryujinx's translator adds
 //   1 / (size * 2^(8+1)) to the coordinate for such hosts (TexturePass, QueryHostGatherBiasPrecision 8), and Lemon found Adreno is one (64x64 dark shadow squares in
 //   Tears of the Kingdom). Done here on the loaded SPIR-V, so shaders translated earlier get it too. 2D and 2D-array gathers only (x and y; a layer stays as it is)
@@ -651,6 +722,65 @@ uint32_t *spv_gather_bias(const uint32_t *code, size_t words, size_t *out_words)
                 o[w++] = 5u << 16 | OpFAdd; o[w++] = vec[1][2]; o[w++] = nc; o[w++] = arr ? xy : x[4]; o[w++] = off;
                 if (arr) { out = next++; o[w++] = 8u << 16 | OpVectorShuffle; o[w++] = vec[1][3]; o[w++] = out; o[w++] = nc; o[w++] = x[4]; o[w++] = 0; o[w++] = 1; o[w++] = 4; }
                 memcpy(o + w, x, 4 * n); o[w + 4] = arr ? out : nc; w += n; i += n; done++; continue;
+            }
+        }
+        memcpy(o + w, x, 4 * n); w += n; i += n; }
+    free(ty); free(info);
+    if (!done) { free(o); return NULL; }
+    o[3] = next; *out_words = w; return o;
+}
+
+// textureQueryLod's first component (the mip level the sample would read) as clamp (computed LOD, 0, levels - 1), for Arm's own driver: on a Mali-G615 MC6 (stock
+//   driver, Android 16) dEQP-VK.glsl.texture_functions.query.texturequerylod failed 63 of 190 cases, all the same way: the second component (the LOD) right, the first
+//   one floor (LOD) whatever the texture's level count and the sampler's mip mode (level 2 on a texture with no mips; 2 where trilinear wants 2.43). Ryujinx's
+//   translator writes Maxwell's TMML as OpImageQueryLod and reads component 0 only: 1,635 of Sword / Shield's 38,501 shaders. Not exact either: the sampler's min / max
+//   LOD and a nearest mip mode are not known to the shader, so it is the answer for a linear-mip sampler without LOD clamps, the common case. 1D / 2D / 3D / cube
+//   (arrayed or not) only, as OpImageQueryLevels allows. The query keeps its place under a new id; OpCompositeInsert takes the old id. NULL when the module has none
+uint32_t *spv_query_lod(const uint32_t *code, size_t words, size_t *out_words) {
+    enum { OpCapability = 17, OpFunction = 54, OpExtInstImport = 11, OpExtInst = 12, OpCompositeExtract = 81, OpCompositeInsert = 82, OpImage = 100,
+           OpImageQueryLod = 105, OpImageQueryLevels = 106, OpConvertSToF = 111, OpConvertUToF = 112, OpFSub = 131, FClamp = 43, CapImageQuery = 50 };
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint32_t *ty = calloc(bound, 4), *info = calloc(bound, 4);   // ty: an id's result type (of a sampled image type: its image type); info: 1 f32, 2 / 3 i32 signed / unsigned, image 0x1000 | dim << 4 | arrayed << 2 | ms << 1 | sampled==1, sampled image 0x2000
+    if (!ty || !info) { free(ty); free(info); return NULL; }
+    size_t first_fn = 0, last_cap = 0; int has_cap = 0, nq = 0; uint32_t f32 = 0, i32 = 0, i32u = 0, glsl = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) { free(ty); free(info); return NULL; } const uint32_t *x = code + i;
+        if (op == OpCapability && n == 2) { last_cap = i + n; if (x[1] == CapImageQuery) has_cap = 1; }
+        else if (op == OpExtInstImport && n >= 3 && !strncmp((const char *)(x + 2), "GLSL.std.450", 4 * (n - 2))) glsl = x[1];
+        else if (op == OpTypeFloat && n >= 3 && x[2] == 32 && x[1] < bound) { info[x[1]] = 1; if (!f32) f32 = x[1]; }
+        else if (op == OpTypeInt && n == 4 && x[2] == 32 && x[1] < bound) { info[x[1]] = x[3] ? 2 : 3; if (x[3] && !i32) i32 = x[1]; if (!x[3] && !i32u) i32u = x[1]; }
+        else if (op == OpTypeImage && n >= 9 && x[1] < bound) info[x[1]] = 0x1000 | (x[3] & 0xf) << 4 | (x[5] ? 4 : 0) | (x[6] ? 2 : 0) | (x[7] == 1);
+        else if (op == OpTypeSampledImage && n == 3 && x[1] < bound && x[2] < bound) { info[x[1]] = 0x2000; ty[x[1]] = x[2]; }
+        else if (op == OpFunction && !first_fn) first_fn = i;
+        else if (op == OpImageQueryLod && n == 5) nq++;
+        if (first_fn && n >= 3 && (op == 61 /* OpLoad */ || op == 86 /* OpSampledImage */ || op == 245 /* OpPhi */ || op == 169 /* OpSelect */) && x[2] < bound) ty[x[2]] = x[1];
+        i += n; }
+    if (!nq || !first_fn || !f32 || !glsl || !last_cap) { free(ty); free(info); return NULL; }
+    uint32_t it = i32 ? i32 : i32u, next = bound;
+    uint32_t *o = malloc(4 * (words + 32 + 32 * (size_t)nq)); if (!o) { free(ty); free(info); return NULL; }
+    size_t w = 0; memcpy(o, code, 4 * last_cap); w = last_cap;
+    if (!has_cap) { o[w++] = 2u << 16 | OpCapability; o[w++] = CapImageQuery; }
+    memcpy(o + w, code + last_cap, 4 * (first_fn - last_cap)); w += first_fn - last_cap;
+    if (!it) { it = next++; o[w++] = 4u << 16 | OpTypeInt; o[w++] = it; o[w++] = 32; o[w++] = 1; }
+    int isigned = it != i32u;
+    uint32_t c0 = next++, c1 = next++;
+    o[w++] = 4u << 16 | 43 /* OpConstant */; o[w++] = f32; o[w++] = c0; o[w++] = 0;
+    o[w++] = 4u << 16 | 43; o[w++] = f32; o[w++] = c1; o[w++] = 0x3F800000u;
+    int done = 0;
+    for (size_t i = first_fn; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpImageQueryLod && n == 5 && x[3] < bound) {
+            uint32_t sit = ty[x[3]], imt = sit && sit < bound && info[sit] == 0x2000 ? ty[sit] : 0, ii = imt && imt < bound ? info[imt] : 0, dim = ii >> 4 & 0xf;
+            if ((ii & 0xf000) == 0x1000 && dim <= 3 && !(ii & 2)) {   // Dim 1D / 2D / 3D / Cube, not multisampled
+                uint32_t q = next++, img = next++, lv = next++, lvf = next++, mx = next++, y = next++, l = next++;
+                memcpy(o + w, x, 4 * n); o[w + 2] = q; w += n;
+                o[w++] = 4u << 16 | OpImage; o[w++] = imt; o[w++] = img; o[w++] = x[3];
+                o[w++] = 4u << 16 | OpImageQueryLevels; o[w++] = it; o[w++] = lv; o[w++] = img;
+                o[w++] = 4u << 16 | (isigned ? OpConvertSToF : OpConvertUToF); o[w++] = f32; o[w++] = lvf; o[w++] = lv;
+                o[w++] = 5u << 16 | OpFSub; o[w++] = f32; o[w++] = mx; o[w++] = lvf; o[w++] = c1;
+                o[w++] = 5u << 16 | OpCompositeExtract; o[w++] = f32; o[w++] = y; o[w++] = q; o[w++] = 1;
+                o[w++] = 8u << 16 | OpExtInst; o[w++] = f32; o[w++] = l; o[w++] = glsl; o[w++] = FClamp; o[w++] = y; o[w++] = c0; o[w++] = mx;
+                o[w++] = 6u << 16 | OpCompositeInsert; o[w++] = x[1]; o[w++] = x[2]; o[w++] = l; o[w++] = q; o[w++] = 0;
+                i += n; done++; continue;
             }
         }
         memcpy(o + w, x, 4 * n); w += n; i += n; }
@@ -1320,4 +1450,183 @@ uint32_t *spv_flip_y(const uint32_t *code, size_t words, size_t *out_words) {
     }
     if (!dec || !decl) { free(o); return NULL; }
     o[3] = nb; *out_words = w; return o;
+}
+
+// ---- R11G11B10F's RGBA16F stand-in (DM_VK_B10_AS_RGBA16, nvn_vk.c): what a shader writes into it made what the packed format stores ----
+// R11G11B10F's channels are unsigned floats with the half's exponent and 6 (R, G) or 5 (B) mantissa bits. A value stored into one follows Vulkan's rules for them,
+// as dm/gfx/tex/b10_conv.h's b10_float_to_chan does for the stand-in's clears and copies: negative values, -0 and -inf become 0, a NaN stays a NaN, +inf stays +inf,
+// finite values round to the nearest (ties to even), and those past the largest finite value (65024 for R / G, 64512 for B) become it. RGBA16F keeps a negative or
+// out-of-range value and rounds to 10 mantissa bits, so a later pass would read what the Switch never stores (a negative value through log2 / pow gives NaN).
+// bq_emit writes the rule for a 32-bit float scalar or vector in integer arithmetic on the float's bits, which no rounding mode or fast-math folding of a driver's
+// can change: components 0 and 1 by R / G's rule, 2 by B's, 3 by R's (the callers keep the shader's alpha there, or write 1).
+enum { BQ_23, BQ_31, BQ_255, BQ_MANT, BQ_ONE23, BQ_112, BQ_113, BQ_0, BQ_1, BQ_D, BQ_DMASK, BQ_DHALF, BQ_MAXB, BQ_D113, BQ_F0, BQ_SCALE, BQ_N };
+enum { BQ_PRELUDE_ROOM = 1500, BQ_EMIT_ROOM = 64 * 6 };   // words bq_prelude and one bq_emit write at most
+typedef struct {
+    uint32_t tf, tu, tb, vf[5], vu[5], vb[5];   // the module's 32-bit float, 32-bit unsigned and bool types and their vectors (0: none yet)
+    int need[5];                                 // component counts the patch works on (1: scalar)
+    uint32_t c[5][BQ_N], f1;                     // per component count, the constants (bq_prelude); f1: the float 1.0
+} b10q;
+static uint32_t bq_val(int k, uint32_t comp) {   // constant k's value for component comp
+    int b = comp == 2; uint32_t d = b ? 18 : 17;  // (the float's mantissa bits below the packed channel's: 23 - 5 for B, 23 - 6 for R / G)
+    switch (k) {
+        case BQ_23: return 23; case BQ_31: return 31; case BQ_255: return 255; case BQ_MANT: return 0x7fffffu; case BQ_ONE23: return 0x800000u;
+        case BQ_112: return 112; case BQ_113: return 113; case BQ_0: return 0; case BQ_1: return 1;
+        case BQ_D: return d; case BQ_DMASK: return (1u << d) - 1; case BQ_DHALF: return 1u << (d - 1); case BQ_D113: return d + 113;
+        case BQ_MAXB: return b ? 0x477C0000u : 0x477E0000u;      // 64512.0f, 65024.0f
+        case BQ_F0: return 0; case BQ_SCALE: return b ? 0x36000000u : 0x35800000u;   // 2^-19, 2^-20: the channel's smallest denormal
+    }
+    return 0;
+}
+static void bq_type(b10q *q, const uint32_t *x, uint32_t op, uint32_t n) {   // every type declaration, in order
+    if (op == OpTypeFloat && n >= 3 && x[2] == 32) q->tf = x[1];
+    else if (op == OpTypeInt && n >= 4 && x[2] == 32 && x[3] == 0) q->tu = x[1];
+    else if (op == 20 /* OpTypeBool */ && n == 2) q->tb = x[1];
+    else if (op == OpTypeVector && n == 4 && x[3] >= 2 && x[3] <= 4) {
+        if (q->tf && x[2] == q->tf) q->vf[x[3]] = x[1]; else if (q->tu && x[2] == q->tu) q->vu[x[3]] = x[1]; else if (q->tb && x[2] == q->tb) q->vb[x[3]] = x[1]; }
+}
+// before the first function: the types still missing, then each needed count's constants (and the float 1.0)
+static size_t bq_prelude(b10q *q, uint32_t *o, size_t w, uint32_t *next) {
+    if (!q->tu) { q->tu = (*next)++; o[w++] = 4u << 16 | OpTypeInt; o[w++] = q->tu; o[w++] = 32; o[w++] = 0; }
+    if (!q->tb) { q->tb = (*next)++; o[w++] = 2u << 16 | 20; o[w++] = q->tb; }
+    for (uint32_t k = 2; k <= 4; k++) if (q->need[k]) {
+        if (!q->vf[k]) { q->vf[k] = (*next)++; o[w++] = 4u << 16 | OpTypeVector; o[w++] = q->vf[k]; o[w++] = q->tf; o[w++] = k; }
+        if (!q->vu[k]) { q->vu[k] = (*next)++; o[w++] = 4u << 16 | OpTypeVector; o[w++] = q->vu[k]; o[w++] = q->tu; o[w++] = k; }
+        if (!q->vb[k]) { q->vb[k] = (*next)++; o[w++] = 4u << 16 | OpTypeVector; o[w++] = q->vb[k]; o[w++] = q->tb; o[w++] = k; } }
+    q->f1 = (*next)++; o[w++] = 4u << 16 | OpConstant; o[w++] = q->tf; o[w++] = q->f1; o[w++] = 0x3f800000u;
+    for (uint32_t k = 1; k <= 4; k++) if (q->need[k]) for (int c = 0; c < BQ_N; c++) {
+        int fl = c == BQ_F0 || c == BQ_SCALE; uint32_t st = fl ? q->tf : q->tu, comp[4];
+        for (uint32_t j = 0; j < k; j++) {
+            comp[j] = 0; for (uint32_t i = 0; i < j; i++) if (bq_val(c, i) == bq_val(c, j)) { comp[j] = comp[i]; break; }
+            if (!comp[j]) { comp[j] = (*next)++; o[w++] = 4u << 16 | OpConstant; o[w++] = st; o[w++] = comp[j]; o[w++] = bq_val(c, j); } }
+        if (k == 1) q->c[1][c] = comp[0];
+        else { q->c[k][c] = (*next)++; o[w++] = (3u + k) << 16 | 44 /* OpConstantComposite */; o[w++] = fl ? q->vf[k] : q->vu[k]; o[w++] = q->c[k][c];
+               for (uint32_t j = 0; j < k; j++) o[w++] = comp[j]; } }
+    return w;
+}
+static uint32_t bq_op(uint32_t *o, size_t *w, uint32_t *next, uint32_t op, uint32_t t, int na, uint32_t a, uint32_t b, uint32_t c) {
+    uint32_t r = (*next)++; o[(*w)++] = (uint32_t)(3 + na) << 16 | op; o[(*w)++] = t; o[(*w)++] = r; o[(*w)++] = a; if (na > 1) o[(*w)++] = b; if (na > 2) o[(*w)++] = c;
+    return r;
+}
+// value v (a 32-bit float scalar, k 1, or vector of k) as the packed format stores it; returns the new value's id
+static uint32_t bq_emit(const b10q *q, uint32_t k, uint32_t v, uint32_t *o, size_t *w, uint32_t *next) {
+    enum { Shr = 194, Shl = 196, Or = 197, And = 199, IAdd = 128, ISub = 130, IEq = 170, INe = 171, UGt = 172, UGe = 174, LOr = 166, LAnd = 167, LNot = 168, Sel = 169,
+           Bitcast = 124, UToF = 112, FMul = 133 };
+    const uint32_t *C = q->c[k]; uint32_t TF = k == 1 ? q->tf : q->vf[k], TU = k == 1 ? q->tu : q->vu[k], TB = k == 1 ? q->tb : q->vb[k];
+    #define O1(op, t, a) bq_op(o, w, next, op, t, 1, a, 0, 0)
+    #define O2(op, t, a, b) bq_op(o, w, next, op, t, 2, a, b, 0)
+    #define O3(op, t, a, b, c) bq_op(o, w, next, op, t, 3, a, b, c)
+    uint32_t u = O1(Bitcast, TU, v);
+    uint32_t t = O2(Shr, TU, u, C[BQ_23]), e8 = O2(And, TU, t, C[BQ_255]);
+    uint32_t sg = O2(Shr, TU, u, C[BQ_31]), neg = O2(INe, TB, sg, C[BQ_0]);
+    uint32_t spec = O2(IEq, TB, e8, C[BQ_255]);                                     // infinity or NaN
+    uint32_t mn = O2(And, TU, u, C[BQ_MANT]), mnz = O2(INe, TB, mn, C[BQ_0]), nan = O2(LAnd, TB, spec, mnz);
+    uint32_t gt = O2(UGt, TB, u, C[BQ_MAXB]), uc = O3(Sel, TU, gt, C[BQ_MAXB], u);   // (a positive finite value: at most the largest finite one; else unused)
+    uint32_t ec = O2(Shr, TU, uc, C[BQ_23]);
+    // the packed format's normal range (2^-14 and up): the float's bits rounded at bit d, ties to even (a carry raises the exponent)
+    uint32_t r = O2(Shr, TU, uc, C[BQ_D]), rem = O2(And, TU, uc, C[BQ_DMASK]);
+    uint32_t g1 = O2(UGt, TB, rem, C[BQ_DHALF]), eh = O2(IEq, TB, rem, C[BQ_DHALF]), ro = O2(And, TU, r, C[BQ_1]), odd = O2(INe, TB, ro, C[BQ_0]);
+    uint32_t tie = O2(LAnd, TB, eh, odd), up = O2(LOr, TB, g1, tie), inc = O3(Sel, TU, up, C[BQ_1], C[BQ_0]), r2 = O2(IAdd, TU, r, inc);
+    uint32_t nb = O2(Shl, TU, r2, C[BQ_D]), nf = O1(Bitcast, TF, nb);
+    // below it (the packed format's denormals, quanta of 2^-20 / 2^-19): the mantissa with its leading one, shifted down by d + 113 - exponent (18..31), rounded
+    uint32_t ma = O2(And, TU, uc, C[BQ_MANT]), mant = O2(Or, TU, ma, C[BQ_ONE23]);
+    uint32_t egt = O2(UGt, TB, ec, C[BQ_112]), ecl = O3(Sel, TU, egt, C[BQ_112], ec);
+    uint32_t sh0 = O2(ISub, TU, C[BQ_D113], ecl), sgt = O2(UGt, TB, sh0, C[BQ_31]), sh = O3(Sel, TU, sgt, C[BQ_31], sh0);
+    uint32_t qd = O2(Shr, TU, mant, sh), m1 = O2(Shl, TU, C[BQ_1], sh), msk = O2(ISub, TU, m1, C[BQ_1]), rem2 = O2(And, TU, mant, msk);
+    uint32_t shm = O2(ISub, TU, sh, C[BQ_1]), h2 = O2(Shl, TU, C[BQ_1], shm);
+    uint32_t g2 = O2(UGt, TB, rem2, h2), e2 = O2(IEq, TB, rem2, h2), qo = O2(And, TU, qd, C[BQ_1]), odd2 = O2(INe, TB, qo, C[BQ_0]);
+    uint32_t tie2 = O2(LAnd, TB, e2, odd2), up2 = O2(LOr, TB, g2, tie2), inc2 = O3(Sel, TU, up2, C[BQ_1], C[BQ_0]), q2 = O2(IAdd, TU, qd, inc2);
+    uint32_t qf = O1(UToF, TF, q2), df = O2(FMul, TF, qf, C[BQ_SCALE]);
+    uint32_t norm = O2(UGe, TB, ec, C[BQ_113]), fin = O3(Sel, TF, norm, nf, df);
+    uint32_t keep = O3(Sel, TF, spec, v, fin);                                      // NaN and +inf as they are
+    uint32_t nn = O1(LNot, TB, nan), z = O2(LAnd, TB, neg, nn);
+    return O3(Sel, TF, z, C[BQ_F0], keep);                                           // negative, -0 and -inf: 0
+    #undef O1
+    #undef O2
+    #undef O3
+}
+// A copy of a fragment shader whose float outputs at the locations in mask (scalar or vector, not BuiltIn, not a dual-source blend's second output) are made what
+//   R11G11B10F stores, components 0-2 (the alpha as the shader wrote it): before every return of the entry point each is loaded, rounded and stored again, so
+//   whatever the shader did with it before (component stores, reads back) stays as it was. For the colour targets DM_VK_B10_AS_RGBA16 draws into its RGBA16F
+//   stand-in without blending (nvn_vk.c pso_make). NULL if no output there can be done
+uint32_t *spv_b10_outputs(const uint32_t *code, size_t words, uint32_t mask, size_t *out_words) {
+    if (!(mask & 0xff) || words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    int32_t *loc = malloc(4 * (size_t)bound); uint8_t *bi = calloc(bound, 1), *ix1 = calloc(bound, 1);
+    if (!loc || !bi || !ix1) { free(loc); free(bi); free(ix1); return NULL; }
+    for (uint32_t i = 0; i < bound; i++) loc[i] = -1;
+    b10q q; memset(&q, 0, sizeof q); uint32_t entry = 0; int frag = 0; size_t first_fn = 0, nret = 0;
+    uint32_t var[8], vty[8], vk[8]; int nv = 0;
+    for (size_t i = 5, in = 0; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) goto none; const uint32_t *x = code + i;
+        if (op == OpEntryPoint && n >= 3 && !entry) { entry = x[2]; frag = x[1] == 4; }
+        else if (op == OpDecorate && n >= 3 && x[1] < bound) { if (x[2] == DecLocation && n >= 4) loc[x[1]] = (int32_t)x[3]; else if (x[2] == DecBuiltIn) bi[x[1]] = 1; else if (x[2] == 32 /* Index */ && n >= 4 && x[3] == 1) ix1[x[1]] = 1; }
+        else if (op >= 19 && op <= 39) bq_type(&q, x, op, n);
+        else if (op == 54 /* OpFunction */) { if (!first_fn) first_fn = i; in = n >= 3 && x[2] == entry; }
+        else if (op == 253 /* OpReturn */ && in) nret++;
+        i += n; }
+    if (!frag || !first_fn || !nret || !q.tf) goto none;
+    for (size_t i = 5; i < first_fn;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == OpVariable && n >= 4 && x[3] == SC_Output && x[2] < bound && loc[x[2]] >= 0 && loc[x[2]] < 8 && (mask >> loc[x[2]] & 1) && !bi[x[2]] && !ix1[x[2]] && nv < 8) {
+            const uint32_t *p = def_of(code, words, x[1]); uint32_t T = p && (p[0] & 0xffff) == OpTypePointer ? p[3] : 0, k = 0;
+            if (T && T == q.tf) k = 1;
+            else for (uint32_t c = 2; c <= 4; c++) if (T && q.vf[c] == T) k = c;
+            if (k) { var[nv] = x[2]; vty[nv] = T; vk[nv] = k; q.need[k] = 1; nv++; } }
+        i += n; }
+    if (!nv) goto none;
+    size_t cap = words + BQ_PRELUDE_ROOM + nret * (size_t)nv * (BQ_EMIT_ROOM + 24); uint32_t *o = malloc(4 * cap); if (!o) goto none;
+    uint32_t next = bound; size_t w = 5; memcpy(o, code, 20);
+    for (size_t i = 5, in = 0; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (i == first_fn) w = bq_prelude(&q, o, w, &next);
+        if (op == 54) in = n >= 3 && x[2] == entry;
+        if (op == 253 && in) for (int v = 0; v < nv; v++) {
+            uint32_t ld = next++; o[w++] = 4u << 16 | 61 /* OpLoad */; o[w++] = vty[v]; o[w++] = ld; o[w++] = var[v];
+            uint32_t qv = bq_emit(&q, vk[v], ld, o, &w, &next);
+            if (vk[v] == 4) { uint32_t s = next++; o[w++] = 9u << 16 | 79 /* OpVectorShuffle */; o[w++] = vty[v]; o[w++] = s; o[w++] = qv; o[w++] = ld; o[w++] = 0; o[w++] = 1; o[w++] = 2; o[w++] = 7; qv = s; }
+            o[w++] = 3u << 16 | 62 /* OpStore */; o[w++] = var[v]; o[w++] = qv; }
+        memcpy(o + w, x, 4 * n); w += n; i += n; }
+    free(loc); free(bi); free(ix1);
+    o[3] = next; *out_words = w; return o;
+none:
+    free(loc); free(bi); free(ix1); return NULL;
+}
+// A copy in which every OpImageWrite through a storage image the shader declares R11fG11fB10f (not a texel buffer) writes its texel as R11G11B10F stores it, alpha 1
+//   (the packed format has none: read back, it is 1). With DM_VK_B10_AS_RGBA16 such an image is the RGBA16F stand-in, which would keep what the packed format cannot
+//   hold (applied before spv_image_format_swap re-declares it Rgba16f). A 3-component texel becomes a 4-component one (Rgba16f takes 4). *n_left: writes of fewer
+//   components, left as they are. NULL if there is no write to patch
+uint32_t *spv_b10_image_writes(const uint32_t *code, size_t words, size_t *out_words, int *n_left) {
+    if (n_left) *n_left = 0;
+    if (words < 5 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint8_t *ty = calloc(bound, 1); uint32_t *rt = calloc(bound, 4);   // ty: 1 a type, 2 an R11G11B10F storage image type; rt: a value's type
+    if (!ty || !rt) { free(ty); free(rt); return NULL; }
+    b10q q; memset(&q, 0, sizeof q); size_t first_fn = 0, nw = 0; int left = 0;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) goto none; const uint32_t *x = code + i;
+        if (op >= 19 && op <= 39) { if (n >= 2 && x[1] < bound) { ty[x[1]] = 1; bq_type(&q, x, op, n);
+                if (op == OpTypeImage && n >= 9 && x[7] == 2 && x[8] == SPV_IMGFMT_R11G11B10F && x[3] != SPV_DIM_BUFFER) ty[x[1]] = 2; } }
+        else if (n >= 3 && x[1] < bound && ty[x[1]] && x[2] < bound) rt[x[2]] = x[1];   // (an instruction with a result type: its result; annotations come before any type)
+        if (op == 54 && !first_fn) first_fn = i;
+        i += n; }
+    for (size_t i = first_fn ? first_fn : words; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (op == 99 /* OpImageWrite */ && n >= 4 && x[1] < bound && x[3] < bound && rt[x[1]] < bound && ty[rt[x[1]]] == 2) {
+            uint32_t T = rt[x[3]], k = 0; for (uint32_t c = 3; c <= 4; c++) if (T && q.vf[c] == T) k = c;
+            if (k) { q.need[k] = 1; q.need[4] = 1; nw++; } else left++; }
+        i += n; }
+    if (n_left) *n_left = left;
+    if (!nw || !q.tf) goto none;
+    uint32_t *o = malloc(4 * (words + BQ_PRELUDE_ROOM + nw * (BQ_EMIT_ROOM + 16))); if (!o) goto none;
+    uint32_t next = bound; size_t w = 5; memcpy(o, code, 20);
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (i == first_fn) w = bq_prelude(&q, o, w, &next);
+        uint32_t T = op == 99 && n >= 4 && x[1] < bound && x[3] < bound && rt[x[1]] < bound && ty[rt[x[1]]] == 2 ? rt[x[3]] : 0, k = 0;
+        for (uint32_t c = 3; c <= 4; c++) if (T && q.vf[c] == T) k = c;
+        if (k) {
+            uint32_t qv = bq_emit(&q, k, x[3], o, &w, &next), t4 = next++;
+            if (k == 4) { o[w++] = 6u << 16 | 82 /* OpCompositeInsert */; o[w++] = T; o[w++] = t4; o[w++] = q.f1; o[w++] = qv; o[w++] = 3; }
+            else { o[w++] = 5u << 16 | 80 /* OpCompositeConstruct */; o[w++] = q.vf[4]; o[w++] = t4; o[w++] = qv; o[w++] = q.f1; }
+            memcpy(o + w, x, 4 * n); o[w + 3] = t4; w += n;
+        } else { memcpy(o + w, x, 4 * n); w += n; }
+        i += n; }
+    free(ty); free(rt);
+    o[3] = next; *out_words = w; return o;
+none:
+    free(ty); free(rt); return NULL;
 }

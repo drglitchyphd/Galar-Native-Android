@@ -17,6 +17,7 @@
 #include "nvn_fstep.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+#include "vk_quirks.h"   // (Q_NVN_ASYNC: rq_on asks nvn_vk.c's table)
 #include <mach/mach_time.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -1078,14 +1079,16 @@ enum { RQ_N = 512 };
 static rq_item g_rq[RQ_N]; static uint64_t g_rq_head, g_rq_tail; static int g_rq_presents;
 static pthread_mutex_t g_rq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_rq_cv = PTHREAD_COND_INITIALIZER;
 // DM_NVN_ASYNC=1 on, 0 / off off; unset (Auto): on for Adreno, where it is tested (a Galaxy S25+ went from 42 ms frames to a steady 33 at 30 fps, the replay's 28-33 ms
-//   moved off the game's thread), off for other GPUs until it has been run there
-const char *nvn_vk_gpu_name(void) __attribute__((weak));
-static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ASYNC"); const char *g = nvn_vk_gpu_name ? nvn_vk_gpu_name() : NULL;
-    int autoon = !(e && *e) && g && strstr(g, "Adreno");
+//   moved off the game's thread), off for other GPUs until it has been run there. Auto is the quirk table's Q_NVN_ASYNC (vk_quirks.h: by the GPU's name, Turnip too; off for
+//   a game whose profile says nvn_async_never), asked from nvn_vk.c once its device exists (weak: a build without the Vulkan replay has Auto off, as before)
+int nvn_vk_quirk_default(int q) __attribute__((weak)); int nvn_vk_quirk_note(int q, int value, int from_env) __attribute__((weak));
+static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ASYNC");
+    int autoon = !(e && *e) && nvn_vk_quirk_default && nvn_vk_quirk_default(Q_NVN_ASYNC) > 0;
     v = autoon || (e && *e && strcmp(e, "off") && strcmp(e, "0"));
-#if DM_GAME_ENG_NVN_ASYNC_NEVER   // (profile engine_quirks nvn_async_never, Legends: Arceus: the game crashed at loading screens with it, Arceus-Native-Android#3; android_main.c drops the setting too)
-    v = 0; autoon = 0;
+#if DM_GAME_ENG_NVN_ASYNC_NEVER   // (profile engine_quirks nvn_async_never, Legends: Arceus: the game crashed at loading screens with it, Arceus-Native-Android#3; android_main.c drops the setting too.
+    v = 0; autoon = 0;            //   Q_NVN_ASYNC's default is off for it already; this also refuses the player's own setting: a crash workaround, not a GPU rule)
 #endif
+    if (nvn_vk_quirk_note) nvn_vk_quirk_note(Q_NVN_ASYNC, v, e && *e);
     LOG("[nvn] the replay %s (DM_NVN_ASYNC %s)", v ? "runs on its own thread" : "runs on the game's thread", e && *e ? e : autoon ? "Auto: on for Adreno" : "Auto: off for this GPU"); } return v; }
 static const char *volatile g_rq_at = "idle";
 // A wait on the replay thread that takes this long has gone wrong: said in the log with who is waiting and what the replay thread is doing

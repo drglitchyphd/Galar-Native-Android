@@ -246,6 +246,9 @@ public final class GameMenu {
     private static void set(Activity a, String key, String value) {
         String was = GameSettings.get(a, key);
         GameSettings.set(a, key, value);
+        // the float-target choices: this menu's "1" is the player's On. An older version's menu wrote "1" for its only choice, which the engine takes out once per
+        //   env.txt (android_main.c, mali_white.h mw_env_migrate) unless this marker is there
+        if (key.startsWith("DM_VK_B10_")) GameSettings.set(a, "DM_MALI_ENV", "2");
         boolean now;
         if (a instanceof GameActivity && (key.equals("DM_FRAMEGEN") || key.equals("DM_FPS_TARGET"))) ((GameActivity) a).displayMode();
         if (a instanceof GameActivity && key.equals("DM_GYRO")) ((GameActivity) a).gyro();
@@ -673,6 +676,18 @@ public final class GameMenu {
         action(a, t(a, "Record the frame's passes"), t(a, "For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue."),
                () -> { try (java.io.FileWriter w = new java.io.FileWriter(new File(GameSettings.dir(a), "framegraph.req"))) { w.write("3 90"); } catch (IOException e) { }
                        android.widget.Toast.makeText(a, t(a, "Recording in 3 seconds: close the menu."), android.widget.Toast.LENGTH_LONG).show(); });
+        // the debug report (DebugBundle): logs, Android's crash records, phone / GPU / driver details in one ZIP in Download, and a pre-filled GitHub issue
+        action(a, t(a, "Make a debug report"), t(a, "Logs, Android's crash records and this phone's GPU and driver details in one file in Download (a ZIP ending in debug-report.zip), and a GitHub issue with them filled in. No game files or saves."),
+               () -> DebugBundle.run(a));
+        // the driver check (DriverCheck.java) again at the next start: its results dropped
+        action(a, t(a, "Check the graphics driver again"), t(a, "The few-second graphics driver check runs again the next time the game starts (it runs by itself after a system update or a driver change)."),
+               () -> { DriverCheck.forget(GameSettings.dir(a)); android.widget.Toast.makeText(a, t(a, "The driver is checked again at the next start."), android.widget.Toast.LENGTH_LONG).show(); });
+        // GPU crash tracing (vk_crumbs.h, DM_VK_BREADCRUMBS): the GPU marks each pass it finishes, so a device lost names the pass it stopped in. Slower: off by default
+        choice(a, "DM_VK_BREADCRUMBS", t(a, "GPU crash tracing"), new String[][] { { "", t(a, "Off"), "" },
+            { "1", t(a, "On"), t(a, "On: the GPU notes each step it finishes, so when the graphics crash the log says where. A little slower: turn it on only to reproduce a crash, then make a debug report") } });
+        // the Vulkan 1.1 floor (vk_quirks.h, DM_VK_BASELINE): what an old driver runs, on this phone; for reproducing a problem only phones with old drivers have
+        choice(a, "DM_VK_BASELINE", t(a, "Old-driver mode (Vulkan 1.1)"), new String[][] { { "", t(a, "Off"), "" },
+            { "1", t(a, "On"), t(a, "On: the game draws the way it does on phones with older graphics drivers (slower). For testing a problem other players have; turn it off afterwards") } });
         // Mali's white scenes (#47 #53 #64 #68 #69 #72 #75): switches the engine has for narrowing it down, which players could only set by editing env.txt; each one a
         //   tester tries (with a capture) rules a cause in or out. Shown on Mali phones only
         if (DriverPackages.gpu(a).contains("mali")) {
@@ -708,8 +723,23 @@ public final class GameMenu {
                 { "f16target", t(a, "Float target"), t(a, "Float target: the lit scene stored in a 16-bit float picture instead of the packed one. If the white goes away, tell us") } });
             choice(a, "DM_VK_DEPTH_DISCARD", t(a, "Keep unused depth in tile memory"), new String[][] { { "", t(a, "Off"), "" },
                 { "1", t(a, "On"), t(a, "On: depth that nothing reads afterwards is not written back to memory (faster on Mali; a test: tell us if anything flickers)") } });
-            choice(a, "DM_VK_B10_AS_RGBA16", t(a, "Bright scenes in a wider format"), new String[][] { { "", t(a, "Off"), "" },
-                { "1", t(a, "On"), t(a, "On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory") } });
+            // the float-target routes (nvn_vk.c b10_on), Sword / Shield's white lit scene. Auto = the white-screen check's (mali_white_vk.inc: route A by default on ARM's
+            //   own driver with Sword / Shield, route B when the check found A white, then the PanVK offer); On / Off are set in env.txt and win over it. Not offered for
+            //   Legends: Arceus (its lit scene is not white on Arm's driver, and it draws its G-buffer and bloom in R11G11B10F, which the wider format makes twice the
+            //   size) nor Scarlet / Violet (not known to use the format). One alone does not tell the format from the compression (RGBA16F may get none on some GPUs):
+            //   the check tries both in turn by itself, so the note above them asks players for nothing (there are no testers)
+            if (GameSettings.galar(a)) {
+                note(a, t(a, "Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself."));
+                choice(a, "DM_VK_B10_AS_RGBA16", t(a, "Bright scenes in a wider format"), new String[][] {
+                    { "", t(a, "Auto"), t(a, "Auto: on with ARM's own Mali driver for Sword / Shield; the game checks the picture while you play and moves to the second fix if it stays white") },
+                    { "1", t(a, "On"), t(a, "On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory") },
+                    { "0", t(a, "Off"), t(a, "Off: the lit scene in its own packed format (R11G11B10F)") } });
+                // the other float-target route (nvn_vk.c tex_new, DM_VK_B10_NOCOMPRESS): R11G11B10F kept, its render targets without framebuffer compression (Arm's AFBC)
+                choice(a, "DM_VK_B10_NOCOMPRESS", t(a, "Bright scenes without compression"), new String[][] {
+                    { "", t(a, "Auto"), t(a, "Auto: used when the game finds that the first fix did not take on ARM's own Mali driver") },
+                    { "1", t(a, "On"), t(a, "On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth") },
+                    { "0", t(a, "Off"), t(a, "Off: the framebuffer compression the driver chooses") } });
+            }
             choice(a, "DM_VK_NO_PASS_MERGE", t(a, "Merge render passes"), new String[][] { { "", t(a, "On"), "" },
                 { "1", t(a, "Off"), t(a, "Off: every render target change starts a new pass") } });
         }

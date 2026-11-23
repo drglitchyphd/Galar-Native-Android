@@ -2,7 +2,8 @@
 # Simulated-device runs: a Vulkan test binary once on plain lavapipe and once per profile in profiles/ (Khronos profiles layer between the test and lavapipe), the
 # Khronos validation layer on in every run. Per run: exit status, the test's FAIL lines, and validation errors / warnings by VUID; then one summary table.
 #   bash run_simdev.sh <test binary> [args...]       one binary
-#   bash run_simdev.sh all                           builds and runs t_vkdev, t_fgen_vk and t_lshud_vk (t_lsfg_vk too when LSFG_SHADERS=<folder of its .spv>)
+#   bash run_simdev.sh all                           builds and runs t_vkdev (twice: as recorded, and held: DM_VK_FRAME_HOLD=2), t_fgen_vk and t_lshud_vk (t_lsfg_vk too
+#                                                    when LSFG_SHADERS=<folder of its .spv>)
 # Environment: PROFILES="mali-g720-r44p1 xclipse-920" (default: all, plus "lavapipe" for the plain run); OUT=<folder for logs> (default /tmp/simdev-out);
 #   VKP=<layers prefix> (default ~/vkprofiles, from setup_layers.sh); TIMEOUT=<seconds per run> (default 300).
 #   PROFILE_DIRS=<dir>[:<dir>...]: more folders of profiles beside profiles/ (discover.py's cache); JOBS=<n>: runs at once (default 1; ~8 on 16 GB).
@@ -90,13 +91,15 @@ rm -f "$OUT/rows.tsv"
 if [ "${1:-}" = all ]; then
     build_all
     run_binary t_vkdev "$OUT/bin/vkdev/t_vkdev"
+    # again with every submission held and decided (DM_VK_FRAME_HOLD=2, as Faster rendering's Auto runs on Adreno): passes in secondaries, the depth copy's too
+    run_binary t_vkdev_held env DM_VK_FRAME_HOLD=2 "$OUT/bin/vkdev/t_vkdev"
     run_binary t_fgen_vk "$OUT/bin/t_fgen_vk"
     run_binary t_lshud_vk "$OUT/bin/t_lshud_vk"
     if [ -x "$OUT/bin/t_lsfg_vk" ]; then run_binary t_lsfg_vk "$OUT/bin/t_lsfg_vk" "$LSFG_SHADERS"; else echo "== t_lsfg_vk: skipped (its shaders are private: LSFG_SHADERS=<folder>)"; fi
 elif [ $# -ge 1 ]; then
     run_binary "$(basename "$1")" "$@"
 else
-    sed -n '2,8p' "$0"; exit 2
+    sed -n '2,9p' "$0"; exit 2
 fi
 
 echo
