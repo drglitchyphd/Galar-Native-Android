@@ -85,7 +85,7 @@ final class GameSettings {
     }
     static boolean isShield(Context c) { return "01008DB008C2C000".equalsIgnoreCase(game(c)[0]); }
     // the games the built-in 60 fps patch knows (loader.c FPS_SITES: Pokémon Shield and Sword 1.3.2)
-    // the frame-rate setting: Sword / Shield 1.3.2 (loader.c fps_patch), Scarlet / Violet 4.0.0 (loader.c's built-in Dynamic FPS mod)
+    // the frame-rate setting: Sword / Shield 1.3.2 (loader.c fps_patch), Scarlet / Violet 4.0.0 (loader.c paldea_fps_patch)
     static final boolean AUTO_60 = false;
     // Sword / Shield: 30 fps for every player (2026-11-21; android_main.c ignores a saved 60): no Frame rate choice unless DM_UNLOCK_EXPERIMENTS=1 (development).
     //   Scarlet / Violet and Legends: Arceus keep their choice

@@ -240,11 +240,11 @@ Set up anyway?	Installer quand même ?
 The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	Les parties endommagées de vos fichiers sont gardées telles quelles. Le jeu peut planter ou afficher des défauts là où il les utilise. Recopier vos fichiers en entier est la vraie solution.
 the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	la copie de %s s'est arrêtée trop tôt (%s sur %s Mo) : choisissez-le à nouveau, de préférence depuis le stockage du téléphone
 %s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s est incomplet : il contient %s de ses %s Mo. Il a été coupé pendant la copie ou le téléchargement : recopiez le fichier en entier.
-Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)	Jusqu'à 60 fps : plus fluide là où le téléphone le peut, la vitesse du jeu reste juste (mod Dynamic FPS de Fl4sh)
+Up to 60 fps: smoother where the phone can, the game keeps its real speed	Jusqu'à 60 fps : plus fluide là où le téléphone le peut, le jeu garde sa vraie vitesse
 Shadows	Ombres
 Standard	Standard
 Standard: 1024 × 1024, as the game is made	Standard : 1024 × 1024, comme le jeu d'origine
-Sharp: 2048 × 2048 shadow maps, more GPU work (Fl4sh's 2K Shadows mod)	Nettes : ombres en 2048 × 2048, plus de travail pour le GPU (mod 2K Shadows de Fl4sh)
+Sharp: 2048 × 2048 shadow maps, more GPU work	Nettes : ombres en 2048 × 2048, plus de travail pour le GPU
 60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)	60 fps : plus fluide ; passe en 720p quand il le faut pour tenir 60 (avec Graphismes sur Auto ou Adaptatif)
 Android stopped the setup to free memory: going on from where it was (%s of 3)...	Android a arrêté l'installation pour libérer de la mémoire : elle reprend là où elle en était (%s sur 3)...
 Step %s of %s: %s	Étape %s sur %s : %s
