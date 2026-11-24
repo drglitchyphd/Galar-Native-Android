@@ -47,6 +47,9 @@ t_fgen: t_fgen.c ../nvn/nvn_fgen.h
 # The Mali white-screen ladder's rules (nvn/mali_white.h: the verdict, the route, the state file from start to start); no GPU
 t_mali_white: t_mali_white.c ../nvn/mali_white.h
 	$(CC) -O1 -Wall -I../nvn -o $@ t_mali_white.c
+# Faster rendering's queue (nvn/nvn_rq.h): registrations and remaps in order with the submissions, the replay held back between record and replay (perf-1124 fix 3)
+t_rq_order: t_rq_order.c ../nvn/nvn_rq.h ../nvn/nvn_obj.h
+	$(CC) -O1 -g -Wall -I../nvn -I../nvn/include -o $@ t_rq_order.c -lpthread
 # Frame generation on a real Vulkan driver (Linux: Mesa's lavapipe is enough). VULKAN_INC: a folder holding vulkan/vulkan.h when the system has none
 t_fgen_vk: t_fgen_vk.c ../nvn/nvn_fgen.h ../nvn/overlay/fgen_spv.h
 	$(CC) -O1 -Wall -Wno-unused-function $(if $(VULKAN_INC),-I$(VULKAN_INC)) -o $@ t_fgen_vk.c $(or $(VULKAN_LIB),-lvulkan) -lm
@@ -84,10 +87,11 @@ t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_pfv: t_pfv.m ../../host/crash.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
-run: t_nvn t_dirty_slots t_dirty_race t_builtin t_deswz_gpu t_pace t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pfv
+run: t_nvn t_dirty_slots t_dirty_race t_rq_order t_builtin t_deswz_gpu t_pace t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pfv
 	./t_nvn
 	./t_dirty_slots
 	./t_dirty_race
+	./t_rq_order
 	./t_builtin
 	./t_deswz_gpu
 	./t_pace
