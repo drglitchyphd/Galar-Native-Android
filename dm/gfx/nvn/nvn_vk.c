@@ -8389,7 +8389,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     { static long of = -1; static const char *op; if (of < 0) { const char *e = getenv("DM_OVL_SHOT"), *c = e ? strchr(e, ':') : NULL; of = c ? atol(e) : 0; op = c ? c + 1 : NULL; }
       if (of && (long)n == of && op) { vtex *x = tex_res(t); if (x && x->img) ovl_shot(x, crop, op); } }
 #endif
-    // The present waits out the rest of the period since the last one (period_s: hle_nvn.c's present period). Not on the replay
+    // The present waits out the rest of the period since the last one (period_s: hle_nvn.c's present_hold, a load's shorter hold included, L1'). Not on the replay
     //   thread (Faster rendering) for a frame that asked the display for its time (pace_time): the game is paced at its image acquire, rq_push holds a second
     //   queued present back, and the display shows the frame at its time; the sleep here only held the replay back, and with it every game sync wait that drained
     //   the queue (perf-1124 G1': S25+ "GPU sync" 4-10 ms a frame in the field, 23-32 ms in loads at 2.5-5 ms of GPU). A frame with no time asked (no display

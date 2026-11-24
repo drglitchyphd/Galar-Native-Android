@@ -1761,7 +1761,10 @@ int dm_loading_poll(void) {   // android_main.c nativeLoading, every 500 ms: a f
 //   display (one refresh a frame) | free (no hold); the profile key load_pace pins a game's own default (Scarlet / Violet: game, dm_dynfps owns their hold).
 //   The cause it removes is not proven: the loads advance with frames on the Adreno 830 and the Xclipse 530 (about 300 frames: 5 s at 60 fps, 9-11 at 30), and
 //   Arceus #98's 15-20 s match 30 fps. Risks: the game's clock runs 2-4 times fast on the loading screen (spinner, fades); Arceus's 60 fps step (arc_step) is
-//   left as it was while a load is paced. Only the acquire's hold and the pacer's slot follow it: the Vulkan present does not use the period
+//   left as it was while a load is paced. The acquire's hold, the pacer's slot and the present's own wait follow it (present_hold).
+// L1' (perf-1124): as first built only the acquire followed it. The present still got the game's period and slept it out (nvn_vk.c mtl_present), and every sync
+//   wait drained the queue through that sleep, so a load stayed at 33 ms frames whatever DM_LOAD_PACE said and its A/B would have shown nothing. Now the present
+//   gets the load's hold as its period (0 for free: no wait), and with G1' the replay thread's present does not sleep at all
 #ifndef DM_GAME_LOAD_PACE
 #define DM_GAME_LOAD_PACE -1
 #endif
@@ -1774,6 +1777,11 @@ static int load_pace_mode(void) {
     return m;
 }
 static int g_lp_active;   // the last present's hold was a load's (arc_step leaves the game's step alone then)
+// This frame's hold: the game's period (present_period), or a load's shorter one (L1). Asked before the present (its own wait) and after it (the acquire's grid):
+//   the load detector judges this present's draws in between, so the present follows the last frame's verdict, a frame behind at a load's start and end
+static uint64_t present_hold(uint64_t period) {
+    int hz_ = mtl_display_hz(); return load_pace_period(load_pace_mode(), atomic_load(&g_ld_on), period, 1000000000ull / (uint64_t)(hz_ > 0 ? hz_ : 60));
+}
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     NVN_WHERE();
     (void)q; win_t *o = (win_t *)w; o->presents++;
@@ -1795,8 +1803,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           if (w > 500000000ull) w = 500000000ull;   // (a load or a pause: counted as half a second, so one stall does not swamp the average)
           atomic_store(&g_nvn_game_work_avg_ns, a ? a + (uint64_t)(((int64_t)w - (int64_t)a) / 16) : w); } }   // (the average over about 16 frames: the fps guard's CPU test)
     if (idx >= 0 && idx < o->ntex && idx < 4) {
-        if (rq_on()) { rq_item it = { .kind = RQ_PRESENT, .o = o, .idx = idx, .period = present_period(o) / 1e9 }; memcpy(it.crop, o->crop, sizeof it.crop); gfx_leave(); o->pq_pos[idx] = rq_push(it); gfx_enter(); }   // (pq_pos: this image's next acquire waits for the replay to pass it)
-        else { GOLDEN_PRESENT(CTX(o->tex[idx]), o->crop); o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
+        double php = present_hold(present_period(o)) / 1e9;   // (the present's own wait: a load's hold, L1')
+        if (rq_on()) { rq_item it = { .kind = RQ_PRESENT, .o = o, .idx = idx, .period = php }; memcpy(it.crop, o->crop, sizeof it.crop); gfx_leave(); o->pq_pos[idx] = rq_push(it); gfx_enter(); }   // (pq_pos: this image's next acquire waits for the replay to pass it)
+        else { GOLDEN_PRESENT(CTX(o->tex[idx]), o->crop); o->ticket[idx] = mtl_present(CTX(o->tex[idx]), php, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
@@ -1887,7 +1896,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
     g_hold_ring[o->presents % 16] = (uint8_t)present_itv(o);
-    int lpm = load_pace_mode(); int hz_ = mtl_display_hz(); uint64_t hold = load_pace_period(lpm, atomic_load(&g_ld_on), period, 1000000000ull / (uint64_t)(hz_ > 0 ? hz_ : 60));
+    uint64_t hold = present_hold(period);
     g_lp_active = hold != period;   // (a load's hold: L1)
     nvn_pacer pc = {o->pace};
     uint64_t slot = now + nvn_pace(&pc, now, hold);
