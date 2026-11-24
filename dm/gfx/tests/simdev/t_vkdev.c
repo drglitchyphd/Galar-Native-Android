@@ -1171,21 +1171,24 @@ static void pw_forget(void) {
     atomic_store(&g_pw_done, 0); atomic_store(&g_pw_total, 0); atomic_store(&g_pw_playing, 0); atomic_store(&g_pw_ended, 0);
     if (g_pcache) { PFN_vkDestroyPipelineCache dpc = (PFN_vkDestroyPipelineCache)vkGetDeviceProcAddr(g_dev, "vkDestroyPipelineCache"); if (dpc) dpc(g_dev, g_pcache, NULL); g_pcache = VK_NULL_HANDLE; }
 }
-typedef struct { double hold_ms, done_ms; int built, had; int saved_before_release; } pw_run_t;
+typedef struct { double hold_ms, done_ms; int built, had; int saved_before_release, saved; } pw_run_t;
 static long long pw_mtime(const char *p) { struct stat st; if (stat(p, &st)) return -1; return (long long)st.st_mtim.tv_sec * 1000000000ll + st.st_mtim.tv_nsec; }
 // one start: the prewarm as mtl_init starts it, the game's first submission at once (prewarm_wait's wait, without its 200 ms polling)
 static pw_run_t pw_start(const char *label, const char *cache) {
     pw_run_t r; memset(&r, 0, sizeof r);
     long long m0 = pw_mtime(cache);
-    uint64_t t0 = mono_ns();
+    uint64_t t0 = mono_ns(); atomic_store(&g_pcache_saved_at, 0); atomic_store(&g_pw_released_at, 0);
     prewarm_start();
     while (atomic_load(&g_pw_hold)) usleep(200);
-    r.hold_ms = (mono_ns() - t0) / 1e6; r.saved_before_release = pw_mtime(cache) != m0;
+    r.hold_ms = (mono_ns() - t0) / 1e6;
     atomic_store(&g_pw_playing, 1);   // (prewarm_wait's: the game plays from here)
     while (!atomic_load(&g_pw_ended)) usleep(500);
-    r.done_ms = (mono_ns() - t0) / 1e6; r.built = atomic_load(&g_pw.built); r.had = atomic_load(&g_pw.had);
-    printf("PREWARM %s: hold %.0f ms (the game's first submission held), done %.0f ms; %d built, %d already there; the cache file was %s before the game went on\n",
-           label, r.hold_ms, r.done_ms, r.built, r.had, r.saved_before_release ? "WRITTEN" : "not written");
+    r.done_ms = (mono_ns() - t0) / 1e6; r.built = atomic_load(&g_pw.built); r.had = atomic_load(&g_pw.had); r.saved = pw_mtime(cache) != m0;
+    { uint64_t s = atomic_load(&g_pcache_saved_at), l = atomic_load(&g_pw_released_at); r.saved_before_release = s && (!l || s < l); }
+    printf("PREWARM %s: hold %.0f ms (the game's first submission held), done %.0f ms; %d built, %d already there; the cache file was %s before the game went on, %s\n",
+           label, r.hold_ms, r.done_ms, r.built, r.had, r.saved_before_release ? "WRITTEN" : "not written", r.saved ? "written" : "not written at all");
+    // S1: the game goes on before the cache is written (nvn_vk_prewarm_progress says 0 while the file is still the old one)
+    CHECK(!r.saved_before_release, "prewarm (%s): the pipeline cache file was written before the game was let go", label);
     return r;
 }
 static void prewarm_work(void) {
@@ -1224,7 +1227,7 @@ static void prewarm_work(void) {
     pw_forget();
     pw_run_t c = pw_start("first start", cache);
     CHECK(!g_eds || c.built == N, "prewarm: %d of %d built at the first start", c.built, N);
-    CHECK(pw_mtime(cache) >= 0, "prewarm: no pipeline cache file after the first start");
+    CHECK(pw_mtime(cache) >= 0 && c.saved, "prewarm: no pipeline cache file after the first start");
     pw_forget();
     pw_run_t w = pw_start("later start", cache);
     CHECK(!g_eds || w.built == N, "prewarm: %d of %d built at the later start", w.built, N);

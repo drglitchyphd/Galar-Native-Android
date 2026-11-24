@@ -4754,15 +4754,27 @@ static VkPipeline pso_lookup(vprog *pr, const pkey *k, int record) {
     pthread_mutex_unlock(&g_psomu);
     return p;
 }
+static size_t g_pcache_disk;   // the bytes of pipeline cache the file holds as far as this run knows: what the driver took at pcache_open, then each save's
+static _Atomic uint64_t g_pcache_saved_at, g_pw_released_at;   // (mono_ns) the last save's start, and when prewarm_finished let the game go (simdev t_vkdev: S1's order)
 static void pcache_save(void) {
     const char *path = getenv("DM_VK_PCACHE"); if (!path || !g_pcache) return;
-    uint64_t t0 = mono_ns();
+    uint64_t t0 = mono_ns(); atomic_store(&g_pcache_saved_at, t0);
     size_t n = 0; if (vkGetPipelineCacheData(g_dev, g_pcache, &n, NULL) || !n) return;
     void *d = malloc(n); if (vkGetPipelineCacheData(g_dev, g_pcache, &n, d)) { free(d); return; }
     char tmp[1100]; snprintf(tmp, sizeof tmp, "%s.tmp", path); FILE *f = fopen(tmp, "wb");
-    if (f) { int ok = fwrite(d, 1, n, f) == n; ok &= !fclose(f); if (ok) rename(tmp, path); }
+    if (f) { int ok = fwrite(d, 1, n, f) == n; ok &= !fclose(f); if (ok && !rename(tmp, path)) g_pcache_disk = n; }
     free(d); atomic_store(&g_pso_new, 0);
     VLOG("pipeline cache saved: %.1f MB in %.0f ms", n / 1048576.0, (mono_ns() - t0) / 1e6);
+}
+// The prewarm's save (perf-1124 S1): after the game is let go (prewarm_main), and only when the driver's cache grew since it was read or last written. It used to
+//   come before the release, on every start: vkGetPipelineCacheData plus a 60-106 MB write inside the wait, also when every pipeline came from the cache.
+//   DM_VK_PCACHE_SAVE=always: written every time, as before (still after the release)
+static void pcache_save_new(void) {
+    const char *path = getenv("DM_VK_PCACHE"), *e = getenv("DM_VK_PCACHE_SAVE"); if (!path || !g_pcache) return;
+    size_t n = 0;
+    if (!(e && !strcmp(e, "always")) && !vkGetPipelineCacheData(g_dev, g_pcache, &n, NULL) && n == g_pcache_disk) {
+        VLOG("pipeline cache: nothing new since it was read (%.1f MB): not written again (DM_VK_PCACHE_SAVE=always writes it)", n / 1048576.0); return; }
+    pcache_save();
 }
 void nvn_vk_cache_save(void) { if (g_dev) pcache_save(); }
 void *saver(void *a) { pcache_save(); atomic_store((atomic_int *)a, 0); return NULL; }   // the app calls it when going to the background
@@ -4771,7 +4783,7 @@ static void pcache_open(void) {
     if (path) { FILE *f = fopen(path, "rb"); if (f) { fseek(f, 0, SEEK_END); long l = ftell(f); rewind(f); if (l > 0) { d = malloc((size_t)l); n = fread(d, 1, (size_t)l, f); } fclose(f); } }
     VkPipelineCacheCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = n, .pInitialData = d };
     if (vkCreatePipelineCache(g_dev, &ci, NULL, &g_pcache)) { ci.initialDataSize = 0; ci.pInitialData = NULL; vkCreatePipelineCache(g_dev, &ci, NULL, &g_pcache); n = 0; }   // a cache of another driver version: start empty
-    free(d);
+    free(d); g_pcache_disk = n;
     if (path) VLOG("pipeline cache: %.1f MB from %s (read and handed to the driver in %.0f ms)", n / 1048576.0, path, (mono_ns() - t0) / 1e6);
 }
 static int pso_rec_load(const char *path, pso_rec **out, int *nout) {
@@ -4802,7 +4814,7 @@ static atomic_int g_pw_done, g_pw_total, g_pw_hold;   // pipelines handled / lis
 static pthread_mutex_t g_pw_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pw_cv = PTHREAD_COND_INITIALIZER;
 // for the app's progress line (android_main.c nativePrewarm): 1 while the game waits for the pipelines
 int nvn_vk_prewarm_progress(int *done, int *total) { *done = atomic_load(&g_pw_done); *total = atomic_load(&g_pw_total); return atomic_load(&g_pw_hold); }
-static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
+static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_released_at, mono_ns()); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
 // the game's first submission: waits until the prewarm is done (at most DM_VK_PREWARM_WAIT seconds, 300 by default; then the rest is built while it plays)
 // the game is playing (its first submission past prewarm_wait): from then on the prewarm builds on one thread, one pipeline after each present (prewarm_pace)
 static atomic_int g_pw_playing;
@@ -4872,8 +4884,7 @@ static void *prewarm_static(void) {
     fclose(f);
     VLOG("prewarm (draw state built in): %d pipelines recorded on this phone: %d built, %d already there, %d failed, %d with a shader missing, %.1f s (paused %d times for low memory)",
          n, built, had, failed, noshader, (mono_ns() - t0) / 1e9, waits);
-    pcache_save();
-    return NULL;
+    return NULL;   // (the cache is saved by prewarm_main, after the game is let go)
 }
 // the main prewarm's shared state: the list, the next entry to take, the programs made so far (their layouts made once, under pw.mu: prog_layout is not for two threads)
 // t_*: the prewarm's stage timers (perf-1124 I7), nanoseconds summed over its threads: waiting for pw.mu, loading shaders (shader_get), making layouts
@@ -5002,11 +5013,16 @@ static void *prewarm_run(void) {
          started + 1, atomic_load(&g_pw.t_lock) / 1e6, atomic_load(&g_pw.t_shader) / 1e6, atomic_load(&g_pw.t_layout) / 1e6, atomic_load(&g_pw.t_pipe) / 1e6);
     dm_boot_mark("prewarm: every listed pipeline handled");
     free(rs); g_pw.rs = NULL;
-    pcache_save();
-    return NULL;
+    return NULL;   // (the cache is saved by prewarm_main, after the game is let go)
 }
 static atomic_int g_pw_ended;   // the prewarm thread has returned (simdev t_vkdev's start-up timing)
-static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm"); (void)arg; prewarm_run(); prewarm_finished(); atomic_store(&g_pw_ended, 1); return NULL; }
+static void *prewarm_main(void *arg) {
+    DM_THREAD_NAME("dm-prewarm"); (void)arg;
+    prewarm_run();
+    prewarm_finished();   // the game goes on first (perf-1124 S1), then the cache is written, if anything new went into it
+    pcache_save_new(); dm_boot_mark("prewarm: pipeline cache handled");
+    atomic_store(&g_pw_ended, 1); return NULL;
+}
 // the end of mtl_init: the pipeline cache read, and the prewarm started when there is a list (the game's first submission waits for it: prewarm_wait)
 static void prewarm_start(void) {
     pcache_open();
@@ -5146,7 +5162,12 @@ static VkPipeline pso_make_(vprog *pr, pkey k, const sst *ss) {
         .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &bs, .pDynamicState = &dy, .layout = prog_layout(pr, 0) };
     if (!g_dynren) { gi.pNext = NULL; gi.renderPass = rp_for_pipeline(ncb, cf, k.dfmt ? k.dfmt : k.sfmt, k.samples, 0); gi.subpass = 0; }
 #ifdef __ANDROID__
-    { static int npipe; VLOG("pipeline %d: vertex %s fragment %s", ++npipe, vs->key, fs ? fs->key : "-"); }   // the last line before a driver crash names the shaders it was compiling
+    // the last line before a driver crash names the shaders it was compiling. One line per pipeline was ~4000 line-buffered writes in every start's wait (perf-1124
+    //   S6): only with DM_VK_PIPE_LOG=1, or at the start after one that crashed with the device up (boot_state: DM_LAST_CRASH_DEVICE), so a crash that comes
+    //   back still names its shaders. DM_VK_PIPE_LOG=0: never
+    static int plog = -1; if (plog < 0) { const char *e = getenv("DM_VK_PIPE_LOG"); plog = e && *e ? atoi(e) != 0 : getenv("DM_LAST_CRASH_DEVICE") != NULL;
+        VLOG("pipelines: %s", plog ? "one line each as they are built (DM_VK_PIPE_LOG=1, or the last start crashed)" : "not logged one by one (DM_VK_PIPE_LOG=1 logs each)"); }
+    if (plog) { static _Atomic int npipe; VLOG("pipeline %d: vertex %s fragment %s", atomic_fetch_add(&npipe, 1) + 1, vs->key, fs ? fs->key : "-"); }
 #endif
     // PowerVR (BXM-8-256, driver 0x5d9576) crashes in vkCreateGraphicsPipelines when a pipeline cache is passed and the render pass has an unused colour slot
     //   (VK_ATTACHMENT_UNUSED: a target with a gap): found and isolated by the Persona 5 Royal Android port (Brandon04Gonzalez/p5r-android, MIT). Such a pipeline
