@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <jni.h>
 #include <sys/resource.h>
+#include <sys/prctl.h>
 #include <dlfcn.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -1785,10 +1786,15 @@ void front_frame_work(uint64_t busy_ns, uint64_t period_ns) {
     if (busy_ns) p_hint_report(g_hint, (int64_t)busy_ns);
 }
 // Loading (GameActivity polls this every 500 ms and tells Android 13+ through GameManager.setGameState, so the system can raise the clocks and the storage
-//   speed for it): the game reading its files at 8 MB/s or more; over once it reads under 1 MB/s for 2 s. A load also tells the hint session (Android 16:
+//   speed for it): a loading screen as hle_nvn.c tells it by the picture (dm_loading_poll: the game reads 8 MB/s or more while under 60 draws a frame, over at
+//   the first full frame; fable-loads.md I1). DM_LOAD_DETECT=reads: the rule before 2026-11-24, the game reading 8 MB/s or more until under 1 MB/s for 2 s,
+//   which open-world streaming met too (Arceus #98's "12.03 s load" was play: 430-530 draws a frame). A load also tells the hint session (Android 16:
 //   APerformanceHint_notifyWorkloadSpike) that this frame's CPU work jumps, before the governor sees the late frames. DM_LOAD_HINT=0: neither
 // A load's report (the white screen before a battle, 2026-11-19): every thread's CPU time over the load (/proc/self/task/<tid>/stat utime + stime), the core it was last
-//   on and that core's clock limit, and the time the game's file reads took: says whether a load waits on storage or on a thread's CPU work, and on which kind of core
+//   on and that core's clock limit, and the time the game's file reads took: says whether a load waits on storage or on a thread's CPU work, and on which kind of core.
+//   The percentages are of the window the two snapshots span (the poll that saw the load begin to the one that saw it end); they used to be divided by the
+//   load's length while the snapshots spanned 1.5 s more, so a "1.00 s load" was a 2.5 s window and every share ran high (I1). hle_nvn.c prints the rest of
+//   the load's cost ([load] over after ...: frames, frame work, acquire sleep, sync waits, uploads, pipelines, touch scans)
 #include <dirent.h>
 typedef struct { int tid, cpu; uint64_t ticks; char name[20]; } thr_snap;
 static int thr_snapshot(thr_snap *o, int max) {
@@ -1803,94 +1809,216 @@ static int thr_snapshot(thr_snap *o, int max) {
         t->ticks = ut + st; t->cpu = cpu; n++; }
     closedir(d); return n;
 }
+static int thr_one(int tid, thr_snap *t) {   // one thread: its name, CPU ticks, and in cpu its state letter (R, S, D ...)
+    char p[64], b[512]; snprintf(p, sizeof p, "/proc/self/task/%d/stat", tid); FILE *f = fopen(p, "r"); if (!f) return 0;
+    size_t k = fread(b, 1, sizeof b - 1, f); fclose(f); b[k] = 0;
+    char *lp = strchr(b, '('), *rp = strrchr(b, ')'); if (!lp || !rp) return 0;
+    t->tid = tid; size_t nl = (size_t)(rp - lp - 1); if (nl > sizeof t->name - 1) nl = sizeof t->name - 1; memcpy(t->name, lp + 1, nl); t->name[nl] = 0;
+    unsigned long long ut = 0, st = 0; char *sv = NULL; int field = 3;
+    for (char *tok = strtok_r(rp + 2, " ", &sv); tok; tok = strtok_r(NULL, " ", &sv), field++) { if (field == 3) t->cpu = tok[0]; else if (field == 14) ut = strtoull(tok, NULL, 10); else if (field == 15) { st = strtoull(tok, NULL, 10); break; } }
+    t->ticks = ut + st; return 1;
+}
 static long core_max_khz(int c) { char p[96]; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c); FILE *f = fopen(p, "r"); long v = 0; if (f) { if (fscanf(f, "%ld", &v) != 1) v = 0; fclose(f); } return v; }
-static void load_report(const thr_snap *a, int na, uint64_t ns, uint64_t bytes, uint64_t read_ns) {
-    static thr_snap b[512]; int nb = thr_snapshot(b, 512); long hz = sysconf(_SC_CLK_TCK); if (hz <= 0) hz = 100;
+static void load_report(const thr_snap *a, int na, const thr_snap *b, int nb, uint64_t win_ns, uint64_t bytes, uint64_t read_ns) {
+    long hz = sysconf(_SC_CLK_TCK); if (hz <= 0) hz = 100;
     struct { int i; uint64_t d; } top[8]; memset(top, 0, sizeof top);
     for (int i = 0; i < nb; i++) { uint64_t was = 0; for (int j = 0; j < na; j++) if (a[j].tid == b[i].tid) { was = a[j].ticks; break; }
         uint64_t d = b[i].ticks > was ? b[i].ticks - was : 0;
         for (int k = 0; k < 8; k++) if (d > top[k].d) { for (int m = 7; m > k; m--) top[m] = top[m - 1]; top[k].i = i; top[k].d = d; break; } }
-    double secs = ns / 1e9 > 0.01 ? ns / 1e9 : 0.01;
-    fprintf(stderr, "[cpu] load report: %.2f s, %.1f MB read in %.2f s of file reads (all threads together); busiest threads (CPU s over the load, last core and its top clock):\n",
-            ns / 1e9, bytes / 1048576.0, read_ns / 1e9);
+    double secs = win_ns / 1e9 > 0.01 ? win_ns / 1e9 : 0.01;
+    fprintf(stderr, "[cpu] load report: %.2f s between the polls that saw it begin and end, %.1f MB read in %.2f s of file reads (all threads together); busiest threads (CPU s in that window, last core and its top clock):\n",
+            win_ns / 1e9, bytes / 1048576.0, read_ns / 1e9);
     for (int k = 0; k < 8 && top[k].d; k++) { const thr_snap *t = &b[top[k].i];
-        fprintf(stderr, "[cpu]   %-16s tid %d: %.2f s CPU (%.0f %% of the load), core %d (%.2f GHz)\n", t->name, t->tid, (double)top[k].d / hz, 100.0 * (double)top[k].d / hz / secs, t->cpu, core_max_khz(t->cpu) / 1e6); }
+        fprintf(stderr, "[cpu]   %-16s tid %d: %.2f s CPU (%.0f %% of a core), core %d (%.2f GHz)\n", t->name, t->tid, (double)top[k].d / hz, 100.0 * (double)top[k].d / hz / secs, t->cpu, core_max_khz(t->cpu) / 1e6); }
 }
-// Loads on the fast cores (the white screen before a battle: one thread's CPU work, 2.7 s of a 4 s load on a Galaxy S25+, file reads 0.18 s). While a load runs, every
-//   poll (500 ms) the threads that used a quarter of a core or more since the last one and are not pinned already (g_pin_tid) go to the phone's fast cores (a clock
-//   limit of 70 % of the fastest or more: the little cores left out, nothing changes on a phone without slow ones) and a little higher priority (nice -4); all of
-//   them back as they were when the load is over. DM_LOAD_BOOST=0 leaves the scheduler to it
-// A load profiled (DM_LOAD_PROF, on unless "0"): while a load runs, the replay thread (hle_nvn.c dm-replay, the busiest thread in a battle's load: 2.35 s of CPU in
-//   4 s on a Galaxy S25+) and the process's main thread are sampled 1000 times a second (a SIGPROF timer aimed at each thread); each sample is its pc and lr. At the
-//   end the samples go to files/load_prof_<n>.txt as "<module> <offset of pc> <offset of lr>", mapped to function names on a PC with the library's symbols
+// A load profiled (DM_LOAD_PROF, on unless "0"; fable-loads.md I3 / I4): while a load runs, up to LP_SLOTS threads are sampled 1000 times a second of their own
+//   CPU time (a SIGPROF timer aimed at each thread): the replay thread (hle_nvn.c dm-replay) and the game's main thread (g_game_tid; getpid() was the Java UI
+//   thread) from the start, then each thread load_boost's pass finds at a quarter of a core or more. A sample in a game module keeps its pc and lr only (in game
+//   code x29 need not be a frame pointer, and a bad read would land in the crash handler); in host code the frame-pointer chain follows (the engine keeps frame
+//   pointers). The handler is lock-free: no dladdr, no thread names (module_of only reads the module table). At the end the samples go to
+//   load_prof_<run start>_<n>.txt in the data folder (the newest 12 kept; the debug report takes them), with a header that ties them to a build: the app's
+//   version code, libnxnative.so's build id, every game module's build id, each slot's name, tid and CPU seconds; frames as main+0x / sdk+0x / libnxnative.so+0x
 #include <signal.h>
 #include <ucontext.h>
 #include <link.h>
-enum { LP_N = 32768 };
-enum { LP_F = 10 };   // frames a sample keeps: pc, lr, then the frame-pointer chain (the engine is built with frame pointers)
-static struct { uint64_t f[LP_F]; int nf, who; } g_lp[LP_N]; static _Atomic int g_lp_n; static _Atomic int g_lp_on; static int g_lp_tid[2];
+enum { LP_N = 32768, LP_SLOTS = 8 };
+enum { LP_F = 10 };   // frames a sample keeps: pc, lr, then the frame-pointer chain
+static struct { uint64_t f[LP_F]; int nf, who; } g_lp[LP_N]; static _Atomic int g_lp_n; static _Atomic int g_lp_on; static _Atomic int g_lp_tid[LP_SLOTS];
+int dm_addr_module(const void *p, char *out, size_t n);   // loader.c
+int dm_module_info(int i, const char **name, const char **build);
+void *module_of(const void *p);   // loader.c (lock-free: reads the module table)
 static void lp_sig(int sig, siginfo_t *si, void *ucv) {
     (void)sig; (void)si; if (!atomic_load(&g_lp_on)) return;
-    ucontext_t *uc = ucv; int t = (int)gettid(), who = t == g_lp_tid[0] ? 0 : t == g_lp_tid[1] ? 1 : -1; if (who < 0) return;
+    ucontext_t *uc = ucv; int t = (int)gettid(), who = -1; for (int k = 0; k < LP_SLOTS; k++) if (atomic_load(&g_lp_tid[k]) == t) { who = k; break; }
+    if (who < 0) return;
     int i = atomic_fetch_add(&g_lp_n, 1); if (i >= LP_N) return;
-    g_lp[i].who = who; g_lp[i].f[0] = uc->uc_mcontext.pc; g_lp[i].f[1] = uc->uc_mcontext.regs[30]; int nf = 2;
-    uint64_t sp = uc->uc_mcontext.sp, fp = uc->uc_mcontext.regs[29];
-    while (nf < LP_F && fp && !(fp & 15) && fp >= sp && fp < sp + (8u << 20)) { uint64_t nx = ((uint64_t *)(uintptr_t)fp)[0], ra = ((uint64_t *)(uintptr_t)fp)[1]; g_lp[i].f[nf++] = ra; if (nx <= fp) break; fp = nx; }   // (inside its own stack only)
+    uint64_t pc = uc->uc_mcontext.pc;
+    g_lp[i].who = who; g_lp[i].f[0] = pc; g_lp[i].f[1] = uc->uc_mcontext.regs[30]; int nf = 2;
+    if (!module_of((void *)(uintptr_t)pc)) {   // (host code only: the game's x29 need not be a frame pointer)
+        uint64_t sp = uc->uc_mcontext.sp, fp = uc->uc_mcontext.regs[29];
+        while (nf < LP_F && fp && !(fp & 15) && fp >= sp && fp < sp + (8u << 20)) { uint64_t nx = ((uint64_t *)(uintptr_t)fp)[0], ra = ((uint64_t *)(uintptr_t)fp)[1]; g_lp[i].f[nf++] = ra; if (nx <= fp) break; fp = nx; } }   // (inside its own stack only)
     g_lp[i].nf = nf;
 }
-static timer_t g_lp_timer[2]; static int g_lp_ntimer;
+static timer_t g_lp_timer[LP_SLOTS]; static int g_lp_ntimer; static uint64_t g_lp_t0[LP_SLOTS];
+static int lp_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_LOAD_PROF"); on = !(e && !strcmp(e, "0")); } return on; }
+static void lp_add(int tid) {   // one more thread sampled (load_prof's start, load_boost's pass); only while a profile runs, at most LP_SLOTS
+    if (!tid || !atomic_load(&g_lp_on) || g_lp_ntimer >= LP_SLOTS) return;
+    for (int k = 0; k < g_lp_ntimer; k++) if (atomic_load(&g_lp_tid[k]) == tid) return;
+    struct sigevent ev; memset(&ev, 0, sizeof ev); ev.sigev_notify = SIGEV_THREAD_ID; ev.sigev_signo = SIGPROF; ev._sigev_un._tid = tid;
+    clockid_t cpu = (clockid_t)((~(unsigned)tid) << 3) | 6;   // (the thread's own CPU clock, CPUCLOCK_SCHED | PERTHREAD: a sample per 1 ms it runs, none while it waits)
+    int k = g_lp_ntimer; thr_snap s; g_lp_t0[k] = thr_one(tid, &s) ? s.ticks : 0;
+    atomic_store(&g_lp_tid[k], tid);
+    if (timer_create(cpu, &ev, &g_lp_timer[k]) && timer_create(CLOCK_MONOTONIC, &ev, &g_lp_timer[k])) { atomic_store(&g_lp_tid[k], 0); return; }
+    struct itimerspec it = { { 0, 1000000 }, { 0, 1000000 } }; timer_settime(g_lp_timer[k], 0, &it, NULL); g_lp_ntimer++;
+}
+// libnxnative.so's GNU build id (NT_GNU_BUILD_ID, the linker's --build-id), hex; "" when absent
+static int lp_note_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size; char *out = data; Dl_info di; if (!dladdr((void *)lp_note_cb, &di) || (uintptr_t)info->dlpi_addr != (uintptr_t)di.dli_fbase) return 0;
+    for (int i = 0; i < info->dlpi_phnum; i++) { const ElfW(Phdr) *ph = &info->dlpi_phdr[i]; if (ph->p_type != PT_NOTE) continue;
+        const uint8_t *p = (const uint8_t *)(info->dlpi_addr + ph->p_vaddr), *e = p + ph->p_memsz;
+        while (p + sizeof(ElfW(Nhdr)) <= e) { const ElfW(Nhdr) *nh = (const ElfW(Nhdr) *)p; const uint8_t *nm = p + sizeof *nh, *desc = nm + ((nh->n_namesz + 3) & ~3u);
+            if (nh->n_type == NT_GNU_BUILD_ID && nh->n_namesz == 4 && !memcmp(nm, "GNU", 4)) { size_t o = 0; for (unsigned k = 0; k < nh->n_descsz && o + 3 < 80; k++) o += (size_t)snprintf(out + o, 80 - o, "%02x", desc[k]); return 1; }
+            p = desc + ((nh->n_descsz + 3) & ~3u); } }
+    return 1;
+}
+static const char *lib_build_id(void) { static char id[80]; static int done; if (!done) { done = 1; dl_iterate_phdr(lp_note_cb, id); } return id[0] ? id : "-"; }
+// this run's start (wall clock, for file names that keep runs apart): the process's start time from /proc/self/stat, else now
+static const char *run_stamp(void) {
+    static char s[24]; if (s[0]) return s;
+    time_t start = time(NULL); FILE *f = fopen("/proc/self/stat", "r"); char b[1024];
+    if (f) { size_t k = fread(b, 1, sizeof b - 1, f); fclose(f); b[k] = 0; char *rp = strrchr(b, ')'), *sv = NULL; int field = 3;
+        for (char *tok = rp ? strtok_r(rp + 2, " ", &sv) : NULL; tok; tok = strtok_r(NULL, " ", &sv), field++) if (field == 22) {
+            long hz = sysconf(_SC_CLK_TCK); struct timespec bt; clock_gettime(CLOCK_BOOTTIME, &bt);
+            if (hz > 0) start = time(NULL) - (time_t)(bt.tv_sec - (long long)strtoull(tok, NULL, 10) / hz); break; } }
+    struct tm tm; localtime_r(&start, &tm); strftime(s, sizeof s, "%Y%m%d-%H%M%S", &tm); return s;
+}
+static void lp_frame(FILE *f, uint64_t a) {
+    char b[96]; if (dm_addr_module((void *)(uintptr_t)a, b, sizeof b)) { fprintf(f, " %s", b); return; }
+    Dl_info di; if (dladdr((void *)(uintptr_t)a, &di) && di.dli_fname) { const char *m = strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname; fprintf(f, " %s+0x%llx", m, (unsigned long long)(a - (uint64_t)(uintptr_t)di.dli_fbase)); return; }
+    fprintf(f, " ?+0x%llx", (unsigned long long)a);
+}
+static int lp_cmp(const void *a, const void *b) { const struct { char n[256]; time_t t; } *x = a, *y = b; return (y->t > x->t) - (y->t < x->t); }
+static void lp_keep_newest(int keep) {   // load_prof_*.txt in the data folder beyond the newest `keep` go (older runs' files included)
+    DIR *d = opendir(g_files); if (!d) return; struct dirent *e; static struct { char n[256]; time_t t; } l[256]; int n = 0;
+    while ((e = readdir(d)) && n < 256) { size_t k = strlen(e->d_name); if (strncmp(e->d_name, "load_prof_", 10) || k < 14 || strcmp(e->d_name + k - 4, ".txt")) continue;
+        char p[1400]; struct stat st; snprintf(p, sizeof p, "%s/%s", g_files, e->d_name); if (stat(p, &st)) continue;
+        snprintf(l[n].n, sizeof l[n].n, "%s", e->d_name); l[n].t = st.st_mtime; n++; }
+    closedir(d); qsort(l, (size_t)n, sizeof *l, lp_cmp);
+    for (int i = keep; i < n; i++) { char p[1400]; snprintf(p, sizeof p, "%s/%s", g_files, l[i].n); unlink(p); }
+}
+void dm_thread_names_refresh(void) __attribute__((weak));   // hle_thread.c (fable-loads.md I5)
 static void load_prof(int start) {
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_LOAD_PROF"); on = !(e && !strcmp(e, "0")); } if (!on) return;
+    if (!lp_on()) return;
     extern int nvn_rq_tid(void) __attribute__((weak));
     if (start) {
         if (atomic_load(&g_lp_on)) return;
         static int installed; if (!installed) { installed = 1; struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = lp_sig; sa.sa_flags = SA_SIGINFO | SA_RESTART; sigemptyset(&sa.sa_mask); sigaction(SIGPROF, &sa, NULL); }
-        g_lp_tid[0] = nvn_rq_tid ? nvn_rq_tid() : 0; g_lp_tid[1] = (int)getpid(); atomic_store(&g_lp_n, 0); g_lp_ntimer = 0;
-        for (int k = 0; k < 2; k++) { if (!g_lp_tid[k]) continue;
-            struct sigevent ev; memset(&ev, 0, sizeof ev); ev.sigev_notify = SIGEV_THREAD_ID; ev.sigev_signo = SIGPROF; ev._sigev_un._tid = g_lp_tid[k];
-            clockid_t cpu = (clockid_t)((~(unsigned)g_lp_tid[k]) << 3) | 6;   // (the thread's own CPU clock, CPUCLOCK_SCHED | PERTHREAD: a sample per 1 ms it runs, none while it waits)
-            if (timer_create(cpu, &ev, &g_lp_timer[g_lp_ntimer]) && timer_create(CLOCK_MONOTONIC, &ev, &g_lp_timer[g_lp_ntimer])) continue;
-            struct itimerspec it = { { 0, 1000000 }, { 0, 1000000 } }; timer_settime(g_lp_timer[g_lp_ntimer], 0, &it, NULL); g_lp_ntimer++; }
-        atomic_store(&g_lp_on, 1); return;
+        for (int k = 0; k < LP_SLOTS; k++) atomic_store(&g_lp_tid[k], 0);
+        atomic_store(&g_lp_n, 0); g_lp_ntimer = 0; atomic_store(&g_lp_on, 1);
+        lp_add(nvn_rq_tid ? nvn_rq_tid() : 0); lp_add((int)g_game_tid); return;
     }
     if (!atomic_load(&g_lp_on)) return;
-    atomic_store(&g_lp_on, 0); for (int k = 0; k < g_lp_ntimer; k++) timer_delete(g_lp_timer[k]); g_lp_ntimer = 0;
+    atomic_store(&g_lp_on, 0); for (int k = 0; k < g_lp_ntimer; k++) timer_delete(g_lp_timer[k]);
     int n = atomic_load(&g_lp_n); if (n > LP_N) n = LP_N;
-    static int seq; char p[1200]; snprintf(p, sizeof p, "%s/load_prof_%d.txt", g_files, ++seq); FILE *f = fopen(p, "w"); if (!f) return;
-    fprintf(f, "# samples %d (1 ms of CPU each), thread 0 = dm-replay tid %d, 1 = main tid %d; per line: thread, then module:offset for pc, lr and the frame chain\n", n, g_lp_tid[0], g_lp_tid[1]);
-    for (int i = 0; i < n; i++) { fprintf(f, "%d", g_lp[i].who);
-        for (int k = 0; k < g_lp[i].nf; k++) { Dl_info a; const char *m = "?"; uint64_t o = g_lp[i].f[k];
-            if (dladdr((void *)(uintptr_t)g_lp[i].f[k], &a) && a.dli_fname) { m = strrchr(a.dli_fname, '/') ? strrchr(a.dli_fname, '/') + 1 : a.dli_fname; o -= (uint64_t)(uintptr_t)a.dli_fbase; }
-            fprintf(f, " %s:%llx", m, (unsigned long long)o); }
-        fputc('\n', f); }
-    fclose(f); fprintf(stderr, "[cpu] load profile: %d samples written to %s\n", n, p);
+    if (dm_thread_names_refresh) dm_thread_names_refresh();
+    static int seq; char p[1200]; snprintf(p, sizeof p, "%s/load_prof_%s_%d.txt", g_files, run_stamp(), ++seq); FILE *f = fopen(p, "w");
+    if (f) {
+        const char *ver = getenv("DM_APP_VERSION"); long hz = sysconf(_SC_CLK_TCK); if (hz <= 0) hz = 100;
+        fprintf(f, "# load profile: app version code %s, game %s, libnxnative.so build id %s\n# game modules:", ver ? ver : "-", DM_GAME_ID, lib_build_id());
+        const char *mn, *mb; for (int i = 0; dm_module_info(i, &mn, &mb); i++) fprintf(f, " %s %s;", mn, mb[0] ? mb : "-");
+        fprintf(f, "\n# samples %d (one per 1 ms of a thread's CPU); threads:", n);
+        for (int k = 0; k < g_lp_ntimer; k++) { int tid = atomic_load(&g_lp_tid[k]); thr_snap s; int ok = tid && thr_one(tid, &s);
+            fprintf(f, " %d = %s tid %d %.2f s CPU;", k, ok ? s.name : "(gone)", tid, ok && s.ticks > g_lp_t0[k] ? (double)(s.ticks - g_lp_t0[k]) / hz : 0); }
+        fprintf(f, "\n# per line: thread, then pc, lr and (host code only) the frame chain, each as module+offset (main / sdk / ...: the game's modules; libnxnative.so: the engine)\n");
+        for (int i = 0; i < n; i++) { fprintf(f, "%d", g_lp[i].who); for (int k = 0; k < g_lp[i].nf; k++) lp_frame(f, g_lp[i].f[k]); fputc('\n', f); }
+        fclose(f); fprintf(stderr, "[cpu] load profile: %d samples of %d threads written to %s\n", n, g_lp_ntimer, p);
+    }
+    g_lp_ntimer = 0; lp_keep_newest(12);
 }
+// The game's main thread in a load (fable-loads.md I2): a sampler thread looks every 10 ms at its kernel state (R running, S asleep, D in the kernel's I/O),
+//   the SVC it is in with the game's return address there (hle_thread.c dm_main_where) and the NVN call it is in (hle_nvn.c dm_nvn_where); no signal, so no
+//   EINTR anywhere. At the end of the load the shares print: asleep in nvnWindowAcquireTexture is the load waiting for frames (cause 1), asleep in an SVC on a
+//   lock (0x1a ArbitrateLock, 0x1c WaitProcessWideKeyAtomic, 0x34 WaitForAddress ...) is a hand-off between threads (cause 5). DM_LOAD_WAITPROF=0: off
+int dm_main_where(int *in_svc, uint32_t *svc, uint64_t *at, uint64_t *lr) __attribute__((weak));
+const char *dm_nvn_where(int tid) __attribute__((weak));
+typedef struct { char st; int svc; uint64_t lr; const char *nvn; unsigned n; } wp_key;
+enum { WP_K = 96 };
+static wp_key g_wp[WP_K]; static int g_wp_nk; static unsigned g_wp_total, g_wp_lost; static _Atomic int g_wp_run; static pthread_t g_wp_th; static int g_wp_started;
+static void *wp_main(void *a) {
+    (void)a; prctl(PR_SET_NAME, "dm-waitprof", 0, 0, 0);
+    while (atomic_load(&g_wp_run)) {
+        thr_snap s; if (thr_one((int)g_game_tid, &s)) {
+            int in = 0; uint32_t svc = 0; uint64_t at = 0, lr = 0; if (dm_main_where && !dm_main_where(&in, &svc, &at, &lr)) in = 0;
+            wp_key k = { (char)s.cpu, in ? (int)svc : -1, in ? lr : 0, dm_nvn_where ? dm_nvn_where((int)g_game_tid) : NULL, 1 };
+            int i = 0; for (; i < g_wp_nk; i++) if (g_wp[i].st == k.st && g_wp[i].svc == k.svc && g_wp[i].lr == k.lr && g_wp[i].nvn == k.nvn) { g_wp[i].n++; break; }
+            if (i == g_wp_nk) { if (g_wp_nk < WP_K) g_wp[g_wp_nk++] = k; else g_wp_lost++; }
+            g_wp_total++; }
+        usleep(10000); }
+    return NULL;
+}
+static const char *svc_name(int n) {
+    switch (n) { case 0x0b: return "SleepThread"; case 0x18: return "WaitSynchronization"; case 0x1a: return "ArbitrateLock"; case 0x1b: return "ArbitrateUnlock";
+        case 0x1c: return "WaitProcessWideKeyAtomic"; case 0x1d: return "SignalProcessWideKey"; case 0x34: return "WaitForAddress"; case 0x35: return "SignalToAddress"; default: return "svc"; }
+}
+static int wp_cmp(const void *a, const void *b) { const wp_key *x = a, *y = b; return (y->n > x->n) - (y->n < x->n); }
+static void wait_prof(int start) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_LOAD_WAITPROF"); on = !(e && !strcmp(e, "0")) && g_game_tid; } if (!on) return;
+    if (start) { if (g_wp_started) return; g_wp_nk = 0; g_wp_total = g_wp_lost = 0; atomic_store(&g_wp_run, 1); g_wp_started = !pthread_create(&g_wp_th, NULL, wp_main, NULL); return; }
+    if (!g_wp_started) return;
+    atomic_store(&g_wp_run, 0); pthread_join(g_wp_th, NULL); g_wp_started = 0;
+    if (!g_wp_total) return;
+    qsort(g_wp, (size_t)g_wp_nk, sizeof *g_wp, wp_cmp);
+    fprintf(stderr, "[cpu] load wait profile of the game's main thread (tid %d, %u looks every 10 ms; state R running, S asleep, D in the kernel):\n", (int)g_game_tid, g_wp_total);
+    for (int i = 0; i < g_wp_nk && i < 12; i++) { const wp_key *k = &g_wp[i]; char at[96] = "";
+        if (k->svc >= 0) { char m[80]; if (!dm_addr_module((void *)(uintptr_t)k->lr, m, sizeof m)) snprintf(m, sizeof m, "0x%llx", (unsigned long long)k->lr); snprintf(at, sizeof at, ", in SVC 0x%x %s returning to %s", (unsigned)k->svc, svc_name(k->svc), m); }
+        fprintf(stderr, "[cpu]   %4.1f %% %c%s%s%s\n", 100.0 * k->n / g_wp_total, k->st ? k->st : '?', at, k->nvn ? ", in " : k->svc < 0 ? ", in game or engine code" : "", k->nvn ? k->nvn : ""); }
+    if (g_wp_lost) fprintf(stderr, "[cpu]   (%u looks fell outside the %d kinds kept)\n", g_wp_lost, WP_K);
+}
+// Loads on the fast cores (the white screen before a battle: one thread's CPU work, 2.7 s of a 4 s load on a Galaxy S25+, file reads 0.18 s). While a load runs, every
+//   poll (500 ms) the threads that used a quarter of a core or more since the last one and are not boosted already get a little higher priority (nice -4) and,
+//   when they fit (boost_plan.h, fable-loads.md L3: busy threads plus the threads pinned already at most the fast cores), the phone's fast cores (a clock limit of
+//   70 % of the fastest or more). Each thread's own mask is saved and given back when the load is over. The touch menu's threads (dm-touch, dm-tapdrive,
+//   dm-discover) are left out: their memory scans run at nice 10 so they never come before the game (#112: dm-touch was moved to the fast cores at nice -4 in a
+//   load). Each boosted thread is sampled by the load profile too. DM_LOAD_BOOST=0: no boost; pin: always pin (the rule before); nice: never pin
+#include "boost_plan.h"
 static void load_boost(int loading, uint64_t t) {
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_LOAD_BOOST"); on = !(e && !strcmp(e, "0")); } if (!on) return;
-    static thr_snap prev[512]; static int nprev; static uint64_t prev_t; static int btid[16], bnice[16], nb; static cpu_set_t fast, all; static int masks;
-    if (!masks) { masks = 1; long top = 0, f[32]; CPU_ZERO(&fast); CPU_ZERO(&all);
-        for (int c = 0; c < 32; c++) { f[c] = core_max_khz(c); if (f[c] > top) top = f[c]; }
-        for (int c = 0; c < 32; c++) if (f[c]) { CPU_SET(c, &all); if (f[c] * 10 >= top * 7) CPU_SET(c, &fast); } }
+    static int mode = -1; if (mode < 0) { const char *e = getenv("DM_LOAD_BOOST"); mode = e && !strcmp(e, "0") ? 9 : e && !strcmp(e, "pin") ? BOOST_PIN : e && !strcmp(e, "nice") ? BOOST_NICE : BOOST_AUTO; }
+    if (mode == 9) return;
+    enum { NB = 16 };
+    static thr_snap prev[512]; static int nprev; static uint64_t prev_t; static int btid[NB], bnice[NB], bpin[NB], nb; static cpu_set_t bmask[NB]; static cpu_set_t fast; static int masks, nfast, ncores;
+    if (!masks) { masks = 1; long f[32]; for (int c = 0; c < 32; c++) f[c] = core_max_khz(c);
+        nfast = boost_fast_cores(f, 32, &ncores); long top = 0; for (int c = 0; c < 32; c++) if (f[c] > top) top = f[c];
+        CPU_ZERO(&fast); for (int c = 0; c < 32; c++) if (f[c] && f[c] * 10 >= top * 7) CPU_SET(c, &fast); }
     if (!loading) {
-        if (nb) { for (int i = 0; i < nb; i++) { sched_setaffinity(btid[i], sizeof all, &all); setpriority(PRIO_PROCESS, (id_t)btid[i], bnice[i]); }
-            fprintf(stderr, "[cpu] load over: %d thread(s) back to every core\n", nb); nb = 0; }
+        if (nb) { for (int i = 0; i < nb; i++) { if (bpin[i]) sched_setaffinity(btid[i], sizeof bmask[i], &bmask[i]); setpriority(PRIO_PROCESS, (id_t)btid[i], bnice[i]); }
+            fprintf(stderr, "[cpu] load over: %d thread(s) back to their own priority and cores\n", nb); nb = 0; }
         nprev = 0; return;
     }
     static thr_snap cur[512]; int nc = thr_snapshot(cur, 512); long hz = sysconf(_SC_CLK_TCK); if (hz <= 0) hz = 100;
     if (nprev && t > prev_t) {
-        double win = (double)(t - prev_t) / 1e9; char said[256] = ""; size_t sl = 0;
-        for (int i = 0; i < nc && nb < 16; i++) {
+        double win = (double)(t - prev_t) / 1e9; int cand[NB], ncand = 0;
+        for (int i = 0; i < nc && nb + ncand < NB; i++) {
             uint64_t was = 0; int seen = 0; for (int j = 0; j < nprev; j++) if (prev[j].tid == cur[i].tid) { was = prev[j].ticks; seen = 1; break; }
             if (!seen || cur[i].ticks <= was || (double)(cur[i].ticks - was) / hz < 0.25 * win) continue;
+            if (!strcmp(cur[i].name, "dm-touch") || !strcmp(cur[i].name, "dm-tapdrive") || !strcmp(cur[i].name, "dm-discover")) continue;
             int skip = 0; for (int k = 0; k < g_pin_n; k++) if (g_pin_tid[k] == cur[i].tid) skip = 1;
             for (int k = 0; k < nb; k++) if (btid[k] == cur[i].tid) skip = 1;
-            if (skip) continue;
-            errno = 0; int nice_was = getpriority(PRIO_PROCESS, (id_t)cur[i].tid); if (errno) nice_was = 0;
-            sched_setaffinity(cur[i].tid, sizeof fast, &fast); if (nice_was > -4) setpriority(PRIO_PROCESS, (id_t)cur[i].tid, -4);
-            btid[nb] = cur[i].tid; bnice[nb] = nice_was; nb++;
-            if (sl < sizeof said - 24) sl += (size_t)snprintf(said + sl, sizeof said - sl, " %s", cur[i].name);
+            if (!skip) cand[ncand++] = i;
         }
-        if (sl) fprintf(stderr, "[cpu] load: busy thread(s) to the fast cores:%s\n", said);
+        if (ncand) {
+            int pin = boost_pin(mode, nfast, ncores, nb + ncand, g_pin_n), unpinned = 0;
+            if (!pin) for (int k = 0; k < nb; k++) if (bpin[k]) { sched_setaffinity(btid[k], sizeof bmask[k], &bmask[k]); bpin[k] = 0; unpinned++; }   // (more busy threads than fast cores now: every core back)
+            char said[256] = ""; size_t sl = 0;
+            for (int c = 0; c < ncand; c++) { const thr_snap *th = &cur[cand[c]];
+                errno = 0; int nice_was = getpriority(PRIO_PROCESS, (id_t)th->tid); if (errno) nice_was = 0;
+                CPU_ZERO(&bmask[nb]); if (sched_getaffinity(th->tid, sizeof bmask[nb], &bmask[nb])) pin = 0;
+                bpin[nb] = pin && !sched_setaffinity(th->tid, sizeof fast, &fast);
+                if (nice_was > -4) setpriority(PRIO_PROCESS, (id_t)th->tid, -4);
+                btid[nb] = th->tid; bnice[nb] = nice_was; nb++; lp_add(th->tid);
+                if (sl < sizeof said - 24) sl += (size_t)snprintf(said + sl, sizeof said - sl, " %s", th->name); }
+            if (pin) fprintf(stderr, "[cpu] load: busy thread(s) to the fast cores (%d of %d) at nice -4:%s\n", nfast, ncores, said);
+            else fprintf(stderr, "[cpu] load: busy thread(s) at nice -4 on every core (%d boosted + %d pinned, %d fast cores of %d%s):%s\n", nb, g_pin_n, nfast, ncores, unpinned ? ", the ones pinned before let go" : "", said);
+        }
     }
     memcpy(prev, cur, sizeof *cur * (size_t)nc); nprev = nc; prev_t = t;
 }
@@ -1918,19 +2046,32 @@ JNIEXPORT jint JNICALL Java_com_nxnative_GameActivity_nativeLoading(JNIEnv *env,
     (void)env; (void)c;
     static int off = -1; if (off < 0) { const char *e = getenv("DM_LOAD_HINT"); off = e && !strcmp(e, "0"); } if (off) return 0;
     extern _Atomic uint64_t dm_fs_read_bytes __attribute__((weak)); if (!&dm_fs_read_bytes) return 0;
+    extern _Atomic uint64_t dm_fs_read_ns __attribute__((weak));
+    extern int dm_loading_poll(void) __attribute__((weak));
+    static int reads = -1; if (reads < 0) { const char *e = getenv("DM_LOAD_DETECT"); reads = (e && !strcmp(e, "reads")) || !dm_loading_poll;
+        fprintf(stderr, "[cpu] loads told by %s\n", reads ? "the game's file reads (DM_LOAD_DETECT=reads)" : "the picture (hle_nvn.c: file reads with under 60 draws a frame)"); }
     static uint64_t last_b, last_t, quiet_since; static int loading;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t t = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, b = atomic_load(&dm_fs_read_bytes);
+    static thr_snap ls[512], le[512]; static int nls, nle; static uint64_t l_t0, l_b0, l_r0, e_t, e_b, e_r;   // the snapshots at its start and (reads rule) at the first quiet poll
     if (last_t && t > last_t) {
         double mbs = (double)(b - last_b) / 1048576.0 / ((double)(t - last_t) / 1e9);
-        static thr_snap ls[512]; static int nls; static uint64_t l_t0, l_b0, l_r0; extern _Atomic uint64_t dm_fs_read_ns __attribute__((weak));
-        if (!loading && mbs >= 8.0) { loading = 1; quiet_since = 0; fprintf(stderr, "[cpu] loading (%.0f MB/s of game files): the system is told\n", mbs);
-            nls = thr_snapshot(ls, 512); l_t0 = last_t; l_b0 = last_b; l_r0 = &dm_fs_read_ns ? atomic_load(&dm_fs_read_ns) : 0; load_prof(1);
+        uint64_t rn = &dm_fs_read_ns ? atomic_load(&dm_fs_read_ns) : 0;
+        int now = loading;
+        if (!reads) now = dm_loading_poll();
+        else if (!loading && mbs >= 8.0) now = 1;
+        else if (loading && mbs < 1.0) { if (!quiet_since) { quiet_since = t; nle = thr_snapshot(le, 512); e_t = t; e_b = b; e_r = rn; }   // (the end snapshot: the window ends where the reads went quiet)
+                                         else if (t - quiet_since >= 2000000000ull) now = 0; }
+        else if (loading) quiet_since = 0;
+        if (now && !loading) { loading = 1; quiet_since = 0;
+            if (reads) fprintf(stderr, "[cpu] loading (%.0f MB/s of game files): the system is told\n", mbs); else fprintf(stderr, "[cpu] loading screen (%.0f MB/s of game files): the system is told\n", mbs);
+            if (dm_thread_names_refresh) dm_thread_names_refresh();   // (the game's own thread names in the report: hle_thread.c)
+            nls = thr_snapshot(ls, 512); l_t0 = t; l_b0 = b; l_r0 = rn; load_prof(1); wait_prof(1);
             typedef int (*spike_fn)(void *, int, int, const char *); static spike_fn sp; static int looked;
             if (!looked) { looked = 1; void *lib = dlopen("libandroid.so", RTLD_NOW); sp = lib ? (spike_fn)dlsym(lib, "APerformanceHint_notifyWorkloadSpike") : NULL; }
             if (sp && g_hint) sp(g_hint, 1, 0, "load"); }
-        else if (loading && mbs < 1.0) { if (!quiet_since) quiet_since = t; else if (t - quiet_since >= 2000000000ull) { loading = 0; fprintf(stderr, "[cpu] loading over\n");
-            load_report(ls, nls, quiet_since - l_t0, b - l_b0, (&dm_fs_read_ns ? atomic_load(&dm_fs_read_ns) : 0) - l_r0); load_prof(0); } }
-        else if (loading) quiet_since = 0;
+        else if (!now && loading) { loading = 0; fprintf(stderr, "[cpu] loading over\n");
+            if (!reads) { nle = thr_snapshot(le, 512); e_t = t; e_b = b; e_r = rn; }
+            load_report(ls, nls, le, nle, e_t - l_t0, e_b - l_b0, e_r - l_r0); load_prof(0); wait_prof(0); quiet_since = 0; }
         load_boost(loading, t);
     }
     last_b = b; last_t = t; return loading;

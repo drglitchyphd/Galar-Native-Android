@@ -2835,6 +2835,9 @@ static void bc_convert(int kind, int etk, const uint8_t *src, size_t pitch, size
 // CPU-filled texture upload: deswizzled level by level / layer by layer into staging (the submission's arena, else a one-off buffer), copied into the image in the upload command buffer
 // Time spent here (the long-frame line's upload ms: mtl_upload_ns_take) and in the deswizzle / copy part of it; one upload over 20 ms is logged with its size and split
 static _Atomic uint64_t g_upload_ns;
+static __thread int t_pre_worker;   // (this thread is the upload-ahead worker, pre_main: its uploads are not waited for by a draw)
+static _Atomic uint64_t g_upl_fg_n, g_upl_fg_ns;   // uploads not made by the upload-ahead worker (a draw's first use, a re-upload): a drawing thread waited for them (the load report)
+void mtl_upload_fg_stats(uint64_t *n, uint64_t *ns) { *n = atomic_load(&g_upl_fg_n); *ns = atomic_load(&g_upl_fg_ns); }
 // A batch of uploads (the pre-upload worker, pre_main): this thread's uploads go into one command buffer with their own staging buffers, submitted and waited for once
 //   at the end of the batch instead of once each (each texture was a submission and a wait of its own; an idea from a fork's v0.99, written here)
 enum { UPB_MAX = 32 };
@@ -2844,7 +2847,7 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns);
 static int tex_upload(vtex *x, const tex_t *t) {
     pool_mark_tex(t->mem);
     uint64_t t0 = mono_ns(), cn = 0; int r = tex_upload_(x, t, &cn); uint64_t dt = mono_ns() - t0;
-    atomic_fetch_add(&g_upload_ns, dt);
+    atomic_fetch_add(&g_upload_ns, dt); if (!t_pre_worker) { atomic_fetch_add(&g_upl_fg_n, 1); atomic_fetch_add(&g_upl_fg_ns, dt); }
     if (dt > 20000000ull) { static int n; if (n++ < 40) VLOG("slow texture upload: %ux%ux%u, %u levels, %u layers, format %#x: %.1f ms (deswizzle / copy %.1f ms)",
                                                             x->w, x->h, x->d, x->levels, x->layers, t->d.format, dt / 1e6, cn / 1e6); }
     return r;
@@ -2970,6 +2973,21 @@ static long pre_budget(void) {
               double gb = kb / 1048576.0; mb = gb >= 11.0 ? 512 : gb >= 7.0 ? 256 : 96; }   // (MemTotal is a little under the phone's rating: 12 GB shows about 11)
     b = mb << 20; VLOG("packaged textures: up to %ld MB uploaded ahead and not drawn yet", mb); return b;
 }
+// The budget in a loading screen (fable-loads.md L4; hle_nvn.c dm_loading): #112's load left 156 textures to their first use (budget or queue full) and spent
+//   325 ms of one 1796 ms frame uploading 1436 of them on the drawing thread. DM_VK_PRE_BUDGET_MB=<n> raises the budget to n MB while a load is on and the phone
+//   has 2.5 GB or more available (MemAvailable, read at most once a second); unset (the default until the load report's counters are measured on phones):
+//   the budget stays as above. The counters split what was left to its first use by the budget and by the full queue (the load report, hle_nvn.c)
+__attribute__((weak)) int dm_loading(void) { return 0; }   // (hle_nvn.c; none in t_vkdev)
+static _Atomic uint64_t g_pre_full_budget, g_pre_full_queue;
+static long pre_budget_now(void) {
+    static long load_b = -1; if (load_b < 0) { const char *e = getenv("DM_VK_PRE_BUDGET_MB"); load_b = e && atol(e) > 0 ? atol(e) << 20 : 0;
+        if (load_b) VLOG("packaged textures: up to %ld MB uploaded ahead in a loading screen when 2.5 GB or more is available (DM_VK_PRE_BUDGET_MB)", load_b >> 20); }
+    long b = pre_budget(); if (!load_b || load_b <= b || !dm_loading()) return b;
+    static uint64_t at; static long avail_kb; uint64_t now = mono_ns();
+    if (!at || now - at > 1000000000ull) { at = now; avail_kb = 0; FILE *f = fopen("/proc/meminfo", "r"); char ln[128]; while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemAvailable: %ld kB", &avail_kb) == 1) break; if (f) fclose(f); }
+    return avail_kb >= 2621440 ? load_b : b;   // (2.5 GB)
+}
+void mtl_pre_stats(uint64_t *budget, uint64_t *queue) { *budget = atomic_load(&g_pre_full_budget); *queue = atomic_load(&g_pre_full_queue); }
 static int pre_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PREUPLOAD"); v = !(e && !strcmp(e, "0")); VLOG("packaged textures: %s", v ? "uploaded ahead by a worker as the game creates them" : "uploaded at their first use (DM_VK_PREUPLOAD=0)"); } return v; }
 // The worker's batch: its own command pool (no lock shared with the one-off uploads), a full barrier on both sides, submitted after what was submitted so far and waited
 //   for here. Held work is not flushed for it (a one-off upload did that each time): what it uploads is new images nothing has drawn yet
@@ -2996,7 +3014,7 @@ static void pre_batch_end(upb_t *b) {
 }
 static int pre_batch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PRE_BATCH"); v = e && atoi(e) == 1 ? 0 : 1; } return v; }   // (DM_VK_PRE_BATCH=1: one at a time, as before)
 static _Atomic uint64_t g_pre_batches;
-static void *pre_main(void *unused) { DM_THREAD_NAME("dm-texupload");
+static void *pre_main(void *unused) { DM_THREAD_NAME("dm-texupload"); t_pre_worker = 1;
     (void)unused; setpriority(PRIO_PROCESS, (id_t)gettid(), 4);   // (below the game's threads: it only saves them work)
     static upb_t b; static tex_t cs[UPB_MAX]; static vtex *xs[UPB_MAX];
     for (;;) {
@@ -3013,7 +3031,7 @@ static void *pre_main(void *unused) { DM_THREAD_NAME("dm-texupload");
             tex_t c = got[i];
             pthread_mutex_lock(&g_smu); int want = nvn_hm_get(&g_tex_live, &c.serial) && !serial_get(c.serial); pthread_mutex_unlock(&g_smu);
             if (!want) { atomic_fetch_add(&g_pre_late, 1); continue; }   // (released, or already uploaded by its first use)
-            if (atomic_load(&g_pre_unused) + (long)c.L.size > pre_budget()) { atomic_fetch_add(&g_pre_full, 1); continue; }   // (over the budget: its first use uploads it)
+            if (atomic_load(&g_pre_unused) + (long)c.L.size > pre_budget_now()) { atomic_fetch_add(&g_pre_full, 1); atomic_fetch_add(&g_pre_full_budget, 1); continue; }   // (over the budget: its first use uploads it)
             vtex *x = pkg_upload(&c); if (!x) continue;
             cs[nx] = c; xs[nx] = x; nx++;
         }
@@ -3033,7 +3051,7 @@ void mtl_tex_preupload(const tex_t *t) {   // hle_nvn.c nvnTextureInitialize: a 
     static int started;
     pthread_mutex_lock(&g_pre_mu);
     if (!started) { started = 1; pthread_t th; if (pthread_create(&th, NULL, pre_main, NULL)) { started = -1; } else pthread_detach(th); }
-    if (started < 0 || g_pre_head - g_pre_tail >= PRE_N) { atomic_fetch_add(&g_pre_full, 1); pthread_mutex_unlock(&g_pre_mu); return; }   // (full: uploaded at its first use)
+    if (started < 0 || g_pre_head - g_pre_tail >= PRE_N) { atomic_fetch_add(&g_pre_full, 1); atomic_fetch_add(&g_pre_full_queue, 1); pthread_mutex_unlock(&g_pre_mu); return; }   // (full: uploaded at its first use)
     g_pre[g_pre_head++ % PRE_N] = *t; pthread_cond_signal(&g_pre_cv);
     pthread_mutex_unlock(&g_pre_mu);
 }
@@ -8133,6 +8151,7 @@ void mtl_use_stats(uint64_t *call, uint64_t *skip) { *call = *skip = 0; }
 void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full) { *load = *store = *full = 0; }
 void mtl_create_ns(uint64_t *lib, uint64_t *pso) { *lib = *pso = 0; }
 void mtl_create_stats(uint64_t *lib, uint64_t *pso) { *lib = *pso = 0; }
+void mtl_pso_stats(uint64_t *draw, uint64_t *bg) { *draw = (uint64_t)atomic_load(&g_pso_ingame); *bg = atomic_load(&g_apso_done); }   // (pipelines built by draws / in the background: the load report, hle_nvn.c)
 uint64_t mtl_drawable_ns_take(void) { return 0; }
 uint64_t mtl_ds_omit(void) { return 0; }
 uint64_t mtl_pkg_miss(void) { return 0; }

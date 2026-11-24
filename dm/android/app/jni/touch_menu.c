@@ -23,6 +23,19 @@
 #include "dm_input.h"
 #include "game_profile.h"
 #include "nvn_ovl.h"   // dm_picture_box
+#include "touch_sched.h"
+
+// All-memory scans and loads (fable-loads.md L2): the scans read every writable mapping of the process (1-2 s of a core on a phone, 6.9 s inside a 10 s load on
+//   #112), so none starts while a load is on (hle_nvn.c dm_loading: a picture with under 60 draws while the game reads) and after a scan that found too few panes
+//   the next waits 10, 20, then 40 s (touch_sched.h). DM_TOUCH_SCAN_LOAD=1 allows them in loads again; DM_TOUCH_FULL_S=<s> sets the first gap (default 10).
+//   Their count and time go in the load report (hle_nvn.c, dm_touch_scan_stats)
+int dm_loading(void) __attribute__((weak));
+static _Atomic uint64_t g_scans, g_scan_ns;
+void dm_touch_scan_stats(uint64_t *n, uint64_t *ns) { *n = atomic_load(&g_scans); *ns = atomic_load(&g_scan_ns); }
+static int scan_in_load(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_TOUCH_SCAN_LOAD"); v = e && atoi(e) == 1; } return v; }
+static int touch_loading(void) { return dm_loading && !scan_in_load() && dm_loading(); }
+static double touch_full_s(void) { static double v = -1; if (v < 0) { const char *e = getenv("DM_TOUCH_FULL_S"); v = e && *e ? atof(e) : 10; if (v < 0) v = 0; } return v; }
+static void scan_count(double secs) { atomic_fetch_add(&g_scans, 1); atomic_fetch_add(&g_scan_ns, (uint64_t)(secs * 1e9)); }
 
 #if defined(DM_GAME_TOUCH_MENU) && DM_GAME_TOUCH_MENU
 static const uint64_t PANE_VT[] = DM_GAME_TOUCH_MENU_PANES, LIST_VT[] = DM_GAME_TOUCH_MENU_LISTS, POP_VT[] = DM_GAME_TOUCH_MENU_POPUPS;
@@ -52,7 +65,8 @@ static int setup(void) {
 static void scan(int all) {
     static uint64_t buf[1 << 16]; double t0 = now_s(); g_nfound = 0; g_nlists = 0; g_npops = 0;
     static struct { unsigned long s, e; } *reg; static int creg; int nreg = 0;   // (the game has thousands of mappings)
-    if (all || !g_nreg) {
+    int whole = all || !g_nreg;
+    if (whole) {
         FILE *m = fopen("/proc/self/maps", "r"); char ln[256];
         while (m && fgets(ln, sizeof ln, m)) { unsigned long s, e; char pr[8] = "";
             if (sscanf(ln, "%lx-%lx %7s", &s, &e, pr) == 3 && pr[0] == 'r' && pr[1] == 'w' && pr[3] == 'p') {
@@ -68,13 +82,15 @@ static void scan(int all) {
                 for (int k = 0; k < NLV; k++) if (buf[i] == g_lvt[k] && g_nlists < MAXL) { g_lists[g_nlists++] = a + i * 8; hit = 1; }
                 for (int k = 0; k < NPV; k++) if (buf[i] == g_pvt[k] && g_npops < MAXL) { g_pops[g_npops++] = a + i * 8; hit = 1; } } }
         if (hit && nkeep < 4096) { g_reg[nkeep].s = reg[r].s; g_reg[nkeep].e = reg[r].e; nkeep++; } }
-    g_nreg = nkeep;
-    fprintf(stderr, "[touch-menu] scan (%s): %d panes, %d lists, %d pop-ups in %d of %d mappings, %.0f ms (first pane class at %lx)\n", all ? "all memory" : "kept mappings", g_nfound, g_nlists, g_npops, g_nreg, nreg,
+    g_nreg = nkeep; if (whole) scan_count(now_s() - t0);
+    fprintf(stderr, "[touch-menu] scan (%s): %d panes, %d lists, %d pop-ups in %d of %d mappings, %.0f ms (first pane class at %lx)\n", whole ? "all memory" : "kept mappings", g_nfound, g_nlists, g_npops, g_nreg, nreg,
             (now_s() - t0) * 1e3, (unsigned long)g_vt[0]);
 }
-// all memory again, at most every 10 s (a full scan takes 1–2 s of a phone's CPU, 8 s on an emulator): for taps the kept mappings cannot place
+// all memory again, at most every 10 s (a full scan takes 1–2 s of a phone's CPU, 8 s on an emulator): for taps the kept mappings cannot place. A tap's scan is
+//   the player asking, so a load does not stop it; it counts for the watcher's back-off (g_ts) all the same
 static double g_full_t = -100;
-static void full_scan(void) { if (now_s() - g_full_t < 10) return; scan(1); g_full_t = now_s(); }
+static tsched g_ts = { -1e9, 0 };   // the watcher's all-memory scans (touch_sched.h), under g_scan_mu
+static void full_scan(void) { if (now_s() - g_full_t < 10) return; scan(1); g_full_t = now_s(); tsched_done(&g_ts, g_full_t, g_nfound); }
 // a pane's rectangle in layout space and whether it shows (itself and every parent visible, alpha above 0), through its parents
 static int pane_get(uintptr_t a, pane_t *p) {
     unsigned char b[0xc8]; if (rd(a, b, sizeof b) != (ssize_t)sizeof b) return 0;
@@ -471,10 +487,19 @@ int touch_menu_cutscene(void) { return atomic_load(&g_cut) && atomic_load(&g_men
 static void *watch_main(void *a) {
     (void)a; prctl(PR_SET_NAME, "dm-touch", 0, 0, 0); setpriority(PRIO_PROCESS, (id_t)gettid(), 10);   // (its memory scans take 1-2 s of a core: never ahead of the game's threads)
     if (!setup()) return NULL;
+    int was_load = 0;
     for (;;) { usleep(500000);
+        // a load (hle_nvn.c dm_loading): no scan, no cursor or layout-part reads (the layouts are being destroyed and rebuilt); the state stays as it was. Once
+        //   it is over the next screen is being built: the next all-memory scan may come at once
+        int ld = touch_loading(); if (ld) { was_load = 1; continue; }
         pthread_mutex_lock(&g_scan_mu);
-        // (all memory again while few panes are found: the watcher starts with the overlay, on the title screen, before the field and its menus are loaded)
-        if (!g_nfound || (!atomic_load(&g_menu) && now_s() - g_scan_t > 12)) { scan(g_nreg == 0 || g_nfound < 2000); cursors_pick(); g_scan_t = now_s(); }
+        if (was_load) { was_load = 0; tsched_load_over(&g_ts); }
+        // (all memory again while few panes are found: the watcher starts with the overlay, on the title screen, before the field and its menus are loaded;
+        //   at most as touch_sched.h allows: 10, 20, then 40 s apart while they stay too few)
+        if (!g_nfound || (!atomic_load(&g_menu) && now_s() - g_scan_t > 12)) {
+            int all = g_nreg == 0 || g_nfound < TS_ENOUGH;
+            if (!all) { scan(0); cursors_pick(); g_scan_t = now_s(); }
+            else if (tsched_ok(&g_ts, now_s(), 0, 1, touch_full_s())) { scan(1); g_full_t = now_s(); tsched_done(&g_ts, g_full_t, g_nfound); cursors_pick(); g_scan_t = now_s(); } }
         int on = 0; pane_t p;
         char why[64] = "";
         static char seen[512]; char now[512] = ""; size_t nl = 0;
@@ -589,7 +614,7 @@ void touch_menu_drag_rate(float r) {
     static _Atomic int started; if (m && !atomic_exchange(&started, 1)) { pthread_t t; if (!pthread_create(&t, NULL, scroll_main, NULL)) pthread_detach(t); }
     atomic_store(&g_rate, m); touch_menu_drag(m != 0);
 }
-static void *driver_main(void *a) { prctl(PR_SET_NAME, "dm-tapdrive", 0, 0, 0);
+static void *driver_main(void *a) { prctl(PR_SET_NAME, "dm-tapdrive", 0, 0, 0); setpriority(PRIO_PROCESS, (id_t)gettid(), 10);   // (its scans are the watcher's: never ahead of the game's threads)
     (void)a;
     for (;;) { pthread_mutex_lock(&g_mu); while (!g_nq && !g_sx && !g_sy) pthread_cond_wait(&g_cv, &g_mu);
         if (!g_nq && !atomic_load(&g_menu)) { g_sx = g_sy = 0; pthread_mutex_unlock(&g_mu); continue; }   // the menu closed: its waiting steps go
@@ -678,6 +703,7 @@ static void discover_round(void) {
     if (m) fclose(m);
     struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
     qsort(g_dk, g_ndk, sizeof g_dk[0], dk_cmp);
+    scan_count((t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
     fprintf(stderr, "[touch-discover] main %s: %ld pane-like objects in %d (class, name offset) pairs, %.0f ms; most common:\n", dm_main_build(), objs, g_ndk,
             (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
     for (int k = 0; k < g_ndk && k < 24; k++) {
@@ -688,7 +714,8 @@ static void discover_round(void) {
 }
 static void *discover_main(void *a) { (void)a; prctl(PR_SET_NAME, "dm-discover", 0, 0, 0); setpriority(PRIO_PROCESS, 0, 10);
     const char *e = getenv("DM_TOUCH_DISCOVER_S"); int s = e ? atoi(e) : 15; if (s < 5) s = 5;
-    sleep(20); for (;;) { discover_round(); sleep(s); } return NULL; }
+    if (s < touch_full_s()) s = (int)touch_full_s();   // (the same limit as the watcher's scans; none while a load is on)
+    sleep(20); for (;;) { if (!touch_loading()) discover_round(); sleep(s); } return NULL; }
 void touch_menu_discover_start(void) { static _Atomic int on; if (atomic_exchange(&on, 1)) return;
     const char *e = getenv("DM_TOUCH_DISCOVER"); if (!e || !atoi(e)) return;
     pthread_t t; if (!pthread_create(&t, NULL, discover_main, NULL)) pthread_detach(t); fprintf(stderr, "[touch-discover] on: rounds every %s s\n", getenv("DM_TOUCH_DISCOVER_S") ? getenv("DM_TOUCH_DISCOVER_S") : "15"); }
