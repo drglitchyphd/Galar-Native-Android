@@ -52,3 +52,10 @@ t_fgcut_vk
 t_fg_score
 t_quirks
 t_crumbs
+t_rq_order
+t_pso_lru
+t_prewarm
+t_load_detect
+t_vk_pace
+t_pool_late
+t_work
