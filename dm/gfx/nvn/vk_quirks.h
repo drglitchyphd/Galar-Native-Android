@@ -163,8 +163,10 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     //   Mali, Xclipse and PowerVR keep full barriers for every game (Legends: Arceus flickered with them relaxed: #20 #31 #32)
     case Q_NO_DYNREN: case Q_GATHER_BIAS: case Q_PASS_DEFER: case Q_IMPORT_MARK_OFF: return g->vendor == VEN_QCOM;
     case Q_BARRIER_RELAXED: return g->vendor == VEN_QCOM && !gpu_is_old_qcom(g);
-    // the replay's own thread: by the GPU's name, as Faster rendering's Auto always tested it (Turnip names itself "Turnip Adreno")
-    case Q_NVN_ASYNC: return strstr(g->name, "Adreno") != NULL && !(g->eng & ENG_NVN_ASYNC_NEVER);
+    // the replay's own thread: by the GPU's name, as Faster rendering's Auto always tested it (Turnip names itself "Turnip Adreno"); and Arm's own Mali driver since
+    //   v0.97: the POCO X6 Pro (G615 MC6, r44p1) spent 22-42 ms a frame recording on the game's thread with every pass storing its attachments (the held frame's store
+    //   decisions come with it, DM_VK_FRAME_HOLD=2). Not PanVK (untested there)
+    case Q_NVN_ASYNC: return (strstr(g->name, "Adreno") != NULL || gpu_is_arm_driver(g)) && !(g->eng & ENG_NVN_ASYNC_NEVER);
     // the games apart, each by its own profile (engine_quirks → gpu_id.eng): worker-built pipelines left objects missing for frames on an Adreno 710 (Arceus #34:
     //   async_pso_off); Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34: qc11_no_eds; Sword / Shield answered #209 with full barriers
     //   instead); the driver self-tests at start (driver_selftests); the replay never on its own thread (nvn_async_never, above).
@@ -205,7 +207,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
 VKQ_UNUSED static int quirk_late(int q) {
     switch (q) {
     case Q_FLOAT_CONTROLS: case Q_CLAMP_ZERO: case Q_NAN_MINMAX: case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST:
-    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: return 1;
+    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: case Q_NVN_ASYNC: return 1;
     }
     return 0;
 }

@@ -86,7 +86,7 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     case Q_TF_CHECK: return g->arm_rel > 0;                                     // :4688 chk = e ? atoi (e) != 0 : g_arm_rel > 0
     case Q_CLEAR_BY_PASS: return g->vendor == 0x144D;                           // :4947 v = e ? atoi (e) != 0 : g_props.vendorID == 0x144D
     case Q_TF_SELFTEST: return g->arm_rel > 0;                                  // tf_selftest.h:108 run = on ? atoi (on) != 0 : g_arm_rel > 0 (within :746, Q_DRIVER_SELFTESTS)
-    case Q_NVN_ASYNC: return P->nvn_async_never ? 0 : strstr(g->name, "Adreno") != NULL;   // hle_nvn.c:1083 autoon = !(e && *e) && g && strstr (g, "Adreno"); :1085 #if DM_GAME_ENG_NVN_ASYNC_NEVER v = 0
+    case Q_NVN_ASYNC: return P->nvn_async_never ? 0 : strstr(g->name, "Adreno") != NULL || (g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5);   // v0.97: Arm's own driver too   // hle_nvn.c:1083 autoon = !(e && *e) && g && strstr (g, "Adreno"); :1085 #if DM_GAME_ENG_NVN_ASYNC_NEVER v = 0
     // new with the merged branches, not in 6e0e1dd (docs/ENGINE_UNIFY.md lists it): galar-driver-probes ad0f638 / arceus-vk10-validation 85e72fd, Arm's own driver
     case Q_QUERY_LOD: return g->arm_rel != 0;
     // mali-all e6f6d0c (the Mali white-screen fix), mali_white_vk.inc mw_init: arm = g_arm_rel != 0; g_mw.want = mw_default_route (arm, DM_PORT_GALAR);
@@ -263,7 +263,7 @@ static void phones(const profile *P) {
     gpu_id g615 = phone(P, 1u << 22 | 3u << 12, 0x13B5, 9, 44, 1, 0, 0, "Mali-G615 MC2", 7800000, 1);
     CHECK(QD(Q_G615_SAFE, g615) && QD(Q_CLAMP_ZERO, g615) && QD(Q_NAN_MINMAX, g615) == 2 && QD(Q_VIEW_QUARANTINE, g615) == 2048 && QD(Q_TEX_HALF_UNSAFE, g615)
           && QD(Q_PIPE_KEEP, g615) == 800 && QD(Q_EXACT_MATH, g615) && QD(Q_INIT_LOCALS, g615) && QD(Q_FLOAT_CONTROLS, g615) && QD(Q_DMAHEAP, g615) && QD(Q_GPU_TIME_OFF, g615)
-          && QD(Q_TF_CHECK, g615) && QD(Q_QUERY_LOD, g615) && !QD(Q_NO_DYNREN, g615) && !QD(Q_BARRIER_RELAXED, g615) && !QD(Q_NVN_ASYNC, g615),
+          && QD(Q_TF_CHECK, g615) && QD(Q_QUERY_LOD, g615) && !QD(Q_NO_DYNREN, g615) && !QD(Q_BARRIER_RELAXED, g615) && QD(Q_NVN_ASYNC, g615) == !arc,
           "%s, Mali-G615 MC2 on r44p1 (#82 #110): the full Arm set (and the new LOD query rule), full barriers", gm);
     CHECK(QD(Q_TF_SELFTEST, g615) && QD(Q_DRIVER_SELFTESTS, g615) == arc, "%s, Mali-G615 MC2: the transform feedback self-test where the game runs its self-tests (Legends: Arceus)", gm);
     gpu_id g925 = phone(P, 1u << 22 | 3u << 12, 0x13B5, 9, 49, 1, 1, 0, "Mali-G925-Immortalis MC12", 11800000, 1);
