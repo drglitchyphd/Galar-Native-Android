@@ -1191,6 +1191,15 @@ static pw_run_t pw_start(const char *label, const char *cache) {
     CHECK(!r.saved_before_release, "prewarm (%s): the pipeline cache file was written before the game was let go", label);
     return r;
 }
+// the test shaders' SPIR-V hashes as loaded (S2: the same whether shaders load on one thread or many)
+static int pw_hashes(uint64_t *h, int max) {
+    int n = 0; pthread_mutex_lock(&g_shmu);
+    for (uint32_t i = 0; i < g_shcache.cap && n < max; i++) { vshader *s = g_shcache.vals[i]; if (!s || strncmp(s->key, "70", 2)) continue;
+        uint64_t kk = strtoull(s->key, NULL, 16); h[2 * n] = kk; h[2 * n + 1] = s->spv_hash; n++; }
+    pthread_mutex_unlock(&g_shmu);
+    for (int a = 1; a < n; a++) for (int b = a; b > 0 && h[2 * (b - 1)] > h[2 * b]; b--) { uint64_t t0 = h[2 * b], t1 = h[2 * b + 1]; h[2 * b] = h[2 * (b - 1)]; h[2 * b + 1] = h[2 * (b - 1) + 1]; h[2 * (b - 1)] = t0; h[2 * (b - 1) + 1] = t1; }
+    return n;
+}
 static void prewarm_work(void) {
     if (getenv("SIMDEV_NO_PREWARM")) { printf("PREWARM skipped (SIMDEV_NO_PREWARM)\n"); return; }
     int N = getenv("SIMDEV_PW_N") ? atoi(getenv("SIMDEV_PW_N")) : 400, OPS = getenv("SIMDEV_PW_OPS") ? atoi(getenv("SIMDEV_PW_OPS")) : 800, NV = N / 4 > 0 ? N / 4 : 1;
@@ -1226,11 +1235,18 @@ static void prewarm_work(void) {
            g_eds ? "the shared list" : "this phone's list with the draw state (no extended dynamic state)");
     pw_forget();
     pw_run_t c = pw_start("first start", cache);
+    int nh = N + NV; uint64_t *h1 = calloc((size_t)nh * 2, 8), *h0 = calloc((size_t)nh * 2, 8); int n1 = pw_hashes(h1, nh);
     CHECK(!g_eds || c.built == N, "prewarm: %d of %d built at the first start", c.built, N);
     CHECK(pw_mtime(cache) >= 0 && c.saved, "prewarm: no pipeline cache file after the first start");
     pw_forget();
     pw_run_t w = pw_start("later start", cache);
     CHECK(!g_eds || w.built == N, "prewarm: %d of %d built at the later start", w.built, N);
+    // S2: the same SPIR-V with shaders loaded one at a time (DM_VK_PREWARM_SHADER_MT=0)
+    pw_forget(); g_sh_mt = 0;
+    pw_start("later start, shaders loaded one at a time", cache);
+    g_sh_mt = 1; int n0 = pw_hashes(h0, nh);
+    CHECK(n1 == nh && n0 == nh && !memcmp(h0, h1, (size_t)nh * 16), "prewarm: the shaders' SPIR-V differs between loading on many threads and on one (%d / %d of %d loaded)", n1, n0, nh);
+    free(h0); free(h1);
     unsetenv("DM_VK_PSO_RECORD"); unsetenv("DM_VK_PCACHE");
 }
 

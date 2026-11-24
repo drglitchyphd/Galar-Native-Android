@@ -3465,6 +3465,7 @@ typedef struct vshader {
     uint8_t hasgl;                              // a GL-depth variant was made (glmod; it stays 1 while glmod is released: vs_gl)
     _Atomic int rel; uint8_t relgl, nrel;       // modules released (shmod_release): mod (and glmod: relgl) made again from code / glcode by shmod_ensure; nrel: times
     _Atomic uint64_t used_ns;                   // the last pipeline built with it (shmod_release)
+    uint64_t spv_hash;                          // FNV-1a of the main module's SPIR-V as handed to the driver (simdev t_vkdev: shader loading on one thread or many)
 } vshader;
 // The game's shader modules alive now (main, GL-depth, capture, point, fragment and integer-input variants) and the SPIR-V bytes handed to the driver for them; those
 //   destroyed by shmod_release and made again by shmod_ensure ([mem] shmod_report)
@@ -3550,20 +3551,23 @@ static uint32_t stage_shift(int st) { return st == 1 ? 64 : st == 2 ? 128 : st =
 // The shader set packed into one mapped file (DM_SPV_PAK, dm/android/tools/spv_pak.py): "NXSP", version, count, chain[16], sorted index, data.
 // Versions 1/2 index SPIR-V and reflection; versions 3/4 additionally index a GL-depth fallback SPIR-V. Versions 2/4 compress each blob.
 static const uint8_t *g_pak; static size_t g_pak_n; static uint32_t g_pak_count, g_pak_ver;
-static int pak_open(void) {
-    static int tried; if (tried++) return g_pak != NULL;
-    const char *path = getenv("DM_SPV_PAK"); if (!path) return 0;
-    int fd = open(path, O_RDONLY); struct stat st; if (fd < 0 || fstat(fd, &st)) { VLOG("[RED] shader pack %s cannot be opened", path); if (fd >= 0) close(fd); return 0; }
+static void pak_open_once(void);
+// (once, under pthread_once: the prewarm loads shaders on several threads (shader_get), and a second thread that found "tried" set while the first was still mapping
+//   the pack would have read every shader as missing)
+static int pak_open(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, pak_open_once); return g_pak != NULL; }
+static void pak_open_once(void) {
+    const char *path = getenv("DM_SPV_PAK"); if (!path) return;
+    int fd = open(path, O_RDONLY); struct stat st; if (fd < 0 || fstat(fd, &st)) { VLOG("[RED] shader pack %s cannot be opened", path); if (fd >= 0) close(fd); return; }
     void *m = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
-    if (m == MAP_FAILED || st.st_size < 28 || memcmp(m, "NXSP", 4)) { VLOG("[RED] shader pack %s is not one", path); return 0; }
+    if (m == MAP_FAILED || st.st_size < 28 || memcmp(m, "NXSP", 4)) { VLOG("[RED] shader pack %s is not one", path); return; }
     char chain[17] = {0}; memcpy(chain, (const uint8_t *)m + 12, 16);
-    if (strcmp(chain, DMSH_CHAIN)) { VLOG("[RED] shader pack %s has chain %s, this host expects %s", path, chain, DMSH_CHAIN); munmap(m, (size_t)st.st_size); return 0; }
-    g_pak = m; g_pak_n = (size_t)st.st_size; memcpy(&g_pak_ver, g_pak + 4, 4); memcpy(&g_pak_count, g_pak + 8, 4);
-    if (g_pak_ver < 1 || g_pak_ver > 4) { VLOG("[RED] shader pack %s has version %u", path, g_pak_ver); g_pak = NULL; munmap(m, (size_t)st.st_size); return 0; }
-    size_t entry_size = g_pak_ver >= 3 ? 44 : 32;
-    if (g_pak_count > (g_pak_n - 28) / entry_size) { VLOG("[RED] shader pack %s has a truncated index", path); g_pak = NULL; munmap(m, (size_t)st.st_size); return 0; }
+    if (strcmp(chain, DMSH_CHAIN)) { VLOG("[RED] shader pack %s has chain %s, this host expects %s", path, chain, DMSH_CHAIN); munmap(m, (size_t)st.st_size); return; }
+    uint32_t ver, count; memcpy(&ver, (const uint8_t *)m + 4, 4); memcpy(&count, (const uint8_t *)m + 8, 4);
+    if (ver < 1 || ver > 4) { VLOG("[RED] shader pack %s has version %u", path, ver); munmap(m, (size_t)st.st_size); return; }
+    size_t entry_size = ver >= 3 ? 44 : 32;
+    if (count > ((size_t)st.st_size - 28) / entry_size) { VLOG("[RED] shader pack %s has a truncated index", path); munmap(m, (size_t)st.st_size); return; }
+    g_pak_n = (size_t)st.st_size; g_pak_ver = ver; g_pak_count = count; g_pak = m;
     VLOG("shader pack %s: %u shaders%s%s", path, g_pak_count, g_pak_ver == 2 || g_pak_ver == 4 ? " (compressed)" : "", g_pak_ver >= 3 ? " (GL depth fallback)" : "");
-    return 1;
 }
 static void *pak_blob(const uint8_t *p, size_t n, size_t *out) {   // a malloc'd copy of one blob, inflated in a version 2 pack
     if (g_pak_ver != 2 && g_pak_ver != 4) { void *b = malloc(n ? n : 1); memcpy(b, p, n); *out = n; return b; }
@@ -3640,7 +3644,14 @@ static void live_check(void) {   // under g_shmu
     int n = shmap_parse(f, &g_livemap); fclose(f); g_live_gen++;
     VLOG("live shaders: %d translated while the game runs (%s)", n, g_live_dir);
 }
-static vshader *shader_load(const uint8_t key[8], int st) {
+// Gather nudge (Adreno), decided once for every thread that loads shaders (shader_load runs on several prewarm threads at once: shader_get)
+static int g_gbias;
+static void gbias_decide(void) {
+    const char *e = getenv("DM_VK_GATHER_BIAS"); g_gbias = quirk_note(Q_GATHER_BIAS, e ? atoi(e) != 0 : quirk_default(Q_GATHER_BIAS, &g_gpuid), e != NULL);
+    if (g_gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)");
+}
+// live: g_live_dir as shader_get read it under g_shmu (live_check sets it under that lock; the load itself may run outside it)
+static vshader *shader_load(const uint8_t key[8], int st, const char *live) {
     char hex[17]; for (int i = 0; i < 8; i++) sprintf(hex + 2 * i, "%02x", key[i]);
     char p[1200]; size_t ns = 0, nr = 0, ngl = 0; uint32_t *code = NULL, *glcode = NULL; char *meta = NULL;
     if (pak_get(key, &code, &ns, &meta, &nr, &glcode, &ngl)) {}
@@ -3648,10 +3659,10 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, hex); code = file_read(p, &ns);
         snprintf(p, sizeof p, "%s/%s.vkr", g_spv_dir, hex); meta = file_read(p, &nr);
         if (st == 0) { snprintf(p, sizeof p, "%s/%s.gl.spv", g_spv_dir, hex); glcode = file_read(p, &ngl); }
-        if (!code && *g_live_dir) {   // (translated while the game runs: live_check)
-            snprintf(p, sizeof p, "%s/%s.spv", g_live_dir, hex); code = file_read(p, &ns); free(meta); meta = NULL;
-            snprintf(p, sizeof p, "%s/%s.vkr", g_live_dir, hex); meta = file_read(p, &nr);
-            if (st == 0) { free(glcode); glcode = NULL; snprintf(p, sizeof p, "%s/%s.gl.spv", g_live_dir, hex); glcode = file_read(p, &ngl); }
+        if (!code && *live) {   // (translated while the game runs: live_check)
+            snprintf(p, sizeof p, "%s/%s.spv", live, hex); code = file_read(p, &ns); free(meta); meta = NULL;
+            snprintf(p, sizeof p, "%s/%s.vkr", live, hex); meta = file_read(p, &nr);
+            if (st == 0) { free(glcode); glcode = NULL; snprintf(p, sizeof p, "%s/%s.gl.spv", live, hex); glcode = file_read(p, &ngl); }
         }
     }
     if (!code || !meta) { VLOG("[RED] shader %s: %s missing", hex, !code ? "SPIR-V" : "reflection (.vkr)"); free(code); free(meta); free(glcode); return NULL; }
@@ -3663,7 +3674,8 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     s->vkstage = spst >= 0 && spst < 6 ? VS[spst] : VK_SHADER_STAGE_VERTEX_BIT;
     // reflection: bindings by name (the combined image takes its texture slot from "<name>" and its sampler from "<name>Smplr"), c1, driver segment reads
     struct { char name[48], kind[16]; int reg, off, bank, rw, n; } b[96]; int nb = 0; uint8_t *c1 = NULL; uint32_t c1n = 0; int unfill = 0;
-    for (char *ln = strtok(meta, "\n"); ln; ln = strtok(NULL, "\n")) {
+    char *sv = NULL;
+    for (char *ln = strtok_r(meta, "\n", &sv); ln; ln = strtok_r(NULL, "\n", &sv)) {   // (strtok_r: several threads load shaders at once)
         if (!strncmp(ln, "b ", 2) && nb < 96) { if (sscanf(ln + 2, "%47s %15s %d %d %d %d %d", b[nb].name, b[nb].kind, &b[nb].reg, &b[nb].off, &b[nb].bank, &b[nb].rw, &b[nb].n) == 7) nb++; }
         else if (!strncmp(ln, "c1 ", 3)) { const char *h = ln + 3; size_t l = strlen(h) / 2; c1 = malloc(l ? l : 1); for (size_t i = 0; i < l; i++) { unsigned v; sscanf(h + 2 * i, "%2x", &v); c1[i] = (uint8_t)v; } c1n = (uint32_t)l; }
         else if (!strncmp(ln, "drv ", 4)) { int a, c; if (sscanf(ln + 4, "%d %d", &a, &c) == 2) { s->drv_read[0] = (uint8_t)a; s->drv_read[2] = (uint8_t)c; } }
@@ -3710,7 +3722,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         if (left) RED_ONCE(160, "b10 swap: shader %s stores fewer than 3 components into an image declared R11G11B10F: left as they are", hex);
         if (spv_image_format_swap(code, ns / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F)) b10_note("a shader's storage image declared R11G11B10F: declared RGBA16F (the image it is given)", NULL, 0); }
     // Adreno picks another 2x2 block than Maxwell for a gather on a texel centre: its gathers are nudged by 1/512 of a texel (spv_gather_bias). DM_VK_GATHER_BIAS=0 / 1 decides
-    static int gbias = -1; if (gbias < 0) { const char *e = getenv("DM_VK_GATHER_BIAS"); gbias = quirk_note(Q_GATHER_BIAS, e ? atoi(e) != 0 : quirk_default(Q_GATHER_BIAS, &g_gpuid), e != NULL); if (gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)"); }
+    static pthread_once_t gb_once = PTHREAD_ONCE_INIT; pthread_once(&gb_once, gbias_decide); int gbias = g_gbias;
     if (gbias) { size_t nw; uint32_t *c2 = spv_gather_bias(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_fctl) { size_t nw; uint32_t *c2 = spv_float_controls(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_nanmm) { size_t nw; uint32_t *c2 = spv_nan_minmax(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_nanmm_n, 1); } }   // (before spv_clamp_zero, which knows both)
@@ -3781,6 +3793,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         for (int b = 0; b < 19; b++) if (fresh >> b & 1) VLOG("[RED] shader %s needs %s, which this device lacks: %s", hex, nm[b], b <= 1 ? "its programs are skipped" : "passed to the driver as it is");
     }
     for (size_t i = 5, nw = ns / 4; i < nw;) { uint32_t n = code[i] >> 16; if (!n || i + n > nw) break; if ((code[i] & 0xffff) == 99 /* OpImageWrite */) { s->img_writes = 1; break; } i += n; }
+    { uint64_t h = 1469598103934665603ull; const uint8_t *b = (const uint8_t *)code; for (size_t i = 0; i < ns; i++) { h ^= b[i]; h *= 1099511628211ull; } s->spv_hash = h; }   // (simdev: the same with shader loading on one thread or many)
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
     atomic_fetch_add(&g_spv_mod_bytes, (uint64_t)ns); if (st == 1) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns);
@@ -3791,10 +3804,36 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     return s;
 }
 static pthread_mutex_t g_shmu = PTHREAD_MUTEX_INITIALIZER;   // the shader cache: the game's thread and the prewarm thread
+// Shaders loaded on every thread that asks (perf-1124 S2). shader_get used to hold g_shmu across shader_load: the pack's inflate, the reflection, 10-15 SPIR-V
+//   rewrites and 1-4 vkCreateShaderModule, so the prewarm's 6 threads loaded one shader at a time (Legends: Arceus lists 5690 shaders, 231 MB of SPIR-V, for 3901
+//   pipelines) and only vkCreateGraphicsPipelines ran in parallel; the game's thread waited behind the prewarm's loads too. Now a key being loaded is marked
+//   (g_shloading) and the load runs outside the lock: another thread asking for the same key waits for that load, a different key loads at once.
+//   DM_VK_PREWARM_SHADER_MT=0: under the lock as before
+static pthread_cond_t g_shcv = PTHREAD_COND_INITIALIZER; static nvn_hmap g_shloading = {.klen = 8};   // keys being loaded (under g_shmu)
+static int g_sh_mt = -1;
+static int sh_mt(void) {
+    if (g_sh_mt < 0) { const char *e = getenv("DM_VK_PREWARM_SHADER_MT"); g_sh_mt = !(e && *e == '0');
+        VLOG("shaders: %s", g_sh_mt ? "loaded on every thread that asks, one load per shader (DM_VK_PREWARM_SHADER_MT)" : "loaded one at a time (DM_VK_PREWARM_SHADER_MT=0)"); }
+    return g_sh_mt;
+}
 static vshader *shader_get(const uint8_t key[8], int st) {
+    int mt = sh_mt();
     pthread_mutex_lock(&g_shmu);
     vshader *s = nvn_hm_get(&g_shcache, key);
-    if (!s) { s = shader_load(key, st); if (s) nvn_hm_put(&g_shcache, key, s); }
+    if (!s && !mt) { s = shader_load(key, st, g_live_dir); if (s) nvn_hm_put(&g_shcache, key, s); }
+    else if (!s) {
+        int waited = 0;
+        while (!(s = nvn_hm_get(&g_shcache, key)) && nvn_hm_get(&g_shloading, key)) { pthread_cond_wait(&g_shcv, &g_shmu); waited = 1; }
+        if (!s && !waited) {   // (one that waited for another thread's load that failed gets NULL, as the loading thread does)
+            nvn_hm_put(&g_shloading, key, (void *)1);
+            char live[sizeof g_live_dir]; memcpy(live, g_live_dir, sizeof live);
+            pthread_mutex_unlock(&g_shmu);
+            s = shader_load(key, st, live);
+            pthread_mutex_lock(&g_shmu);
+            if (s) nvn_hm_put(&g_shcache, key, s);
+            nvn_hm_del(&g_shloading, key); pthread_cond_broadcast(&g_shcv);
+        }
+    }
     pthread_mutex_unlock(&g_shmu);
     return s;
 }
@@ -4915,6 +4954,16 @@ static void *prewarm_worker(void *arg) {
         if (nvn_hm_get(&g_pw.seen, &g_pw.rs[i])) { pthread_mutex_unlock(&g_pw.mu); continue; }
         nvn_hm_put(&g_pw.seen, &g_pw.rs[i], (void *)1);
         vprog *pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key);
+        if (!pr && sh_mt()) {   // (perf-1124 S2: the shaders loaded outside pw.mu, on every prewarm thread; only the layout under it)
+            pthread_mutex_unlock(&g_pw.mu);
+            vprog *np = calloc(1, sizeof *np); int ok = 1; uint64_t ts = mono_ns();
+            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; np->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!np->sh[st]) ok = 0; }
+            atomic_fetch_add(&g_pw.t_shader, mono_ns() - ts);
+            if (!ok || !np->sh[0]) { free(np); atomic_fetch_add(&g_pw.noshader, 1); continue; }
+            tl = mono_ns(); pthread_mutex_lock(&g_pw.mu); atomic_fetch_add(&g_pw.t_lock, mono_ns() - tl);
+            if ((pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key))) free(np);   // (another thread made the same program meanwhile)
+            else { uint64_t tp = mono_ns(); prog_layout(np, 0); atomic_fetch_add(&g_pw.t_layout, mono_ns() - tp); nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, np); pr = np; }
+        }
         if (!pr) {
             pr = calloc(1, sizeof *pr); int ok = 1; uint64_t ts = mono_ns();
             for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
