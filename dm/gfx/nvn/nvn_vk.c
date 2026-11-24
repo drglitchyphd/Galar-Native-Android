@@ -978,7 +978,13 @@ static void defer_drain(void) {
 // Three ways a pool's pages and the GPU share memory: imported host memory (VK_EXT_external_memory_host), the driver's memory moved onto the pool (mremap, needs every
 // allocation to be a whole mapping of its own: Adreno), or a mirror (shadow): the GPU buffer in the driver's memory, the game's pages unchanged, the pages the game wrote
 // copied in before each submission and what the GPU wrote copied back once it is done (drivers that sub-allocate their mappings: the Android emulator's; DM_VK_POOL_SHADOW=1)
-typedef struct { uintptr_t lo, hi, base; VkBuffer buf; VkDeviceMemory mem; VkDeviceSize size; const void *key; void *moved_from; uint8_t *shadow; uint64_t stamp; int tracked_here, fdmapped; } pool_ent;
+// Only pools the GPU reads as buffers get one (fix 5 of the 2026-11-24 memory analysis): every pool with storage used to, 850-1,100 MB of pinned driver memory on every
+//   phone (POCO F6: 926-964 MB in 2,000-2,300 pools), while textures are uploaded from the game's pages by the CPU (tex_upload_) and render targets and command memory
+//   are never read by the GPU from the pool at all. A pool is recorded unbacked (buf VK_NULL_HANDLE, plain game memory that can be swapped) and backed on the first
+//   pool_buf that finds it (pool_back, late = 1). DM_VK_POOL_GPU_ALL=1: every pool backed when it is made, as before
+// (flags: the game's NVN pool flags, -1 unknown; used_buf / used_tex: ever bound as a buffer / read as texture data, for the census line, mem_report)
+typedef struct { uintptr_t lo, hi, base; VkBuffer buf; VkDeviceMemory mem; VkDeviceSize size; const void *key; void *moved_from; uint8_t *shadow; uint64_t stamp; int tracked_here, fdmapped;
+                 int flags; uint8_t backed, used_buf, used_tex, late; } pool_ent;
 static pool_ent *g_pools; static int g_npool, g_cpool; static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int g_nshadow;   // mirrored pools alive
 static int g_plast = -1;
@@ -1050,12 +1056,33 @@ static void *move_pieces(uintptr_t base, size_t size, void *to) {
     return to;
 }
 #endif
-void mtl_pool_add(const void *mem, uint64_t size) {
-    mtl_init();
-    uintptr_t pg = (uintptr_t)(g_host_import ? g_host_align : (VkDeviceSize)getpagesize()), lo = (uintptr_t)mem, hi = lo + size;
-    uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1); VkDeviceSize n = b - a;
-    pool_ent e = { lo, hi, a, VK_NULL_HANDLE, VK_NULL_HANDLE, n, mem, NULL, NULL, 0, 0 };
+// Pools backed only once the GPU reads one as a buffer (pool_ent above). Off with DM_VK_POOL_GPU_ALL=1, and where the late move cannot be made safe: without the write
+//   tracking's page faults (DM_NO_DIRTY, the Android emulator, whose translation cannot deliver them) the other threads' writes could not be held back during it
+static int pool_lazy(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_POOL_GPU_ALL");
+#ifdef __linux__
+        v = !(e && atoi(e)) && !nvn_dirty_off();
+#else
+        v = 0;
+#endif
+        VLOG("memory pools: %s", v ? "GPU memory only for pools the GPU reads as buffers (vertex, index, uniform, storage, indirect, copies); texture-only pools stay the game's own memory (DM_VK_POOL_GPU_ALL=1: every pool)"
+                                   : e && atoi(e) ? "every pool backed by GPU memory (DM_VK_POOL_GPU_ALL=1)" : "every pool backed by GPU memory (no write tracking here: pools are not moved later)"); }
+    return v;
+}
+// A pool's GPU buffer and memory (the routes below). late: the pool already exists and the game's other threads may be writing it (pool_buf's first hit); the range is
+//   frozen for the time (nvn_dirty_freeze: their writes and protection changes wait), the driver's pages arrive read-only and the thaw sets each page's protection from
+//   the write tracking, so no write is lost between the copy and the move and none to a tracked texture page goes unseen. The GPU never had this pool before (no buffer
+//   existed), so there is nothing of its to wait for. The import route moves nothing: its protected pages are made writable first (the import pins them with write
+//   access; their textures are uploaded again once). A late pool the tracking does not hold (its table full) is not added to it on the mirror routes: a pool being
+//   freed holds the table's lock while it waits for the thaw (nvn_dirty_remove_range); untracked, the mirror copies the whole pool at each submission instead
+static void pool_back(pool_ent *out) {
+    pool_ent e = *out; const void *mem = e.key; uint64_t size = e.hi - e.lo; uintptr_t a = e.base; VkDeviceSize n = e.size; int late = e.late;
     void *p = NULL; int reused = 0;
+#ifdef __linux__
+    int prot = late ? PROT_READ : PROT_READ | PROT_WRITE;   // (how the driver's pages arrive over the pool's)
+    if (late) { nvn_dirty_freeze((void *)a, n, !g_host_import); if (g_host_import) nvn_dirty_release((void *)a, n); }
+#endif
 #ifdef __linux__
     static int shadow_forced = -1; if (shadow_forced < 0) shadow_forced = getenv("DM_VK_POOL_SHADOW") && atoi(getenv("DM_VK_POOL_SHADOW"));
     // A freed pool's memory waiting for reuse is checked as a new allocation is (below): its mapping must still be readable and writable over the whole pool. Turnip
@@ -1103,7 +1130,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
             VKCHECK(vkAllocateMemory(g_dev, &ma, NULL, &e.mem));
             void *p = NULL; VKCHECK(vkMapMemory(g_dev, e.mem, 0, VK_WHOLE_SIZE, 0, &p));
             e.shadow = p; atomic_fetch_add(&g_nshadow, 1);
-            if (!nvn_dirty_tracked((void *)a, n)) { nvn_dirty_add_range((void *)a, n); e.tracked_here = 1; }
+            if (!late && !nvn_dirty_tracked((void *)a, n)) { nvn_dirty_add_range((void *)a, n); e.tracked_here = 1; }
             e.stamp = nvn_dirty_now(); nvn_dirty_protect((void *)a, n);
             memcpy(p, (void *)a, n);
         }
@@ -1139,7 +1166,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
             }
             if (!why) {
                 memcpy(tmp, (void *)a, n);   // what the pool holds, into the dma-buf
-                void *q = mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);   // the pool's pages become the dma-buf, in one step
+                void *q = mmap((void *)a, n, prot, MAP_SHARED | MAP_FIXED, fd, 0);   // the pool's pages become the dma-buf, in one step
                 munmap(tmp, n); close(fd);
                 if (q != (void *)a) VDIE("memory pool %p+%#llx: mapping the dma-buf over it failed (errno %d)", mem, (unsigned long long)size, errno);
                 e.fdmapped = 1; if (first) g_heap_pending = 1;   // (the marker stays until 20 s of play went by: mtl_present)
@@ -1168,7 +1195,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
                 if (!getfd(g_dev, &gi, &fd) && fd >= 0) tmp = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
                 if (tmp != MAP_FAILED) {
                     memcpy(tmp, (void *)a, n);   // what the pool holds, into the GPU memory
-                    void *q = mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);   // the pool's pages become the GPU memory, in one step
+                    void *q = mmap((void *)a, n, prot, MAP_SHARED | MAP_FIXED, fd, 0);   // the pool's pages become the GPU memory, in one step
                     munmap(tmp, n);
                     if (q == (void *)a) {
                         close(fd); e.fdmapped = 1;
@@ -1230,7 +1257,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
             if (force || ((uintptr_t)p & (getpagesize() - 1)) || vs != (uintptr_t)p || ve != (uintptr_t)p + n) {
                 static int said; if (!said++) VLOG("memory pools: %s: mirrored (pages the game writes copied in before each submission)", force ? "DM_VK_POOL_SHADOW" : "the driver's mappings are not whole mappings of their own");
                 e.shadow = p; atomic_fetch_add(&g_nshadow, 1);
-                if (!nvn_dirty_tracked((void *)a, n)) { nvn_dirty_add_range((void *)a, n); e.tracked_here = 1; }
+                if (!late && !nvn_dirty_tracked((void *)a, n)) { nvn_dirty_add_range((void *)a, n); e.tracked_here = 1; }
                 e.stamp = nvn_dirty_now(); nvn_dirty_protect((void *)a, n);   // later writes fault and get a newer generation; then the copy
                 memcpy(p, (void *)a, n);
                 goto bind;
@@ -1244,6 +1271,7 @@ reuse:
 #endif
         memcpy(p, (void *)a, n);
 #ifdef __linux__
+        if (late) mprotect(p, n, PROT_READ);   // (arrives read-only: the thaw decides each page)
         // MREMAP_DONTUNMAP leaves the driver's old range mapped (empty) in the same step, so no other thread's mapping can land in a gap there before the placeholder;
         // where the kernel refuses it for this mapping, the plain move and the placeholder right after
         void *q = mremap_keep_old(p, n, (void *)a);
@@ -1255,9 +1283,15 @@ reuse:
                 int err = errno;
                 VLOG("[RED] memory pool %p+%#llx: moving the GPU memory onto it failed (errno %d): mirrored instead", mem, (unsigned long long)size, err);
                 // a refused MREMAP_FIXED unmaps its target before it looks at the source: the pool's pages can be gone here; they come back from the copy made above
-                mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); memcpy((void *)a, p, n);
+                if (late) {   // (built aside and moved in read-only: other threads must not write the pool before the copy is in)
+                    void *c = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                    if (c == MAP_FAILED) VDIE("memory pool %p+%#llx: no memory for its pages (errno %d)", mem, (unsigned long long)size, errno);
+                    memcpy(c, p, n); mprotect(c, n, PROT_READ);
+                    if (mremap(c, n, n, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)a) != (void *)a) { mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); memcpy((void *)a, c, n); munmap(c, n); }
+                    mprotect(p, n, PROT_READ | PROT_WRITE);   // (the mirror is written by the copies before each submission)
+                } else { mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); memcpy((void *)a, p, n); }
                 e.shadow = p; atomic_fetch_add(&g_nshadow, 1);
-                if (!nvn_dirty_tracked((void *)a, n)) { nvn_dirty_add_range((void *)a, n); e.tracked_here = 1; }
+                if (!late && !nvn_dirty_tracked((void *)a, n)) { nvn_dirty_add_range((void *)a, n); e.tracked_here = 1; }
                 e.stamp = nvn_dirty_now(); nvn_dirty_protect((void *)a, n);
                 goto bind;
             }
@@ -1272,9 +1306,28 @@ reuse:
 bind:
 #endif
     if (!reused) VKCHECK(vkBindBufferMemory(g_dev, e.buf, e.mem, 0));
+#ifdef __linux__
+    if (late) nvn_dirty_thaw();
+#endif
+    e.backed = 1; *out = e;
+}
+static _Atomic uint64_t g_pool_late_n, g_pool_late_bytes, g_pool_late_ns;   // pools backed late, their bytes, the time it took (the census line)
+void mtl_pool_add(const void *mem, uint64_t size) {
+    mtl_init();
+    uintptr_t pg = (uintptr_t)(g_host_import ? g_host_align : (VkDeviceSize)getpagesize()), lo = (uintptr_t)mem, hi = lo + size;
+    uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1); VkDeviceSize n = b - a;
+    pool_ent e = { lo, hi, a, VK_NULL_HANDLE, VK_NULL_HANDLE, n, mem, NULL, NULL, 0, 0 };
+    e.flags = -1;
+    if (!pool_lazy()) pool_back(&e);
     pthread_mutex_lock(&g_mu);
     if (g_npool == g_cpool) { g_cpool = g_cpool ? g_cpool * 2 : 64; g_pools = realloc(g_pools, g_cpool * sizeof *g_pools); }
     g_pools[g_npool++] = e; ps_add(g_npool - 1); g_plast = -1;
+    pthread_mutex_unlock(&g_mu);
+}
+// The game's NVN flags of a pool just made (hle_nvn.c, after mtl_pool_add): for the census line only
+void mtl_pool_flags(const void *mem, int flags) {
+    pthread_mutex_lock(&g_mu);
+    for (int i = g_npool - 1; i >= 0; i--) if (g_pools[i].key == mem) { g_pools[i].flags = flags; break; }
     pthread_mutex_unlock(&g_mu);
 }
 void mtl_pool_del(const void *mem) {
@@ -1286,6 +1339,7 @@ void mtl_pool_del(const void *mem) {
         // mapping could take); the GPU buffer and its memory go once the GPU is done with them. The placeholder at the driver's old address is the driver's to unmap
         // (vkFreeMemory): unmapping that range here as well, after the free, raced other threads whose new mappings could already sit there (games free and make pools
         // all the time: 131 times in two minutes of Pokémon Shield's character creation)
+        if (!e.backed) return;   // (never read by the GPU as a buffer: its pages always were the game's own)
         mtl_finish();
         if (e.shadow) { atomic_fetch_sub(&g_nshadow, 1); if (e.tracked_here) nvn_dirty_remove_range((void *)e.base); }
         if (e.fdmapped) {   // the game's pages back as ordinary memory with the same content, in one step (pool_pages.h), then a plain free (the driver's own mapping was never touched)
@@ -1356,9 +1410,19 @@ static int pool_find(uint64_t addr, uint64_t len) {   // caller holds g_mu
 static int pool_buf(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceSize *left) {
     GOLDEN_MEM(addr, len);
     pthread_mutex_lock(&g_mu); int i = pool_find(addr, len ? len : 1);
-    if (i >= 0) { *buf = g_pools[i].buf; *off = addr - g_pools[i].base; if (left) *left = g_pools[i].base + g_pools[i].size - addr; }
+    if (i >= 0 && !g_pools[i].backed) {   // the first time the GPU reads this pool as a buffer: backed now (pool_back; under g_mu, so no other lookup sees it half made)
+        uint64_t t0 = mono_ns(); g_pools[i].late = 1; pool_back(&g_pools[i]); uint64_t dt = mono_ns() - t0;
+        uint64_t k = atomic_fetch_add(&g_pool_late_n, 1); atomic_fetch_add(&g_pool_late_bytes, g_pools[i].size); atomic_fetch_add(&g_pool_late_ns, dt);
+        if (k < 3 || dt > 20000000) VLOG("memory pools: pool %p+%#llx (flags %#x) first read as a buffer: GPU memory now (%.2f ms)", (void *)g_pools[i].lo, (unsigned long long)(g_pools[i].hi - g_pools[i].lo), g_pools[i].flags, dt / 1e6);
+    }
+    if (i >= 0) { g_pools[i].used_buf = 1; *buf = g_pools[i].buf; *off = addr - g_pools[i].base; if (left) *left = g_pools[i].base + g_pools[i].size - addr; }
     pthread_mutex_unlock(&g_mu);
     return i >= 0;
+}
+// Texture data read from a pool by the CPU (tex_upload): for the census line only
+static void pool_mark_tex(const void *mem) {
+    if (!mem) return;
+    pthread_mutex_lock(&g_mu); int i = pool_find((uint64_t)(uintptr_t)mem, 1); if (i >= 0) g_pools[i].used_tex = 1; pthread_mutex_unlock(&g_mu);
 }
 // Mirrored pools: the pages the game wrote since the last submission go into the GPU's copy (called before every submission)
 static void shadow_copy_run(uintptr_t a, size_t n, void *u) { pool_ent *e = u; nvn_dirty_protect((void *)a, n); memcpy(e->shadow + (a - e->base), (void *)a, n); }
@@ -1372,9 +1436,13 @@ static void shadow_sync(void) {
 // What the GPU writes into a mirrored pool (copies, fills, readbacks, writable storage buffers) is copied back to the game's pages when the submission is done
 typedef struct { uint64_t addr, n; } wb_t;
 static void wb_note(uint64_t addr, uint64_t n);
+// (hle_nvn.c asks only whether shader code sits in a pool: a lookup that never backs one; buf is VK_NULL_HANDLE for a pool not backed yet)
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
-    VkBuffer b; VkDeviceSize o; if (!pool_buf(addr, len, &b, &o, NULL)) return 0;
-    *buf = (void *)b; *off = o; return 1;
+    GOLDEN_MEM(addr, len);
+    pthread_mutex_lock(&g_mu); int i = pool_find(addr, len ? len : 1);
+    if (i >= 0) { *buf = (void *)g_pools[i].buf; *off = addr - g_pools[i].base; }
+    pthread_mutex_unlock(&g_mu);
+    return i >= 0;
 }
 void mtl_alias_drop_pool(const void *pool);   // textures (section below)
 
@@ -2615,6 +2683,7 @@ typedef struct { VkCommandBuffer cb; int n; VkBuffer sb[UPB_MAX]; vmalloc_t tmp[
 static __thread upb_t *t_upb;
 static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns);
 static int tex_upload(vtex *x, const tex_t *t) {
+    pool_mark_tex(t->mem);
     uint64_t t0 = mono_ns(), cn = 0; int r = tex_upload_(x, t, &cn); uint64_t dt = mono_ns() - t0;
     atomic_fetch_add(&g_upload_ns, dt);
     if (dt > 20000000ull) { static int n; if (n++ < 40) VLOG("slow texture upload: %ux%ux%u, %u levels, %u layers, format %#x: %.1f ms (deswizzle / copy %.1f ms)",
@@ -7251,8 +7320,35 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         FGE.n_gen = FGE.n_plain = FGE.gpu_sum = FGE.gpu_n = FGE.gpu_max = FGE.cpu_sum = FGE.lag_sum = FGE.lag_n = 0; FGE.n_cut = FGE.n_still = FGE.n_menu = 0; FGE.last_log = t_arr; }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { fg_flush_locked(); swap_destroy(); }
 }
+// The pool census (fix 5 of the 2026-11-24 memory analysis asked for it before any change: which pools the GPU needs as buffers): the live pools by what was done with
+//   them, ever bound as a buffer (vertex, index, uniform, storage, indirect, copies: pool_buf), only read as texture data (tex_upload) or neither, and by the game's
+//   NVN pool flags; how many are on GPU memory. One line, at the second memory readout (about 2 minutes in) and every 10th after it
+static void pool_census(void) {
+    enum { NG = 12 }; struct { int flags, n; double b, buf, tex, none; } g[NG]; int ng = 0, other = 0;
+    int n = 0, nbuf = 0, ntex = 0, nnone = 0, nback = 0; double all = 0, bbuf = 0, btex = 0, bnone = 0, bback = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) { const pool_ent *e = &g_pools[i]; double sz = (double)e->size; n++; all += sz;
+        int k = 0; while (k < ng && g[k].flags != e->flags) k++;
+        if (k == ng && ng < NG) { g[ng].flags = e->flags; g[ng].n = 0; g[ng].b = g[ng].buf = g[ng].tex = g[ng].none = 0; ng++; }
+        if (k == ng) other++;
+        if (k < ng) { g[k].n++; g[k].b += sz; }
+        if (e->used_buf) { nbuf++; bbuf += sz; if (k < ng) g[k].buf += sz; }
+        else if (e->used_tex) { ntex++; btex += sz; if (k < ng) g[k].tex += sz; }
+        else { nnone++; bnone += sz; if (k < ng) g[k].none += sz; }
+        if (e->backed) { nback++; bback += sz; } }
+    pthread_mutex_unlock(&g_mu);
+    for (int a = 1; a < ng; a++) for (int b = a; b > 0 && g[b].b > g[b - 1].b; b--) { __typeof__(g[0]) t = g[b]; g[b] = g[b - 1]; g[b - 1] = t; }   // largest first
+    char fl[1024]; int o = 0; const double M = 1048576.0;
+    for (int k = 0; k < ng && o < (int)sizeof fl - 120; k++)
+        o += snprintf(fl + o, sizeof fl - (size_t)o, "%s%#x: %d, %.0f MB (buffers %.0f, textures only %.0f, neither %.0f)", k ? "; " : "", g[k].flags, g[k].n, g[k].b / M, g[k].buf / M, g[k].tex / M, g[k].none / M);
+    if (other) snprintf(fl + o, sizeof fl - (size_t)o, "; %d more with other flags", other);
+    VLOG("[mem] pool census: %d pools, %.0f MB: read as buffers %d (%.0f MB), texture data only %d (%.0f MB), neither %d (%.0f MB); on GPU memory %d (%.0f MB; %llu backed late, %.0f MB, %.0f ms in all; %s); by flags %s",
+         n, all / M, nbuf, bbuf / M, ntex, btex / M, nnone, bnone / M, nback, bback / M, (unsigned long long)atomic_load(&g_pool_late_n), atomic_load(&g_pool_late_bytes) / M,
+         atomic_load(&g_pool_late_ns) / 1e6, pool_lazy() ? "only pools read as buffers" : "every pool", fl);
+}
 // Once a minute: where the renderer's memory is, so growth can be told apart (caches that level off: shaders, pipelines; anything else that keeps rising is a leak)
 static void mem_report(void) {
+    { static int nrep; nrep++; if (nrep == 2 || (nrep > 2 && (nrep - 2) % 10 == 0)) pool_census(); }
     pthread_mutex_lock(&g_amu); double dev = 0, devused = 0; int nb = g_nblocks;
     for (int i = 0; i < g_nblocks; i++) { dev += g_blocks[i]->size; double fr = 0; for (int k = 0; k < g_blocks[i]->nfree; k++) fr += g_blocks[i]->fr[k].size; devused += g_blocks[i]->size - fr; }
     pthread_mutex_unlock(&g_amu);

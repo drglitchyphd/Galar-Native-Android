@@ -610,9 +610,22 @@ static void panvk_defaults(const char *model) {
     if ((strstr(m, "s5e9840") || strstr(m, "s5e8835") || strstr(m, "exynos2100") || strstr(m, "exynos1380")) && !getenv("PANVK_ATOM_STRIDE")) {
         setenv("PANVK_ATOM_STRIDE", "56", 0); fprintf(stderr, "boot: PanVK on %s: PANVK_ATOM_STRIDE=56 (the driver's own table: needed to start on this chip)\n", model); }
 }
+#include "mem_tier.h"   // mem_tier_half(): half textures by default when little memory is free at start (tests/t_mem_tier.c)
+// Before the profiles below, so their log lines show the result; env.txt (read before this) wins over it, as over them
+static void mem_tier(void) {
+    const char *e = getenv("DM_MEM_TIER"), *tq = getenv("DM_VK_TEX_QUALITY"); long av, tot;
+    if (!mem_tier_read("/proc/meminfo", &av, &tot)) return;
+    int half = mem_tier_half(av, tot);
+    if (e && !atoi(e)) { if (half) fprintf(stderr, "boot: memory tier: %.1f GB available of %.1f GB, half textures would be the default; DM_MEM_TIER=0: left to the profile\n", av / 1048576.0, tot / 1048576.0); return; }
+    if (!half) { fprintf(stderr, "boot: memory tier: %.1f GB available of %.1f GB at start: textures left to the profile\n", av / 1048576.0, tot / 1048576.0); return; }
+    if (tq) { fprintf(stderr, "boot: memory tier: %.1f GB available of %.1f GB at start, but the textures setting is %s: kept\n", av / 1048576.0, tot / 1048576.0, tq); return; }
+    setenv("DM_VK_TEX_QUALITY", "half", 1); setenv("DM_VK_TEX_QUALITY_AUTO", "1", 1);   // (_AUTO: not the player's half, so Arm's drivers before r49 keep full: Q_TEX_HALF_UNSAFE)
+    fprintf(stderr, "boot: memory tier: only %.1f GB available of %.1f GB at start (under 2.5 GB, a phone under 9 GB): half textures by default (Textures = Full in the menu, or DM_MEM_TIER=0, keeps full)\n", av / 1048576.0, tot / 1048576.0);
+}
 static void device_profile(void) {
     char maker[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = ""; __system_property_get("ro.soc.manufacturer", maker); __system_property_get("ro.soc.model", model);
     panvk_defaults(model);
+    mem_tier();
     const char *force = getenv("DM_PROFILE"); const struct prof *p = NULL;
     // The app measured the phone (GameSettings.java profile: CPU, GPU and memory tiers, the display's modes) and handed the result over as DM_AUTO_*: those are the
     // defaults, set without overwriting, so the player's own choices (env.txt, read before this) win. The table below stays for a start without them (an older app)
