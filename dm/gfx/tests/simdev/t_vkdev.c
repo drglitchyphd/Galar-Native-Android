@@ -1111,6 +1111,126 @@ static void shmod_work(void) {
         if (sh[i]->mod) { shmod_count(sh[i]->mod, (int64_t)sh[i]->nw * 4, -1); vkDestroyShaderModule(g_dev, sh[i]->mod, NULL); } free(sh[i]->code); free(sh[i]); }
 }
 
+// PREWARM (perf-1124 S1-S5): the wait before play, timed on this device. A synthetic shader set and pipeline list as a phone has them (vk/b-<chain>/<key>.spv + .vkr,
+//   vk_pipelines.bin, plus its .sst list for a driver without extended dynamic state), built by the engine's own prewarm (prewarm_start, the end of mtl_init) twice:
+//   a first start (no pipeline cache file) and a later one (the cache file the first one saved; every pipeline, shader and program made again, as in a new process).
+//   SIMDEV_PW_N pipelines (400 by default) over as many fragment shaders of SIMDEV_PW_OPS arithmetic instructions each (800: about 16 KB of SPIR-V; the game's
+//   are 40 KB on average) and SIMDEV_PW_N / 4 vertex shaders. Each SPIR-V differs in its generator word, so the driver compiles every pipeline.
+//   Printed: "PREWARM <start>: hold <ms> (the game's first submission held), done <ms>", the engine's own [start] / prewarm timer lines around them.
+//   SIMDEV_NO_PREWARM=1: skipped
+static uint32_t *pw_frag_spv(int ops, uint32_t gen, size_t *nw) {   // an OpFAdd / OpFMul chain on constants into the one colour output
+    size_t cap = 64 + (size_t)ops * 5 + 16; uint32_t *w = calloc(cap, 4), n = 0, id = 11;
+    w[n++] = 0x07230203; w[n++] = 0x00010000; w[n++] = gen; w[n++] = 0; w[n++] = 0;   // (the bound below)
+    w[n++] = 2u << 16 | 17; w[n++] = 1;                                   // OpCapability Shader
+    w[n++] = 3u << 16 | 14; w[n++] = 0; w[n++] = 1;                       // OpMemoryModel Logical GLSL450
+    w[n++] = 6u << 16 | 15; w[n++] = 4; w[n++] = 1; w[n++] = 0x6e69616d; w[n++] = 0; w[n++] = 2;   // OpEntryPoint Fragment %1 "main" %2
+    w[n++] = 3u << 16 | 16; w[n++] = 1; w[n++] = 7;                       // OpExecutionMode %1 OriginUpperLeft
+    w[n++] = 4u << 16 | 71; w[n++] = 2; w[n++] = 30; w[n++] = 0;          // OpDecorate %2 Location 0
+    w[n++] = 2u << 16 | 19; w[n++] = 3;                                   // %3 void
+    w[n++] = 3u << 16 | 33; w[n++] = 4; w[n++] = 3;                       // %4 function type
+    w[n++] = 3u << 16 | 22; w[n++] = 5; w[n++] = 32;                      // %5 float
+    w[n++] = 4u << 16 | 23; w[n++] = 6; w[n++] = 5; w[n++] = 4;           // %6 vec4
+    w[n++] = 4u << 16 | 32; w[n++] = 7; w[n++] = 3; w[n++] = 6;           // %7 pointer Output vec4
+    w[n++] = 4u << 16 | 59; w[n++] = 7; w[n++] = 2; w[n++] = 3;           // %2 the output
+    w[n++] = 4u << 16 | 43; w[n++] = 5; w[n++] = 8; w[n++] = 0x3f800000;  // %8 1.0
+    w[n++] = 4u << 16 | 43; w[n++] = 5; w[n++] = 9; w[n++] = 0x3f000000;  // %9 0.5
+    w[n++] = 5u << 16 | 54; w[n++] = 3; w[n++] = 1; w[n++] = 0; w[n++] = 4;   // %1 main
+    w[n++] = 2u << 16 | 248; w[n++] = 10;                                 // %10 its label
+    uint32_t prev = 8;
+    for (int i = 0; i < ops; i++, id++) { w[n++] = 5u << 16 | (i & 1 ? 133u : 129u); w[n++] = 5; w[n++] = id; w[n++] = prev; w[n++] = i % 3 ? 9 : 8; prev = id; }
+    uint32_t col = id++;
+    w[n++] = 7u << 16 | 80; w[n++] = 6; w[n++] = col; w[n++] = prev; w[n++] = prev; w[n++] = prev; w[n++] = 8;   // OpCompositeConstruct
+    w[n++] = 3u << 16 | 62; w[n++] = 2; w[n++] = col;                     // OpStore
+    w[n++] = 1u << 16 | 253; w[n++] = 1u << 16 | 56;                      // OpReturn, OpFunctionEnd
+    w[3] = id; *nw = n; return w;
+}
+static int pw_write(const char *path, const void *d, size_t n) { FILE *f = fopen(path, "wb"); if (!f) return 0; int ok = fwrite(d, 1, n, f) == n; return !fclose(f) && ok; }
+static void pw_key(uint8_t k[8], int kind, int i) { memset(k, 0, 8); k[0] = 0x70; k[1] = (uint8_t)kind; k[2] = (uint8_t)(i >> 8); k[3] = (uint8_t)i; k[7] = 1; }
+static void pw_hex(const uint8_t k[8], char hex[17]) { for (int i = 0; i < 8; i++) sprintf(hex + 2 * i, "%02x", k[i]); }
+// what a new process would not have: every pipeline, program and shader of the first start (the driver's pipeline cache is read again from its file)
+static void pw_forget(void) {
+    pthread_mutex_lock(&g_psomu);
+    for (uint32_t i = 0; i < g_pso.cap; i++) if (g_pso.vals[i]) vkDestroyPipeline(g_dev, (VkPipeline)g_pso.vals[i], NULL);
+    for (uint32_t i = 0; i < g_pso_s.cap; i++) if (g_pso_s.vals[i]) vkDestroyPipeline(g_dev, (VkPipeline)g_pso_s.vals[i], NULL);
+    nvn_hm_clear(&g_pso, NULL); nvn_hm_clear(&g_pso_s, NULL); nvn_hm_clear(&g_pso_fail, NULL); nvn_hm_clear(&g_pso_s_fail, NULL); nvn_hm_clear(&g_pso_used, NULL);
+    nvn_hm_clear(&g_pso_rec, NULL); nvn_hm_clear(&g_pso_rec_s, NULL); nvn_hm_clear(&g_pso_s_rec, NULL);
+    pthread_mutex_unlock(&g_psomu);
+    pthread_mutex_lock(&g_shmu);
+    nvn_hmap fresh = {.klen = 8};
+    for (uint32_t i = 0; i < g_shcache.cap; i++) { vshader *s = g_shcache.vals[i]; if (!s) continue;
+        if (strncmp(s->key, "70", 2)) { nvn_hm_put(&fresh, g_shcache.keys + (size_t)i * 8, s); continue; }   // (the test's own shaders: keys 70...)
+        if (s->mod) { shmod_count(s->mod, (int64_t)s->nw * 4, -1); vkDestroyShaderModule(g_dev, s->mod, NULL); }
+        for (int v = 0; v < s->nvar; v++) if (s->var[v].mod) vkDestroyShaderModule(g_dev, s->var[v].mod, NULL);
+        for (int v = 0; v < s->nibv; v++) if (s->ibv[v].mod) vkDestroyShaderModule(g_dev, s->ibv[v].mod, NULL);
+        if (s->glmod) vkDestroyShaderModule(g_dev, s->glmod, NULL); }   // (the vshader itself is left: a layout made from it may still name it)
+    free(g_shcache.keys); free(g_shcache.vals); g_shcache = fresh;
+    pthread_mutex_unlock(&g_shmu);
+    nvn_hm_clear(&g_pw.progs, NULL); nvn_hm_clear(&g_pw.seen, NULL);
+    atomic_store(&g_pw.next, 0); atomic_store(&g_pw.unfit, 0); atomic_store(&g_pw.built, 0); atomic_store(&g_pw.had, 0); atomic_store(&g_pw.failed, 0); atomic_store(&g_pw.noshader, 0); atomic_store(&g_pw.waits, 0);
+    atomic_store(&g_pw.t_lock, 0); atomic_store(&g_pw.t_shader, 0); atomic_store(&g_pw.t_layout, 0); atomic_store(&g_pw.t_pipe, 0);
+    atomic_store(&g_pw_done, 0); atomic_store(&g_pw_total, 0); atomic_store(&g_pw_playing, 0); atomic_store(&g_pw_ended, 0);
+    if (g_pcache) { PFN_vkDestroyPipelineCache dpc = (PFN_vkDestroyPipelineCache)vkGetDeviceProcAddr(g_dev, "vkDestroyPipelineCache"); if (dpc) dpc(g_dev, g_pcache, NULL); g_pcache = VK_NULL_HANDLE; }
+}
+typedef struct { double hold_ms, done_ms; int built, had; int saved_before_release; } pw_run_t;
+static long long pw_mtime(const char *p) { struct stat st; if (stat(p, &st)) return -1; return (long long)st.st_mtim.tv_sec * 1000000000ll + st.st_mtim.tv_nsec; }
+// one start: the prewarm as mtl_init starts it, the game's first submission at once (prewarm_wait's wait, without its 200 ms polling)
+static pw_run_t pw_start(const char *label, const char *cache) {
+    pw_run_t r; memset(&r, 0, sizeof r);
+    long long m0 = pw_mtime(cache);
+    uint64_t t0 = mono_ns();
+    prewarm_start();
+    while (atomic_load(&g_pw_hold)) usleep(200);
+    r.hold_ms = (mono_ns() - t0) / 1e6; r.saved_before_release = pw_mtime(cache) != m0;
+    atomic_store(&g_pw_playing, 1);   // (prewarm_wait's: the game plays from here)
+    while (!atomic_load(&g_pw_ended)) usleep(500);
+    r.done_ms = (mono_ns() - t0) / 1e6; r.built = atomic_load(&g_pw.built); r.had = atomic_load(&g_pw.had);
+    printf("PREWARM %s: hold %.0f ms (the game's first submission held), done %.0f ms; %d built, %d already there; the cache file was %s before the game went on\n",
+           label, r.hold_ms, r.done_ms, r.built, r.had, r.saved_before_release ? "WRITTEN" : "not written");
+    return r;
+}
+static void prewarm_work(void) {
+    if (getenv("SIMDEV_NO_PREWARM")) { printf("PREWARM skipped (SIMDEV_NO_PREWARM)\n"); return; }
+    int N = getenv("SIMDEV_PW_N") ? atoi(getenv("SIMDEV_PW_N")) : 400, OPS = getenv("SIMDEV_PW_OPS") ? atoi(getenv("SIMDEV_PW_OPS")) : 800, NV = N / 4 > 0 ? N / 4 : 1;
+    if (N > 65535) N = 65535;
+    char dir[96], sub[160], p[300], hex[17]; snprintf(dir, sizeof dir, "/tmp/t_vkdev_pw.%d", (int)getpid()); snprintf(sub, sizeof sub, "%s/b-%s", dir, DMSH_CHAIN);
+    mkdir(dir, 0700); mkdir(sub, 0700);
+    snprintf(p, sizeof p, "%s/shader_map.tsv", dir); FILE *map = fopen(p, "w"); if (!map) { CHECK(0, "prewarm: no scratch folder %s", dir); return; }
+    fprintf(map, "package\tindex\tstage\tkey\tsource\n");
+    uint8_t k[8];
+    for (int i = 0; i < NV; i++) { pw_key(k, 0, i); pw_hex(k, hex); size_t sz = sizeof zcopy_vert_spv; uint32_t *w = malloc(sz); memcpy(w, zcopy_vert_spv, sz); w[2] = 0x10000u + (uint32_t)i;
+        snprintf(p, sizeof p, "%s/%s.spv", sub, hex); pw_write(p, w, sz); free(w); snprintf(p, sizeof p, "%s/%s.vkr", sub, hex); pw_write(p, "# t_vkdev prewarm\n", 18);
+        fprintf(map, "pw\t%d\tvertex\t%s\tt_vkdev\n", i, hex); }
+    for (int i = 0; i < N; i++) { pw_key(k, 1, i); pw_hex(k, hex); size_t nw; uint32_t *w = pw_frag_spv(OPS, 0x20000u + (uint32_t)i, &nw);
+        snprintf(p, sizeof p, "%s/%s.spv", sub, hex); pw_write(p, w, nw * 4); free(w); snprintf(p, sizeof p, "%s/%s.vkr", sub, hex); pw_write(p, "# t_vkdev prewarm\n", 18);
+        fprintf(map, "pw\t%d\tpixel\t%s\tt_vkdev\n", i, hex); }
+    fclose(map);
+    snprintf(p, sizeof p, "%s/shader_map.tsv", dir); setenv("DM_NVN_SHMAP", p, 1); setenv("DM_SPV_DIR", dir, 1); unsetenv("DM_SPV_PAK"); unsetenv("DM_LIVE_SPV");
+    shmap_load();
+    char list[200], cache[200], lst[220]; snprintf(list, sizeof list, "%s/vk_pipelines.bin", dir); snprintf(cache, sizeof cache, "%s/vk_pipeline_cache.bin", dir); snprintf(lst, sizeof lst, "%s.sst", list);
+    FILE *f = fopen(list, "wb"), *fs = fopen(lst, "wb");
+    if (!f || !fs) { CHECK(0, "prewarm: the lists cannot be written in %s", dir); if (f) fclose(f); if (fs) fclose(fs); return; }
+    { uint32_t v[2] = { 1, (uint32_t)sizeof(pso_rec) }, vs[2] = { 1, (uint32_t)sizeof(pso_rec_s) }; fwrite(PSO_MAGIC, 1, 4, f); fwrite(v, 4, 2, f); fwrite(PSO_MAGIC_S, 1, 4, fs); fwrite(vs, 4, 2, fs); }
+    for (int i = 0; i < N; i++) {
+        pso_rec_s r; memset(&r, 0, sizeof r);
+        pw_key(r.r.key[0], 0, i % NV); pw_key(r.r.key[1], 1, i);
+        r.r.k.cfmt[0] = VK_FORMAT_R8G8B8A8_UNORM; r.r.k.chmask = 0xf; r.r.k.samples = 1; r.r.k.topo = 2; r.r.k.depth_zero = 1;
+        r.s.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; r.s.dcmp = VK_COMPARE_OP_ALWAYS; for (int q = 0; q < 2; q++) r.s.sop[q][3] = VK_COMPARE_OP_ALWAYS;
+        fwrite(&r.r, sizeof r.r, 1, f); fwrite(&r, sizeof r, 1, fs);
+    }
+    fclose(f); fclose(fs);
+    setenv("DM_VK_PSO_RECORD", list, 1); unsetenv("DM_VK_PSO_SEED"); setenv("DM_VK_PCACHE", cache, 1); unlink(cache);
+    printf("PREWARM list: %d pipelines, %d vertex + %d fragment shaders (%d instructions each), %s\n", N, NV, N, OPS,
+           g_eds ? "the shared list" : "this phone's list with the draw state (no extended dynamic state)");
+    pw_forget();
+    pw_run_t c = pw_start("first start", cache);
+    CHECK(!g_eds || c.built == N, "prewarm: %d of %d built at the first start", c.built, N);
+    CHECK(pw_mtime(cache) >= 0, "prewarm: no pipeline cache file after the first start");
+    pw_forget();
+    pw_run_t w = pw_start("later start", cache);
+    CHECK(!g_eds || w.built == N, "prewarm: %d of %d built at the later start", w.built, N);
+    unsetenv("DM_VK_PSO_RECORD"); unsetenv("DM_VK_PCACHE");
+}
+
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -1138,7 +1258,8 @@ int main(void) {
     decisions_and_checks(profile);
     quirk_checks();
     g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "compose"; compose_work();
-                                                   g_step = "memlife"; memlife_work(); g_step = "shmod"; g_shmod_idle_ns = 1000000000ull; shmod_work(); }
+                                                   g_step = "memlife"; memlife_work(); g_step = "shmod"; g_shmod_idle_ns = 1000000000ull; shmod_work(); g_shmod_idle_ns = 60000000000ull;
+                                                   g_step = "prewarm"; prewarm_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
