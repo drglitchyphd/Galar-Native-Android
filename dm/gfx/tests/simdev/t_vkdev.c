@@ -847,6 +847,67 @@ static void mw_work(void) {
            (int)(sizeof ss / sizeof *ss), sbad ? "WRONG" : "counted right");
 }
 
+// ---- uniform snapshots reused within a submission (DM_VK_UBO_SNAPSHOT with DM_VK_UBO_SNAPSHOT_REUSE, nvn_vk.c snapc_*): a frame of 1,000 draws (the field scene of
+//   poco-runs b10 had 997) in submissions of 150 (DM_VK_SPLIT), each draw binding a scene and a light block every draw shares, one of 40 material blocks and its own
+//   object block (written by the game before the submission, as it does before nvnQueueSubmitCommands), with a uniform update into the scene block every 50 draws and a
+//   GPU fill into a material block every 75, recorded through push_stage_h with the snapshots forced on, reuse off (the copy per draw) and on. Every copy a draw binds
+//   must hold what the game's memory held when that draw was recorded, and every update must make the next draw's scene block a new copy. A model of the field's
+//   bindings, not the game's own stream: the copies, bytes and arena blocks per frame of both are printed
+static const uint8_t *snap_map(VkBuffer b, VkDeviceSize o) { for (int i = 0; i < g_sub->nar; i++) if (g_sub->ar[i].buf == b) return g_sub->ar[i].map + o; return NULL; }
+typedef struct { uint64_t copies, reused, bytes, arena, used, upd, upd_new; double ms; int bad; } snap_res;
+static snap_res snap_frame(uint8_t *mem, vshader *vs, int reuse) {
+    enum { DRAWS = 1000, PER_SUB = 150, NMAT = 40 };
+    snap_res r; memset(&r, 0, sizeof r);
+    int keep_snap = g_ubo_snap, keep_reuse = g_snapc_on, keep_np = g_np; g_ubo_snap = 1; g_snapc_on = reuse;
+    uint64_t c0 = g_snap_copies, r0 = g_snap_reused, b0 = g_snap_bytes, base = (uint64_t)(uintptr_t)mem;
+    uint64_t scene = base + 0x10000, light = base + 0x20000, mat = base + 0x40000, obj = base + 0x100000;   // (materials 4 KB apart, objects 256 bytes apart)
+    VkBuffer last_b = VK_NULL_HANDLE; VkDeviceSize last_o = 0; int updated = 0;
+    for (int d = 0; d < DRAWS; d++) {
+        if (d % PER_SUB == 0) {
+            if (d) { for (int i = 0; i < g_sub->nar; i++) { r.arena += g_sub->ar[i].size; r.used += g_sub->ar[i].used; } uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); }
+            for (int k = d; k < d + PER_SUB && k < DRAWS; k++) for (int q = 0; q < 64; q++) ((uint32_t *)(uintptr_t)(obj + (uint64_t)k * 0x100))[q] = 0x0B000000u + (uint32_t)k * 64 + (uint32_t)q;
+            mtl_sub_begin(); last_b = VK_NULL_HANDLE; }
+        if (d % 50 == 25) { uint32_t v[64]; for (int q = 0; q < 64; q++) v[q] = 0x5CE00000u + (uint32_t)d * 64 + (uint32_t)q; sub_update(v, scene + 0x40, sizeof v); updated = 1; r.upd++; }
+        if (d % 75 == 40) mtl_sub_fill(mat + (uint64_t)(d % NMAT) * 0x1000, 256, 0xF1110000u + (uint32_t)d);
+        S.ubo[0][0] = (p_bind_buf){ 0, 0, scene, 0x400 }; S.ubo[0][1] = (p_bind_buf){ 0, 1, light, 0x800 };
+        S.ubo[0][2] = (p_bind_buf){ 0, 2, mat + (uint64_t)(d * 7 % NMAT) * 0x1000, 0x100 }; S.ubo[0][3] = (p_bind_buf){ 0, 3, obj + (uint64_t)d * 0x100, 0x100 };
+        D.n = 0; g_np = 1; uint64_t t0 = mono_ns();
+        push_stage_h(vs, 0, VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE, 0);
+        r.ms += (mono_ns() - t0) / 1e6; g_np = keep_np;
+        for (int i = 0; i < 4; i++) { const VkDescriptorBufferInfo *bi = &D.bi[i]; const uint8_t *m = snap_map(bi->buffer, bi->offset);
+            if (!m || memcmp(m, (const void *)(uintptr_t)S.ubo[0][i].addr, (size_t)bi->range)) { if (!r.bad) printf("snapshots: draw %d binding %d: %s\n", d, i, m ? "the copy differs from the game's memory" : "not in the arena"); r.bad++; } }
+        if (updated && last_b) { r.upd_new += D.bi[0].buffer != last_b || D.bi[0].offset != last_o; } updated = 0;
+        last_b = D.bi[0].buffer; last_o = D.bi[0].offset; D.n = 0;
+    }
+    for (int i = 0; i < g_sub->nar; i++) { r.arena += g_sub->ar[i].size; r.used += g_sub->ar[i].used; }
+    uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+    r.copies = g_snap_copies - c0; r.reused = g_snap_reused - r0; r.bytes = g_snap_bytes - b0;
+    g_ubo_snap = keep_snap; g_snapc_on = keep_reuse;
+    return r;
+}
+static void snap_work(void) {
+    if (!g_host_import && !g_fdmap && !g_heapmap) { printf("SIMGAP snapshots: the moved-mapping pool route cannot run on lavapipe (see the pool work above)\n"); return; }
+    size_t n = 4u << 20; uint8_t *mem = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(mem != MAP_FAILED, "snapshots mmap"); if (mem == MAP_FAILED) return;
+    for (size_t i = 0; i < n / 4; i++) ((uint32_t *)mem)[i] = (uint32_t)i * 2654435761u;
+    mtl_pool_add(mem, n);
+    vshader *vs = calloc(1, sizeof *vs); snprintf(vs->key, sizeof vs->key, "snaptest"); vs->nres = 4;
+    for (int i = 0; i < 4; i++) { vs->res[i].kind = SPV_RES_UBO; vs->res[i].binding = (uint32_t)i; vs->res[i].count = 1; snprintf(vs->res[i].name, sizeof vs->res[i].name, "fp_c%d", i); vs->how[i].what = W_CBUF; vs->how[i].reg = (uint16_t)i; }
+    snap_res a = snap_frame(mem, vs, 0), b = snap_frame(mem, vs, 1);   // (twice each, the second pair reported: the first touches the arenas' new pages)
+    { snap_res a2 = snap_frame(mem, vs, 0), b2 = snap_frame(mem, vs, 1); a2.bad += a.bad; b2.bad += b.bad; a = a2; b = b2; }
+    {   // a mirrored pool written back by the completion thread (wb_apply) between two draws: the next draw copies again
+        int keep_snap = g_ubo_snap, keep_reuse = g_snapc_on, keep_np = g_np; g_ubo_snap = 1; g_snapc_on = 1; uint64_t c0 = g_snap_copies; mtl_sub_begin();
+        for (int k = 0; k < 3; k++) { if (k == 2) atomic_fetch_add(&g_snapc_wbgen, 1); D.n = 0; g_np = 1; push_stage_h(vs, 0, VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE, 0); g_np = keep_np; D.n = 0; }
+        uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); g_ubo_snap = keep_snap; g_snapc_on = keep_reuse;
+        CHECK(g_snap_copies - c0 == 8, "snapshots reused: a write-back by the completion thread drops every copy (%llu copies for 3 draws of 4 blocks, 8 expected)", (unsigned long long)(g_snap_copies - c0)); }
+    CHECK(!a.bad && !b.bad, "snapshots: every bound copy holds the game's memory as at its draw (a copy per draw: %d wrong, reused: %d wrong)", a.bad, b.bad);
+    CHECK(a.copies == 4000 && !a.reused, "snapshots, a copy per draw: %llu copies, %llu reused (4,000 and 0 expected)", (unsigned long long)a.copies, (unsigned long long)a.reused);
+    CHECK(b.copies + b.reused == 4000 && b.copies < a.copies / 2, "snapshots reused: %llu copies + %llu reused (of 4,000)", (unsigned long long)b.copies, (unsigned long long)b.reused);
+    CHECK(b.upd && b.upd_new == b.upd, "snapshots reused: each uniform update gave the next draw a new copy of the scene block (%llu of %llu)", (unsigned long long)b.upd_new, (unsigned long long)b.upd);
+    printf("WORK uniform snapshots, 1,000 draws x 4 blocks a frame: a copy per draw %llu copies, %.1f MB copied, arenas %.1f MB (%.1f MB used), %.2f ms; reused %llu copies + %llu bound again, "
+           "%.1f MB copied, arenas %.1f MB (%.1f MB used), %.2f ms\n", (unsigned long long)a.copies, a.bytes / 1048576.0, a.arena / 1048576.0, a.used / 1048576.0, a.ms,
+           (unsigned long long)b.copies, (unsigned long long)b.reused, b.bytes / 1048576.0, b.arena / 1048576.0, b.used / 1048576.0, b.ms);
+}
+
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -873,7 +934,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); }
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
