@@ -67,7 +67,8 @@ final class DebugBundle {
             file(z, "logs/log.txt", new File(dir, "log.txt"));
             file(z, "logs/log.prev.txt", new File(dir, "log.prev.txt"));
             file(z, "logs/setup.log", new File(new File(dir, "setup_work"), "setup.log"));
-            for (String n : new String[] { "boot_state", "safe_start", "gpu.txt", "notice.txt", "save_place.txt", "ready", "captures_done" }) file(z, "logs/" + n, new File(dir, n));
+            for (String n : new String[] { "boot_state", "safe_start", "gpu.txt", "notice.txt", "ready", "captures_done" }) file(z, "logs/" + n, new File(dir, n));
+            file(z, "logs/save_place.txt", new File(GameSettings.saveRoot(c), "save_place.txt"));   // (the chosen player's: Profiles)
             loadProfiles(c, z);
             exits(c, z);
             text(z, "crash-summary.txt", crashSummary(c));   // (the lines the issue text carries)
@@ -115,7 +116,7 @@ final class DebugBundle {
         g.put("titleId", gm[0]); g.put("name", gm[1]); g.put("version", GameSettings.version(c));
         g.put("setUp", new File(dir, "ready").exists()); g.put("shaderChain", first(new File(dir, "ready")));
         g.put("packComplete", packComplete(dir)); g.put("packShaders", packCount(new File(dir, "shaders.pak")));
-        g.put("savePlace", first(new File(dir, "save_place.txt")));
+        g.put("savePlace", first(new File(GameSettings.saveRoot(c), "save_place.txt"))); g.put("saveProfile", Profiles.current(GameSettings.root(c)));   // (the player's id, not their name)
         j.put("game", g);
 
         JSONObject d = new JSONObject();

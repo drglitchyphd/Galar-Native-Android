@@ -66,6 +66,10 @@ static int rq_order_on(void) { if (g_rq_order < 0) { const char *e = getenv("DM_
 static void rq_wait(const char *who) {
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
     if (pthread_cond_timedwait(&g_rq_cv, &g_rq_mu, &ts) == ETIMEDOUT) {
+        // (the first submission waiting for the pipelines to be built before play, nvn_vk.c prewarm_wait, is meant to take long: said once, not as an error;
+        //   Galar #349's ten "[RED] ... waited 5 s" lines before play were that, and read like a hang)
+        extern int nvn_vk_prewarm_progress(int *done, int *total) __attribute__((weak)); int d = 0, tot = 0;
+        if (nvn_vk_prewarm_progress && nvn_vk_prewarm_progress(&d, &tot)) { static int said; if (!said++) LOG("[nvn] %s waits on the replay thread while the pipelines are built before play (%d of %d so far): expected, not a hang", who, d, tot); return; }
         static int n; if (n++ < 20) LOG("[RED] %s has waited 5 s on the replay thread: it is at %s, queue %llu..%llu, %d presents, caller lr %p", who, g_rq_at, (unsigned long long)g_rq_tail, (unsigned long long)g_rq_head, g_rq_presents, __builtin_return_address(0));
     }
 }
