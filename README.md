@@ -8,23 +8,31 @@
 > **Beta. v0.96 is a pre-release**, so far played only briefly on one test phone (Snapdragon 8 Elite, Adreno 830). See [Compatibility](#compatibility). Reports with logs help most ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 > [!NOTE]
-> **No game files, code, shaders or keys are included.** You need your own dump (base game + update 1.3.2) and your console's `prod.keys`.
+> **No game files, code, shaders or keys are included.** You need the ExeFS and RomFS folders extracted from your own copy of the game, with update 1.3.2 applied.
 
 ## Install
 
 1. Install `GalarNative.apk` from [Releases](https://github.com/simipoB/Galar-Native-Android/releases) (or [build it](docs/BUILDING.md)).
-2. Choose your **game files** (`.nsp` / `.xci`, update 1.3.2, any DLC) and **keys**. Keys stay on the phone.
-3. **Set up the game.** Setup detects Sword or Shield from your files. When it's done, the app opens straight into the game.
+2. Choose your **game files**: the ExeFS and RomFS folders (the folder holding both, or each in turn), plus one RomFS folder per DLC with **Add DLC**. See [Your game files](#your-game-files).
+3. **Set up the game.** Setup tells Sword from Shield by your files and copies them into the app. When it's done, the app opens straight into the game.
 
 - One app runs both games, each with its own setup, saves, settings and mods. With both installed, the app icon lets you choose; each game's home screen shortcut has its own name and icon.
 - It updates PKShield in place (package `com.nxnative.pokemonshield`), so your setup and saves are kept.
+- **Players and Start over:** sharing the phone? Under **Save data** on the setup screen (with two games, **Set up or manage a game**; with one, hold the app icon → **Settings**), add a player for each person: each gets their own save in both games, your existing save stays as **Player 1**, and the app shows who is playing before the game starts. **Start over** begins a new game for the current player and keeps the old save as a backup (**Restore the previous save** brings it back). No reinstall, no Android/data access needed.
 - Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`. Any other build says "Unofficial build".
 - **Updates:** ☰ → About → Updates checks this repository's releases for a newer full release (never a pre-release) and installs it after you confirm. It only installs the official build signed with the key above. Turn off **Look for updates when the app starts** to stop the check.
+
+### Your game files
+
+- On your own console or PC, dump the game's **ExeFS** and **RomFS** with **update 1.3.2 applied** (the update merged into the base game). Dump tools and emulators that have "dump ExeFS / RomFS" make a folder holding `exefs` and `romfs`: choose that folder once. Copy it to the phone's storage first.
+- The ExeFS folder holds `main`, `main.npdm`, `rtld`, `sdk` and `subsdk*`. Setup reads its version from `main`: without the update you'll be told to dump again with 1.3.2.
+- **DLC:** dump each DLC's RomFS too. Its folder name must carry the DLC's title ID (Sword `0100ABF008969001` / `…9002`, Shield `01008DB008C2D001` / `…D002`) or its number (`1`, `2`) so setup knows which DLC it is.
+- No keys and no `.nsp` / `.xci`: the app doesn't use them any more, and deletes keys an older version stored. Setup needs room for a copy of the files; if there isn't any, it offers to move them into the app instead.
 
 ## Requirements
 
 - Android 12+, arm64, Vulkan 1.0 or later.
-- About 15 GB free per game. 8 GB of RAM or more is best; on 6 GB phones the app picks lighter settings for you.
+- About 15 GB free per game, besides your extracted files (setup copies them in; with too little room it can move them instead). 8 GB of RAM or more is best; on 6 GB phones the app picks lighter settings for you.
 
 ## Compatibility
 

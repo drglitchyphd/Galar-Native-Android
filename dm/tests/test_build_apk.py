@@ -7,26 +7,14 @@ import tempfile
 
 BUILDER = os.path.abspath(os.path.join(os.path.dirname(__file__), "../android/tools/build_apk.py"))
 BUILD = runpy.run_path(BUILDER, run_name="build_apk_test")
-validate_extractor, shader_chain, _game = BUILD["validate_extractor"], BUILD["shader_chain"], BUILD["_game"]
+shader_chain, _game = BUILD["shader_chain"], BUILD["_game"]
 CHAIN_TOOL = os.path.abspath(os.path.join(os.path.dirname(__file__), "../gfx/tools/dmsh_chain.py"))
 
 
 def main():
-    with tempfile.TemporaryDirectory() as temp:
-        current = os.path.join(temp, "current.so")
-        with open(current, "wb") as stream:
-            stream.write(b"\x7fELFcurrent extractor")
-        validate_extractor(current)
-
-        stale = os.path.join(temp, "stale.so")
-        with open(stale, "wb") as stream:
-            stream.write("LibHac cache count was not found".encode("utf-16le"))
-        try:
-            validate_extractor(stale)
-        except SystemExit as error:
-            assert "stale libnx_extract.so" in str(error)
-        else:
-            raise AssertionError("APK builder accepted the known-broken extractor")
+    # no NSP / XCI unpacker in the app any more (setup takes the extracted ExeFS and RomFS folders, no keys): the builder neither needs nor packages one
+    assert 'libnx_extract.so' not in BUILD["LIBS"] + BUILD["OPTIONAL"], "the APK builder still packages the NSP / XCI unpacker"
+    assert "validate_extractor" not in BUILD
 
     # the launcher compares the packaged chain with the one setup writes to the ready file: if they differ, every start would ask for setup again
     # for each game: Pokémon Sword takes Shield's tables (tables_from), so its chain is Shield's too

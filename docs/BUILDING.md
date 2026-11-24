@@ -1,7 +1,7 @@
 # Building Galar Native
 
-The app (`PokemonShield.apk`) holds no game data: it sets the game up on the phone from the player's own `.nsp` / `.xci` files and
-`prod.keys`. Building it needs a PC with **Linux**, or **Windows with WSL** (Ubuntu from the Microsoft Store). No game files or keys are
+The app (`PokemonShield.apk`) holds no game data: it sets the game up on the phone from the player's own extracted game files
+(the ExeFS and RomFS folders, with the update applied). Building it needs a PC with **Linux**, or **Windows with WSL** (Ubuntu from the Microsoft Store). No game files or keys are
 involved in the build.
 
 ## One command
@@ -20,7 +20,6 @@ builds every part from source:
 | Part | From | In the app as |
 | --- | --- | --- |
 | The engine | `dm/host`, `dm/gfx`, `dm/android` (`dm/android/Makefile.host`) | `libnxnative.so` |
-| The NSP / XCI unpacker | `dm/tools/nx_extract` (LibHac), .NET NativeAOT (`dm/android/extract_aot`) | `libnx_extract.so` |
 | The shader translator | `dm/gfx/tools/dmsh_xlate` (Ryujinx), .NET NativeAOT (`dm/android/xlate_aot`) | `libdmsh_xlate.so` |
 | SPIRV-Cross | `dm/android/spirv_cross/build_spirv_cross.sh` | `libspirv_cross.so` |
 | Python for the setup scripts | CPython 3.14 for Android, `dm/android/python/pylaunch.c` | `libpython3.14.so`, `libpython_exe.so`, `libssl_python.so`, `libcrypto_python.so`, `python.zip` |
@@ -33,8 +32,9 @@ both are signed with the same key.
 ## Installing and setting the game up
 
 1. Copy `PokemonShield.apk` to the phone and install it (allow installing from unknown sources when asked).
-2. Open it. **Game files → Choose**: the base game, update 1.3.2 and any DLC. **Keys → Choose**: `prod.keys` (and `title.keys` if needed).
-   Pick the files from the phone's own storage; the app asks for all-files access so it can read the dump where it is (nothing large is copied).
+2. Open it. **Your game files → Choose a folder**: the ExeFS and RomFS folders extracted from your own game with update 1.3.2 applied (the
+   folder holding both, or each in turn); **Add DLC** for each DLC's RomFS folder, named after its title ID. The app asks for all-files access
+   so it can read the folders where they are; setup copies them into the game's folder.
 3. **Set up the game**. Progress shows step by step; the log is in `Android/data/com.nxnative.pokemonshield/files/setup_work/setup.log`.
 4. From then on the app opens straight into the game. Long-press its icon for **Settings** (graphics, touch controls, name, graphics driver,
    setting the game up again). Uninstalling asks whether to keep the game data.
@@ -57,9 +57,8 @@ both are signed with the same key.
 Attach `Android/data/com.nxnative.pokemonshield/files/log.txt` (and `log.prev.txt`), the phone model, its GPU and Android version. The
 `Vulkan device` line near the top of the log shows the GPU, the driver, and which texture and memory paths were chosen.
 
-If setup fails during extraction, attach `Android/data/com.nxnative.pokemonshield/files/setup_work/setup.log` instead. An error such as
-`nx_extract terminated by SIGABRT (-6)` means the extractor process was aborted before Vulkan started; the selected dump paths, their sizes,
-and free space are recorded immediately before extraction.
+If setup fails, attach `Android/data/com.nxnative.pokemonshield/files/setup_work/setup.log` instead: it records the chosen folders, main's
+build ID (which game and version they are), their sizes and the free space before anything is copied.
 
 ## Rebuilding only the engine
 
