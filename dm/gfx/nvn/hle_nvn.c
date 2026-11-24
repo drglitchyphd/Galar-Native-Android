@@ -1790,9 +1790,20 @@ static int load_pace_mode(void) {
 }
 static int g_lp_active;   // the last present's hold was a load's (arc_step leaves the game's step alone then)
 // This frame's hold: the game's period (present_period), or a load's shorter one (L1). Asked before the present (its own wait) and after it (the acquire's grid):
-//   the load detector judges this present's draws in between, so the present follows the last frame's verdict, a frame behind at a load's start and end
-static uint64_t present_hold(uint64_t period) {
-    int hz_ = mtl_display_hz(); return load_pace_period(load_pace_mode(), atomic_load(&g_ld_on), period, 1000000000ull / (uint64_t)(hz_ > 0 ? hz_ : 60));
+//   the load detector judges this present's draws in between, so the present follows the last frame's verdict, a frame behind at a load's start and end.
+// DM_PACE_GRID=display (perf-1124 G3', off by default): the game's period on whole refreshes of the display's measured one first (nvn_pace.h nvn_pace_grid):
+//   33.37 ms on a 59.93 Hz panel, where 2 / 60 s slides a refresh against the display every 15 s. The game's own step (dt) and present_period stay. Not the
+//   default: it fixes the hand-over's phase against the vsync for good, and t_vk_pace's simulated compositor found a bad phase then stays bad (uneven 4.8 ->
+//   8.9 % at GPU 22 ms) where the drift used to sweep past it; the default keeps the game's grid and snaps the asked times (nvn_vk.c, vk_pace.h
+//   vkp_want_grid). Legends: Arceus at 60 has one refresh a frame and no time pacing. *grid: the period before a load's hold
+extern uint64_t dm_display_refresh_ns(void) __attribute__((weak)); extern int dm_pace_grid_mode(void) __attribute__((weak));
+static uint64_t present_hold(uint64_t period, uint64_t *grid) {
+    uint64_t r = dm_display_refresh_ns && dm_pace_grid_mode && dm_pace_grid_mode() == 2 ? dm_display_refresh_ns() : 0, g = nvn_pace_grid(period, r);
+    int hz_ = mtl_display_hz(); uint64_t one = r ? nvn_pace_grid(16666667ull, r) : 1000000000ull / (uint64_t)(hz_ > 0 ? hz_ : 60);   // (a load's one refresh at 60 Hz)
+    { static uint64_t said; if (g != period && g != said && period) { said = g; LOG("[nvn] frame grid %.3f ms: %llu refreshes of the display's %.3f ms (the game's own %.3f ms; DM_PACE_GRID=display)",
+          g / 1e6, (unsigned long long)(g / (r ? r : 1)), r / 1e6, period / 1e6); } }
+    if (grid) *grid = g;
+    return load_pace_period(load_pace_mode(), atomic_load(&g_ld_on), g, one);
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     NVN_WHERE();
@@ -1820,7 +1831,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           if (w > 500000000ull) w = 500000000ull;   // (a load or a pause: counted as half a second, so one stall does not swamp the average)
           atomic_store(&g_nvn_game_work_avg_ns, a ? a + (uint64_t)(((int64_t)w - (int64_t)a) / 16) : w); } }   // (the average over about 16 frames: the fps guard's CPU test)
     if (idx >= 0 && idx < o->ntex && idx < 4) {
-        double php = present_hold(present_period(o)) / 1e9;   // (the present's own wait: a load's hold, L1')
+        double php = present_hold(present_period(o), NULL) / 1e9;   // (the present's own wait: the display's grid, a load's hold, L1')
         if (rq_on()) { rq_item it = { .kind = RQ_PRESENT, .o = o, .idx = idx, .period = php }; memcpy(it.crop, o->crop, sizeof it.crop); gfx_leave(); o->pq_pos[idx] = rq_push(it); gfx_enter(); }   // (pq_pos: this image's next acquire waits for the replay to pass it)
         else { GOLDEN_PRESENT(CTX(o->tex[idx]), o->crop); o->ticket[idx] = mtl_present(CTX(o->tex[idx]), php, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
     }
@@ -1913,8 +1924,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
     g_hold_ring[o->presents % 16] = (uint8_t)present_itv(o);
-    uint64_t hold = present_hold(period);
-    g_lp_active = hold != period;   // (a load's hold: L1)
+    uint64_t grid = period, hold = present_hold(period, &grid);
+    g_lp_active = hold != grid;   // (a load's hold: L1)
     nvn_pacer pc = {o->pace};
     uint64_t slot = now + nvn_pace(&pc, now, hold);
     o->pace = pc.target;

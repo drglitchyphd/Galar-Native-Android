@@ -23,6 +23,22 @@ int main(void) {
         printf("%-52s expected wait %8.3f ms → got %8.3f ms %s\n", c[i].why, c[i].want / 1e6, got / 1e6, ok ? "✓" : "✗");
         fail += !ok;
     }
+    // The game's grid on the display's refresh (perf-1124 G3' nvn_pace_grid): 30 fps on a 59.93 Hz panel is two of its refreshes, at 120 Hz four; 60 fps one;
+    //   an exact 60 Hz panel changes nothing; a 90 Hz panel (no whole number of refreshes near 1/60 s), an unknown refresh and period 0 keep the game's own
+    struct { uint64_t period, refresh, want; const char *why; } g[] = {
+        {2 * P, 16686000, 2 * 16686000, "grid: 30 fps on 59.93 Hz = 2 refreshes (33.372 ms)"},
+        {2 * P, 8343000, 4 * 8343000, "grid: 30 fps on 119.86 Hz = 4 refreshes"},
+        {P, 16686000, 16686000, "grid: 60 fps on 59.93 Hz = 1 refresh"},
+        {2 * P, 16666667, 2 * 16666667, "grid: an exact 60 Hz panel: unchanged"},
+        {2 * P, 11111111, 2 * P, "grid: 90 Hz panel: the game's own"},
+        {2 * P, 0, 2 * P, "grid: refresh unknown: the game's own"},
+        {0, 16686000, 0, "grid: period 0 (no wait) stays 0"},
+    };
+    for (int i = 0; i < (int)(sizeof g / sizeof *g); i++) {
+        uint64_t got = nvn_pace_grid(g[i].period, g[i].refresh); int ok = got == g[i].want; n++;
+        printf("%-52s expected %8.3f ms → got %8.3f ms %s\n", g[i].why, g[i].want / 1e6, got / 1e6, ok ? "✓" : "✗");
+        fail += !ok;
+    }
     printf("== %d checks, %d failed ==\n", n, fail);
     return fail != 0;
 }

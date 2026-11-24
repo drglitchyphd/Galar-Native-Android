@@ -7094,6 +7094,14 @@ static uint64_t g_pace_asked;   // the time the last frame presented asked to be
 //   DM_PACE_LEAD=1 turns it on; DM_VK_PACE_LEAD=<ms> (a fixed lead) keeps it off
 #include "vk_pace.h"
 static vk_pacer g_vkp; static uint8_t g_vkp_plain[64]; static uint64_t g_vkp_gf;
+// One grid (perf-1124 G3'): the game hands frames over on 2 / 60 s while the display shows them 2 of its refreshes apart (33.37 ms on a 59.93 Hz panel). The
+//   asked times now keep their grid, snapped to the display's vsyncs, within legacy's lead (vk_pace.h vkp_want_grid). DM_PACE_GRID (dm_pace_grid_mode):
+//   unset 0 that; game 1: vkp_want_legacy, as before; display 2: that and the game's acquire grid on whole refreshes of the display too (hle_nvn.c
+//   present_hold). The analysis asked for 2 by default; t_vk_pace showed it locks the hand-over's phase for good (a bad phase stays bad: 4.8 -> 8.9 % uneven
+//   at GPU 22 ms), so it waits for a phone A/B
+int dm_pace_grid_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PACE_GRID"); v = e && !strcmp(e, "game") ? 1 : e && !strcmp(e, "display") ? 2 : 0;
+    VLOG("frame pacing: %s (DM_PACE_GRID %s)", v == 1 ? "asked times clamped to a lead from now, as before" : v == 2 ? "asked times on the display's vsyncs, the game's frames on whole refreshes of the display"
+         : "asked times on the display's vsyncs, the game's own grid", e ? e : "unset; game: as before, display: the game on the display's grid too"); } return v; }
 static int pace_adapt(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PACE_LEAD"), *l = getenv("DM_VK_PACE_LEAD"); v = e && strcmp(e, "0") && !(l && atol(l) > 0);
     VLOG("frame pacing: %s", v ? "the lead follows the GPU's time and the display's record (DM_PACE_LEAD=1)" : "one frame interval, as before 2026-11-24 (DM_PACE_LEAD=1: the lead follows the GPU's time)");
     // the hold (vk_pace.h): no grid move for a hitch or a load (a 1 s grace period), none chasing a GPU over the interval. DM_PACE_HOLD=0: every late frame moves it
@@ -7138,6 +7146,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
                     if (ch) VLOG("frame pacing: %u of the last %u frames showed a refresh late%s: the lead %s a refresh, now GPU %.1f ms + %d refreshes (%.1f ms)",
                                  g_vkp.last_late, g_vkp.last_n, ch < 0 ? " (none for a while)" : "", ch > 0 ? "grows by" : "gives back",
                                  vkp_gpu_p95(&g_vkp) / 1e6, 1 + g_vkp.extra, vkp_need(&g_vkp, r) / 1e6); }
+                if (a && !pace_adapt()) g_vkp.vs = a;   // (vkp_want_grid's phase: any frame shown is shown at a vsync)
                 if (g_pace.prev_actual && a > g_pace.prev_actual) { uint64_t d = a - g_pace.prev_actual;
                     if (d > 4 * iv) g_pace.pauses++;
                     else { g_pace.sum += d; g_pace.nsum++; if (d + r / 2 < iv || d > iv + r / 2) g_pace.uneven++; } }
@@ -7162,7 +7171,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
         want = vkp_want(&g_vkp, now, r, iv);
         g_vkp_plain[(g_pace.id + 1) % 64] = 1;
     } else if (pace) {
-        want = vkp_want_legacy(&g_vkp, now, r, iv, lead);   // (late: back to a full lead; ran ahead of the display: back in step)
+        want = dm_pace_grid_mode() == 1 ? vkp_want_legacy(&g_vkp, now, r, iv, lead) : vkp_want_grid(&g_vkp, now, r, iv, lead);   // (late: back to a full lead; ran ahead of the display: back in step)
         // frame generation: both pictures must reach the display early enough to make the refresh asked for, or one shows a refresh late and they land 8 and 25 ms
         //   apart (measured on a Galaxy S25+ at 120 Hz). The in-between picture asks for a time g_fg_lead ahead; the real frame exactly half an interval after it
         if (g_fg_pace == 1) { uint64_t lead = r * (uint64_t)g_fg_lead / 100; if (want < now + lead || want > now + lead + r) want = now + lead; }

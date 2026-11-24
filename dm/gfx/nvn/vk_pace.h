@@ -95,6 +95,22 @@ static inline uint64_t vkp_want_legacy(vk_pacer *p, uint64_t now, uint64_t r, ui
     if (want > now + (lead > iv ? lead : iv)) want = now + (lead > iv ? lead : iv);
     p->next = want; return want;
 }
+// The default since perf-1124 G3' (DM_PACE_GRID=game: vkp_want_legacy). The game handed frames over on a grid of its own, 2 / 60 s = 33.333 ms (hle_nvn.c), while
+//   the display shows them 2 refreshes apart, 33.37 ms on a 59.93 Hz panel: each hand-over came 0.04 ms earlier against the display, so vkp_want_legacy's
+//   clamp (no more than one lead ahead of now) put the asked time at now + lead, which carried the hand-over's jitter and slid through a whole refresh about
+//   every 15 s; near the edge frames flipped between two vsyncs (S25+: uneven frames per 300 in bursts, 0, 4, 7, 80, 47, 0 ..., "mean interval 33.26-33.32 ms
+//   (target 33.37)"). Here the grid is kept while its time is no later than the legacy clamp allows (+ half a refresh), and every asked time sits half a
+//   refresh before a reported vsync (vkp_snap, the nearest), so jitter under half a refresh changes nothing. The vsync a frame can be shown at stays within
+//   legacy's bounds (now + lead .. now + lead + a refresh; never more than an interval and a refresh ahead): with mailbox a longer lead lets a newer frame
+//   replace one still waiting (fable-final M1), which t_vk_pace's compositor does not model. t_vk_pace "one grid": a 59.93 Hz panel against the game's 60.000
+//   Hz grid, uneven frames before / now per scenario (and hle_nvn.c's grid on the display's refresh too, nvn_pace_grid)
+static inline uint64_t vkp_want_grid(vk_pacer *p, uint64_t now, uint64_t r, uint64_t iv, uint64_t lead) {
+    if (lead < r) lead = r;
+    uint64_t hi = lead > iv ? lead : iv, want = p->next ? p->next + iv : 0;
+    if (!want || want < now + r / 2 || want > now + hi + r / 2) want = vkp_snap(p, now + lead, r, 0);   // (late, or ahead of the display: a full lead again)
+    else want = vkp_snap(p, want, r, 0);
+    p->next = want; return want;
+}
 // The display's record of one paced frame: asked (desiredPresentTime), shown (actualPresentTime), margin (presentMargin, 0: not reported). now: the clock when it
 //   is read. Returns +1 when the lead grew a refresh, -1 when it gave one back, 0 else (the caller logs the change)
 static inline int vkp_seen(vk_pacer *p, uint64_t asked, uint64_t shown, uint64_t margin, uint64_t now, uint64_t r) {

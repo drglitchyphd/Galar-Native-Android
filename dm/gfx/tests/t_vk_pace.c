@@ -9,6 +9,7 @@
 //   next frame at once and keeps its interval from there (its timer re-phased); a load replays the frames of the S25+ field load at 322 s (load_trace: the time
 //   from one frame to the next and its GPU time, as [longframe] logged them). gwait: the game waits for the GPU's frame before (the hot run, GPU 50 ms a frame).
 //   Those scenarios count the grid's moves in 10 s with the hold (vkp_want as now) and without it (DM_PACE_HOLD=0, PR #361 as first pushed)
+// One grid (perf-1124 G3'): a 59.93 Hz panel against the game's own 60.000 Hz hand-over grid, before and with the game on the display's grid and vkp_want_grid.
 // Plain C, any OS: cc -O2 -o t_vk_pace t_vk_pace.c && ./t_vk_pace
 #include "../nvn/vk_pace.h"
 #include <stdio.h>
@@ -19,8 +20,8 @@ static uint64_t rng = 0x9e3779b97f4a7c15ull;
 static double urand(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (double)(rng >> 11) / 9007199254740992.0; }
 #define MS 1000000.0
 
-typedef struct { const char *name; double r, gpu, gjit, work, jit, latch, disp; int nots; int every; double hitch; int load, gwait; } scen;   // nots: the driver gives no GPU time
-typedef struct { long frames, uneven; double mean_iv, lat, secs, mean_all; unsigned rephase; int extra; } res;   // mean_all: pauses counted in
+typedef struct { const char *name; double r, gpu, gjit, work, jit, latch, disp; int nots; int every; double hitch; int load, gwait; double giv; } scen;   // nots: the driver gives no GPU time; giv: the game's own hand-over interval (ms; 0: the display's, iv)
+typedef struct { long frames, uneven; double mean_iv, lat, secs, mean_all; unsigned rephase; int extra, wmax; } res;   // mean_all: pauses counted in; wmax: the most uneven frames in one 300-frame window
 // the S25+ field load at 322 s (perf-all-cool.txt, frames 9368-9414): time to the next frame and GPU time, ms
 static const double load_trace[][2] = { { 51.6, 3.3 }, { 30.5, 24.3 }, { 19.8, 42.0 }, { 57.8, 71.6 }, { 72.3, 26.1 }, { 113.3, 23.4 }, { 143.6, 23.6 }, { 65.4, 32.3 },
     { 75.9, 35.2 }, { 96.8, 48.8 }, { 75.2, 44.6 }, { 52.9, 49.1 }, { 52.3, 32.5 }, { 35.9, 32.2 }, { 35.4, 27.7 }, { 30.8, 20.3 }, { 23.7, 18.8 }, { 32.2, 18.8 } };
@@ -29,13 +30,14 @@ enum { LOAD_N = sizeof load_trace / sizeof *load_trace };
 // one run of n frames; mode 0: as before (lead one interval), 1: now, 2: now without the hold (DM_PACE_HOLD=0)
 static res run(const scen *s, int mode, int n, double phase) {
     uint64_t r = (uint64_t)(s->r * MS), iv = ((uint64_t)(33333333.0 + r / 2) / r) * r;
+    uint64_t giv = s->giv > 0 ? (uint64_t)(s->giv * MS) : iv; int wn = 0;   // (giv: the game's hand-over grid; wn: uneven frames in this 300-frame window)
     vk_pacer P; memset(&P, 0, sizeof P); P.hold_off = mode == 2;
     uint64_t vs0 = 1000000000ull + (uint64_t)(urand() * r), t0 = 2000000000ull + (uint64_t)(phase * iv);
     enum { Q = 64 }; struct { uint64_t asked, shown, at; int used; } q[Q]; memset(q, 0, sizeof q);
     uint64_t gpu_free = 0, last_shown = 0, prev_actual = 0; res o = { 0 }; double sum = 0, sall = 0; long nsum = 0, nall = 0;
     uint64_t start = t0, prev_now = 0; int li = -1;   // the game's frame start (its timer: an interval after the last, or at once after a frame that ran over); a load's frame
     for (int i = 0; i < n; i++) {
-        if (i) { start += iv; if (prev_now > start) start = prev_now; }
+        if (i) { start += giv; if (prev_now > start) start = prev_now; }
         if (s->load && i >= 120 && i % s->every == 0) li = 0;
         uint64_t now = start + (uint64_t)((s->work + urand() * s->jit) * MS);
         if (s->every && !s->load && i >= 120 && i % s->every == 0) now = start + (uint64_t)(s->hitch * MS);
@@ -43,12 +45,12 @@ static res run(const scen *s, int mode, int n, double phase) {
         if (s->gwait && gpu_free + 2000000 > now) now = gpu_free + 2000000;   // (the game waits for the frame before to be drawn, then submits)
         prev_now = now;
         for (int k = 0; k < Q; k++) if (q[k].used && q[k].at <= now) {   // the display's record so far
-            if (mode) vkp_seen(&P, q[k].asked, q[k].shown, 0, now, r);
+            if (mode == 3) P.vs = q[k].shown; else if (mode) vkp_seen(&P, q[k].asked, q[k].shown, 0, now, r);   // (3: pace_time sets the phase from every frame shown)
             q[k].used = 0; }
         uint64_t g = (uint64_t)((s->gpu + (urand() * 2 - 1) * s->gjit) * MS);
         if (li >= 0) { g = (uint64_t)(load_trace[li][1] * MS); if (++li == LOAD_N) li = -1; }
-        if (mode && i >= 2 && !s->nots) vkp_gpu(&P, g);   // (pace_time reads the GPU time of frames already done; the model's is steady enough that this one's stands in)
-        uint64_t want = mode ? vkp_want(&P, now, r, iv) : vkp_want_legacy(&P, now, r, iv, iv);
+        if (mode && mode != 3 && i >= 2 && !s->nots) vkp_gpu(&P, g);   // (pace_time reads the GPU time of frames already done; the model's is steady enough that this one's stands in)
+        uint64_t want = mode == 3 ? vkp_want_grid(&P, now, r, iv, iv) : mode ? vkp_want(&P, now, r, iv) : vkp_want_legacy(&P, now, r, iv, iv);
         uint64_t start = now > gpu_free ? now : gpu_free, ready = start + g; gpu_free = ready;
         // the asked time as the compositor compares it with a vsync: give or take 0.5 ms
         uint64_t w = want ? (uint64_t)((double)want + (urand() - 0.5) * MS) : 0;
@@ -61,8 +63,9 @@ static res run(const scen *s, int mode, int n, double phase) {
         if (i >= 120) {   // (the first 4 s: the grid settles)
             o.lat += (v - now) / MS;
             if (prev_actual && actual - prev_actual <= 4 * iv) {   // (longer: a pause, left out as pace_time's log does)
-                uint64_t d = actual - prev_actual; o.frames++; sum += d; nsum++; if (d + r / 2 < iv || d > iv + r / 2) o.uneven++; }
-            if (prev_actual) { sall += actual - prev_actual; nall++; } }
+                uint64_t d = actual - prev_actual; o.frames++; sum += d; nsum++; if (d + r / 2 < iv || d > iv + r / 2) { o.uneven++; wn++; } }
+            if (prev_actual) { sall += actual - prev_actual; nall++; }
+            if ((i - 120) % 300 == 299) { if (wn > o.wmax) o.wmax = wn; wn = 0; } }
         prev_actual = actual;
     }
     o.secs = (prev_now - t0) / 1e9; o.mean_all = nall ? sall / nall / MS : 0; o.mean_iv = nsum ? sum / nsum / MS : 0; o.lat = o.frames ? o.lat / o.frames : 0; o.rephase = P.rephase; o.extra = P.extra;
@@ -124,6 +127,54 @@ int main(void) {
         if (!ok) { printf("FAIL: %s\n", H[i].name); fail++; }
     }
     ns += nh;
+    // One grid (perf-1124 G3'): the game handing over on its own 60.000 Hz grid (33.333 ms) to a panel of 59.93 Hz (two refreshes: 33.37 ms). Ways:
+    //   before (vkp_want_legacy, the game's grid); now (vkp_want_grid: the asked times snapped to the display's vsyncs, the game's grid, the default); the game on
+    //   the display's grid alone (hle_nvn.c nvn_pace_grid, DM_PACE_GRID=display without the snap); both (DM_PACE_GRID=display). 3,000 frames (100 s). Columns:
+    //   uneven frames, the most in one 300-frame window (the S25+ log's bursts: 0, 4, 7, 80, 47 ...), mean interval.
+    //   What it showed (2026-11-24): the game on the display's grid locks the hand-over's phase against the vsync for good, where the drift used to sweep it:
+    //   a good phase stays good, a bad one stays bad (GPU 22 ms, latch 8: 4.8 % uneven before, 8.9 % with a window of 148 of 300), so it is not the default.
+    //   The snapped times on the game's grid are never worse and help wherever the frame fits its lead; where it does not (GPU + latch over the interval) no
+    //   asked time within the lead mailbox allows helps (fable-final G4 / M1). Now must be: no more uneven than before (+ 0.25 points), no longer burst (+ 2)
+    const scen G[] = {
+        { "59.93 Hz, GPU 18, latch 8 ms",  16.686, 18.4, 3, 7, 5, 8.0, 16.686, 0, 0, 0, 0, 0, 33.3333 },
+        { "59.93 Hz, GPU 22, latch 8 ms",  16.686, 22.0, 3, 7, 5, 8.0, 16.686, 0, 0, 0, 0, 0, 33.3333 },
+        { "59.93 Hz, GPU 14, latch 12 ms", 16.686, 14.0, 3, 7, 5, 12.0, 16.686, 0, 0, 0, 0, 0, 33.3333 },
+        { "119.86 Hz, GPU 18, latch 8 ms",  8.343, 18.4, 3, 7, 5, 8.0, 8.343, 0, 0, 0, 0, 0, 33.3333 },
+        { "59.93 Hz panel, GPU 18 ms",   16.686, 18.4, 3, 7, 5, 16.686, 16.686, 0, 0, 0, 0, 0, 33.3333 },
+        { "59.93 Hz panel, GPU 26 ms",   16.686, 25.6, 3, 7, 5, 16.686, 16.686, 0, 0, 0, 0, 0, 33.3333 },
+        { "59.93 Hz, work jitter 12 ms", 16.686, 18.4, 3, 7, 12, 16.686, 16.686, 0, 0, 0, 0, 0, 33.3333 },
+        { "119.86 Hz panel, GPU 18 ms",   8.343, 18.4, 3, 7, 5, 16.686, 8.343, 0, 0, 0, 0, 0, 33.3333 },
+        { "60.00 Hz panel (no drift)",   16.667, 18.4, 3, 7, 5, 16.667, 16.667, 0, 0, 0, 0, 0, 33.3333 },
+    };
+    int ng = sizeof G / sizeof *G;
+    printf("\n%-30s | %-23s | %-23s | %-23s | %s\n", "one grid (30 fps)", "before: uneven / max", "now (snapped): uneven / max", "display grid alone", "display grid + snapped");
+    for (int i = 0; i < ng; i++) {
+        scen dg = G[i]; dg.giv = 0;   // (the game on the display's grid)
+        res a = { 0 }, b = { 0 }, c = { 0 }, d = { 0 }; int wa = 0, wb = 0, wc = 0, wd = 0;
+        for (int ph = 0; ph < PH; ph++) {   // (each way the same random draws: the seed set again before each run)
+            uint64_t seed = 0x9e3779b97f4a7c15ull ^ (uint64_t)(i * 131 + ph + 1);
+            rng = seed; res x = run(&G[i], 0, N, ph / (double)PH); rng = seed; res y = run(&G[i], 3, N, ph / (double)PH);
+            rng = seed; res z = run(&dg, 0, N, ph / (double)PH); rng = seed; res u = run(&dg, 3, N, ph / (double)PH);
+            a.frames += x.frames; a.uneven += x.uneven; if (x.wmax > wa) wa = x.wmax;
+            b.frames += y.frames; b.uneven += y.uneven; if (y.wmax > wb) wb = y.wmax;
+            c.frames += z.frames; c.uneven += z.uneven; if (z.wmax > wc) wc = z.wmax;
+            d.frames += u.frames; d.uneven += u.uneven; if (u.wmax > wd) wd = u.wmax; }
+        double ua = 100.0 * a.uneven / a.frames, ub = 100.0 * b.uneven / b.frames;
+        printf("%-30s | %6.2f %% / %3d          | %6.2f %% / %3d          | %6.2f %% / %3d          | %6.2f %% / %3d\n", G[i].name, ua, wa, ub, wb,
+               100.0 * c.uneven / c.frames, wc, 100.0 * d.uneven / d.frames, wd);
+        if (!(ub <= ua + 0.25 && wb <= wa + 2)) { printf("FAIL: %s\n", G[i].name); fail++; }
+    }
+    ns += ng;
+    // vkp_want_grid is what runs with DM_PACE_LEAD off (the default): the steady scenarios above (the game's grid the display's) with it against vkp_want_legacy
+    printf("\n%-30s | %-24s | %s\n", "steady, game on the grid", "legacy: uneven / mean", "snapped: uneven / mean");
+    for (int i = 0; i < (int)(sizeof S / sizeof *S); i++) {
+        res a = { 0 }, c = { 0 }; double ma = 0, mc = 0;
+        for (int ph = 0; ph < PH; ph++) { uint64_t seed = 0x9e3779b97f4a7c15ull ^ (uint64_t)(i * 977 + ph + 1); rng = seed; res x = run(&S[i], 0, N, ph / (double)PH); rng = seed; res z = run(&S[i], 3, N, ph / (double)PH);
+            a.frames += x.frames; a.uneven += x.uneven; ma += x.mean_iv; c.frames += z.frames; c.uneven += z.uneven; mc += z.mean_iv; }
+        double ua = 100.0 * a.uneven / a.frames, uc = 100.0 * c.uneven / c.frames;
+        printf("%-30s | %6.2f %% / %6.2f ms      | %6.2f %% / %6.2f ms\n", S[i].name, ua, ma / PH, uc, mc / PH);
+        if (!(uc <= ua + 1.0 && mc / PH > 33.0 && mc / PH < 33.8)) { printf("FAIL: snapped, %s\n", S[i].name); fail++; }
+    }
     // unit checks of the parts
     { vk_pacer p; memset(&p, 0, sizeof p); uint64_t r = 16666667;
       for (int i = 0; i < 16; i++) vkp_gpu(&p, (uint64_t)(10 + i) * 1000000);
