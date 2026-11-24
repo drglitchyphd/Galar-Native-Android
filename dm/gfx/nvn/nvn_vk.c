@@ -6385,7 +6385,14 @@ static int swap_ensure_now(void *win, int srgb) {
 static int pace_off(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PACE"); v = e && !atoi(e); } return v; }
 // The display's refresh period for the game's vsync timer (hle_sdk16.c vsync_thread): its 60 Hz then follows the display's own clock; 0 when not pacing
 uint64_t dm_display_refresh_ns(void) { return pace_off() ? 0 : g_refresh_ns; }
-static struct { uint64_t next, last_log, n, uneven, pauses, sum, nsum, prev_actual; uint32_t id; } g_pace;
+static struct { uint64_t last_log, n, uneven, pauses, sum, nsum, prev_actual; uint32_t id; } g_pace;
+// The asked times (vk_pace.h): the grid (g_vkp.next, shared with frame generation's pictures), the GPU's time of the last frames, the display's record of the
+//   frames paced by it (g_vkp_plain: by presentID, so frame generation's pictures, paced their own way, stay out of it). DM_PACE_LEAD=0: the times as before
+//   2026-11-24 (and DM_VK_PACE_LEAD=<ms>, a fixed lead, implies it)
+#include "vk_pace.h"
+static vk_pacer g_vkp; static uint8_t g_vkp_plain[64]; static uint64_t g_vkp_gf;
+static int pace_adapt(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PACE_LEAD"), *l = getenv("DM_VK_PACE_LEAD"); v = !(e && !strcmp(e, "0")) && !(l && atol(l) > 0);
+    VLOG("frame pacing: %s", v ? "the lead follows the GPU's time and the display's record (DM_PACE_LEAD=0: one frame interval as before)" : "a fixed lead (DM_PACE_LEAD=0 or DM_VK_PACE_LEAD)"); } return v; }
 // The time this frame should reach the screen: one frame interval (1 / the frame rate, rounded to whole refreshes) after the last frame's. A frame that comes late shows at
 //   the next refresh it can make; the target never runs more than one interval ahead of now (with mailbox a newer frame would replace one still waiting). With pacing off
 //   (DM_VK_PACE=0, or a frame rate that is the display's own) the frame still gets an id and no time (0: as soon as it can), so its timing is measured the same way.
@@ -6405,7 +6412,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
     //   a Galaxy S25+ was at 60 Hz when the swapchain was made and at 120 a moment later, and pictures paced for 60 landed 8 and 25 ms apart)
     { static uint64_t last; uint64_t t = mono_ns(); if (g_dtiming && p_refresh && W.sc && t - last >= 1000000000ull) { last = t; VkRefreshCycleDurationGOOGLE rc = { 0 };
         if (!p_refresh(g_dev, W.sc, &rc) && rc.refreshDuration && (rc.refreshDuration > g_refresh_ns + g_refresh_ns / 16 || rc.refreshDuration + rc.refreshDuration / 16 < g_refresh_ns)) {
-            VLOG("display refresh now %.3f ms (%.2f Hz), was %.3f ms", rc.refreshDuration / 1e6, 1e9 / (double)rc.refreshDuration, g_refresh_ns / 1e6); g_refresh_ns = rc.refreshDuration; g_pace.next = 0; } } }
+            VLOG("display refresh now %.3f ms (%.2f Hz), was %.3f ms", rc.refreshDuration / 1e6, 1e9 / (double)rc.refreshDuration, g_refresh_ns / 1e6); g_refresh_ns = rc.refreshDuration; g_vkp.next = 0; g_vkp.vs = 0; } } }
     if (!g_refresh_ns) return 0;
     uint64_t r = g_refresh_ns, now = mono_ns(); int fps = game_fps();
     if (g_fg_pace) fps *= g_fg_mult;   // (g_fg_period, when known, replaces it below)
@@ -6420,6 +6427,11 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
             VkPastPresentationTimingGOOGLE t[16]; if (n > 16) n = 16;
             if (p_past(g_dev, W.sc, &n, t) >= 0) for (uint32_t i = 0; i < n; i++) {
                 uint64_t a = t[i].actualPresentTime; g_pace.n++;
+                if (g_vkp_plain[t[i].presentID % 64] == 1) { g_vkp_plain[t[i].presentID % 64] = 0;   // (a frame paced by vkp_want: the display's record of it)
+                    int ch = vkp_seen(&g_vkp, t[i].desiredPresentTime, a, t[i].presentMargin, now, r);
+                    if (ch) VLOG("frame pacing: %u of the last %u frames showed a refresh late%s: the lead %s a refresh, now GPU %.1f ms + %d refreshes (%.1f ms)",
+                                 g_vkp.last_late, g_vkp.last_n, ch < 0 ? " (none for a while)" : "", ch > 0 ? "grows by" : "gives back",
+                                 vkp_gpu_p95(&g_vkp) / 1e6, 1 + g_vkp.extra, vkp_need(&g_vkp, r) / 1e6); }
                 if (g_pace.prev_actual && a > g_pace.prev_actual) { uint64_t d = a - g_pace.prev_actual;
                     if (d > 4 * iv) g_pace.pauses++;
                     else { g_pace.sum += d; g_pace.nsum++; if (d + r / 2 < iv || d > iv + r / 2) g_pace.uneven++; } }
@@ -6433,22 +6445,34 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
     //   DM_VK_PACE_LEAD=<ms> sets it by hand (16 is the former one refresh)
     uint64_t lead = iv; { static long ms = -2; if (ms == -2) { const char *e = getenv("DM_VK_PACE_LEAD"); ms = e && atol(e) > 0 ? atol(e) : -1; }
         if (ms > 0) lead = (uint64_t)ms * 1000000ull; if (lead < r) lead = r; }
-    if (pace) {
-        want = g_pace.next ? g_pace.next + iv : now + lead;
-        if (want < now + r / 2) want = now + lead;   // late: back to a full lead (it then shows at the slot after, and the frames after it keep their spacing)
-        if (want > now + (lead > iv ? lead : iv)) want = now + (lead > iv ? lead : iv);   // the game ran ahead of the display: back in step
+    // Since 2026-11-24 (vk_pace.h vkp_want, DM_PACE_LEAD=0 for the above): a frame keeps its place on the grid only when its GPU time and the compositor's lead fit
+    //   before it, else the grid moves once; times sit half a refresh before a reported vsync. At a held 30 the frames had come in 50 / 16.7 ms pairs at an unchanged
+    //   33.3 ms mean (S25+ 4-20 %, POCO F6 19-33 % uneven); t_vk_pace's simulated compositor: 9-40 % before, under 1 % now, for 6-17 ms more input delay.
+    //   Frame generation's pictures keep their own times (below), the real frame's from the grid
+    int adapt = pace && !g_fg_pace && pace_adapt();
+    if (adapt) {   // the GPU's time of the frames done since the last look (a frame three back is done: three swapchain slots, each waited on)
+        uint64_t fno = g_frame_no; if (fno > 3 && g_vkp_gf + 64 < fno) g_vkp_gf = fno - 64;
+        for (; fno > 3 && g_vkp_gf + 3 < fno; g_vkp_gf++) { double ms = mtl_gpu_ms(g_vkp_gf + 1); if (ms > 0 && ms < 1000) vkp_gpu(&g_vkp, (uint64_t)(ms * 1e6)); }
+        want = vkp_want(&g_vkp, now, r, iv);
+        g_vkp_plain[(g_pace.id + 1) % 64] = 1;
+    } else if (pace) {
+        want = vkp_want_legacy(&g_vkp, now, r, iv, lead);   // (late: back to a full lead; ran ahead of the display: back in step)
         // frame generation: both pictures must reach the display early enough to make the refresh asked for, or one shows a refresh late and they land 8 and 25 ms
         //   apart (measured on a Galaxy S25+ at 120 Hz). The in-between picture asks for a time g_fg_lead ahead; the real frame exactly half an interval after it
         if (g_fg_pace == 1) { uint64_t lead = r * (uint64_t)g_fg_lead / 100; if (want < now + lead || want > now + lead + r) want = now + lead; }
-        if (g_fg_pace == 2 && g_pace.next) want = g_pace.next + iv;
-        g_pace.next = want;
+        if (g_fg_pace == 2 && g_vkp.next) want = g_vkp.next + iv;
+        g_vkp.next = want;
     }
+    if (!adapt) g_vkp_plain[(g_pace.id + 1) % 64] = 0;
     pt->presentID = ++g_pace.id; pt->desiredPresentTime = want;
     if (now - g_pace.last_log >= 10000000000ull) {
         if (g_pace.last_log && g_pace.n)
-            VLOG("frame timing (pacing %s): %llu frames shown in the last 10 s, %llu uneven, %llu pauses, mean interval %.2f ms (target %.2f ms = %llu refreshes of %.2f ms)",
+            VLOG("frame timing (pacing %s): %llu frames shown in the last 10 s, %llu uneven, %llu pauses, mean interval %.2f ms (target %.2f ms = %llu refreshes of %.2f ms); "
+                 "lead %.1f ms (GPU p95 %.1f ms + %d refreshes), grid moved %u times",
                  pace ? "on" : "off", (unsigned long long)g_pace.n, (unsigned long long)g_pace.uneven, (unsigned long long)g_pace.pauses,
-                 g_pace.nsum ? g_pace.sum / 1e6 / (double)g_pace.nsum : 0.0, iv / 1e6, (unsigned long long)k, r / 1e6);
+                 g_pace.nsum ? g_pace.sum / 1e6 / (double)g_pace.nsum : 0.0, iv / 1e6, (unsigned long long)k, r / 1e6,
+                 (pace_adapt() ? vkp_lead(&g_vkp, r, iv) : lead) / 1e6, vkp_gpu_p95(&g_vkp) / 1e6, 1 + g_vkp.extra, g_vkp.rephase);
+        g_vkp.rephase = 0;
         g_pace.n = g_pace.uneven = g_pace.pauses = g_pace.sum = g_pace.nsum = 0; g_pace.last_log = now;
     }
     return 1;

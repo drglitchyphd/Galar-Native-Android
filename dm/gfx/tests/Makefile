@@ -34,6 +34,8 @@ t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
+t_vk_pace: t_vk_pace.c ../nvn/vk_pace.h
+	$(CC) -O2 -Wall -o $@ t_vk_pace.c
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
 # The unified driver layer's table (vk_quirks.h) against beta-exit's per-site rules for each port (6e0e1dd's; background pipelines as since f09e58f; it

@@ -950,6 +950,15 @@ static long kb_of(const char *path, const char *key) {
 }
 // The phone's heat (Android 11+ thermal status, 12+ headroom: 1.0 = where throttling starts), looked up at run time, for the log line: a slowdown from heat shows as heat
 static void *g_th_mgr; static int (*g_th_st)(void *); static float (*g_th_hr)(void *, int);
+// Headroom asked at most once a second (Android answers NaN to a second call within one, and the guard's reading and the log line's come a moment apart): within
+//   the second, the same forecast gets the answer already had, another NaN. Called from the log thread only (log_mirror: the guard and the [mem] line)
+static uint64_t g_hr_t; static float g_hr_v = -1.0f; static int g_hr_fs = -1;
+static float th_headroom(int fs) {
+    if (!g_th_mgr || !g_th_hr) return -1.0f;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t t = (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+    if (g_hr_fs >= 0 && t - g_hr_t < 1100) return fs == g_hr_fs ? g_hr_v : NAN;
+    g_hr_v = g_th_hr(g_th_mgr, fs); g_hr_t = t; g_hr_fs = fs; return g_hr_v;
+}
 static const char *thermal_text(char *buf, size_t n) {
     static void *mgr; static int (*st)(void *); static float (*hr)(void *, int); static int tried;
     if (!tried++) { void *lib = dlopen("libandroid.so", RTLD_NOW); void *(*acq)(void) = lib ? (void *(*)(void))dlsym(lib, "AThermal_acquireManager") : NULL;
@@ -957,9 +966,59 @@ static const char *thermal_text(char *buf, size_t n) {
     g_th_mgr = mgr; g_th_st = st; g_th_hr = hr;
     if (!mgr || !st) return "unknown";
     static const char *names[] = { "none", "light", "moderate", "severe", "critical", "emergency", "shutdown" }; int v = st(mgr);
-    snprintf(buf, n, "%s, headroom %.2f", v >= 0 && v <= 6 ? names[v] : "?", hr ? hr(mgr, 10) : -1.0f);   // headroom forecast 10 s ahead
+    float h10 = hr ? th_headroom(10) : -1.0f;   // headroom forecast 10 s ahead; the guard's reading of now when it asked this second
+    if (h10 == h10) snprintf(buf, n, "%s, headroom %.2f", v >= 0 && v <= 6 ? names[v] : "?", h10);
+    else snprintf(buf, n, "%s, headroom now %.2f", v >= 0 && v <= 6 ? names[v] : "?", g_hr_v);
     return buf;
 }
+// When the phone counts as hot (heat_trig.h heat_check, one check every 5 s from graphics_auto / heat_guard): since 2026-11-24 three checks in a row of thermal
+//   status moderate or worse, or of the headroom now at 0.95 with the status raised, or of Adreno's GPU clock held under 60 %: one reading of the 10 s forecast
+//   (A#98 at status "none", A#90 at 0) had cut the scale, and on Legends: Arceus that cut came before the crashes in #90. DM_HEAT_SUSTAIN=0: one reading as
+//   before. Every change is logged, and a reading the old rule would have acted on, once a minute at most
+#include "heat_trig.h"
+static int heat_sustain(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_HEAT_SUSTAIN"); v = !(e && !strcmp(e, "0"));
+    fprintf(stderr, "heat: %s\n", v ? "hot after 3 checks in a row (15 s) of thermal status moderate or worse, headroom now 0.95+ with the status raised, or the GPU's clock held (DM_HEAT_SUSTAIN=0: one reading)"
+                                     : "hot at one reading of thermal status moderate or worse, or the 10 s forecast at 0.9 (DM_HEAT_SUSTAIN=0)"); } return v; }
+static int g_heat_st = -1; static float g_heat_hr = -1.0f;   // the last check's readings, for the guards' own log lines
+static int heat_now(int saver, float cs, int *calm) {
+    static heat_trig h; static int was; static uint64_t said;
+    int sus = heat_sustain(), st = g_th_st(g_th_mgr); float hr = th_headroom(sus ? 0 : 10);
+    int why = heat_check(&h, st, hr, cs, saver, sus, calm);
+    g_heat_st = st; g_heat_hr = hr == hr ? hr : -1.0f;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t t = (uint64_t)ts.tv_sec;
+    if (!!why != !!was)
+        fprintf(stderr, "heat: %s (thermal status %d, headroom%s %.2f, GPU limit %.0f %% of its top clock%s)\n", why ? "hot" : "no longer hot", st, sus ? " now" : "", (double)g_heat_hr,
+                cs >= 0 ? cs * 100.0 : -1.0, !why ? "" : why == HEAT_STATUS ? "; by the status" : why == HEAT_HEADROOM ? "; by the headroom" : why == HEAT_GPU_CAP ? "; by the GPU's clock limit" : "; by more than one");
+    else if (!why && sus && heat_first(&h) && t - said >= 60) { said = t;
+        fprintf(stderr, "heat: one hot reading (thermal status %d, headroom now %.2f, GPU limit %.0f %%): nothing done unless %d in a row\n", st, (double)g_heat_hr, cs >= 0 ? cs * 100.0 : -1.0, HEAT_SUSTAIN_N); }
+    was = why; return why;
+}
+// Legends: Arceus: a 3D render scale change while playing is not safe (every crash in #90 and a vivo report came minutes after the heat guard's mid-play drop to
+//   67 %, at the same place in the game). Heat there changes the scale only at the next start: <files>/heat_scale.txt holds the percent heat_boot applies under
+//   the player's own (Graphics -> Render scale), and a session of 20 minutes with no hot check takes it back for the start after. Every decision is logged
+static int heat_file_pct(void) { char p[1100], cur[8] = ""; snprintf(p, sizeof p, "%s/heat_scale.txt", g_files); FILE *f = fopen(p, "r"); if (f) { if (!fgets(cur, sizeof cur, f)) cur[0] = 0; fclose(f); }
+    int v = atoi(cur); return v >= 50 && v < 100 ? v : 0; }
+static void heat_next_start(int pct, const char *why) {
+    if (heat_file_pct() == pct) return;
+    char p[1100]; snprintf(p, sizeof p, "%s/heat_scale.txt", g_files); FILE *f = fopen(p, "w"); if (!f) return;
+    if (pct) fprintf(f, "%d\n", pct); else fputs("\n", f); fclose(f);
+    if (pct) fprintf(stderr, "heat guard: %s: 3D render scale %d %% from the next start (nothing changed while playing: a scale change in play is not safe in this game)\n", why, pct);
+    else fprintf(stderr, "heat guard: %s: the 3D render scale of the player's own again from the next start\n", why);
+}
+static void heat_session(int hot) {   // each check: a whole cool session gives the remembered scale back
+    static int checks, hot_seen; checks++; hot_seen |= hot;
+    if (checks == 240 && !hot_seen && heat_file_pct()) heat_next_start(0, "20 minutes without the phone getting hot");
+}
+#if DM_PORT_ARCEUS
+static void heat_boot(void) {   // at start, after the phone's profile: the scale heat chose last time, under the player's own
+    int pct = heat_file_pct(); if (!pct) return;
+    { const char *g = getenv("DM_HEAT_GUARD"); if (g && !strcmp(g, "0")) { fprintf(stderr, "boot: the heat guard remembered 3D render scale %d %%: not applied (DM_HEAT_GUARD=0)\n", pct); return; } }
+    const char *e = getenv("DM_RES_CAP"); float cap = e ? (float)atof(e) : 1.0f; if (!(cap >= 0.5f && cap <= 1.0f)) cap = 1.0f;
+    if (cap * 100.0f <= (float)pct + 0.5f) { fprintf(stderr, "boot: the heat guard remembered 3D render scale %d %%; the player's own (%d %%) is lower already\n", pct, (int)(cap * 100 + 0.5f)); return; }
+    char v[16]; snprintf(v, sizeof v, "%.2f", pct / 100.0); setenv("DM_RES_CAP", v, 1);
+    fprintf(stderr, "boot: 3D render scale %d %%, chosen by the heat guard (the phone ran hot last time; 20 cool minutes take it back; DM_HEAT_GUARD=0 leaves it out)\n", pct);
+}
+#endif
 // Graphics "auto": TV mode while the phone keeps cool; handheld mode (720p, lighter effects) once it is hot (thermal status severe or worse, or throttling forecast
 // within 10 s), back to TV mode after a minute below "moderate" with headroom to spare. The game switches as when a Switch leaves or enters its dock
 void dm_set_opmode(int m);   // host/hle_oe.c: tells the game the console mode changed
@@ -993,8 +1052,8 @@ static void fps_guard_init(void) {
     g_fps_guard = fps; fprintf(stderr, "fps guard: %d fps target: a lighter picture whenever it falls short of 30 or the phone runs hot\n", fps);
 }
 // The heat guard, for every Graphics level the guard above does not run on (High, Low, Lowest, a scale set by hand): only heat, never the frame rate. Hot (thermal
-//   status moderate or worse, or the throttling forecast at 0.9): the 3D render scale goes to the 720p step through the game's own setter; back to the game's size
-//   after a calm minute. A Galaxy S25+ on High at 1080p ran its GPU down to 160 MHz (51 °C), the game at 20 fps, 2026-11-20. DM_HEAT_GUARD=0 leaves it out
+//   status moderate or worse for 15 s, heat_now): the 720p step under the slider, from the NEXT start (heat_next_start: never while playing in this game); the player's own
+//   again after a session of 20 minutes without heat. A Galaxy S25+ on High at 1080p ran its GPU down to 160 MHz (51 °C), the game at 20 fps, 2026-11-20. DM_HEAT_GUARD=0 leaves it out
 // Adreno's own GPU limit (kgsl): the thermal engine caps the clock directly, and Android's thermal status can stay "none" or "light" meanwhile (a Galaxy S25+ held at
 //   160 MHz of 1200, power level 14 of 15, status not raised, 2026-11-20). Returns the cap as a share of the top clock (1: no cap), -1 where it cannot be read
 static float gpu_cap_share(void) {
@@ -1018,15 +1077,17 @@ static void heat_guard(void) {   // (Legends: Arceus: the 3D render scale throug
     static int off = -1, on, calm_n; if (off < 0) { const char *e = getenv("DM_HEAT_GUARD"); off = e && !strcmp(e, "0"); }
     extern void dm_arc_scale_set(float) __attribute__((weak));
     if (off || !g_th_mgr || !g_th_st || !dm_arc_scale_set) return;
-    int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
-    int hot = st >= 2 || hr >= 0.9f, calm = st <= 1 && (hr < 0 || hr < 0.75f);
-    float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
+    // (the trigger: heat_now, three checks in a row. The GPU held below 60 % of its top clock counts as hot whatever the status says)
+    float cs = gpu_cap_share(); int calm, hot = heat_now(0, cs, &calm) != 0;
     calm_n = calm ? calm_n + 1 : 0;
-    atomic_store(&g_guard_heat, hot ? 2 : 0);   // (no frame-rate steps here: hot means the scale is at its heat step already)
-    const char *ce = getenv("DM_RES_CAP"); float cap = ce ? (float)atof(ce) : 1.0f; if (!(cap >= 0.5f && cap <= 1.0f)) cap = 1.0f;   // (the slider's value: the guard only ever goes under it)
-    if (hot && !on) { on = 1; calm_n = 0; float h = cap < 0.67f ? cap : 0.67f; dm_arc_scale_set(h);
-        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(h * 100 + 0.5f)); }
-    else if (on && calm_n >= 12) { on = 0; dm_arc_scale_set(cap); fprintf(stderr, "heat guard: cooled down: 3D render scale %d %% again\n", (int)(cap * 100 + 0.5f)); }
+    heat_session(hot);
+    atomic_store(&g_guard_heat, hot ? 2 : 0);   // (no frame-rate steps here: frame generation, where on, gets lighter at once: a live change that is safe)
+    // the scale: never while playing (heat_next_start), the 720p step under the slider's own value from the next start
+    if (hot && !on) { on = 1; calm_n = 0;
+        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock)\n", g_heat_st, (double)g_heat_hr, cs >= 0 ? cs * 100.0 : -1.0);
+        if (heat_file_pct()) fprintf(stderr, "heat guard: 3D render scale %d %% is chosen already (in use since this start, or from the next): nothing more changed\n", heat_file_pct());
+        else heat_next_start(67, "the phone is hot"); }
+    else if (on && calm_n >= 12) { on = 0; fprintf(stderr, "heat guard: cooled down (a calm minute); the scale chosen for the next start stays until a session of 20 minutes without heat\n"); }
 }
 // Locked 30, the last lever (Legends: Arceus): when even the lightest step of graphics_auto falls short with the CPU the limit, the draw distance is the one setting
 //   left that lowers the CPU's work (fewer people and Pokémon loaded, trees and terrain detail closer). It is only read at start, so it is remembered in
@@ -1048,10 +1109,9 @@ static void graphics_auto(void) {
     const char *g = getenv("DM_GRAPHICS");
     if (!(g && !strcmp(g, "auto") && g_th_mgr && g_th_st) && !g_fps_guard) { heat_guard(); return; }
     int hot = 0, calm = 1;
-    if (g_th_mgr && g_th_st) { int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
-        // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate
-        hot = st >= 2 || hr >= 0.9f; calm = st <= 1 && (hr < 0 || hr < 0.75f);
-        float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; } }   // (Adreno's own GPU limit: heat_guard)
+    // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate. Three
+    //   checks in a row (heat_now); Adreno's own GPU limit as in heat_guard
+    if (g_th_mgr && g_th_st) { hot = heat_now(0, gpu_cap_share(), &calm) != 0; heat_session(hot); }
     double fps = -1;
     // (the first minute of frames does not count: a save loading in runs slow while the game reads the world, Legends: Arceus at 22.6 fps for its first 20 s; that
     //   dropped TV mode for two minutes on a phone that then held 30 in it, Galaxy S25+ 2026-11-09)
@@ -1103,9 +1163,14 @@ static void graphics_auto(void) {
         if (cpu_short >= 6 && (lv >= lo || nogain)) lock30_draw(1, cpu, budget);   // (the lightest step and still short, with the CPU the limit: fewer things to draw from the next start)
         if (full && cpu > 0 && cpu < 0.5 * budget && cool >= 120) lock30_draw(0, cpu, budget);   // (ten calm minutes with the CPU half idle: the normal distance may come back)
         int fgp = atomic_exchange(&g_fg_pressure, 0);   // (frame generation's pictures cost the game frames: a step now, judged like any other)
-        int for_heat = hot && since >= 6 && !noheat && !probe,
+        // Heat takes no step while playing (2026-11-24): its handheld mode / scale drop is a live scale change, which came before the crashes in #90. Hot: the
+        //   720p step from the next start (heat_next_start; DM_HEAT_GUARD=0 leaves it out), and frame generation, where on, gets lighter now (dm_guard_heat 2)
+        { static int said; const char *hg = getenv("DM_HEAT_GUARD");
+          if (hot && !(hg && !strcmp(hg, "0"))) { if (!heat_file_pct()) heat_next_start(67, "graphics auto: the phone is hot");
+              else if (!said++) fprintf(stderr, "graphics auto: the phone is hot; 3D render scale %d %% is chosen already (in use since this start, or from the next)\n", heat_file_pct()); } }
+        int for_heat = 0,
             for_rate = (slow >= (gpu_bound ? 1 : 2) || fgp) && !nogain && !probe;
-        atomic_store(&g_guard_heat, hot ? (lv >= 2 ? 2 : 1) : 0);   // (heat's step: handheld mode, lv 2)
+        atomic_store(&g_guard_heat, hot ? 2 : 0);
         atomic_store(&g_guard_room, g_fps_guard && lv < lo && !nogain && !probe && !cpu_bound && !fgp);
         if (fgp && for_rate && lv < lo) fprintf(stderr, "fps guard: frame generation costs the game frames: a lighter step first\n");
         double r_up = lv > 0 && LM[lv - 1] == LM[lv] ? LS[lv - 1] / LS[lv] : 9;   // (up to TV mode: no early guess, the mode's cost is not the pixels')
@@ -1169,7 +1234,7 @@ static void fps_guard_init(void) {
     g_fps_guard = fps; fprintf(stderr, "fps guard: %d fps target: a lighter picture whenever it falls short of 30 or the phone runs hot\n", fps);
 }
 // The heat guard, for every Graphics level the guard above does not run on (High, Low, Lowest, a scale set by hand): only heat, never the frame rate. Hot (thermal
-//   status moderate or worse, or the throttling forecast at 0.9): the 3D render scale goes to the 720p step through the game's own setter; back to the game's size
+//   status moderate or worse for 15 s, heat_now): the 3D render scale goes to the 720p step through the game's own setter; back to the game's size
 //   after a calm minute. A Galaxy S25+ on High at 1080p ran its GPU down to 160 MHz (51 °C), the game at 20 fps, 2026-11-20. DM_HEAT_GUARD=0 leaves it out
 // Adreno's own GPU limit (kgsl): the thermal engine caps the clock directly, and Android's thermal status can stay "none" or "light" meanwhile (a Galaxy S25+ held at
 //   160 MHz of 1200, power level 14 of 15, status not raised, 2026-11-20). Returns the cap as a share of the top clock (1: no cap), -1 where it cannot be read
@@ -1184,15 +1249,16 @@ static float gpu_cap_share(void) {
 }
 static void heat_guard(void) {
     static int off = -1, on, calm_n; if (off < 0) { const char *e = getenv("DM_HEAT_GUARD"); off = e && !strcmp(e, "0"); }
-    if (off || !g_th_mgr || !g_th_st || !dm_res_scale_ready() || !dm_res_scale_applies()) return;
-    int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
-    int hot = st >= 2 || hr >= 0.9f, calm = st <= 1 && (hr < 0 || hr < 0.75f);
-    if (power_saver()) { hot = st >= 1 || hr >= 0.75f; calm = st == 0 && (hr < 0 || hr < 0.6f); }
-    float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; }   // (the GPU held below 60 % of its top clock: hot whatever the status says)
+    if (off || !g_th_mgr || !g_th_st) return;
+    // (the trigger: heat_now, three checks in a row, read every check so a scene at the game's full size does not break the count; battery saver: heat counts
+    //   sooner; the GPU held below 60 % of its top clock counts as hot whatever the status says)
+    float cs = gpu_cap_share(); int calm, hot = heat_now(power_saver(), cs, &calm) != 0;
+    if (!dm_res_scale_ready() || !dm_res_scale_applies()) return;
     calm_n = calm ? calm_n + 1 : 0;
     atomic_store(&g_guard_heat, hot ? 2 : 0);   // (no frame-rate steps here: hot means the scale is at its heat step already)
+    // Sword / Shield take the scale while playing (hle_resscale.c: the game's own setter; no crash tied to it), so heat steps it at once
     if (hot && !on) { on = 1; calm_n = 0; dm_res_factor_set(0.667f);
-        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% (about 720p) until it cools\n", st, (double)hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(0.667f * 100 + 0.5f)); }
+        fprintf(stderr, "heat guard: the phone is hot (thermal status %d, headroom %.2f, GPU limit %.0f %% of its top clock): 3D render scale %d %% (about 720p) until it cools\n", g_heat_st, (double)g_heat_hr, cs >= 0 ? cs * 100.0 : -1.0, (int)(0.667f * 100 + 0.5f)); }
     else if (on && calm_n >= 12) { on = 0; dm_res_factor_set(1.0f); fprintf(stderr, "heat guard: cooled down: the game's own 3D render scale again\n"); }
 }
 // Locked 30, the last lever (Sword and Shield; Legends: Arceus has the same with its draw distance, lock30_draw there): when the lightest 3D render scale still falls
@@ -1219,11 +1285,9 @@ static void graphics_auto(void) {
     const char *g = getenv("DM_GRAPHICS");
     if (!(g && !strcmp(g, "auto") && g_th_mgr && g_th_st) && !g_fps_guard) { heat_guard(); return; }
     int hot = 0, calm = 1;
-    if (g_th_mgr && g_th_st) { int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
-        // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate
-        hot = st >= 2 || hr >= 0.9f; calm = st <= 1 && (hr < 0 || hr < 0.75f);
-        if (power_saver()) { hot = st >= 1 || hr >= 0.75f; calm = st == 0 && (hr < 0 || hr < 0.6f); }
-        float cs = gpu_cap_share(); if (cs >= 0) { if (cs < 0.6f) hot = 1; if (cs < 0.9f) calm = 0; } }   // (Adreno's own GPU limit: heat_guard)   // (battery saver: heat counts sooner)
+    // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate. Three
+    //   checks in a row (heat_now); battery saver: heat counts sooner; Adreno's own GPU limit as in heat_guard
+    if (g_th_mgr && g_th_st) hot = heat_now(power_saver(), gpu_cap_share(), &calm) != 0;
     double fps = -1;
     // (the first minute of frames does not count: a save loading in runs slow while the game reads the world, Legends: Arceus at 22.6 fps for its first 20 s; that
     //   dropped TV mode for two minutes on a phone that then held 30 in it, Galaxy S25+ 2026-11-09)
@@ -1515,6 +1579,9 @@ static void host_start(void) {
     lite_boot();   // (lighter shadows and draw distance, when the fps guard remembered this phone needs them)
 #endif
     device_profile();   // the chip tier's defaults, under env.txt
+#if DM_PORT_ARCEUS
+    heat_boot();   // (the 3D render scale the heat guard chose last time: never changed while playing in this game)
+#endif
     // Game files: inside the installed APKs (the all-in-one .apks bundle, read through apkfs.c as /nxapk/...), else copied into the files folder
     struct stat st; int inapk = !stat("/nxapk/RomFS", &st);
     snprintf(g_game, sizeof g_game, "%s", inapk ? "/nxapk" : g_files);
