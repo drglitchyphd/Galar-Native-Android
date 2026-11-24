@@ -1073,6 +1073,13 @@ static void graphics_auto(void) {
     static int mode = 1, cool, slow, held, wait = 12, primed, lv, since; static uint64_t last_fr;
     const char *g = getenv("DM_GRAPHICS");
     if (!(g && !strcmp(g, "auto") && g_th_mgr && g_th_st) && !g_fps_guard) { heat_guard(); return; }
+    // No steps while playing unless DM_ARC_LIVE_STEPS=1 (2026-11-24): the ladder's switch to handheld mode in the middle of play ("graphics auto: the phone is hot",
+    //   a heat forecast with the status at none) was followed 15 s later by the same crash as heat_guard's scale drop (thread "s+350180", main+0x2b94314, x20 at a
+    //   "VFXB" effect), and the game's smoke fog stayed sized for TV mode, drawn into the top-left two thirds (REDMAGIC 10 Pro, Adreno 830, v0.96). The mode and
+    //   scale chosen at start stay; the menu's own slider and Mode still change them on the player's word
+    { static int live = -1; if (live < 0) { const char *e = getenv("DM_ARC_LIVE_STEPS"); live = e && !strcmp(e, "1");
+          if (!live) fprintf(stderr, "graphics auto: the mode and 3D render scale stay as set at start while playing (DM_ARC_LIVE_STEPS=1 steps them)\n"); }
+      if (!live) return; }
     int hot = 0, calm = 1;
     if (g_th_mgr && g_th_st) { int st = g_th_st(g_th_mgr); float hr = g_th_hr ? g_th_hr(g_th_mgr, 10) : -1.0f;
         // hot from "moderate" (2): the status a Galaxy S25+ sat at with all its cores capped to 1.4-2.2 GHz; "severe" (3) came too late to save the frame rate
