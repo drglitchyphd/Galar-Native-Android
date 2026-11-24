@@ -1393,7 +1393,8 @@ typedef struct { VkBuffer buf; vmalloc_t a; uint8_t *map; VkDeviceSize used, siz
 //   decided ones (dynamic rendering: formats and samples inherited, the same)
 // (work: a gap's commands that do something, counted by the gap_* wrappers; a gap with none, or only the barrier that stands for the Switch's own order between passes
 //   on the same targets, lets the passes on either side run as one: renderer phase 3, seg_record_prim)
-typedef struct { int pass, fgp; VkCommandBuffer cb; VkRenderingInfo ri; VkRenderingAttachmentInfo ca[8], da, sa; uint32_t cf[8], dsfmt, samples, work; } seg_t;
+// (ra / box: the part of the target the pass's contents can write, seg_area: ra 0 unknown (the whole target), 1 known and nothing yet, 2 known: box)
+typedef struct { int pass, fgp; VkCommandBuffer cb; VkRenderingInfo ri; VkRenderingAttachmentInfo ca[8], da, sa; uint32_t cf[8], dsfmt, samples, work; int ra; VkRect2D box; } seg_t;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, ucb; int ucb_open; uint64_t fence;
     VkCommandBuffer prim; VkCommandBuffer *sec; int nsec, csec; int dec; seg_t *seg; int nseg, cseg; seg_t cur;   // (the held frame's pieces: above; prim the submission's own primary)
@@ -1824,7 +1825,7 @@ static VkFramebuffer fbc_create(VkRenderPass rp, const VkImageView *views, uint3
 static int fbc_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_FB_CACHE"); on = !e || atoi(e) != 0; } return on; }
 // Begins a pass described as dynamic rendering. cf: each colour slot's format (a slot with no view: ignored), dsfmt: the depth / stencil attachment's format,
 //   samples: the attachments' sample count; swapchain: the one colour attachment is a swapchain image (framebuffer kept, see g_scfb)
-static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain, int secondary);
+static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain, int secondary, const VkRect2D *area);
 static int g_seg_in, g_seg_fgp = -1;   // a pass of a decided submission is open (its contents go to a secondary); the frame recorder's index for the pass about to begin
 static VkRenderPass rp_compat(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples);
 static VkCommandBuffer seg_new_cb(sub_t *s) {
@@ -1839,9 +1840,66 @@ static void seg_gap_begin(sub_t *s) {   // a new gap: work outside passes
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, .pInheritanceInfo = &inh };
     VKCHECK(vkBeginCommandBuffer(cb, &bi)); s->cb = cb; g_gap_cb = cb; g_gap_work = 0; g_cb_epoch++;
 }
-static void seg_pass_begin(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples) {   // the gap ends; the pass's contents go to a secondary
+// ---- A held frame's render areas (fix 2 of perf-1124, DM_VK_RENDER_AREA=0 / Q_RENDER_AREA_FULL: off) ----
+// Sword / Shield scale the viewport and scissor inside full-size targets (hle_resscale.c: the targets stay full size), and every pass began on the whole target with
+//   LOAD / STORE: a tiler loads and stores every tile of it on each of the 67-88 passes a frame (#349, Adreno 613 at 50 %: GPU 69.5-73 ms for 288 draws), so a lower
+//   scale saved shading but no tile traffic (#99 #315 #299). In a held frame the pass is begun at the flush (seg_record_prim), when its contents are known: its render
+//   area is then the union of every rectangle its contents can write, rounded out to RA_ALIGN pixels. Vulkan restricts load, store, clear and resolve to the render
+//   area and leaves the rest of each attachment as it was, which is what the whole-target LOAD / STORE gave it (the same pixels loaded and stored back unchanged), so
+//   whatever reads the target later (the game sampling it, copies, mips, a menu at full size, the present) sees the same pixels. Rasterisation never leaves the
+//   scissor, and every draw in a pass's secondary sets its own (dynamic state does not carry into a secondary), so the scissors set there and the rectangles cleared
+//   (seg_area_note: draw_, clear_in_pass) are all the pass can write. Only the game's own passes (pass_begin) are measured; ours (copies, captures, the clear of a 3D
+//   slice) keep the whole target. A pass that clears an attachment by its load op, resolves one or is multiview keeps the whole target too
+#define RA_ALIGN 32   // (Adreno's bins and Mali's tiles: whole tiles, a smaller area that cuts one would still load and store it)
+static int g_ra_next;   // pass_begin: the pass rend_begin is about to begin is the game's own (its area can be measured)
+static uint64_t g_ra_px_full, g_ra_px, g_ra_n;   // passes begun at the flush: pixels of their targets, pixels of their render areas, passes with a smaller area
+static int ra_on(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_VK_RENDER_AREA"); int full = quirk_note(Q_RENDER_AREA_FULL, e ? !atoi(e) : quirk_default(Q_RENDER_AREA_FULL, &g_gpuid), vkq_env_src("DM_VK_RENDER_AREA"));
+    v = !full; if (v && hold_dec()) VLOG("held frames: each pass's render area is the part of its targets its draws reach (DM_VK_RENDER_AREA=0: the whole target)");
+    return v;
+}
+static int seg_area_ok(const VkRenderingInfo *ri) {   // the pass's own operations write nothing outside its draws: no clear by load op, no resolve, no views
+    if (ri->viewMask) return 0;
+    for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) { const VkRenderingAttachmentInfo *c = &ri->pColorAttachments[i];
+        if (c->imageView && (c->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR || c->resolveImageView || c->resolveMode)) return 0; }
+    const VkRenderingAttachmentInfo *ds[2] = { ri->pDepthAttachment, ri->pStencilAttachment };
+    for (int i = 0; i < 2; i++) if (ds[i] && ds[i]->imageView && (ds[i]->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR || ds[i]->resolveImageView || ds[i]->resolveMode)) return 0;
+    return 1;
+}
+// A rectangle the open pass's contents can write (a scissor set in cb, a cleared rectangle): added to the held pass's area. Elsewhere nothing
+static void seg_area_note(VkCommandBuffer cb, VkRect2D r) {
+    if (!g_sub || !g_sub->dec || !g_seg_in || cb != g_sub->cb) return;
+    seg_t *g = &g_sub->cur; if (!g->ra) return;
+    if (!r.extent.width || !r.extent.height) return;
+    if (g->ra == 1) { g->box = r; g->ra = 2; return; }
+    int32_t x0 = g->box.offset.x < r.offset.x ? g->box.offset.x : r.offset.x, y0 = g->box.offset.y < r.offset.y ? g->box.offset.y : r.offset.y;
+    int64_t x1 = (int64_t)g->box.offset.x + g->box.extent.width, y1 = (int64_t)g->box.offset.y + g->box.extent.height;
+    if ((int64_t)r.offset.x + r.extent.width > x1) x1 = (int64_t)r.offset.x + r.extent.width;
+    if ((int64_t)r.offset.y + r.extent.height > y1) y1 = (int64_t)r.offset.y + r.extent.height;
+    g->box = (VkRect2D){ { x0, y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
+}
+// The render area for passes i..last (step 2: one run as one, seg_record_prim) of s, all on the same targets: their boxes' union rounded out to RA_ALIGN and kept
+//   inside the target; the whole target when any of them is unknown, or drew nothing (an empty pass keeps what it did before: nothing to gain)
+static VkRect2D seg_area(const sub_t *s, int i, int last) {
+    const seg_t *g = &s->seg[i]; VkRect2D full = g->ri.renderArea, r = full;
+    if (!ra_on()) return full;
+    int have = 0; int64_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    for (int j = i; j <= last; j += 2) { const seg_t *h = &s->seg[j];
+        if (h->ra != 2) return full;
+        int64_t a0 = h->box.offset.x, b0 = h->box.offset.y, a1 = a0 + h->box.extent.width, b1 = b0 + h->box.extent.height;
+        if (!have || a0 < x0) x0 = a0; if (!have || b0 < y0) y0 = b0; if (!have || a1 > x1) x1 = a1; if (!have || b1 > y1) y1 = b1; have = 1; }
+    int64_t fx0 = full.offset.x, fy0 = full.offset.y, fx1 = fx0 + full.extent.width, fy1 = fy0 + full.extent.height;
+    x0 = x0 / RA_ALIGN * RA_ALIGN; y0 = y0 / RA_ALIGN * RA_ALIGN; x1 = (x1 + RA_ALIGN - 1) / RA_ALIGN * RA_ALIGN; y1 = (y1 + RA_ALIGN - 1) / RA_ALIGN * RA_ALIGN;
+    if (x0 < fx0) x0 = fx0; if (y0 < fy0) y0 = fy0; if (x1 > fx1) x1 = fx1; if (y1 > fy1) y1 = fy1;
+    if (x1 <= x0 || y1 <= y0) return full;
+    r = (VkRect2D){ { (int32_t)x0, (int32_t)y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
+    return r;
+}
+static void seg_pass_begin(const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int game) {   // the gap ends; the pass's contents go to a secondary
     sub_t *s = g_sub; VKCHECK(vkEndCommandBuffer(s->cb)); seg_push(s, (seg_t){ .pass = 0, .fgp = -1, .cb = s->cb, .work = g_gap_work }); g_gap_cb = VK_NULL_HANDLE;
     seg_t *g = &s->cur; memset(g, 0, sizeof *g); g->pass = 1; g->fgp = g_seg_fgp; g->ri = *ri; g->dsfmt = dsfmt; g->samples = samples ? samples : 1;
+    g->ra = game && seg_area_ok(ri) && ra_on() ? 1 : 0;   // (a game's pass: its area measured as its contents are recorded, seg_area_note)
     for (uint32_t i = 0; i < ri->colorAttachmentCount && i < 8; i++) { g->ca[i] = ri->pColorAttachments[i]; g->cf[i] = cf && ri->pColorAttachments[i].imageView ? cf[i] : 0; }
     if (ri->pDepthAttachment) g->da = *ri->pDepthAttachment;
     if (ri->pStencilAttachment) g->sa = *ri->pStencilAttachment;
@@ -1859,12 +1917,14 @@ static void rend_begin(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint
     // (a pass begun in the same primary keeps its state: Vulkan's command buffer state lives across render pass instances, as the pipeline binding draw_ already
     //   kept. DM_VK_STATE_SHADOW=2 sends everything again in each pass anyway: a test for a driver that loses state there)
     if (state_shadow_mode() == 2) g_cb_epoch++;
-    if (g_sub && g_sub->dec && cb == g_sub->cb && !g_seg_in && !swapchain) { seg_pass_begin(ri, cf, dsfmt, samples); g_seg_fgp = -1; return; }
+    int game = g_ra_next; g_ra_next = 0;
+    if (g_sub && g_sub->dec && cb == g_sub->cb && !g_seg_in && !swapchain) { seg_pass_begin(ri, cf, dsfmt, samples, game); g_seg_fgp = -1; return; }
     g_seg_fgp = -1;
-    rend_begin_ex(cb, ri, cf, dsfmt, samples, swapchain, 0);
+    rend_begin_ex(cb, ri, cf, dsfmt, samples, swapchain, 0, NULL);
 }
-static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain, int secondary) {
-    if (g_dynren) { vkCmdBeginRendering(cb, ri); return; }
+// (area: the render area when it is smaller than ri's, seg_area; the framebuffer stays the size of ri's, so the cached ones serve both)
+static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const uint32_t *cf, uint32_t dsfmt, uint32_t samples, int swapchain, int secondary, const VkRect2D *area) {
+    if (g_dynren) { if (area) { VkRenderingInfo r2 = *ri; r2.renderArea = *area; vkCmdBeginRendering(cb, &r2); } else vkCmdBeginRendering(cb, ri); return; }
     rpkey k; memset(&k, 0, sizeof k); k.n = (uint8_t)ri->colorAttachmentCount; k.samples = (uint8_t)(samples ? samples : 1);
     VkImageView views[9]; VkClearValue cv[9]; uint32_t nv = 0;
     for (uint32_t i = 0; i < k.n && i < 8; i++) {
@@ -1899,7 +1959,7 @@ static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const u
             pthread_mutex_unlock(&g_scfbmu); }
         if (!kept) defer_add((dfr){ .kind = DF_FRAMEBUFFER, .h.fb = fb });
     }
-    VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = ri->renderArea, .clearValueCount = nv, .pClearValues = cv };
+    VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = area ? *area : ri->renderArea, .clearValueCount = nv, .pClearValues = cv };
     vkCmdBeginRenderPass(cb, &bi, secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
 }
 static void rend_end(VkCommandBuffer cb) {
@@ -4162,6 +4222,7 @@ static int pass_begin(void) {
         pthread_mutex_unlock(&g_fgrmu); }
     if (!P_tf) { hp_pass_begin(CB(), hp_c0); g_hpc.z = hp_z; g_hpc.zclr = (uint8_t)hp_zclr; g_hpc.zcd = hp_zcd; }   // (HUD-free frame generation: the scene copy before the first HUD pass)
     if (!P_tf) g_seg_fgp = fgr_pass_begin(CB(), tw, th, nlay ? nlay : 1, P.samples, fga, fgn);   // (the held frame decides this pass's stores by it)   // (the transform feedback capture passes are ours, not the game's)
+    g_ra_next = !P_tf;   // (a held frame: the game's pass gets the render area its draws reach, seg_area)
     rend_begin(CB(), &ri, P.cfmt, P.hd ? P.dfmt : P.hs ? P.sfmt : 0, P.samples, 0); g_stat_begins++;
     if (prof) { uint64_t pt3 = mono_ns(); g_pb_ns[0] += pt1 - pt0; g_pb_ns[1] += pt2 - pt1; g_pb_ns[2] += pt3 - pt2; }
     {   // a pass onto exactly the attachments of the one a target change just ended (the same views, size and layers): one that could have gone on (g_pass_samev)
@@ -5402,6 +5463,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         if (x1 <= x0 || y1 <= y0) return; sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
     SH_SEND(SH_SC, SH.sc.offset.x == sc.offset.x && SH.sc.offset.y == sc.offset.y && SH.sc.extent.width == sc.extent.width && SH.sc.extent.height == sc.extent.height, SH.sc = sc,
             vkCmdSetScissor(cb, 0, 1, &sc));
+    seg_area_note(cb, sc);   // (a held pass's area: the scissors its draws use, the game's scaled one in Sword / Shield's scene passes; noted whether or not the shadow
+                             //   left the call out, since a call left out sets the same scissor the pass already has)
     if (g_mw_px) mw_draw_rect(vx, vy, vw, vh, &sc);   // (the white-screen check: the part of the lit target this draw covers)
     if (g_eds) {   // (without extended dynamic state these are built into the pipeline: pso_get's sst, the same values)
     // (points and lines never cull, so none is sent for them: Arm's driver culled them with a dynamic cull mode and those draws vanished, erratum 3786517, r41-r51)
@@ -5999,6 +6062,7 @@ static void clear_in_pass(int color_index, const VkClearValue *v, VkImageAspectF
         if (x1 <= x0 || y1 <= y0) return; rc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}; }
     if (P.layers > 1 && (asp & VK_IMAGE_ASPECT_COLOR_BIT) && clear_by_pass() && clear_slice_by_pass(color_index, v, rc)) return;
     VkClearRect cr = { rc, 0, 1 };
+    seg_area_note(CB(), rc);   // (inside the held pass's area: VUID-vkCmdClearAttachments-pRects-00016)
     vkCmdClearAttachments(CB(), 1, &a, 1, &cr);
 }
 
@@ -6605,6 +6669,7 @@ __attribute__((weak)) int front_overlay(dm_ovl_item *it, int max, int width, int
 static struct { VkFormat fmt; VkPipeline pipe; VkPipelineLayout pl; VkDescriptorSetLayout dsl; VkDescriptorPool dp; VkDescriptorSet ds; VkSampler samp;
                 VkImage font; VkImageView fview; vmalloc_t fa, sa; VkBuffer stage; int font_ready, failed; } O;
 typedef struct { float rect[4], color[4], shape[4], glyph[4], target[2], rot; } ovl_pc;
+static uint64_t g_cmp_n, g_cmp_passes, g_cmp_clears, g_cmp_one;   // present_compose: pictures composed, passes on the swapchain image, whole-image clears, composed in one pass
 static int ovl_setup(VkFormat fmt) {
     if (O.failed) return 0;
     if (O.pipe && O.fmt == fmt) return 1;
@@ -6660,9 +6725,10 @@ static int ovl_setup(VkFormat fmt) {
 static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, VkExtent2D ext, VkExtent2D lext, int rot, VkFormat fmt, VkImageLayout fin);
 static int ovl_draw(VkCommandBuffer cb, VkImage img, VkImageView view, VkExtent2D ext, VkFormat fmt, VkImageLayout fin) { return ovl_draw_turned(cb, img, view, ext, ext, 0, fmt, fin); }
 // (ext: the image; lext: the window the controls are laid out in; rot: the quarter turns between them)
-static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, VkExtent2D ext, VkExtent2D lext, int rot, VkFormat fmt, VkImageLayout fin) {
-    dm_ovl_item it[128]; int n = front_overlay(it, 128, (int)lext.width, (int)lext.height);
-    if (n <= 0 || !view || !ovl_setup(fmt)) return 0;
+// The controls to draw (it, at most max) for a window lext, with the pipeline for fmt and the label atlas ready: recorded into cb outside any pass. 0: nothing to draw
+static int ovl_prep(VkCommandBuffer cb, VkFormat fmt, VkExtent2D lext, dm_ovl_item *it, int max) {
+    int n = front_overlay(it, max, (int)lext.width, (int)lext.height);
+    if (n <= 0 || !ovl_setup(fmt)) return 0;
     if (!O.font_ready) {   // the label atlas, once, in this same command buffer
         VkImageMemoryBarrier fb = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = O.font, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
@@ -6673,6 +6739,25 @@ static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, Vk
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &fb);
         O.font_ready = 1;
     }
+    return n;
+}
+// The controls (it, n from ovl_prep) drawn in the open pass over an image of size ext (lext / rot as below)
+static void ovl_rec(VkCommandBuffer cb, VkExtent2D ext, VkExtent2D lext, int rot, const dm_ovl_item *it, int n) {
+    VkViewport v = { 0, 0, (float)ext.width, (float)ext.height, 0, 1 }; VkRect2D sc = { {0, 0}, ext };
+    vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, O.pipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, O.pl, 0, 1, &O.ds, 0, NULL);
+    for (int i = 0; i < n; i++) {
+        const dm_ovl_item *q = &it[i];
+        ovl_pc pc = { { q->x, q->y, q->w, q->h }, { q->r, q->g, q->b, q->a }, { (float)q->shape, q->ring, q->radius, q->h > 0 ? q->w / q->h : 1 },
+                      { (float)q->glyph, q->gscale > 0 ? q->gscale : 0.5f, q->galpha, q->gdark }, { (float)lext.width, (float)lext.height }, (float)rot };
+        vkCmdPushConstants(cb, O.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+        vkCmdDraw(cb, 6, 1, 0, 0);
+    }
+}
+static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, VkExtent2D ext, VkExtent2D lext, int rot, VkFormat fmt, VkImageLayout fin) {
+    dm_ovl_item it[128]; int n = view ? ovl_prep(cb, fmt, lext, it, 128) : 0;
+    if (n <= 0) return 0;
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = img, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
@@ -6681,18 +6766,8 @@ static int ovl_draw_turned(VkCommandBuffer cb, VkImage img, VkImageView view, Vk
         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { {0, 0}, ext }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
     { uint32_t cf = (uint32_t)fmt; int sc = 0; for (uint32_t i = 0; i < W.n; i++) if (W.view[i] == view) sc = 1;   // (a screenshot's own image: a framebuffer per pass)
-      rend_begin(cb, &ri, &cf, 0, 1, sc); }
-    VkViewport v = { 0, 0, (float)ext.width, (float)ext.height, 0, 1 }; VkRect2D sc = { {0, 0}, ext };
-    vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, O.pipe);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, O.pl, 0, 1, &O.ds, 0, NULL);
-    for (int i = 0; i < n; i++) {
-        dm_ovl_item *q = &it[i];
-        ovl_pc pc = { { q->x, q->y, q->w, q->h }, { q->r, q->g, q->b, q->a }, { (float)q->shape, q->ring, q->radius, q->h > 0 ? q->w / q->h : 1 },
-                      { (float)q->glyph, q->gscale > 0 ? q->gscale : 0.5f, q->galpha, q->gdark }, { (float)lext.width, (float)lext.height }, (float)rot };
-        vkCmdPushConstants(cb, O.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
-        vkCmdDraw(cb, 6, 1, 0, 0);
-    }
+      rend_begin(cb, &ri, &cf, 0, 1, sc); g_cmp_passes += sc; }
+    ovl_rec(cb, ext, lext, rot, it, n);
     rend_end(cb);
     ib.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; ib.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT; ib.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; ib.newLayout = fin;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
@@ -6866,9 +6941,34 @@ static void fsr_easu_con(uint32_t con[4][4], float vw, float vh, float iw, float
                       { -1.0f / iw, 2.0f / ih, 1.0f / iw, 2.0f / ih }, { 0.0f, 4.0f / ih, 0, 0 } };
     memcpy(con, c, sizeof c); con[3][2] = con[3][3] = 0;
 }
-// The game frame (view sv, tw x th, crop cx cy cw ch) through EASU into FS.img, then RCAS into swapchain image ii's box; the swapchain image is left in COLOR_ATTACHMENT
-//   with its pass begun no more: the caller records the same end as for the other upscalers. 0: nothing recorded
-static int fsr_draw(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint32_t th, int32_t cx, int32_t cy, int32_t cw, int32_t ch, int flip, uint32_t ii, const int32_t box[4], float sharp) {
+// The picture's box (dm_picture_box, in the window's unturned layout) as a scissor in the swapchain image: turned with it and kept inside it
+static VkRect2D box_scissor(const int32_t box[4]) {
+    int32_t sx = box[0], sy = box[1], sw = box[2], shh = box[3];
+    if (W.rot & 1) { int32_t t = sx; sx = sy; sy = t; t = sw; sw = shh; shh = t; }   // a turned swapchain: the box in the turned image (it is centred, so either turn lands the same)
+    if (W.rot == 2) { sx = (int32_t)W.ext.width - sx - sw; sy = (int32_t)W.ext.height - sy - shh; }
+    if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { shh += sy; sy = 0; }
+    if (sx + sw > (int32_t)W.ext.width) sw = (int32_t)W.ext.width - sx; if (sy + shh > (int32_t)W.ext.height) shh = (int32_t)W.ext.height - sy;
+    return (VkRect2D){ { sx, sy }, { (uint32_t)(sw > 0 ? sw : 0), (uint32_t)(shh > 0 ? shh : 0) } };
+}
+// RCAS from FS.img (EASU's result, in SHADER_READ_ONLY) into the box of the swapchain image whose pass is open in cb
+static void fsr_rcas_rec(VkCommandBuffer cb, const int32_t box[4], float sharp) {
+    uint32_t ow = (uint32_t)box[2], oh = (uint32_t)box[3];
+    VkViewport sv2 = { 0, 0, (float)W.ext.width, (float)W.ext.height, 0, 1 };
+    VkRect2D ssc = box_scissor(box);
+    vkCmdSetViewport(cb, 0, 1, &sv2); vkCmdSetScissor(cb, 0, 1, &ssc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, FS.pipe[1]);
+    VkDescriptorImageInfo ri2 = { SC.samp, FS.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ri2 };
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, FS.pl, 0, 1, &w);
+    float lw = (float)W.lext.width, lh = (float)W.lext.height;
+    fsr_pc rc = { { 0, 0, 1, 1 }, { (float)ow, (float)oh, 0, 0 }, { box[0] / lw * 2 - 1, box[1] / lh * 2 - 1, (box[0] + box[2]) / lw * 2 - 1, (box[1] + box[3]) / lh * 2 - 1 }, { (float)W.rot, 0, 0, 0 } };
+    rc.con[1][0] = (uint32_t)color_mode();   // (fsr_rcas.frag: grade)
+    float stops = sharp < 0 ? 2.0f : fminf(2.0f, fmaxf(0.0f, 1.4f - 1.714f * sharp)); float lin = exp2f(-stops); memcpy(&rc.con[0][0], &lin, 4);   // (FsrRcasCon: stops → linear; con[1] (half) unused here)
+    vkCmdPushConstants(cb, FS.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof rc, &rc);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+}
+// The game frame (view sv, tw x th, crop cx cy cw ch) through EASU into FS.img, left for RCAS to sample (recorded outside any pass). 0: nothing recorded
+static int fsr_easu(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint32_t th, int32_t cx, int32_t cy, int32_t cw, int32_t ch, int flip, const int32_t box[4]) {
     uint32_t ow = (uint32_t)box[2], oh = (uint32_t)box[3];
     if (!ow || !oh || !fsr_setup(W.fmt) || !fsr_target(ow, oh, W.fmt)) return 0;
     // EASU: the whole EASU image, unrotated
@@ -6895,6 +6995,12 @@ static int fsr_draw(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint32_t th
     ib.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; ib.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     ib.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; ib.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    return 1;
+}
+// The game frame through EASU, then RCAS into swapchain image ii's box; the swapchain image is left in COLOR_ATTACHMENT with its pass begun no more: the caller records
+//   the same end as for the other upscalers. 0: nothing recorded
+static int fsr_draw(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint32_t th, int32_t cx, int32_t cy, int32_t cw, int32_t ch, int flip, uint32_t ii, const int32_t box[4], float sharp) {
+    if (!fsr_easu(cb, sv, tw, th, cx, cy, cw, ch, flip, box)) return 0;
     // RCAS: into the swapchain image's box (the caller has it in COLOR_ATTACHMENT and records nothing else in between)
     VkImageMemoryBarrier sb = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,   /* (READ: the pass after loads it; SYNC-HAZARD-READ-AFTER-WRITE) */
         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -6903,26 +7009,31 @@ static int fsr_draw(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint32_t th
     VkRenderingAttachmentInfo sa = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = W.view[ii], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };   // (LOAD: the black around the box stays)
     VkRenderingInfo si = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { {0, 0}, W.ext }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &sa };
-    { uint32_t cf = (uint32_t)W.fmt; rend_begin(cb, &si, &cf, 0, 1, 1); }
-    VkViewport sv2 = { 0, 0, (float)W.ext.width, (float)W.ext.height, 0, 1 };
-    int32_t sx = box[0], sy = box[1], sw = box[2], shh = box[3];
-    if (W.rot & 1) { int32_t t = sx; sx = sy; sy = t; t = sw; sw = shh; shh = t; }
-    if (W.rot == 2) { sx = (int32_t)W.ext.width - sx - sw; sy = (int32_t)W.ext.height - sy - shh; }
-    if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { shh += sy; sy = 0; }
-    if (sx + sw > (int32_t)W.ext.width) sw = (int32_t)W.ext.width - sx; if (sy + shh > (int32_t)W.ext.height) shh = (int32_t)W.ext.height - sy;
-    VkRect2D ssc = { { sx, sy }, { (uint32_t)(sw > 0 ? sw : 0), (uint32_t)(shh > 0 ? shh : 0) } };
-    vkCmdSetViewport(cb, 0, 1, &sv2); vkCmdSetScissor(cb, 0, 1, &ssc);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, FS.pipe[1]);
-    VkDescriptorImageInfo ri2 = { SC.samp, FS.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }; w.pImageInfo = &ri2;
-    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, FS.pl, 0, 1, &w);
-    float lw = (float)W.lext.width, lh = (float)W.lext.height;
-    fsr_pc rc = { { 0, 0, 1, 1 }, { (float)ow, (float)oh, 0, 0 }, { box[0] / lw * 2 - 1, box[1] / lh * 2 - 1, (box[0] + box[2]) / lw * 2 - 1, (box[1] + box[3]) / lh * 2 - 1 }, { (float)W.rot, 0, 0, 0 } };
-    rc.con[1][0] = (uint32_t)color_mode();   // (fsr_rcas.frag: grade)
-    float stops = sharp < 0 ? 2.0f : fminf(2.0f, fmaxf(0.0f, 1.4f - 1.714f * sharp)); float lin = exp2f(-stops); memcpy(&rc.con[0][0], &lin, 4);   // (FsrRcasCon: stops → linear; con[1] (half) unused here)
-    vkCmdPushConstants(cb, FS.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof rc, &rc);
-    vkCmdDraw(cb, 3, 1, 0, 0);
+    { uint32_t cf = (uint32_t)W.fmt; rend_begin(cb, &si, &cf, 0, 1, 1); g_cmp_passes++; }
+    fsr_rcas_rec(cb, box, sharp);
     rend_end(cb);
     return 1;
+}
+// The picture (view sv, tw x th, crop cx cy cw ch, flipped when its origin is lower left) drawn by upscaler which (0 sharp at sharpness sh, 1 SGSR) into the box of the
+//   swapchain image whose pass is open in cb. The whole image is the viewport: the box is in the vertices. The vertices are one triangle twice the box's size (scale.vert /
+//   sgsr.vert), so the scissor must be the box: with the whole image the picture spilled past the box's right edge and the triangle's long edge cut the corner below it
+//   diagonally (a 2560x1440 picture on a 3120x1440 Galaxy S25+)
+static void scale_rec(VkCommandBuffer cb, int which, VkImageView sv, uint32_t tw, uint32_t th, int32_t cx, int32_t cy, int32_t cw, int32_t ch, int flip, const int32_t box[4], float sh) {
+    VkViewport v = { 0, 0, (float)W.ext.width, (float)W.ext.height, 0, 1 };
+    VkRect2D sc = box_scissor(box);
+    vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, SC.pipe[which]);
+    VkDescriptorImageInfo di = { SC.samp, sv, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di };
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, SC.pl, 0, 1, &w);
+    float u0 = (float)cx / tw, u1 = (float)(cx + cw) / tw, v0 = (float)cy / th, v1 = (float)(cy + ch) / th;
+    float lw = (float)W.lext.width, lh = (float)W.lext.height;
+    scale_pc pc = { { 0 }, { 0 }, { box[0] / lw * 2 - 1, box[1] / lh * 2 - 1, (box[0] + box[2]) / lw * 2 - 1, (box[1] + box[3]) / lh * 2 - 1 }, { (float)W.rot, 0, 0, 0 } };
+    float uv[4] = { u0, flip ? v1 : v0, u1, flip ? v0 : v1 };
+    if (which) { float vi[4] = { 1.0f / tw, 1.0f / th, (float)tw, (float)th }; memcpy(pc.p0, vi, sizeof vi); memcpy(pc.p1, uv, sizeof uv); }
+    else { float t[4] = { 1.0f / tw, 1.0f / th, sh, (float)color_mode() }; memcpy(pc.p0, uv, sizeof uv); memcpy(pc.p1, t, sizeof t); }
+    vkCmdPushConstants(cb, SC.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+    vkCmdDraw(cb, 3, 1, 0, 0);
 }
 // The game frame x (crop cx cy cw ch, flipped when its origin is lower left) drawn into swapchain image ii's box, the rest black; the image is left in TRANSFER_DST layout,
 // as after the blit. Returns 0 (nothing recorded: the caller blits) when the upscaler does not apply
@@ -6948,29 +7059,8 @@ static int scale_draw_view(VkCommandBuffer cb, VkImageView sv, uint32_t tw, uint
     VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = W.view[ii], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };   // (LOAD: the black the caller cleared stays around the box)
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { {0, 0}, W.ext }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
-    { uint32_t cf = (uint32_t)W.fmt; rend_begin(cb, &ri, &cf, 0, 1, 1); }
-    // the whole image: the box is in the vertices. The vertices are one triangle twice the box's size (scale.vert / sgsr.vert), so the scissor must be the box: with the whole image
-    //   the picture spilled past the box's right edge and the triangle's long edge cut the corner below it diagonally (a 2560x1440 picture on a 3120x1440 Galaxy S25+)
-    VkViewport v = { 0, 0, (float)W.ext.width, (float)W.ext.height, 0, 1 };
-    int32_t sx = box[0], sy = box[1], sw = box[2], shh = box[3];
-    if (W.rot & 1) { int32_t t = sx; sx = sy; sy = t; t = sw; sw = shh; shh = t; }   // a turned swapchain: the box in the turned image (it is centred, so either turn lands the same)
-    if (W.rot == 2) { sx = (int32_t)W.ext.width - sx - sw; sy = (int32_t)W.ext.height - sy - shh; }
-    if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { shh += sy; sy = 0; }
-    if (sx + sw > (int32_t)W.ext.width) sw = (int32_t)W.ext.width - sx; if (sy + shh > (int32_t)W.ext.height) shh = (int32_t)W.ext.height - sy;
-    VkRect2D sc = { { sx, sy }, { (uint32_t)(sw > 0 ? sw : 0), (uint32_t)(shh > 0 ? shh : 0) } };
-    vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, SC.pipe[which]);
-    VkDescriptorImageInfo di = { SC.samp, sv, VK_IMAGE_LAYOUT_GENERAL };
-    VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di };
-    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, SC.pl, 0, 1, &w);
-    float u0 = (float)cx / tw, u1 = (float)(cx + cw) / tw, v0 = (float)cy / th, v1 = (float)(cy + ch) / th;
-    float lw = (float)W.lext.width, lh = (float)W.lext.height;
-    scale_pc pc = { { 0 }, { 0 }, { box[0] / lw * 2 - 1, box[1] / lh * 2 - 1, (box[0] + box[2]) / lw * 2 - 1, (box[1] + box[3]) / lh * 2 - 1 }, { (float)W.rot, 0, 0, 0 } };
-    float uv[4] = { u0, flip ? v1 : v0, u1, flip ? v0 : v1 };
-    if (which) { float vi[4] = { 1.0f / tw, 1.0f / th, (float)tw, (float)th }; memcpy(pc.p0, vi, sizeof vi); memcpy(pc.p1, uv, sizeof uv); }
-    else { float t[4] = { 1.0f / tw, 1.0f / th, sh, (float)color_mode() }; memcpy(pc.p0, uv, sizeof uv); memcpy(pc.p1, t, sizeof t); }
-    vkCmdPushConstants(cb, SC.pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
-    vkCmdDraw(cb, 3, 1, 0, 0);
+    { uint32_t cf = (uint32_t)W.fmt; rend_begin(cb, &ri, &cf, 0, 1, 1); g_cmp_passes++; }
+    scale_rec(cb, which, sv, tw, th, cx, cy, cw, ch, flip, box, sh);
     rend_end(cb);
     ib.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; ib.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     ib.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -7345,13 +7435,58 @@ static void present_window(vtex *x, const int crop[4]) { pthread_mutex_lock(&g_w
 void nvn_vk_window_term(void) { if (!g_dev) return; pthread_mutex_lock(&g_wmu); fg_flush_locked(); swap_destroy(); pthread_mutex_unlock(&g_wmu); }
 // One swapchain image composed in cb: black, the picture scaled into its box (the upscaler, else the plain linear stretch), the touch overlay; left ready to present
 typedef struct { vtex *x; VkImage img; VkImageView view; uint32_t w, h; int32_t cx, cy, cw, ch; } pres_src;   // x: the game's frame; NULL: a picture of ours (img / view / w / h, GENERAL layout)
+// In one pass (fix 8 of perf-1124; DM_VK_COMPOSE_ONE_PASS=0: the three steps below): the image cleared black by the pass's load op, the picture drawn into its box by the
+//   upscaler (the plain stretch: the sharp upscaler at sharpness 0, plain bilinear as the blit's linear filter), the controls over it, one store. Before, the whole
+//   image was cleared (vkCmdClearColorImage), then loaded and stored by the upscaler's pass and again by the overlay's: on a tiler one full-screen clear and two
+//   full-screen load / store cycles a picture, at the panel's size (2400x1080 on #349's Adreno 613, whose game draws 640x360). 0: not possible here (no push
+//   descriptors for the upscaler, a picture that cannot be sampled): the caller composes as before
+static int g_compose_one = -1;   // (t_vkdev sets it to compare the two)
+static int compose_one_on(void) { int v = g_compose_one; if (v < 0) { const char *e = getenv("DM_VK_COMPOSE_ONE_PASS"); g_compose_one = v = !(e && !strcmp(e, "0")); if (v) VLOG("present: each picture composed in one pass (DM_VK_COMPOSE_ONE_PASS=0: clear, upscale, overlay as three)"); } return v; }
+static int present_compose_one(VkCommandBuffer cb, uint32_t ii, const pres_src *s, int flip) {
+    if (!compose_one_on() || !W.view[ii]) return 0;
+    VkImageView sv = s->view; uint32_t tw = s->w, th = s->h;
+    if (s->x) { if (!(s->x->usage & VK_IMAGE_USAGE_SAMPLED_BIT) || s->x->is3d) return 0;
+        sv = view_get(s->x, VK_IMAGE_VIEW_TYPE_2D, s->x->fmt, 0, 1, 0, 1, SW_ID, VK_IMAGE_ASPECT_COLOR_BIT); tw = s->x->w; th = s->x->h; }
+    if (!sv || !tw || !th || !scale_setup(W.fmt, 0)) return 0;   // (the sampler and layout every upscaler uses, and the sharp one: the plain stretch's here)
+    int32_t cx = s->cx, cy = s->cy, cw = s->cw, ch = s->ch;
+    int32_t box[4]; dm_picture_box((int32_t)W.lext.width, (int32_t)W.lext.height, cw, ch, box);
+    int mode = scaler_mode(); float sh = scale_sharpness(); int up = box[2] > cw && box[3] > ch;
+    int plain = !W.rot && !color_mode() && (mode == 2 || (sh < 0 && mode != 3) || !up);   // (where the three-step compose blits)
+    int which = !plain && mode == 1 && !color_mode() ? 1 : 0; if (which && !scale_setup(W.fmt, 1)) which = 0;   // (SGSR has no colour: with one chosen, the sharp upscaler)
+    // the picture made visible to the fragment shader that samples it (the game's frame: its passes, copies; frame generation's: its render or compute passes)
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    int fsr = !plain && mode == 3 && up && fsr_easu(cb, sv, tw, th, cx, cy, cw, ch, flip, box);   // (FSR 1's first half into its own image, before the pass; else the sharp upscaler)
+    if (plain || (!fsr && (mode == 2 || sh < 0))) sh = 0;   // (the plain stretch, or turned but smooth: plain bilinear; FSR keeps the setting, as fsr_draw)
+    dm_ovl_item it[128]; int n = ovl_prep(cb, W.fmt, W.lext, it, 128);   // (the label atlas uploaded outside the pass)
+    // (from COLOR_ATTACHMENT_OUTPUT: the stage the image's acquire semaphore is waited at, so the transition follows it)
+    VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = W.img[ii], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = W.view[ii], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue.color = {{ 0, 0, 0, 1 }} };
+    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { {0, 0}, W.ext }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
+    { uint32_t cf = (uint32_t)W.fmt; rend_begin(cb, &ri, &cf, 0, 1, 1); g_cmp_passes++; }
+    if (fsr) fsr_rcas_rec(cb, box, sh); else scale_rec(cb, which, sv, tw, th, cx, cy, cw, ch, flip, box, sh);
+    if (n > 0) ovl_rec(cb, W.ext, W.lext, W.rot, it, n);
+    rend_end(cb);
+    ib.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; ib.dstAccessMask = 0; ib.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; ib.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    static int said; if (!said++) VLOG("present: composed in one pass by the %s (%dx%d → %dx%d%s)", fsr ? "FSR 1 upscaler" : plain ? "plain stretch" : which ? "SGSR upscaler" : "sharp upscaler",
+                                       cw, ch, box[2], box[3], W.rot ? ", pre-rotated" : "");
+    g_cmp_one++;
+    return 1;
+}
 static void present_compose(VkCommandBuffer cb, uint32_t ii, const pres_src *s, int flip) {
     if (ii >= W.n) { RED_ONCE(115, "swapchain image %u handed out, %u known: not drawn", ii, W.n); return; }
+    g_cmp_n++;
+    if (present_compose_one(cb, ii, s, flip)) return;
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = W.img[ii], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
     VkClearColorValue black = {{0, 0, 0, 1}}; VkImageSubresourceRange rr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCmdClearColorImage(cb, W.img[ii], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rr);
+    vkCmdClearColorImage(cb, W.img[ii], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rr); g_cmp_clears++;
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     int32_t cx = s->cx, cy = s->cy, cw = s->cw, ch = s->ch;
@@ -7636,7 +7771,10 @@ static void seg_record_prim(sub_t *s) {
         g->da.storeOp = e->da.storeOp; g->sa.storeOp = e->sa.storeOp;
         g->ri.pColorAttachments = g->ca; g->ri.pDepthAttachment = g->ri.pDepthAttachment ? &g->da : NULL; g->ri.pStencilAttachment = g->ri.pStencilAttachment ? &g->sa : NULL;
         g->ri.flags |= VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
-        rend_begin_ex(s->prim, &g->ri, g->cf, g->dsfmt, g->samples, 0, 1);
+        VkRect2D ra = seg_area(s, i, last); const VkRect2D *fa = &g->ri.renderArea;   // (the part of the targets these passes' draws reach)
+        int small = ra.offset.x != fa->offset.x || ra.offset.y != fa->offset.y || ra.extent.width != fa->extent.width || ra.extent.height != fa->extent.height;
+        g_ra_px_full += (uint64_t)fa->extent.width * fa->extent.height; g_ra_px += (uint64_t)ra.extent.width * ra.extent.height; g_ra_n += small;
+        rend_begin_ex(s->prim, &g->ri, g->cf, g->dsfmt, g->samples, 0, 1, small ? &ra : NULL);
         for (int j = i; j <= last; j += 2) vkCmdExecuteCommands(s->prim, 1, &s->seg[j].cb);
         if (g_dynren) vkCmdEndRendering(s->prim); else vkCmdEndRenderPass(s->prim);
         i = last;
@@ -7712,6 +7850,8 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (n % 300 == 0 && hold_on()) VLOG("present %llu: frames held whole %llu, flushed early by a wait %llu times; passes decided %llu: stores left out %llu, put back %llu; frame-end depth stores left out %llu (needed after all %llu); passes run as one with the one before %llu", (unsigned long long)n,
                                        (unsigned long long)g_hold_frames, (unsigned long long)g_hold_split, (unsigned long long)g_dec_passes, (unsigned long long)g_dec_dc, (unsigned long long)g_dec_fix,
                                        (unsigned long long)g_xf_dc, (unsigned long long)g_xf_bad, (unsigned long long)g_merge_n);
+    if (n % 300 == 0 && hold_dec() && g_ra_px_full) VLOG("present %llu: render areas: %llu passes begun on part of their targets; %.1f %% of the targets' pixels loaded / stored (DM_VK_RENDER_AREA)",
+                                       (unsigned long long)n, (unsigned long long)g_ra_n, 100.0 * (double)g_ra_px / (double)g_ra_px_full);
     if (n % 300 == 0) { pso_evict(); vk_trim(); }   // (pipelines kept: Arm's driver, phones under 7.5 GB; empty device blocks given back)
     if (n % 300 == 0 && g_dsc_hits + g_dsc_new) VLOG("present %llu: descriptor sets written %llu, reused %llu (%.0f %%)", (unsigned long long)n, (unsigned long long)g_dsc_new, (unsigned long long)g_dsc_hits, 100.0 * (double)g_dsc_hits / (double)(g_dsc_hits + g_dsc_new));
     // the state shadow's count (DM_VK_STATE_LOG=<presents>, 300 by default; 0: never): driver calls a draw for its state (pipeline, dynamic state, vertex and index

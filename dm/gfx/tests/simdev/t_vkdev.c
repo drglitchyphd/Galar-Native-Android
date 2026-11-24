@@ -917,6 +917,120 @@ static void snap_work(void) {
            "%.1f MB copied, arenas %.1f MB (%.1f MB used), %.2f ms\n", (unsigned long long)a.copies, a.bytes / 1048576.0, a.arena / 1048576.0, a.used / 1048576.0, a.ms,
            (unsigned long long)b.copies, (unsigned long long)b.reused, b.bytes / 1048576.0, b.arena / 1048576.0, b.used / 1048576.0, b.ms);
 }
+// ---- perf-1124 fixes 2 and 8 ----
+static VkImageView tv_view(vtex *x) {
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = x->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = x->fmt, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    VkImageView v = VK_NULL_HANDLE; return vkCreateImageView(g_dev, &vi, NULL, &v) ? VK_NULL_HANDLE : v;
+}
+static uint8_t *tv_readback(vtex *x, VkImageLayout lay, VkBuffer *hb, vmalloc_t *hm, VkCommandBuffer cb) {   // (cb open: the copy recorded there; the caller ends it)
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)x->w * x->h * 4, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    VKCHECK(vkCreateBuffer(g_dev, &bci, NULL, hb)); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, *hb, &rq);
+    *hm = vk_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1); VKCHECK(vkBindBufferMemory(g_dev, *hb, hm->b->mem, hm->off));
+    VkBufferImageCopy bc = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { x->w, x->h, 1 } };
+    vkCmdCopyImageToBuffer(cb, x->img, lay, *hb, 1, &bc);
+    return (uint8_t *)hm->b->map + hm->off;
+}
+// Fix 2, a held frame's render areas (seg_area): a 1280x720 target and a frame of 8 game passes, each writing only part of what render scale 0.5 leaves (640x360 at the
+//   top left, as Sword / Shield scale the viewport and scissor inside full-size targets), separated by the pass-to-pass barrier pass_begin records (so on Adreno's
+//   profiles the passes run as one, seg_record_prim). Each pass's writes are a vkCmdClearAttachments over its scissor, noted as clear_in_pass notes it. Read back: the
+//   part written has the passes' colour, everything else the colour from before (Vulkan's load / store outside the render area keep it); the validation layer checks every
+//   clear lies inside its pass's area. MEASURE: target pixels and render-area pixels for the frame (held frames only: DM_VK_FRAME_HOLD=2; DM_VK_RENDER_AREA=0 compares)
+static void ra_work(void) {
+    enum { TW = 1280, TH = 720, NP = 8 };
+    vtex *t = zt_image(VK_FORMAT_R8G8B8A8_UNORM, TW, TH, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    VkImageView v = t ? tv_view(t) : VK_NULL_HANDLE;
+    if (!v) { printf("SIMGAP render area: no RGBA8 target\n"); return; }
+    img_init(t, 0);
+    { VkCommandBuffer cb = once_begin(); VkClearColorValue bg = {{ 0.2f, 0.4f, 0.6f, 1 }}; VkImageSubresourceRange rr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+      vkCmdClearColorImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &bg, 1, &rr); once_end(cb); }
+    VkRect2D rc[NP]; for (int p = 0; p < NP; p++) rc[p] = (VkRect2D){ { (p % 4) * 60, (p / 4) * 60 }, { 460, 280 } };   // (their union: 640x340)
+    uint64_t f0 = g_ra_px_full, a0 = g_ra_px, n0 = g_ra_n, m0 = g_merge_n;
+    g_step = "render area: the frame";
+    mtl_sub_begin(); int held = g_sub->dec;
+    for (int p = 0; p < NP; p++) {
+        if (p) { barrier_pass(CB()); if (CB() == g_gap_cb && g_gap_work) g_gap_work--; }   // (as pass_begin: only the order between passes)
+        VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v, .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { TW, TH } }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
+        uint32_t cf = VK_FORMAT_R8G8B8A8_UNORM; g_ra_next = 1; rend_begin(CB(), &ri, &cf, 0, 1, 0);
+        VkClearAttachment a = { VK_IMAGE_ASPECT_COLOR_BIT, 0, { .color = {{ 1.0f, 0.0f, 0.0f, 1.0f }} } }; VkClearRect cr = { rc[p], 0, 1 };
+        seg_area_note(CB(), rc[p]); vkCmdClearAttachments(CB(), 1, &a, 1, &cr);
+        rend_end(CB());
+    }
+    barrier_all(CB());
+    uint64_t fence = mtl_sub_commit(); mtl_wait(fence, UINT64_MAX); mtl_finish();
+    g_step = "render area: read back";
+    VkBuffer hb; vmalloc_t hm; VkCommandBuffer cb = once_begin(); const uint8_t *px = tv_readback(t, VK_IMAGE_LAYOUT_GENERAL, &hb, &hm, cb); once_end(cb);
+    int bad_in = 0, bad_out = 0, fx = -1, fy = -1;
+    for (int y = 0; y < TH; y++) for (int x = 0; x < TW; x++) { int in = 0;
+        for (int p = 0; p < NP && !in; p++) in = x >= rc[p].offset.x && y >= rc[p].offset.y && x < rc[p].offset.x + (int)rc[p].extent.width && y < rc[p].offset.y + (int)rc[p].extent.height;
+        const uint8_t *q = px + ((size_t)y * TW + x) * 4;
+        int ok = in ? q[0] == 255 && q[1] == 0 && q[2] == 0 : abs(q[0] - 51) <= 1 && abs(q[1] - 102) <= 1 && abs(q[2] - 153) <= 1;
+        if (!ok) { if (in) bad_in++; else bad_out++; if (fx < 0) { fx = x; fy = y; } } }
+    CHECK(!bad_in && !bad_out, "render area (%s, %s): %d pixels written wrong, %d outside the writes changed (first at %d,%d)", held ? "held" : "as recorded", g_dynren ? "dynamic rendering" : "render passes", bad_in, bad_out, fx, fy);
+    uint64_t full = g_ra_px_full - f0, area = g_ra_px - a0, nsm = g_ra_n - n0, merged = g_merge_n - m0;
+    if (held && ra_on()) CHECK(nsm > 0 && area < full, "render area: the held frame's passes began on part of the target (%llu of %llu pixels)", (unsigned long long)area, (unsigned long long)full);
+    if (held && !ra_on()) CHECK(area == full, "render area off: the whole target (%llu of %llu pixels)", (unsigned long long)area, (unsigned long long)full);
+    printf("MEASURE render area at scale 0.5 (%s, %s, DM_VK_RENDER_AREA %s): %d game passes on a %dx%d target, %llu begun (%llu run inside the one before); target pixels %llu, render-area pixels %llu (%.1f %%)\n",
+           held ? "held" : "as recorded", g_dynren ? "dynamic rendering" : "render passes", ra_on() ? "on" : "off", NP, TW, TH, (unsigned long long)(held ? NP - merged : NP), (unsigned long long)merged,
+           (unsigned long long)(held ? full : (uint64_t)NP * TW * TH), (unsigned long long)(held ? area : (uint64_t)NP * TW * TH), held && full ? 100.0 * (double)area / (double)full : 100.0);
+}
+// Fix 8, the present composed in one pass: a 160x90 picture into a 400x240 stand-in for a swapchain image (the picture's box 400x225, black above and below), by the
+//   sharp upscaler, the plain stretch, FSR 1 and SGSR, composed both ways (g_compose_one 0: clear, upscaler pass or blit, as before; 1: one pass). Read back: the upscalers'
+//   pictures the same both ways, the plain stretch within a step or two (the blit's filter against the shader's bilinear), black outside the box. MEASURE: passes
+//   and whole-image clears on the swapchain image per picture
+static void compose_work(void) {
+    enum { SW = 400, SH = 240, PW = 160, PH = 90 };
+    if (!g_has_swapchain) { printf("SIMGAP compose: no VK_KHR_swapchain (the present layout)\n"); return; }
+    vtex *d = zt_image(VK_FORMAT_R8G8B8A8_UNORM, SW, SH, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT),
+         *s = zt_image(VK_FORMAT_R8G8B8A8_UNORM, PW, PH, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    VkImageView dv = d ? tv_view(d) : VK_NULL_HANDLE, sv = s ? tv_view(s) : VK_NULL_HANDLE;
+    if (!dv || !sv) { printf("SIMGAP compose: images not made\n"); return; }
+    img_init(s, 0);
+    {   // the picture: a gradient with a checker, through a host buffer
+        VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = PW * PH * 4, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
+        VkBuffer b; VKCHECK(vkCreateBuffer(g_dev, &bci, NULL, &b)); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, b, &rq);
+        vmalloc_t m = vk_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1); VKCHECK(vkBindBufferMemory(g_dev, b, m.b->mem, m.off));
+        uint8_t *p = (uint8_t *)m.b->map + m.off;
+        for (int y = 0; y < PH; y++) for (int x = 0; x < PW; x++) { uint8_t *q = p + (y * PW + x) * 4; q[0] = (uint8_t)(x * 255 / (PW - 1)); q[1] = (uint8_t)(y * 255 / (PH - 1)); q[2] = ((x / 8 + y / 8) & 1) ? 200 : 40; q[3] = 255; }
+        VkCommandBuffer cb = once_begin(); VkBufferImageCopy bc = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { PW, PH, 1 } };
+        vkCmdCopyBufferToImage(cb, b, s->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bc); once_end(cb); }
+    W.n = 1; W.img[0] = d->img; W.view[0] = dv; W.fmt = VK_FORMAT_R8G8B8A8_UNORM; W.ext = W.lext = (VkExtent2D){ SW, SH }; W.rot = 0;
+    static uint8_t out[4][2][SW * SH * 4]; int done[4][2] = { { 0 } };
+    const int modes[4] = { 0, 2, 3, 1 }; static const char *const mname[4] = { "sharp upscaler", "plain stretch", "FSR 1", "SGSR" };
+    int32_t box[4]; dm_picture_box(SW, SH, PW, PH, box);
+    for (int mi = 0; mi < 4; mi++) for (int one = 0; one < 2; one++) {
+        dm_scaler_mode = modes[mi]; g_compose_one = one;
+        uint64_t p0 = g_cmp_passes, c0 = g_cmp_clears, o0 = g_cmp_one;
+        g_step = "compose";
+        VkCommandBuffer cb = once_begin();
+        pres_src ps = { NULL, s->img, sv, PW, PH, 0, 0, PW, PH };
+        present_compose(cb, 0, &ps, 0);
+        VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = d->img, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+        VkBuffer hb; vmalloc_t hm; const uint8_t *px = tv_readback(d, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, &hb, &hm, cb);
+        once_end(cb);
+        memcpy(out[mi][one], px, sizeof out[mi][one]); done[mi][one] = 1;
+        int was_one = g_cmp_one != o0;
+        if (one && !was_one) printf("SIMGAP compose: one pass not possible on this device (no push descriptors for the upscaler): composed as before\n");
+        printf("MEASURE compose (%s, %s): passes on the swapchain image %llu, whole-image clears %llu%s\n", mname[mi], one ? "one pass" : "as before",
+               (unsigned long long)(g_cmp_passes - p0), (unsigned long long)(g_cmp_clears - c0), was_one ? " (one pass: the clear is the pass's load op)" : "");
+    }
+    dm_scaler_mode = -1; g_compose_one = -1;
+    for (int mi = 0; mi < 4; mi++) {
+        if (!done[mi][0] || !done[mi][1]) continue;
+        int maxd = 0, nblack = 0, fx = -1, fy = -1;
+        for (int y = 0; y < SH; y++) for (int x = 0; x < SW; x++) { const uint8_t *a = out[mi][0] + (y * SW + x) * 4, *b = out[mi][1] + (y * SW + x) * 4;
+            int in = x >= box[0] && y >= box[1] && x < box[0] + box[2] && y < box[1] + box[3];
+            if (!in && (b[0] || b[1] || b[2] || b[3] != 255)) { if (!nblack++ && fx < 0) { fx = x; fy = y; } }
+            for (int c = 0; c < 4; c++) { int dd = abs(a[c] - b[c]); if (dd > maxd) { maxd = dd; if (fx < 0) { fx = x; fy = y; } } } }
+        int tol = mi == 1 ? 6 : 0;
+        CHECK(!nblack && maxd <= tol, "compose (%s): one pass against as before: largest difference %d (allowed %d), %d pixels outside the box not black (first at %d,%d)", mname[mi], maxd, tol, nblack, fx, fy);
+        printf("WORK compose (%s): one pass against as before: largest channel difference %d\n", mname[mi], maxd);
+    }
+    memset(&W.img, 0, sizeof W.img); memset(&W.view, 0, sizeof W.view); W.n = 0;
+}
 
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
@@ -944,7 +1058,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); }
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "compose"; compose_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
