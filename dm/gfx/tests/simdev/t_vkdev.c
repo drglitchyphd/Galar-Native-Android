@@ -3,7 +3,7 @@
 //   what the engine decided against what that device reports (read again independently, through the same instance), and against what is known for the GPU named
 //   by SIMDEV_PROFILE (Arm's release from driverVersion, no dual-source blending on r44p1, the Vulkan 1.0 routes, ...). Then a little real work through the engine:
 //   samplers with every optional feature asked for, a memory pool mapped for the GPU, a fill submitted and waited for, a depth / stencil copy drawn (zcopy_draw),
-//   integer textures bound under a float sampler (tex_view_for).
+//   integer textures bound under a float sampler (tex_view_for), the draw-state shadow's reset rules and descriptor pushes, the draw memo (shadow_work).
 //   Build: simdev/build_vkdev.sh. Run: SIMDEV_PROFILE=<name> ./t_vkdev (exit 1 on a failed check; "FAIL" lines name it).
 //   DM_VK_FRAME_HOLD=2 (run_simdev.sh's second t_vkdev run): every submission held and decided, as with Faster rendering on Adreno: its passes in secondaries.
 //   SIMDEV_DC_FC=1 / 2: a float_controls_crashed marker from an earlier start, and DM_VK_FLOAT_CONTROLS=1 from the driver check (1: named in DM_DRIVER_CHECK_KEYS, as
@@ -592,6 +592,81 @@ static void inttex_work(void) {
     }
 }
 
+// ---- The draw-state shadow (nvn_vk.c, DM_VK_STATE_SHADOW) and the draw memo (DM_VK_DRAW_MEMO): what draw_ leaves out must be what the driver already has.
+//   The reset rules on real submissions (a new command buffer, other graphics work); the pushed descriptors and the index buffer through stand-ins for the
+//   driver's calls (the count and the bindings each call carries); tex_view_for's remembered answer against a texture ID registered again
+static uint32_t sw_calls, sw_n, sw_bind[8];
+static VKAPI_ATTR void VKAPI_CALL sw_push(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout pl, uint32_t set, uint32_t n, const VkWriteDescriptorSet *w) {
+    (void)cb; (void)bp; (void)pl; (void)set; sw_calls++; sw_n = n; for (uint32_t i = 0; i < n && i < 8; i++) sw_bind[i] = w[i].dstBinding; }
+static uint32_t si_calls; static VkDeviceSize si_off;
+static VKAPI_ATTR void VKAPI_CALL sw_index(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkIndexType t) { (void)cb; (void)b; (void)t; si_calls++; si_off = o; }
+static void shadow_work(void) {
+    g_step = "state shadow";
+    // reset rules, on the engine's own submissions
+    mtl_sub_begin(); int held = g_sub->dec; VkCommandBuffer cb = CB();
+    sh_sync(cb); SH.have = SH_VP | SH_SC; SH.vb_have = 1; SH.ib_have = 1; uint64_t ds0 = SH.dstamp;
+    sh_sync(cb); CHECK(SH.have == (SH_VP | SH_SC) && SH.vb_have == 1 && SH.ib_have == 1 && SH.dstamp == ds0, "state shadow: kept in the same command buffer");
+    g_gfx_bind_gen++; sh_sync(cb); CHECK(!SH.have && !SH.vb_have && !SH.ib_have && SH.dstamp != ds0, "state shadow: forgotten after other graphics work (g_gfx_bind_gen)");
+    SH.have = SH_VP; sh_sync(cb); CHECK(SH.have == SH_VP, "state shadow: kept again");
+    uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+    int same = 0;
+    for (int i = 0; i <= NSUB; i++) { mtl_sub_begin(); if (CB() == cb) { same = 1; break; } f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish(); }   // (until the ring hands the same handle out again)
+    if (!same) mtl_sub_begin();
+    sh_sync(CB()); CHECK(!SH.have, "state shadow: forgotten in a new submission%s", same ? " (the same command buffer handle, begun again)" : "");
+    f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+    printf("WORK state shadow: reset rules checked (%s frames%s)\n", held ? "held" : "plain", same ? ", a command buffer handle reused" : "");
+    // pushed descriptors: the writes the driver has under the same layout left out
+    PFN_vkCmdPushDescriptorSetKHR keep = p_push; p_push = sw_push; g_dsh = 1; g_dsh_cnt = 1; sh_forget(); sh_desc_forget();
+    VkDescriptorBufferInfo bi = { (VkBuffer)(uintptr_t)0x1000, 256, 64 }; VkDescriptorImageInfo ii = { (VkSampler)(uintptr_t)0x2000, (VkImageView)(uintptr_t)0x3000, VK_IMAGE_LAYOUT_GENERAL };
+    VkBufferView bv = (VkBufferView)(uintptr_t)0x4000; VkPipelineLayout pa = (VkPipelineLayout)(uintptr_t)0x5000, pb = (VkPipelineLayout)(uintptr_t)0x6000;
+    VkWriteDescriptorSet w[3];
+    #define PUSH(pl) do { VkWriteDescriptorSet w0[3] = { \
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bi }, \
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 33, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii }, \
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 70, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, .pTexelBufferView = &bv } }; \
+        memcpy(w, w0, sizeof w); sw_calls = sw_n = 0; push_writes(VK_NULL_HANDLE, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 3, w); } while (0)
+    PUSH(pa); CHECK(sw_calls == 1 && sw_n == 3, "pushed descriptors: all 3 the first time (%u calls, %u writes)", sw_calls, sw_n);
+    PUSH(pa); CHECK(sw_calls == 0, "pushed descriptors: none again when nothing changed (%u calls)", sw_calls);
+    ii.imageView = (VkImageView)(uintptr_t)0x3100; PUSH(pa); CHECK(sw_calls == 1 && sw_n == 1 && sw_bind[0] == 33, "pushed descriptors: only the texture that changed (%u writes, binding %u)", sw_n, sw_bind[0]);
+    bi.offset = 512; ii.sampler = (VkSampler)(uintptr_t)0x2100; PUSH(pa); CHECK(sw_calls == 1 && sw_n == 2 && sw_bind[0] == 0 && sw_bind[1] == 33, "pushed descriptors: the buffer offset and the sampler that changed (%u writes)", sw_n);
+    bi.range = 128; PUSH(pa); CHECK(sw_calls == 1 && sw_n == 1 && sw_bind[0] == 0, "pushed descriptors: a buffer range that changed (%u writes)", sw_n);
+    bv = (VkBufferView)(uintptr_t)0x4100; PUSH(pa); CHECK(sw_calls == 1 && sw_n == 1 && sw_bind[0] == 70, "pushed descriptors: a texel buffer view that changed (%u writes)", sw_n);
+    PUSH(pb); CHECK(sw_calls == 1 && sw_n == 3, "pushed descriptors: all again under another layout (%u writes)", sw_n);
+    PUSH(pa); CHECK(sw_calls == 1 && sw_n == 3, "pushed descriptors: all again back under the first layout (%u writes)", sw_n);
+    sh_desc_forget(); PUSH(pa); CHECK(sw_calls == 1 && sw_n == 3, "pushed descriptors: all again after a descriptor set was bound (sh_desc_forget) (%u writes)", sw_n);
+    g_gfx_bind_gen++; sh_sync(VK_NULL_HANDLE); PUSH(pa); CHECK(sw_calls == 1 && sw_n == 3, "pushed descriptors: all again after other graphics work (%u writes)", sw_n);
+    g_dsh = 0; PUSH(pa); PUSH(pa); CHECK(sw_calls == 1 && sw_n == 3, "pushed descriptors: all of them every time with the shadow off (%u writes)", sw_n);
+    #undef PUSH
+    p_push = keep; g_dsh_cnt = 0;
+    // the index buffer
+    PFN_vkCmdBindIndexBuffer ki = vkCmdBindIndexBuffer; vkCmdBindIndexBuffer = sw_index; sh_forget(); sh_sync(VK_NULL_HANDLE); si_calls = 0;
+    VkBuffer ib = (VkBuffer)(uintptr_t)0x7000;
+    sh_index(VK_NULL_HANDLE, 1, 1, ib, 0, VK_INDEX_TYPE_UINT16); sh_index(VK_NULL_HANDLE, 1, 1, ib, 0, VK_INDEX_TYPE_UINT16); CHECK(si_calls == 1, "index buffer: bound once for two draws with the same one (%u)", si_calls);
+    sh_index(VK_NULL_HANDLE, 1, 1, ib, 0, VK_INDEX_TYPE_UINT32); sh_index(VK_NULL_HANDLE, 1, 1, ib, 64, VK_INDEX_TYPE_UINT32); CHECK(si_calls == 3 && si_off == 64, "index buffer: bound again for another type and offset (%u)", si_calls);
+    sh_index(VK_NULL_HANDLE, 0, 1, ib, 64, VK_INDEX_TYPE_UINT32); CHECK(si_calls == 4, "index buffer: always bound with the shadow off (%u)", si_calls);
+    vkCmdBindIndexBuffer = ki; sh_forget();
+    g_sh_draws = g_sh_sent = g_sh_skip = g_sh_dw_all = g_sh_dw_sent = g_sh_vb_all = g_sh_vb_sent = 0;
+    printf("WORK state shadow: pushed descriptors and the index buffer checked\n");
+    // tex_view_for's memo: a texture ID registered again must not answer with the view it had
+    if (g_api < VK_API_VERSION_1_1 || !fmt_feat(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { printf("SIMGAP draw memo: not on Vulkan 1.0 (view_get's view usage structure is Vulkan 1.1's)\n"); return; }
+    if (!draw_memo_on()) { printf("SIMGAP draw memo: DM_VK_DRAW_MEMO=0\n"); return; }
+    g_step = "draw memo";
+    spv_res r; memset(&r, 0, sizeof r); r.kind = SPV_RES_TEX; r.dim = SPV_DIM_2D;
+    tex_t t1, t2; memset(&t1, 0, sizeof t1); t1.magic = MAGIC('T', 'E', 'X', 0); t1.d.format = NVN_FORMAT_RGBA8; t1.d.target = 1; t1.d.width = t1.d.height = 4; t1.d.depth = 1; t1.d.levels = 1;
+    t2 = t1; t1.serial = nvn_new_serial(); t2.serial = nvn_new_serial(); t2.d.width = t2.d.height = 8;
+    int tid = 3950; VkImageView v[4];
+    tex_t *seq[4] = { &t1, &t1, &t2, &t1 };   // (the last: t1's image exists already, only the registration changes)
+    for (int i = 0; i < 4; i++) { if (i == 0 || seq[i] != seq[i - 1]) mtl_reg_tex(tid, seq[i], NULL);
+        pthread_mutex_lock(&g_rmu); v[i] = tex_view_for(tid, &r, 0, NULL, 1, 0); pthread_mutex_unlock(&g_rmu); }
+    vtex *x1 = tex_res(&t1), *x2 = tex_res(&t2);
+    int in1 = 0, in2 = 0; if (x1) for (int k = 0; k < x1->nviews; k++) in1 |= x1->views[k].v == v[0]; if (x2) for (int k = 0; k < x2->nviews; k++) in2 |= x2->views[k].v == v[2];
+    CHECK(v[0] && v[0] == v[1] && in1, "draw memo: the same view for the same registration");
+    CHECK(v[2] && v[2] != v[0] && in2, "draw memo: the new texture's view after the ID was registered again");
+    CHECK(v[3] == v[0], "draw memo: the first texture's view again after it was registered back");
+    mtl_reg_tex(tid, NULL, NULL);
+    printf("WORK draw memo: a texture ID registered again checked\n");
+}
+
 // ---- R11G11B10F, the format the Mali float-target tests change (DM_VK_B10_AS_RGBA16: drawn as RGBA16F; DM_VK_B10_NOCOMPRESS: its targets without framebuffer
 //   compression), through the engine's own paths, judged by the validation layer against the simulated GPU, and checked bit for bit: a render target made and
 //   cleared in a pass (the load op, then vkCmdClearAttachments), copied into a pool and back, a pool's every channel code copied in and out, a texture clear, a
@@ -795,7 +870,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); }
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
