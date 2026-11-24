@@ -127,7 +127,9 @@ def share_translated(vk, same):
             except FileNotFoundError: pass
             if not os.path.isfile(src): continue
             try: os.link(src, dst)
-            except OSError: shutil.copyfile(src, dst)
+            except OSError:   # (some storage makes the link and still reports an error: copying onto it then fails as the same file, #320)
+                if os.path.lexists(dst): os.remove(dst)
+                shutil.copyfile(src, dst)
             got = got or end == '.spv'
         n += got
     return n
@@ -453,7 +455,9 @@ def main():
         for f in (tmp, target):
             if os.path.exists(f): os.remove(f)
         try: os.link(dp, tmp)   # (no extra space: a later merge into either game writes a new file and leaves the other's alone)
-        except OSError: shutil.copyfile(dp, tmp)
+        except OSError:   # (a link made but reported failed would make the copy below 'the same file': #320)
+            if os.path.lexists(tmp): os.remove(tmp)
+            shutil.copyfile(dp, tmp)
         if missing:
             vk = os.path.join(S, 'vk', 'b-' + chain); cache = os.path.join(S, 'shader_cache')
             kept = not resumed and translation_kept(a.work, chain)
