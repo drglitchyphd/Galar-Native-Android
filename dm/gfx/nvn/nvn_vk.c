@@ -6763,7 +6763,10 @@ static struct { uint64_t last_log, n, uneven, pauses, sum, nsum, prev_actual; ui
 #include "vk_pace.h"
 static vk_pacer g_vkp; static uint8_t g_vkp_plain[64]; static uint64_t g_vkp_gf;
 static int pace_adapt(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PACE_LEAD"), *l = getenv("DM_VK_PACE_LEAD"); v = !(e && !strcmp(e, "0")) && !(l && atol(l) > 0);
-    VLOG("frame pacing: %s", v ? "the lead follows the GPU's time and the display's record (DM_PACE_LEAD=0: one frame interval as before)" : "a fixed lead (DM_PACE_LEAD=0 or DM_VK_PACE_LEAD)"); } return v; }
+    VLOG("frame pacing: %s", v ? "the lead follows the GPU's time and the display's record (DM_PACE_LEAD=0: one frame interval as before)" : "a fixed lead (DM_PACE_LEAD=0 or DM_VK_PACE_LEAD)");
+    // the hold (vk_pace.h): no grid move for a hitch or a load (a 1 s grace period), none chasing a GPU over the interval. DM_PACE_HOLD=0: every late frame moves it
+    const char *h = getenv("DM_PACE_HOLD"); g_vkp.hold_off = h && !strcmp(h, "0");
+    if (v) VLOG("frame pacing: %s", g_vkp.hold_off ? "every late frame moves the grid (DM_PACE_HOLD=0)" : "hitches and loads keep the grid for 1 s, a GPU over the interval gets a fixed lead (DM_PACE_HOLD=0: off)"); } return v; }
 // The time this frame should reach the screen: one frame interval (1 / the frame rate, rounded to whole refreshes) after the last frame's. A frame that comes late shows at
 //   the next refresh it can make; the target never runs more than one interval ahead of now (with mailbox a newer frame would replace one still waiting). With pacing off
 //   (DM_VK_PACE=0, or a frame rate that is the display's own) the frame still gets an id and no time (0: as soon as it can), so its timing is measured the same way.
@@ -6839,11 +6842,11 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
     if (now - g_pace.last_log >= 10000000000ull) {
         if (g_pace.last_log && g_pace.n)
             VLOG("frame timing (pacing %s): %llu frames shown in the last 10 s, %llu uneven, %llu pauses, mean interval %.2f ms (target %.2f ms = %llu refreshes of %.2f ms); "
-                 "lead %.1f ms (GPU p95 %.1f ms + %d refreshes), grid moved %u times",
+                 "lead %.1f ms (GPU p95 %.1f ms + %d refreshes), grid moved %u times; held: %u late frames after a hitch, %u at the fixed lead (GPU over the interval)",
                  pace ? "on" : "off", (unsigned long long)g_pace.n, (unsigned long long)g_pace.uneven, (unsigned long long)g_pace.pauses,
                  g_pace.nsum ? g_pace.sum / 1e6 / (double)g_pace.nsum : 0.0, iv / 1e6, (unsigned long long)k, r / 1e6,
-                 (pace_adapt() ? vkp_lead(&g_vkp, r, iv) : lead) / 1e6, vkp_gpu_p95(&g_vkp) / 1e6, 1 + g_vkp.extra, g_vkp.rephase);
-        g_vkp.rephase = 0;
+                 (pace_adapt() ? (g_vkp.over ? iv + 2 * r : vkp_lead(&g_vkp, r, iv)) : lead) / 1e6, vkp_gpu_p95(&g_vkp) / 1e6, 1 + g_vkp.extra, g_vkp.rephase, g_vkp.kept, g_vkp.fixed);
+        g_vkp.rephase = g_vkp.kept = g_vkp.fixed = 0;
         g_pace.n = g_pace.uneven = g_pace.pauses = g_pace.sum = g_pace.nsum = 0; g_pace.last_log = now;
     }
     return 1;

@@ -11,6 +11,16 @@
 //   display reported, so it can not fall on either side of one. The display's record (vkp_seen): frames shown more than half a refresh after the rest of a 2 s
 //   window in 5-95 % of it (some, not all: all is the compositor's own fixed delay) add a refresh to the lead; 5 s without one, with a reported margin over 1.5
 //   refreshes (30 s when the driver reports no margin: Android's often does not), take one back. Costs up to a refresh of input delay; DM_PACE_LEAD=0: as before
+// Hitches and an overloaded GPU (vkp_want's hold, DM_PACE_HOLD=0 to turn it off): on the S25+ the grid moved 16 times in 10 s after a field load (frames of 50-143 ms,
+//   then a few handed over 24-35 ms apart while the game caught up; mean interval 35.9 ms) and 186 times in 10 s when heat took the GPU to 50 ms a frame. A frame
+//   handed over more than 1.5 intervals after the one before (a load, a pipeline built, a hitch) starts a 1 s grace period: in it a late frame asks the earliest
+//   time it can make (GPU p95 + the compositor's lead, not the full lead a move gives: a move asked half a refresh to two refreshes more, one refresh more on the
+//   screen for that frame) and the grid goes on from there; two late frames in a row that were not hitches still move it; frames that come early while the game
+//   catches up keep their place (up to an interval more ahead than otherwise, where a move pulled the grid back and showed one a refresh early). With the GPU's
+//   p95 over the frame interval the 30 can not be held anyway: a frame keeps its slot when it fits, else asks one fixed lead (an interval and two refreshes, the
+//   most vkp_lead gives) from now, and that is no move (the grid is not chased), until the p95 is a quarter refresh under the interval. t_vk_pace (the S25+
+//   cases): grid moves in 10 s 9.8-11.6 -> 0.1-0.5 over a field load, 1.6-7.4 -> 0.2-1.0 with a 140 ms frame every 2-10 s, 96-192 -> 0 with the GPU at 38-50 ms;
+//   uneven frames the same or fewer, the steady cases unchanged (no hitch there: the hold never acts)
 #pragma once
 #include <stdint.h>
 
@@ -23,7 +33,11 @@ typedef struct {
     uint64_t win_t; int win_n; uint64_t off[VKP_WIN];   // this 2 s window: each frame's shown time minus its asked time
     uint64_t calm_t, calm_margin;     // since the last late frame: when, and the smallest margin the driver reported (0: none reported)
     unsigned rephase, last_late, last_n;   // counts for the log: grid moves; the last window's late frames of its frames
+    uint64_t last_now, grace_t;       // when the frame before was handed over; a hitch's grace period runs until grace_t
+    int late, over, hold_off;         // the frame before was late in a grace period; the GPU's p95 is over the interval (fixed lead); DM_PACE_HOLD=0: no hold
+    unsigned kept, fixed;             // counts for the log: late frames that kept the grid in a grace period; frames asked at the fixed lead
 } vk_pacer;
+enum { VKP_GRACE_MS = 1000 };
 
 static inline void vkp_gpu(vk_pacer *p, uint64_t ns) { p->gpu[p->gpos] = ns; p->gpos = (p->gpos + 1) % VKP_GPU_N; if (p->ngpu < VKP_GPU_N) p->ngpu++; }
 // p95 of the samples kept (16: the second longest, so one odd frame does not move the grid); 0 with none (a driver without timestamps: Mali, PowerVR)
@@ -49,6 +63,24 @@ static inline uint64_t vkp_lead(const vk_pacer *p, uint64_t r, uint64_t iv) {
 static inline uint64_t vkp_want(vk_pacer *p, uint64_t now, uint64_t r, uint64_t iv) {
     uint64_t lead = vkp_lead(p, r, iv), need = vkp_need(p, r); if (need > lead) need = lead;
     uint64_t want = p->next ? p->next + iv : 0;
+    if (!p->hold_off) {
+        uint64_t gap = p->last_now && now > p->last_now ? now - p->last_now : 0, g = vkp_gpu_p95(p); p->last_now = now;
+        if (g > iv) p->over = 1; else if (g + r / 4 < iv) p->over = 0;
+        if (p->over) {   // the GPU can not draw the interval: one fixed lead, a slot kept when it fits, no grid to chase (the grace period covers the way back)
+            uint64_t fl = iv + 2 * r; if (need > fl) need = fl;
+            p->late = 0; p->grace_t = now + VKP_GRACE_MS * 1000000ull;
+            if (want && want >= now + need && want <= now + fl + 2 * r) return p->next = vkp_snap(p, want, r, 0);
+            p->fixed++; return p->next = vkp_snap(p, now + fl, r, 1); }
+        int hitch = gap > iv + iv / 2;
+        if (hitch) p->grace_t = now + VKP_GRACE_MS * 1000000ull;
+        if (want && now < p->grace_t) {
+            if (want < now + need && (hitch || !p->late)) {   // late after a hitch: the earliest time it can make (not the full lead), the grid on from it
+                p->kept++; p->late = 1;
+                return p->next = vkp_snap(p, now + need, r, 1); }
+            if (want >= now + need && want <= now + lead + iv + 2 * r) { p->late = 0; return p->next = vkp_snap(p, want, r, 0); }
+        }
+        p->late = 0;
+    }
     if (!want || want < now + need || want > now + lead + 2 * r) {   // late (or the game ran ahead of the display): the grid moves, once
         if (p->next) p->rephase++;
         want = vkp_snap(p, now + lead, r, 1);

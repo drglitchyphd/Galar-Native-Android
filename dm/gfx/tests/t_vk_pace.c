@@ -5,6 +5,10 @@
 //   the compositor shows it at the first vsync that is no earlier than the time asked (give or take 0.5 ms: where SurfaceFlinger compares it) and that comes at
 //   least `latch` after the picture was finished, never two frames at one vsync. The display's record (shown, asked) reaches the pacer 2 refreshes after the
 //   frame was shown, with a fixed delay of its own added (the compositor's: `disp`), and margin 0 (Android's swapchain reports none).
+// Hitches (2026-11-24, the S25+ logs of perf-all): a frame's work can run long (hitch: one frame of hitch ms every `every` frames), after which the game starts its
+//   next frame at once and keeps its interval from there (its timer re-phased); a load replays the frames of the S25+ field load at 322 s (load_trace: the time
+//   from one frame to the next and its GPU time, as [longframe] logged them). gwait: the game waits for the GPU's frame before (the hot run, GPU 50 ms a frame).
+//   Those scenarios count the grid's moves in 10 s with the hold (vkp_want as now) and without it (DM_PACE_HOLD=0, PR #361 as first pushed)
 // Plain C, any OS: cc -O2 -o t_vk_pace t_vk_pace.c && ./t_vk_pace
 #include "../nvn/vk_pace.h"
 #include <stdio.h>
@@ -15,22 +19,34 @@ static uint64_t rng = 0x9e3779b97f4a7c15ull;
 static double urand(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (double)(rng >> 11) / 9007199254740992.0; }
 #define MS 1000000.0
 
-typedef struct { const char *name; double r, gpu, gjit, work, jit, latch, disp; int nots; } scen;   // nots: the driver gives no GPU time
-typedef struct { long frames, uneven; double mean_iv, lat; unsigned rephase; int extra; } res;
+typedef struct { const char *name; double r, gpu, gjit, work, jit, latch, disp; int nots; int every; double hitch; int load, gwait; } scen;   // nots: the driver gives no GPU time
+typedef struct { long frames, uneven; double mean_iv, lat, secs, mean_all; unsigned rephase; int extra; } res;   // mean_all: pauses counted in
+// the S25+ field load at 322 s (perf-all-cool.txt, frames 9368-9414): time to the next frame and GPU time, ms
+static const double load_trace[][2] = { { 51.6, 3.3 }, { 30.5, 24.3 }, { 19.8, 42.0 }, { 57.8, 71.6 }, { 72.3, 26.1 }, { 113.3, 23.4 }, { 143.6, 23.6 }, { 65.4, 32.3 },
+    { 75.9, 35.2 }, { 96.8, 48.8 }, { 75.2, 44.6 }, { 52.9, 49.1 }, { 52.3, 32.5 }, { 35.9, 32.2 }, { 35.4, 27.7 }, { 30.8, 20.3 }, { 23.7, 18.8 }, { 32.2, 18.8 } };
+enum { LOAD_N = sizeof load_trace / sizeof *load_trace };
 
-// one run of n frames; mode 0: as before (lead one interval), 1: now
+// one run of n frames; mode 0: as before (lead one interval), 1: now, 2: now without the hold (DM_PACE_HOLD=0)
 static res run(const scen *s, int mode, int n, double phase) {
     uint64_t r = (uint64_t)(s->r * MS), iv = ((uint64_t)(33333333.0 + r / 2) / r) * r;
-    vk_pacer P; memset(&P, 0, sizeof P);
+    vk_pacer P; memset(&P, 0, sizeof P); P.hold_off = mode == 2;
     uint64_t vs0 = 1000000000ull + (uint64_t)(urand() * r), t0 = 2000000000ull + (uint64_t)(phase * iv);
     enum { Q = 64 }; struct { uint64_t asked, shown, at; int used; } q[Q]; memset(q, 0, sizeof q);
-    uint64_t gpu_free = 0, last_shown = 0, prev_actual = 0; res o = { 0 }; double sum = 0; long nsum = 0;
+    uint64_t gpu_free = 0, last_shown = 0, prev_actual = 0; res o = { 0 }; double sum = 0, sall = 0; long nsum = 0, nall = 0;
+    uint64_t start = t0, prev_now = 0; int li = -1;   // the game's frame start (its timer: an interval after the last, or at once after a frame that ran over); a load's frame
     for (int i = 0; i < n; i++) {
-        uint64_t now = t0 + (uint64_t)i * iv + (uint64_t)((s->work + urand() * s->jit) * MS);
+        if (i) { start += iv; if (prev_now > start) start = prev_now; }
+        if (s->load && i >= 120 && i % s->every == 0) li = 0;
+        uint64_t now = start + (uint64_t)((s->work + urand() * s->jit) * MS);
+        if (s->every && !s->load && i >= 120 && i % s->every == 0) now = start + (uint64_t)(s->hitch * MS);
+        if (li >= 0) { now = prev_now + (uint64_t)(load_trace[li][0] * MS); start = now; }
+        if (s->gwait && gpu_free + 2000000 > now) now = gpu_free + 2000000;   // (the game waits for the frame before to be drawn, then submits)
+        prev_now = now;
         for (int k = 0; k < Q; k++) if (q[k].used && q[k].at <= now) {   // the display's record so far
             if (mode) vkp_seen(&P, q[k].asked, q[k].shown, 0, now, r);
             q[k].used = 0; }
         uint64_t g = (uint64_t)((s->gpu + (urand() * 2 - 1) * s->gjit) * MS);
+        if (li >= 0) { g = (uint64_t)(load_trace[li][1] * MS); if (++li == LOAD_N) li = -1; }
         if (mode && i >= 2 && !s->nots) vkp_gpu(&P, g);   // (pace_time reads the GPU time of frames already done; the model's is steady enough that this one's stands in)
         uint64_t want = mode ? vkp_want(&P, now, r, iv) : vkp_want_legacy(&P, now, r, iv, iv);
         uint64_t start = now > gpu_free ? now : gpu_free, ready = start + g; gpu_free = ready;
@@ -44,10 +60,12 @@ static res run(const scen *s, int mode, int n, double phase) {
         for (int j = 0; j < Q; j++) if (!q[j].used) { q[j].used = 1; q[j].asked = want; q[j].shown = actual; q[j].at = actual + 2 * r; break; }
         if (i >= 120) {   // (the first 4 s: the grid settles)
             o.lat += (v - now) / MS;
-            if (prev_actual) { uint64_t d = actual - prev_actual; o.frames++; sum += d; nsum++; if (d + r / 2 < iv || d > iv + r / 2) o.uneven++; } }
+            if (prev_actual && actual - prev_actual <= 4 * iv) {   // (longer: a pause, left out as pace_time's log does)
+                uint64_t d = actual - prev_actual; o.frames++; sum += d; nsum++; if (d + r / 2 < iv || d > iv + r / 2) o.uneven++; }
+            if (prev_actual) { sall += actual - prev_actual; nall++; } }
         prev_actual = actual;
     }
-    o.mean_iv = nsum ? sum / nsum / MS : 0; o.lat = o.frames ? o.lat / o.frames : 0; o.rephase = P.rephase; o.extra = P.extra;
+    o.secs = (prev_now - t0) / 1e9; o.mean_all = nall ? sall / nall / MS : 0; o.mean_iv = nsum ? sum / nsum / MS : 0; o.lat = o.frames ? o.lat / o.frames : 0; o.rephase = P.rephase; o.extra = P.extra;
     return o;
 }
 
@@ -79,6 +97,33 @@ int main(void) {
         int ok = ub <= 2.0 && ub <= ua + 0.01 && mb / PH > 33.0 && mb / PH < 33.8 && lb / PH - la / PH <= 33.4 + 2 * S[i].r;
         if (!ok) { printf("FAIL: %s\n", S[i].name); fail++; }
     }
+    // Hitches and an overloaded GPU (the S25+ logs of 2026-11-24): grid moves in 10 s without the hold (DM_PACE_HOLD=0) and with it; uneven and mean as above.
+    //   (uneven: frames handed over unevenly are counted too, a load's own; mean: of all intervals, pauses in). With the hold: at most half the moves (at 120 Hz the grid
+    //   still moves once after the grace period when the game came back early), uneven at most 1 % more, the mean at most 0.1 ms longer
+    const scen H[] = {
+        { "S25+ 60 Hz, a 140 ms frame / 10 s", 16.667, 21.0, 3, 7, 5, 16.667, 16.667, 0, 300, 140, 0, 0 },
+        { "S25+ 60 Hz, a 140 ms frame / 2 s",  16.667, 21.0, 3, 7, 5, 16.667, 16.667, 0,  60, 140, 0, 0 },
+        { "S25+ 120 Hz, a 140 ms frame / 10 s", 8.333, 21.0, 3, 7, 5, 16.667, 8.333, 0, 300, 140, 0, 0 },
+        { "S25+ 60 Hz, field load / 10 s",     16.667, 21.0, 3, 7, 5, 16.667, 16.667, 0, 300, 0, 1, 0 },
+        { "S25+ 120 Hz, field load / 10 s",     8.333, 21.0, 3, 7, 5, 16.667, 8.333, 0, 300, 0, 1, 0 },
+        { "S25+ 60 Hz hot, GPU 50 ms",         16.667, 50.0, 3, 7, 5, 16.667, 16.667, 0, 0, 0, 0, 1 },
+        { "S25+ 120 Hz hot, GPU 50 ms",         8.333, 50.0, 3, 7, 5, 16.667, 8.333, 0, 0, 0, 0, 1 },
+        { "POCO F6 60 Hz hot, GPU 38 ms",      16.667, 38.0, 4, 10, 8, 16.667, 16.667, 0, 0, 0, 0, 1 },
+    };
+    int nh = sizeof H / sizeof *H;
+    printf("\n%-34s | %-24s | %-24s | %s\n", "hitches / GPU over (30 fps)", "no hold: uneven / mean", "hold: uneven / mean", "grid moves in 10 s: no hold -> hold");
+    for (int i = 0; i < nh; i++) {
+        res a = { 0 }, b = { 0 }; double ma = 0, mb = 0, sa = 0, sb = 0; unsigned rpa = 0, rpb = 0;
+        for (int ph = 0; ph < PH; ph++) {
+            res x = run(&H[i], 2, N, ph / (double)PH), y = run(&H[i], 1, N, ph / (double)PH);
+            a.frames += x.frames; a.uneven += x.uneven; ma += x.mean_all; rpa += x.rephase; sa += x.secs;
+            b.frames += y.frames; b.uneven += y.uneven; mb += y.mean_all; rpb += y.rephase; sb += y.secs; }
+        double ua = 100.0 * a.uneven / a.frames, ub = 100.0 * b.uneven / b.frames, ra = 10 * rpa / sa, rb = 10 * rpb / sb;
+        printf("%-34s | %6.2f %% / %6.2f ms      | %6.2f %% / %6.2f ms      | %6.1f -> %5.1f\n", H[i].name, ua, ma / PH, ub, mb / PH, ra, rb);
+        int ok = rb * 2 <= ra + 0.1 && ub <= ua + 1.0 && mb / PH <= ma / PH + 0.1;
+        if (!ok) { printf("FAIL: %s\n", H[i].name); fail++; }
+    }
+    ns += nh;
     // unit checks of the parts
     { vk_pacer p; memset(&p, 0, sizeof p); uint64_t r = 16666667;
       for (int i = 0; i < 16; i++) vkp_gpu(&p, (uint64_t)(10 + i) * 1000000);
