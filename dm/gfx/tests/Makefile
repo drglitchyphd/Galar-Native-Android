@@ -47,6 +47,9 @@ t_pso_lru: t_pso_lru.c ../nvn/pso_lru.h
 # The loading-screen detector and a load's frame hold (nvn/load_detect.h, fable-loads.md L1 / I1): plain C, any OS
 t_load_detect: t_load_detect.c ../nvn/load_detect.h
 	$(CC) -O1 -Wall -I../nvn -o $@ t_load_detect.c
+# A frame's work for the performance hint and the fps guard (nvn/nvn_work.h, perf-1124 G2'): plain C, any OS
+t_work: t_work.c ../nvn/nvn_work.h
+	$(CC) -O1 -Wall -I../nvn -o $@ t_work.c
 # The prewarm's rules without a GPU (nvn/prewarm_policy.h: the later start's stamp, the hold's setting, the cap's share, the list compaction; perf-1124 S3 / S4)
 t_prewarm: t_prewarm.c ../nvn/prewarm_policy.h ../nvn/nvn_hmap.h
 	$(CC) -O1 -Wall -I../nvn -o $@ t_prewarm.c

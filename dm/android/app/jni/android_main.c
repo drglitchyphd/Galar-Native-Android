@@ -1228,7 +1228,10 @@ static void res_ladder(void) {
 }
 static int res_lowest(void) { if (g_res_gen < 0) { g_res_gen = 0; res_ladder(); } return g_res_lo; }
 // Where a slow frame rate comes from (Intelligent Adaptive Resolution, #321): the GPU's time per frame (hle_nvn.c dm_gpu_avg_ms, timestamps; -1 when the driver gives
-//   none) and the game thread's own work (nvn_vk.c g_nvn_game_work_avg_ns), against the frame's budget. A lower resolution helps only a GPU that is behind
+//   none) and the game thread's own work (nvn_vk.c g_nvn_game_work_avg_ns), against the frame's budget. A lower resolution helps only a GPU that is behind.
+//   That work is the game thread's without its acquire sleep and sync waits, or the replay thread's if longer (perf-1124 G2', hle_nvn.c / nvn_work.h). It was the
+//   whole paced frame, about 33 ms at 30 fps, so "the CPU is the limit" held whenever the GPU was under 23 ms (no scale step) and lock-30-lite's calm test
+//   (under half the budget) never did; the log lines' "game thread" figure is this one. DM_HINT_WORK=wall: as before
 extern double dm_gpu_avg_ms(int frames) __attribute__((weak));
 extern _Atomic uint64_t g_nvn_game_work_avg_ns __attribute__((weak));
 // One governor with frame generation (nvn_vk.c fg_gov_absorb): when its pictures cost the game frames, the render scale gives way first. dm_guard_fg_absorb: 1 when this

@@ -8271,10 +8271,12 @@ static void mem_report(void) {
            kb[VA_LONG], ku[VA_LONG], kb[VA_TEMP], ku[VA_TEMP], kb[VA_ARENA], ku[VA_ARENA], g_trim_bytes / 1048576.0, g_trim_n); }
     shmod_report(heap);
 }
-// The front end's frame report (Android: performance hints, android_main.c): the presenting thread's work since its last present against the frame's period
+// The front end's frame report (Android: performance hints, android_main.c): the frame's work against the frame's period (perf-1124 G2': the game thread's own
+//   work or the replay thread's, whichever is longer, hle_nvn.c / nvn_work.h; DM_HINT_WORK=wall: the presenting thread's time since its last present, as before)
 __attribute__((weak)) void front_frame_work(uint64_t busy_ns, uint64_t target_ns) { (void)busy_ns; (void)target_ns; }   // (no front end report: nothing)
-_Atomic uint64_t g_nvn_game_work_ns;   // hle_nvn.c: the game thread's time per frame (DM_NVN_ASYNC: not the presenting thread's)
+_Atomic uint64_t g_nvn_game_work_ns;   // hle_nvn.c: the frame's work (nvn_work.h: the game thread's own, without its acquire sleep and sync waits, or the replay thread's)
 _Atomic uint64_t g_nvn_game_work_avg_ns;   // its average over about 16 frames (android_main.c: the fps guard tells a CPU-bound slowdown from a GPU-bound one)
+_Atomic uint64_t g_nvn_replay_work_ns;   // hle_nvn.c rq_run: the replay thread's work for its last frame (DM_NVN_ASYNC; 0 without it)
 // ---- the held frame's stores (DM_VK_FRAME_HOLD=2) ----
 static int hold_dec(void) {
     static int v = -1; if (v >= 0) return v;
@@ -8345,6 +8347,7 @@ static void seg_record_prim(sub_t *s) {
 }
 void nvn_fgr_arm_series(void) { fgr_arm_series(atomic_load(&g_present_n)); }   // (hle_resscale.c: a battle begins)
 int nvn_on_replay_thread(void) __attribute__((weak));   // (hle_nvn.c: 1 on the replay thread, DM_NVN_ASYNC)
+int nvn_hint_wall(void) __attribute__((weak));          // (hle_nvn.c: DM_HINT_WORK=wall)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     { static _Atomic int first; if (!atomic_exchange(&first, 1)) { dm_boot_mark("first present"); atomic_store(&g_pw_playing, 1); } }   // (the prewarm builds one pipeline a present from here)
     uint64_t hp_scene = g_hp_scene_seq == g_hp_seq + 1;   // (HUD-free: this frame's scene copy was made; read before hp_learn starts the next frame)
@@ -8378,8 +8381,9 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
         { extern _Atomic uint64_t g_wait_sync_ns, g_wait_sync_n; uint64_t ws = atomic_exchange(&g_wait_sync_ns, 0), wn = atomic_exchange(&g_wait_sync_n, 0);
           VLOG("[prof] waits per frame: sync waits %.2f ms (%.1f a frame), submission slot %.2f ms", ws / f, wn / 300.0, g_wait_ring_ns / f); g_wait_ring_ns = 0; }
         memset(g_vp_t, 0, sizeof g_vp_t); memset(g_vp_o, 0, sizeof g_vp_o); g_vp_c = 0; g_vp_n = 0; }
-    static uint64_t g_present_exit;   // when the last present returned (after its pacing sleep): from there to this call is the frame's work
-    if (g_present_exit && period_s > 0) { uint64_t busy = mono_ns() - g_present_exit, gw = atomic_load(&g_nvn_game_work_ns); front_frame_work(busy > gw ? busy : gw, (uint64_t)(period_s * 1e9)); }
+    static uint64_t g_present_exit;   // when the last present returned (after its pacing sleep): from there to this call is the presenting thread's time (DM_HINT_WORK=wall)
+    { int wall = nvn_hint_wall && nvn_hint_wall();
+      if (g_present_exit && period_s > 0) { uint64_t busy = mono_ns() - g_present_exit, gw = atomic_load(&g_nvn_game_work_ns); front_frame_work(!wall ? gw : busy > gw ? busy : gw, (uint64_t)(period_s * 1e9)); } }
     static long shots[256]; static int nshot = -1; static const char *shot_path;
     if (nshot < 0) { nshot = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL;
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 256; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); } }
