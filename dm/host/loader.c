@@ -919,6 +919,147 @@ static int galar_draw_patch(module_t *m, int64_t p0, int64_t p1) {
     LOG("%s: draw distance %d %% for %s: grass and field detail layers (DM_DRAW_DIST)", m->name, pct, gi == 1 ? "Shield 1.3.2" : "Sword 1.3.2");
     return 2;
 }
+// The game's memory pool running dry (Sword and Shield 1.3.2; DM_POOL_DUMP=0 leaves it out). The Dynamax crash (#211 #325 #330 #341) and the load crash at
+//   main+0x5a00a8: a gflib3 tlsf_pool_resource (vtable main+0x250dae0) gives no memory, and the caller uses the null. Its allocate (main+0x661260: the pool at
+//   obj+0x28, then the parent resource at obj+0x20) returns null without a word: the game's own dump (vtable +0xb8, main+0x6614e0 → do_dump_no_lock
+//   main+0x660910: "[gfl::mem] dump <name> begin", one line per block with the source file and line that took it) runs only where a caller asks for it, and
+//   the Dynamax path (the file loader main+0x5fac50 allocating a 2.6 MB VFXB effect file through its request's allocator, no null check) does not.
+//   So: at the allocate's end (+0x66131c MOV X0, X22, after the pool's lock is let go) a branch to added code in the zero tail of the rewriter's code area
+//   (as galar_draw_patch: the 64 bytes before its own): a null result calls dm_gfl_pool_fail (pool, size asked, sp), which logs the pool, the size and the
+//   caller, and runs the game's dump on that pool (hle_sdk16.c h_diag_Log lets "[gfl::mem]" lines into the log). The result is returned unchanged. Same
+//   words at the same addresses in both games (checked in both mains)
+//   Emergency memory (on by default; DM_POOL_EMERGENCY=0 leaves it out, the report stays): the failed allocate is given memory instead of the null, from a
+//   reserved area of our own (768 MB of address space; only what is used becomes real memory), whole pages per block, and the pool's deallocate (main+0x661340,
+//   the same in both games) first checks whether a block is from that area and gives it back there. On hardware the game's pools are fixed sizes; something on
+//   the port fills some of them further (the Dynamax effect, a Pokemon's textures on changing the lead, a 30 KB vector), and every caller uses the null unchecked.
+// (dm_bigstack_enter: hle.h, hle_bigstack.c)
+#include <pthread.h>
+static uint8_t *g_gfl_main; static int g_gfl_test;
+#define GFL_EMG_SIZE (768ull << 20)
+static uint8_t *g_emg; static size_t g_emg_pg, g_emg_np, g_emg_next, g_emg_live, g_emg_peak_mb; static uint8_t *g_emg_used; static uint32_t *g_emg_run;
+static pthread_mutex_t g_emg_mu = PTHREAD_MUTEX_INITIALIZER;
+static int emg_init(void) {
+    long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 4096; g_emg_pg = (size_t)pg; g_emg_np = GFL_EMG_SIZE / g_emg_pg;
+    size_t al = 2u << 20; uint8_t *m = mmap(NULL, GFL_EMG_SIZE + al, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+    if (m == MAP_FAILED) { LOG("[RED] memory pool emergency area: no address space (errno %d)", errno); return 0; }
+    g_emg = (uint8_t *)(((uintptr_t)m + al - 1) & ~(uintptr_t)(al - 1));   // (2 MB aligned: a block's alignment up to that is a multiple of the page index)
+    g_emg_used = calloc(g_emg_np, 1); g_emg_run = calloc(g_emg_np, sizeof *g_emg_run);
+    return g_emg_used && g_emg_run;
+}
+static void *emg_alloc(uint64_t size, uint64_t align, int *got) {
+    *got = 0; if (!g_emg || !size || size > GFL_EMG_SIZE / 4) return NULL;
+    size_t np = (size_t)((size + g_emg_pg - 1) / g_emg_pg), step = align > g_emg_pg ? (size_t)(align / g_emg_pg) : 1; void *r = NULL;
+    pthread_mutex_lock(&g_emg_mu);
+    for (int pass = 0; pass < 2 && !r; pass++) {   // next fit from where the last block ended, then once from the start
+        size_t i = pass ? 0 : g_emg_next, lim = pass ? g_emg_next + np : g_emg_np; if (lim > g_emg_np) lim = g_emg_np;
+        while (!r) {
+            i = (i + step - 1) / step * step; if (i + np > lim) break;
+            size_t j = 0; while (j < np && !g_emg_used[i + j]) j++;
+            if (j == np) { memset(g_emg_used + i, 1, np); g_emg_run[i] = (uint32_t)np; g_emg_next = i + np; g_emg_live += np; r = g_emg + i * g_emg_pg; }
+            else i += j + 1;
+        }
+    }
+    size_t mb = g_emg_live * g_emg_pg >> 20; int grew = r && mb >= g_emg_peak_mb + 16; if (grew) g_emg_peak_mb = mb;
+    pthread_mutex_unlock(&g_emg_mu);
+    if (grew) LOG("[RED] the game's pools now use %zu MB of emergency memory", mb);
+    *got = r != NULL;
+    return r;
+}
+void dm_gfl_pool_free(uint8_t *pool, uint8_t *p);
+void dm_gfl_pool_free(uint8_t *pool, uint8_t *p) {
+    (void)pool; size_t off = (size_t)(p - g_emg), i = off / g_emg_pg;
+    pthread_mutex_lock(&g_emg_mu);
+    uint32_t np = (off % g_emg_pg == 0 && i < g_emg_np) ? g_emg_run[i] : 0;
+    // (the pages go back to the system before they are marked free, still under the lock: another thread could otherwise be given them in between and lose
+    //   what it wrote; the address space stays ours)
+    if (np) { madvise(p, (size_t)np * g_emg_pg, MADV_DONTNEED); g_emg_run[i] = 0; memset(g_emg_used + i, 0, np); g_emg_live -= np; }
+    pthread_mutex_unlock(&g_emg_mu);
+    if (!np) LOG("[RED] the game gave back %p in the emergency area, not a block start: left alone", (void *)p);
+}
+void *dm_gfl_pool_fail(uint8_t *pool, uint64_t size, uint8_t *sp, uint64_t align);
+void *dm_gfl_pool_fail(uint8_t *pool, uint64_t size, uint8_t *sp, uint64_t align) {
+    if (g_gfl_test) {   // (DM_POOL_DUMP=test: every allocate comes here; the first one of 2 MB or more is reported and dumped as if it had failed, once; its result is kept)
+        static int t; if (size < (2u << 20) || __atomic_exchange_n(&t, 1, __ATOMIC_RELAXED)) return NULL;
+        LOG("memory pool report (test): pool %p gave %llu bytes, asked from main+%#llx; the game's own dump of it follows", (void *)pool, (unsigned long long)size,
+            (unsigned long long)(*(uint64_t *)(sp + 0x38) - (uint64_t)g_gfl_main));
+        ((void (*)(void *))(g_gfl_main + 0x6614e0))(pool); LOG("memory pool report (test): dump done"); return NULL; }
+    int got; void *r = emg_alloc(size, align, &got);
+    static int n; int k = __atomic_fetch_add(&n, 1, __ATOMIC_RELAXED); if (k >= 40) return r;
+    uint64_t lr = *(uint64_t *)(sp + 0x38);   // (the allocate's own return address, saved by its prologue: stp x29, x30, [sp, #0x30])
+    LOG("[RED] the game's memory pool %p (%s) could not give %llu bytes (%.2f MB), asked from main+%#llx: %s%s", (void *)pool,
+        *(uint64_t *)(pool + 0x20) ? "its parent too" : "no parent", (unsigned long long)size, size / 1048576.0, (unsigned long long)(lr - (uint64_t)g_gfl_main),
+        got ? "given emergency memory" : g_emg ? "the emergency area has no room either, the game gets nothing" : "no emergency memory (DM_POOL_EMERGENCY=0)",
+        k < 2 ? "; the game's own dump of the pool follows" : "");
+    if (k < 2) ((void (*)(void *))(g_gfl_main + 0x6614e0))(pool);   // (the pool's dump through its own vtable function: takes the pool's lock, let go above)
+    return r;
+}
+static int galar_pool_dump(module_t *m, int64_t p0, int64_t p1) {
+    const char *e = getenv("DM_POOL_DUMP"); if (e && !strcmp(e, "0")) return 0;
+    int64_t d; if (!galar_shift(m, &d)) return 0; (void)d;   // (the allocator sits at the same address in Sword and Shield)
+    static const uint64_t W[5] = { 0x66131c, 0x661320, 0x6614e0, 0x661340, 0x661344 };
+    // MOV X0, X22 / LDP X29, X30, [SP, #0x30] / the dump's STP X22, X21, [SP, #-0x30]! / the deallocate's STR X25, [SP, #-0x50]! and STP X24, X23, [SP, #0x10]
+    static const uint32_t O[5] = { 0xaa1603e0u, 0xa9437bfdu, 0xa9bd57f6u, 0xf81b0ff9u, 0xa9015ff8u };
+    if (!words_are(m, p0, p1, W, O, 5)) { LOG("[RED] %s: memory pool report not applied (the allocator's code differs)", m->name); return 0; }
+    int64_t end = m->patch_off < 0 ? p1 : (int64_t)m->size, cave = end - 128, cave2 = end - 224; static const uint8_t z[96];
+    if (cave2 < p0 || memcmp(m->base + cave, z, 64) || memcmp(m->base + cave2, z, 96) || llabs(cave2 - (int64_t)W[0]) >= (1ll << 27)) {
+        LOG("[RED] %s: memory pool report not applied (no free code space in reach)", m->name); return 0; }
+    g_gfl_main = m->base;
+    int test = !strcmp(e ? e : "", "test"); const char *ee = getenv("DM_POOL_EMERGENCY");
+    int emg = !test && !(ee && !strcmp(ee, "0")) && emg_init();
+    uint64_t ent = (uint64_t)(uintptr_t)dm_bigstack_enter;
+    // at the allocate's end: a null result goes to dm_gfl_pool_fail (pool, size, sp, alignment), whose answer (emergency memory) is returned; no answer returns
+    //   the allocate's own result (test mode: every result passes through and comes back unchanged)
+    uint32_t cc[16] = {
+        0xaa1603e0u,   // [0]  MOV X0, X22            (the game's own)
+        0xb5000140u,   // [1]  CBNZ X0, [11]          memory given: straight back
+        0xaa1303e0u,   // [2]  MOV X0, X19            the pool
+        0xaa1503e1u,   // [3]  MOV X1, X21            the size asked
+        0x910003e2u,   // [4]  MOV X2, SP             (the allocate's frame: its return address at +0x38)
+        0xaa1403e3u,   // [5]  MOV X3, X20            the alignment asked
+        0x580000d0u,   // [6]  LDR X16, [12]          dm_gfl_pool_fail
+        0x580000f1u,   // [7]  LDR X17, [14]          dm_bigstack_enter: on this thread's host stack (a game thread's own can be small)
+        0xd63f0220u,   // [8]  BLR X17                (x1..x18 and x30 are free here: the allocate reloads x29 / x30 and returns x0 only)
+        0xf100001fu,   // [9]  CMP X0, #0
+        0x9a961000u,   // [10] CSEL X0, X0, X22, NE   no answer: the allocate's own result
+        0x14000000u | (uint32_t)((((int64_t)W[1]) - (cave + 44)) >> 2 & 0x3ffffff),   // [11] B +0x661320
+        0, 0, 0, 0 };  // [12] [14] the two addresses
+    uint64_t fn = (uint64_t)(uintptr_t)dm_gfl_pool_fail; memcpy(&cc[12], &fn, 8); memcpy(&cc[14], &ent, 8);
+    if (test) cc[1] = 0xd503201fu;   // (test: NOP the CBNZ)
+    memcpy(m->base + cave, cc, sizeof cc);
+    __builtin___clear_cache((char *)(m->base + cave), (char *)(m->base + cave + sizeof cc));
+    if (emg) {   // at the deallocate's start: a block from the emergency area goes back there; anything else on to the game's own code
+        uint32_t dc[24] = {
+            0x58000210u,   // [0]  LDR X16, [16]          the area's start
+            0x58000231u,   // [1]  LDR X17, [18]          its end
+            0xeb10003fu,   // [2]  CMP X1, X16            (x1 = the block)
+            0x54000143u,   // [3]  B.LO [13]
+            0xeb11003fu,   // [4]  CMP X1, X17
+            0x54000102u,   // [5]  B.HS [13]
+            0xa9bf7bfdu,   // [6]  STP X29, X30, [SP, #-16]!
+            0x910003fdu,   // [7]  MOV X29, SP
+            0x58000190u,   // [8]  LDR X16, [20]          dm_gfl_pool_free (pool, block)
+            0x580001b1u,   // [9]  LDR X17, [22]          dm_bigstack_enter
+            0xd63f0220u,   // [10] BLR X17
+            0xa8c17bfdu,   // [11] LDP X29, X30, [SP], #16
+            0xd65f03c0u,   // [12] RET                    (the deallocate returns nothing)
+            O[3],          // [13] STR X25, [SP, #-0x50]!  (the game's own first instruction)
+            0x14000000u | (uint32_t)((((int64_t)W[4]) - (cave2 + 56)) >> 2 & 0x3ffffff),   // [14] B +0x661344
+            0xd503201fu,   // [15] NOP
+            0, 0, 0, 0, 0, 0, 0, 0 };
+        uint64_t lo = (uint64_t)(uintptr_t)g_emg, hi = lo + GFL_EMG_SIZE, fr = (uint64_t)(uintptr_t)dm_gfl_pool_free;
+        memcpy(&dc[16], &lo, 8); memcpy(&dc[18], &hi, 8); memcpy(&dc[20], &fr, 8); memcpy(&dc[22], &ent, 8);
+        memcpy(m->base + cave2, dc, sizeof dc);
+        __builtin___clear_cache((char *)(m->base + cave2), (char *)(m->base + cave2 + sizeof dc));
+        uint32_t b2 = 0x14000000u | (uint32_t)((cave2 - (int64_t)W[3]) >> 2 & 0x3ffffff); memcpy(m->base + W[3], &b2, 4);
+        __builtin___clear_cache((char *)(m->base + W[3]), (char *)(m->base + W[3] + 4));
+    }
+    uint32_t br = 0x14000000u | (uint32_t)((cave - (int64_t)W[0]) >> 2 & 0x3ffffff); memcpy(m->base + W[0], &br, 4);
+    __builtin___clear_cache((char *)(m->base + W[0]), (char *)(m->base + W[0] + 4));
+    LOG("%s: memory pool report%s: when one of the game's memory pools gives nothing, the log names it and the game's own dump of it follows%s (DM_POOL_DUMP%s)", m->name,
+        emg ? " and emergency memory" : "", emg ? "; the game gets memory from a reserved area instead of nothing (DM_POOL_EMERGENCY=0 leaves that out)" : "",
+        test ? "=test: the first allocate of 2 MB or more is dumped once" : "");
+    return 2 + emg;
+}
 static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, int modded) {
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
@@ -927,6 +1068,7 @@ static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, in
     if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_wide_render(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     n += wide_patch(m, lim, p0, p1);
     n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1) + galar_step_pin(m, p0, p1);
+    n += galar_pool_dump(m, p0, p1);
     n += galar_res_patch(m, p0, p1);   // (before wide_render_patch: with a resolution chosen, that one finds its words changed and stays out)
     n += wide_render_patch(m, p0, p1);
     return n + fps_patch(m, lim, p0, p1);
