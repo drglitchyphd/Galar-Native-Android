@@ -52,14 +52,16 @@ typedef struct { uint32_t magic; samp_par p; } samp_t;                          
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
 
-typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;                            FITS(sync_t, NVNsync);
+// fenced: 0 not fenced, 1 fenced at fence, 2 the same, fenced inside a command list, 3 an acquired image's previous present: at the replay queue's place rq_pos (nvn_rq.h rq_present_fence),
+//   4 fenced by the game with the replay on its own thread: the fence the replay reached at the queue's place rq_pos (nvn_rq.h rq_sync_fence; UINT64_MAX until then)
+typedef struct { uint32_t magic, fenced; uint64_t fence, rq_pos; } sync_t;                    FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
 typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], pfence[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i; pfence[i]: the work up to that present (acquire's sync)
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], pfence[4], pq_pos[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i; pfence[i]: the work up to that present (acquire's sync); pq_pos[i]: with the replay on its own thread, that present's place in its queue
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory

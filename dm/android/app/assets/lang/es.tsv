@@ -318,7 +318,7 @@ Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied ther
 The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	La última configuración tradujo solo una parte de los shaders del juego, por eso partes del juego no se dibujaban. Toca Configurar una vez más: las termina (las ya hechas se conservan).
 FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0: el escalador de AMD, ampliación que respeta los bordes y luego nitidez
 Faster rendering	Renderizado más rápido
-Auto: on for Adreno and Mali GPUs, off for others	Auto: activado en GPU Adreno y Mali, desactivado en las demás
+Auto: on for Adreno, Mali, PowerVR and Xclipse GPUs, off for others	Auto: activado en GPU Adreno, Mali, PowerVR y Xclipse, desactivado en las demás
 Off: the graphics work runs on the game's own thread	Desactivado: el trabajo gráfico se hace en el hilo del propio juego
 Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself.	Escenas iluminadas: dos correcciones para la pantalla blanca con el controlador Mali propio de ARM. Auto deja que el juego elija una y revise la imagen por sí solo.
 Bright scenes in a wider format	Escenas iluminadas en un formato más amplio

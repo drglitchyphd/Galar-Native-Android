@@ -318,7 +318,7 @@ Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied ther
 The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	前回のセットアップはゲームのシェーダーの一部しか変換しなかったため、ゲームの一部が描画されませんでした。もう一度セットアップをタップしてください。残りを仕上げます（変換済みのものは保持されます）。
 FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0：AMDのアップスケーラー。輪郭を考慮して拡大し、その後シャープ化します
 Faster rendering	高速レンダリング
-Auto: on for Adreno and Mali GPUs, off for others	自動：AdrenoとMaliのGPUではオン、それ以外ではオフ
+Auto: on for Adreno, Mali, PowerVR and Xclipse GPUs, off for others	自動：Adreno、Mali、PowerVR、XclipseのGPUではオン、それ以外ではオフ
 Off: the graphics work runs on the game's own thread	オフ：グラフィック処理をゲーム自身のスレッドで行います
 Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself.	明るい場面：ARM純正のMaliドライバーで画面が白くなる問題への2つの修正です。自動にすると、ゲームが修正を選び、画面を自分で確認します。
 Bright scenes in a wider format	明るい場面をより広い形式で描画

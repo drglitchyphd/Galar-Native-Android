@@ -63,3 +63,9 @@ docs_dir	Galar Native
 # the game's own GPU choices (dm/games/game.py ENGINE_QUIRKS; Pokémon Sword takes them through tables_from): on Arm's own Mali driver, the lit R11G11B10F target drawn
 # as an RGBA16F stand-in and checked for the white screen while playing (#47 #110 #111 #172)
 engine_quirks	mali_lit_standin
+# draws per submission part when a frame is not held whole (nvn_vk.c sub_split, DM_VK_SPLIT): Sword / Shield rarely wait on the submission they just made (32 early
+# flushes in 2,400 frames, #349), so fewer, larger parts (8 submissions a frame at 1,200 draws with 150); Pokémon Sword takes it through tables_from
+vk_split	600
+# a frame held whole until its present (Adreno, Arm: the replay on its own thread) is not split at all: its parts would wait for the present anyway, and from the 5th
+# the hold was flushed early, so above ~750 draws the frame was never whole (fable-cpu fix 4); Scarlet / Violet keep splitting held frames (default split)
+vk_split_held	whole

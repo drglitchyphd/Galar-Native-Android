@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <mach/mach_time.h>
 #include <sched.h>
+#include <time.h>
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
 #endif
@@ -86,12 +87,29 @@ static int release_page(range_t *r, uintptr_t p, _Atomic uint64_t *count) {
         if (!busy_wait(r, p)) return 0;
     }
 }
+// A frozen range (nvn_dirty_freeze; nvn_vk.c's late pool backing, fix 5 of the 2026-11-24 memory analysis): a memory pool first used as a GPU buffer gets the driver's
+//   memory then, its content copied in and the driver's pages moved over the game's. A game write between the copy and the move would be lost, so for that moment the
+//   range is read-only and every other thread waits: a game thread's fault there, the host's unprotect before its own writes (prep_write: a file read into the pool)
+//   and the texture code's protect (nvn_dirty_protect) all wait for the thaw, then go on against the new pages. One range at a time (g_fz_mu); the freezing thread
+//   itself never waits. g_fz_act counts threads inside the protection code: the freeze waits for it to reach 0, so no unprotect begun before it lands after its mprotect
+static _Atomic uintptr_t g_fz_lo, g_fz_hi, g_fz_owner; static _Atomic int g_fz_act; static int g_fz_wp;
+static pthread_mutex_t g_fz_mu = PTHREAD_MUTEX_INITIALIZER;
+static int fz_hit(uintptr_t lo, uintptr_t hi) {   // async-signal-safe: atomics only
+    uintptr_t fl = atomic_load(&g_fz_lo), fh = atomic_load(&g_fz_hi);
+    return fl && lo < fh && hi > fl && atomic_load(&g_fz_owner) != (uintptr_t)pthread_self();
+}
+static void fz_wait(void) { while (atomic_load(&g_fz_lo)) { struct timespec w = { 0, 50000 }; nanosleep(&w, NULL); } }   // (nanosleep: async-signal-safe)
+static void fz_enter(uintptr_t lo, uintptr_t hi) { for (;;) { atomic_fetch_add(&g_fz_act, 1); if (!fz_hit(lo, hi)) return; atomic_fetch_sub(&g_fz_act, 1); fz_wait(); } }
+static void fz_leave(void) { atomic_fetch_sub(&g_fz_act, 1); }
 static int on_fault(void *addr, int is_write, void *uc) {
     (void)uc;
+    uintptr_t a = (uintptr_t)addr;
+    if (fz_hit(a, a + 1)) { fz_wait(); return 1; }   // (read or write: the range is being moved; the instruction runs again on the new pages)
     if (!is_write) return 0;   // (-1 = unknown: a fault on a page this module made read-only is a write; pages it never protected are not released below)
-    uintptr_t a = (uintptr_t)addr; int ours = 0, n = atomic_load(&g_nr);
+    int ours = 0; fz_enter(a, a + 1); int n = atomic_load(&g_nr);
     for (int i = 0; i < n; i++)   // Every range sharing the page must be released: releasing only one leaves the other range's state at "protected", and later writes no longer fault and are missed
         { range_t *r = rg(i); if (live_at(i) && a >= r->base && a < r->end) ours |= release_page(r, (a - r->base) >> g_shift, &g_faults); }
+    fz_leave();
     return ours;
 }
 // Unprotect pages p..q of a range with one mprotect per run of protected pages (a host write over a whole texture, e.g. WriteTexels, used to make one system call per 16 KB page:
@@ -111,17 +129,21 @@ static void release_pages(range_t *r, uintptr_t p, uintptr_t q, _Atomic uint64_t
     }
 }
 static void prep_write(void *addr, size_t len) {
-    uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
+    uintptr_t a = (uintptr_t)addr, e = a + len;
     if (!len) return;
+    fz_enter(a, e); int n = atomic_load(&g_nr);
     for (int i = 0; i < n; i++) {
         range_t *r = rg(i);
         if (!live_at(i) || e <= r->base || a >= r->end) continue;
         uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end;
         release_pages(r, (lo - r->base) >> g_shift, (hi - 1 - r->base) >> g_shift, &g_preps);
     }
+    fz_leave();
 }
 
-void nvn_dirty_add_range(const void *mem, size_t size) {
+static void hooks_init(void) { g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+static pthread_once_t g_hooks_once = PTHREAD_ONCE_INIT;
+int nvn_dirty_off(void) {
     // DM_NO_DIRTY=1: no pool is tracked, so no page is write-protected and no write faults (the Android emulator's ARM translation cannot deliver them: "Cannot process signal 11");
     // untracked pools count as dirty, their textures uploaded again at every use (slower, never stale)
     // DM_NO_DIRTY=2: the same, but untracked pools count as clean: a texture is uploaded once and not again (fast; stale wherever the game rewrites a texture in
@@ -134,9 +156,11 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
 #endif
         if (off == 2) g_untracked_clean = 1;
     }
-    if (off) return;
-    static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+    return off != 0;
+}
+void nvn_dirty_add_range(const void *mem, size_t size) {
+    if (nvn_dirty_off()) return;
+    pthread_once(&g_hooks_once, hooks_init);
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
@@ -191,6 +215,7 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
     if (!r) return;
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    fz_enter(a, a + len);   // (a range being moved: protected against its new pages, after the thaw)
     // Consecutive pages are merged into one mprotect (per-page calls reach thousands per frame on the first upload of large textures; character select page startup frame 5: 4888 calls).
     // Pages already PROT / BUSY break the consecutive run: do not protect again, and do not touch pages another thread is changing
     uintptr_t run = 0; int open = 0;
@@ -200,7 +225,41 @@ void nvn_dirty_protect(const void *addr, size_t len) {
         if (took && !open) { run = i; open = 1; }
         if (!took && open) { mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ); for (uintptr_t k = run; k < i; k++) atomic_store(&r->state[k], PG_PROT); open = 0; }
     }
+    fz_leave();
 }
+// Freeze [addr, addr+len) (see fz_hit above): wp = 1 makes it read-only for the time (a copy and a move onto new pages: nvn_vk.c pool_back); wp = 0 only holds the
+//   other threads' protection changes back (the host import route, which pins the pages where they are). Pages rounded out to whole pages
+void nvn_dirty_freeze(const void *addr, size_t len, int wp) {
+    pthread_once(&g_hooks_once, hooks_init);   // (also with the tracking off: the waits live in its fault and pre-write hooks)
+    pthread_mutex_lock(&g_fz_mu);
+    uintptr_t lo = (uintptr_t)addr & ~(g_pg - 1), hi = ((uintptr_t)addr + len + g_pg - 1) & ~(g_pg - 1);
+    atomic_store(&g_fz_owner, (uintptr_t)pthread_self()); atomic_store(&g_fz_hi, hi); atomic_store(&g_fz_lo, lo);
+    while (atomic_load(&g_fz_act)) sched_yield();   // (each thread inside finishes a few atomics and at most one mprotect)
+    g_fz_wp = wp;
+    if (wp) mprotect((void *)lo, hi - lo, PROT_READ);
+}
+// The pages under the frozen range read-only where some tracked range has them protected (state PROT, the texture tracking's), writable elsewhere, then the waiting
+//   threads go on. The new pages must have arrived read-only (nvn_vk.c moves them so): a PROT page is never writable for a moment, so no write to it goes unseen
+void nvn_dirty_thaw(void) {
+    uintptr_t lo = atomic_load(&g_fz_lo), hi = atomic_load(&g_fz_hi);
+    if (g_fz_wp && lo) {
+        int idx[16], ni = 0, many = 0, n = atomic_load(&g_nr);   // the ranges over the frozen pages: usually the pool's own
+        for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && r->base < hi && r->end > lo) { if (ni < 16) idx[ni++] = i; else many = 1; } }
+        uintptr_t run = lo; int rprot = -1;
+        for (uintptr_t pa = lo; pa <= hi; pa += g_pg) {
+            int prot = 0;
+            if (pa < hi) for (int k = 0; k < (many ? n : ni) && !prot; k++) { range_t *r = rg(many ? k : idx[k]);
+                if (!live_at(many ? k : idx[k]) || pa < r->base || pa >= r->end) continue;
+                uint8_t st = atomic_load(&r->state[(pa - r->base) >> g_shift]); prot = st != PG_NONE; }
+            if (pa == hi || (rprot >= 0 && prot != rprot)) { if (rprot >= 0) mprotect((void *)run, pa - run, rprot ? PROT_READ : PROT_READ | PROT_WRITE); run = pa; }
+            rprot = prot;
+        }
+    }
+    atomic_store(&g_fz_lo, 0); atomic_store(&g_fz_hi, 0); atomic_store(&g_fz_owner, 0);
+    pthread_mutex_unlock(&g_fz_mu);
+}
+// Every protected page of [addr, addr+len) made writable and stamped as written (prep_write: the textures there are uploaded again at their next use)
+void nvn_dirty_release(const void *addr, size_t len) { if (len && g_pg) prep_write((void *)addr, len); }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;

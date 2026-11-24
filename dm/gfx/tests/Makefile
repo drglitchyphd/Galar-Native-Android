@@ -34,12 +34,28 @@ t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
+t_vk_pace: t_vk_pace.c ../nvn/vk_pace.h
+	$(CC) -O2 -Wall -o $@ t_vk_pace.c
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
 # The unified driver layer's table (vk_quirks.h) against beta-exit's per-site rules for each port (6e0e1dd's; background pipelines as since f09e58f; it
 #   reads ../../games/*/game.tsv), and the GPU breadcrumbs (vk_crumbs.h): plain C, any OS (gcc or clang)
 t_quirks: t_quirks.c ../nvn/vk_quirks.h
 	$(CC) -O2 -Wall -I../nvn -o $@ t_quirks.c
+t_pso_lru: t_pso_lru.c ../nvn/pso_lru.h
+	$(CC) -O1 -Wall -I../nvn -o $@ t_pso_lru.c
+# The loading-screen detector and a load's frame hold (nvn/load_detect.h, fable-loads.md L1 / I1): plain C, any OS
+t_load_detect: t_load_detect.c ../nvn/load_detect.h
+	$(CC) -O1 -Wall -I../nvn -o $@ t_load_detect.c
+# A frame's work for the performance hint and the fps guard (nvn/nvn_work.h, perf-1124 G2'): plain C, any OS
+t_work: t_work.c ../nvn/nvn_work.h
+	$(CC) -O1 -Wall -I../nvn -o $@ t_work.c
+# The prewarm's rules without a GPU (nvn/prewarm_policy.h: the later start's stamp, the hold's setting, the cap's share, the list compaction; perf-1124 S3 / S4)
+t_prewarm: t_prewarm.c ../nvn/prewarm_policy.h ../nvn/nvn_hmap.h
+	$(CC) -O1 -Wall -I../nvn -o $@ t_prewarm.c
+# A pool backed late while other threads write it (nvn_dirty.c freeze / thaw, nvn_vk.c pool_back): Linux, any compiler; its own fault handler instead of crash.c
+t_pool_late: t_pool_late.c ../nvn/nvn_dirty.c ../nvn/nvn_dirty.h $(GAME_H)
+	$(CC) -O1 -g -Wall -Wno-unused-function -I../../android/compat -I../nvn/include -I$(dir $(GAME_H)) -o $@ t_pool_late.c -lpthread
 t_crumbs: t_crumbs.c ../nvn/vk_crumbs.h
 	$(CC) -O2 -Wall -I../nvn -I../../third_party/vulkan-headers/include -o $@ t_crumbs.c -lpthread
 t_fgen: t_fgen.c ../nvn/nvn_fgen.h
@@ -47,6 +63,9 @@ t_fgen: t_fgen.c ../nvn/nvn_fgen.h
 # The Mali white-screen ladder's rules (nvn/mali_white.h: the verdict, the route, the state file from start to start); no GPU
 t_mali_white: t_mali_white.c ../nvn/mali_white.h
 	$(CC) -O1 -Wall -I../nvn -o $@ t_mali_white.c
+# Faster rendering's queue (nvn/nvn_rq.h): registrations and remaps in order with the submissions, the replay held back between record and replay (perf-1124 fix 3)
+t_rq_order: t_rq_order.c ../nvn/nvn_rq.h ../nvn/nvn_obj.h
+	$(CC) -O1 -g -Wall -I../nvn -I../nvn/include -o $@ t_rq_order.c -lpthread
 # Frame generation on a real Vulkan driver (Linux: Mesa's lavapipe is enough). VULKAN_INC: a folder holding vulkan/vulkan.h when the system has none
 t_fgen_vk: t_fgen_vk.c ../nvn/nvn_fgen.h ../nvn/overlay/fgen_spv.h
 	$(CC) -O1 -Wall -Wno-unused-function $(if $(VULKAN_INC),-I$(VULKAN_INC)) -o $@ t_fgen_vk.c $(or $(VULKAN_LIB),-lvulkan) -lm
@@ -84,10 +103,11 @@ t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_pfv: t_pfv.m ../../host/crash.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
-run: t_nvn t_dirty_slots t_dirty_race t_builtin t_deswz_gpu t_pace t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pfv
+run: t_nvn t_dirty_slots t_dirty_race t_rq_order t_builtin t_deswz_gpu t_pace t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pfv
 	./t_nvn
 	./t_dirty_slots
 	./t_dirty_race
+	./t_rq_order
 	./t_builtin
 	./t_deswz_gpu
 	./t_pace

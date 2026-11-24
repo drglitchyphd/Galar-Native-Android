@@ -31,7 +31,7 @@
 //   - the white-screen ladder's own state (mali_white_vk.inc: mali_ladder.txt is kept per driver ID and driver version, so another driver starts it over): whether
 //     the ladder and its route run by default is this table's (Q_MALI_WHITE_CHECK, Q_B10_STANDIN);
 //   - test switches that make a GPU act as another (DM_VK_AS_MALI) or pick a device by name (DM_VK_DEVICE), log and capture texts;
-//   - the frame hold's default (nvn_vk.c hold_on) follows the replay thread's decision (Q_NVN_ASYNC, or the player's setting), not a GPU test of its own;
+//   - the frame hold's default (nvn_vk.c hold_on) is Q_FRAME_HOLD's, applied only where the replay has its own thread (Q_NVN_ASYNC, or the player's setting);
 //   - what follows from how an image was made rather than from a GPU test: tex_view_for's view of another numeric class for an integer texture is made only
 //     where the image allows it (tex_new: not mutable on Mali by Q_ARM_FORMATS, or a format list where the driver has them), else its own format as before.
 // Values the driver check (DriverCheck.java, libdmprobe) found for this driver come in as environment settings: driver-check.env, read after env.txt and the
@@ -91,7 +91,8 @@ enum {
     Q_PASS_DEFER,        // target changes that need no new pass keep it open: Adreno
     Q_ASYNC_PSO,         // pipelines built on worker threads: every GPU (beta-exit f09e58f, 2026-11-22; Adreno only before), unless the game's profile says
                          //   async_pso_off (Arceus #34)
-    Q_PIPE_KEEP,         // at most 800 pipelines kept (least recently used destroyed): Mali, or a phone under 7.5 GB
+    Q_PIPE_KEEP,         // at most 800 pipelines kept (least recently used destroyed): Mali, Xclipse, or a phone under 9 GB (an "8 GB" Galaxy A55 / A56 reports ~7.6 M kB,
+                         //   which the old 7.5 GB line missed: 428-1,450 MB swapped, #97 #179 #324, Arceus #78 #92)
     Q_CLEAR_BY_PASS,     // clears in a layered pass over a 3D target as passes of their own: Xclipse
     Q_PCACHE_GAPS_OFF,   // a pipeline with a colour gap made without the pipeline cache: PowerVR's driver crashes on it
     Q_NO_EDS,            // draw state built into each pipeline: Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides, for a game whose profile says qc11_no_eds
@@ -107,11 +108,15 @@ enum {
     Q_TF_CHECK,          // the first transform feedback capture checked once (a marker read back 60 frames later): Arm's own driver (#6)
     Q_DRIVER_SELFTESTS,  // the start-up driver self-tests (vtx_canary.h vertex strides, tf_selftest.h transform feedback): a game whose profile says driver_selftests
     Q_TF_SELFTEST,       // within those: the transform feedback self-test runs on Arm's own driver
-    Q_NVN_ASYNC,         // the replay on its own thread (Faster rendering's Auto, hle_nvn.c): Adreno by name (Turnip too), unless the game's profile says
-                         //   nvn_async_never (Arceus #3: crashed at loading screens with it)
+    Q_NVN_ASYNC,         // the replay on its own thread (Faster rendering's Auto, hle_nvn.c): Adreno by name (Turnip too), Arm's own driver, PowerVR and Xclipse, unless
+                         //   the game's profile says nvn_async_never (Arceus #3: crashed at loading screens with it)
     // Mali's white lit scene (#47 #110 #111 #172), a game whose profile says mali_lit_standin (Sword / Shield) on Arm's own driver (mali-all e6f6d0c)
     Q_B10_STANDIN,       // route A: the lit R11G11B10F target drawn and sampled as an RGBA16F stand-in, converted exactly where it meets the game's memory (b10_on)
     Q_MALI_WHITE_CHECK,  // the white-screen check while playing and its ladder (mali_white_vk.inc: route A, then B, then the PanVK offer, start by start)
+    Q_FRAME_HOLD,        // the whole frame held until its present, stores decided from it (nvn_vk.c hold_on, mode 2), where the replay has its own thread: Adreno by name
+                         //   and Arm's own driver, where it has been run (was: wherever Q_NVN_ASYNC was on)
+    Q_RENDER_AREA_FULL,  // a held frame's passes keep the whole target as their render area, not the part their draws reach (seg_area): no GPU listed yet; the row
+                         //   for a driver that misdraws with a smaller area
     Q_N
 };
 // (env: the switches that decide the rule at its site, named in its [quirk] line when one of them is set)
@@ -148,6 +153,8 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] VKQ_UNUSED = {
     [Q_NVN_ASYNC] = { "DM_NVN_ASYNC", "the replay on its own thread" },
     [Q_B10_STANDIN] = { "DM_VK_B10_AS_RGBA16, DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the lit R11G11B10F target drawn as RGBA16F" },
     [Q_MALI_WHITE_CHECK] = { "DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the white-screen check and its ladder" },
+    [Q_FRAME_HOLD] = { "DM_VK_FRAME_HOLD", "frames held whole, stores decided at the present (mode)" },
+    [Q_RENDER_AREA_FULL] = { "DM_VK_RENDER_AREA", "passes keep the whole target as their render area" },
 };
 // Arm's own driver: by driver ID where the driver gives one, else by vendor (PanVK reports Arm's vendor ID with its own driver ID)
 VKQ_UNUSED static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }
@@ -165,8 +172,13 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     case Q_BARRIER_RELAXED: return g->vendor == VEN_QCOM && !gpu_is_old_qcom(g);
     // the replay's own thread: by the GPU's name, as Faster rendering's Auto always tested it (Turnip names itself "Turnip Adreno"); and Arm's own Mali driver since
     //   v0.97: the POCO X6 Pro (G615 MC6, r44p1) spent 22-42 ms a frame recording on the game's thread with every pass storing its attachments (the held frame's store
-    //   decisions come with it, DM_VK_FRAME_HOLD=2). Not PanVK (untested there)
-    case Q_NVN_ASYNC: return (strstr(g->name, "Adreno") != NULL || gpu_is_arm_driver(g)) && !(g->eng & ENG_NVN_ASYNC_NEVER);
+    //   decisions came with it then: Q_FRAME_HOLD now). PowerVR and Xclipse since perf-1124 fix 3, once the queue carried registrations and remaps in order
+    //   (nvn_rq.h): #324 (Xclipse 550, Shield) spent ~45 ms a frame as ~12 game + ~33 replay on one thread, #206 #300 #270 #248 likewise; the frame becomes the
+    //   longer of the two. Their frames are not held (Q_FRAME_HOLD: not run there). Not PanVK (untested there; after the #158 stadium is rerun clean)
+    case Q_NVN_ASYNC: return (strstr(g->name, "Adreno") != NULL || gpu_is_arm_driver(g) || g->vendor == VEN_IMG || g->vendor == VEN_SAMSUNG) && !(g->eng & ENG_NVN_ASYNC_NEVER);
+    // the held frame (mode 2), decided per GPU instead of following the replay thread to every GPU it reaches: where both have been run together (the S25+, the
+    //   owner's choice 2026-11-19; the POCO X6 Pro since v0.97). nvn_vk.c applies it only where the replay has its own thread, as before
+    case Q_FRAME_HOLD: return strstr(g->name, "Adreno") != NULL || gpu_is_arm_driver(g) ? 2 : 0;
     // the games apart, each by its own profile (engine_quirks → gpu_id.eng): worker-built pipelines left objects missing for frames on an Adreno 710 (Arceus #34:
     //   async_pso_off); Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34: qc11_no_eds; Sword / Shield answered #209 with full barriers
     //   instead); the driver self-tests at start (driver_selftests); the replay never on its own thread (nvn_async_never, above).
@@ -200,7 +212,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST: return g->arm_rel != 0;
     case Q_VIEW_QUARANTINE: return g->arm_rel && g->dynren ? 2048 : 0;
     case Q_TEX_HALF_UNSAFE: return g->arm_rel && g->arm_rel < 49;
-    case Q_PIPE_KEEP: return g->vendor == VEN_ARM || (g->ram_kb > 0 && g->ram_kb < 7500000) ? 800 : 0;
+    case Q_PIPE_KEEP: return g->vendor == VEN_ARM || g->vendor == VEN_SAMSUNG || (g->ram_kb > 0 && g->ram_kb < 9000000) ? 800 : 0;   // (2026-11-24: Xclipse and 8 GB phones too, now that the cap evicts gradually, pso_lru.h)
     }
     return 0;
 }
@@ -209,7 +221,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
 VKQ_UNUSED static int quirk_late(int q) {
     switch (q) {
     case Q_FLOAT_CONTROLS: case Q_CLAMP_ZERO: case Q_NAN_MINMAX: case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST:
-    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: case Q_NVN_ASYNC: return 1;
+    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: case Q_NVN_ASYNC: case Q_FRAME_HOLD: return 1;
     }
     return 0;
 }

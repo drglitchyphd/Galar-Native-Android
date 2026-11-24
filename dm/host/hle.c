@@ -105,8 +105,8 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
             }
             case G_OBS: if (g_obs_fn[g->arg]) g_obs_fn[g->arg](regs); return 0;   // Registers are read-only; the x0–x8 that dm_gate writes back are the original values
             default: {   // register the gate frame on SVC entry / exit: it is the context of a paused thread (hle_thread.c)
-                void thr_svc_enter(uint64_t *, uint64_t), thr_svc_leave(void);
-                thr_svc_enter(regs, g->orig); uint64_t r = svc_dispatch(g->arg, regs, g->orig); thr_svc_leave(); return r; }
+                void thr_svc_enter(uint64_t *, uint64_t, uint32_t), thr_svc_leave(void);
+                thr_svc_enter(regs, g->orig, (uint32_t)g->arg); uint64_t r = svc_dispatch(g->arg, regs, g->orig); thr_svc_leave(); return r; }
         }
         if (!g->ret) die("unknown gate at %#llx", ret_addr);
     }

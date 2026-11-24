@@ -34,6 +34,9 @@ static void guest_main(void) {
     run_module_inits();   // rtld callback B: each module's DT_INIT (global constructors)
     { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST self-test of host-created guest threads (hle_guestthread.c)
     { void dm_oodle_job_maybe(void); dm_oodle_job_maybe(); }   // DM_OODLE_JOB: decode a job file with the game's own Oodle and exit (hle_oodle.c, for the offline shader tools)
+#if defined(__linux__)
+    { extern void dm_boot_mark(const char *what) __attribute__((weak)); if (dm_boot_mark) dm_boot_mark("nnMain entered"); }   // (nvn_vk.c's start-up marks: Android / Linux builds)
+#endif
     LOG(">>> nnMain"); ((fn0)req("nnMain"))();
     LOG("nnMain returned");
 }
@@ -86,6 +89,11 @@ static void host_preload(int argc, char **argv) {
         if (setrlimit(RLIMIT_NOFILE, &rl)) LOG("open file limit %llu could not be raised", (unsigned long long)was);
     }
     crash_install();
+#if defined(__linux__)
+    // the graphics device set up on a thread of its own from here, beside the loader and the game's boot (nvn_vk.c nvn_vk_early_init, perf-1124 S5; off unless
+    //   DM_VK_EARLY_INIT=1): after crash_install, so a driver crash there is noted for the next start's safe-start level as one at the first pool is
+    { extern void nvn_vk_early_init(void) __attribute__((weak)); if (nvn_vk_early_init) nvn_vk_early_init(); }
+#endif
     const char *race = getenv("DM_TEST_KEYRACE");
     if (race && *race) {
         g_race_want = (unsigned)strtoul(race, NULL, 10);
@@ -107,6 +115,9 @@ static void host_preload(int argc, char **argv) {
     }
     if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD && n < MAX_MOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
     load_modules(argv[1], names, n);
+#if defined(__linux__)
+    { extern void dm_boot_mark(const char *what) __attribute__((weak)); if (dm_boot_mark) dm_boot_mark("game modules mapped"); }
+#endif
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
     uint64_t ta = now_ns();
     probe_install();   // DM_PROBE probes (for diagnostics)

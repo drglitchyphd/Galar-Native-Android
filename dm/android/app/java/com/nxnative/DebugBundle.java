@@ -11,6 +11,8 @@
 //                       passes and pipelines of the submission that was on the GPU at a device lost / hang / crash) and the pack's translation chain: the shaders
 //                       themselves are not copied (they come from the game), we take them from our own pack by key
 //   quirks.txt          the driver workarounds each run used (vk_quirks.h "[quirk]" lines)
+//   load_prof/          the newest 12 load profiles (android_main.c load_prof: samples of the busiest threads during each loading screen, with the build ids
+//                       that tie them to a library; the first 256 KB of each, where the header is)
 //   memory.txt          the run's memory every 30 s (android_main.c [mem] / [mem-by]: what grew, for a run Android ended for memory)
 //   warnings.txt        the engine's [RED] / FATAL lines counted by kind (a picture problem's clues: missing shaders, failed pipelines, skipped draws)
 //   frame-capture.zip   the newest ☰ → Capture a frame, when one was made in the last two days
@@ -67,6 +69,7 @@ final class DebugBundle {
             file(z, "logs/setup.log", new File(new File(dir, "setup_work"), "setup.log"));
             for (String n : new String[] { "boot_state", "safe_start", "gpu.txt", "notice.txt", "ready", "captures_done" }) file(z, "logs/" + n, new File(dir, n));
             file(z, "logs/save_place.txt", new File(GameSettings.saveRoot(c), "save_place.txt"));   // (the chosen player's: Profiles)
+            loadProfiles(c, z);
             exits(c, z);
             text(z, "crash-summary.txt", crashSummary(c));   // (the lines the issue text carries)
             text(z, "shaders_at_crash.txt", shaders(c, dir));
@@ -477,6 +480,14 @@ final class DebugBundle {
         return true;
     }
 
+    // the newest 12 load profiles (android_main.c load_prof writes load_prof_<run start>_<n>.txt in the external data root, not the game's folder), 256 KB of each
+    //   from its start: the header holds the build ids and the thread table
+    private static void loadProfiles(Context c, ZipOutputStream z) throws IOException {
+        File[] l = GameSettings.root(c) == null ? null : GameSettings.root(c).listFiles((d, n) -> n.startsWith("load_prof_") && n.endsWith(".txt"));
+        if (l == null) return;
+        java.util.Arrays.sort(l, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        for (int i = 0; i < l.length && i < 12; i++) fileHead(z, "load_prof/" + l[i].getName(), l[i], 256L << 10);
+    }
     // ---------- small helpers ----------
     private static void text(ZipOutputStream z, String name, String s) throws IOException { z.putNextEntry(new ZipEntry(name)); z.write(s.getBytes(StandardCharsets.UTF_8)); z.closeEntry(); }
     private static void file(ZipOutputStream z, String name, File f) throws IOException { file(z, name, f, CAP); }
@@ -489,6 +500,10 @@ final class DebugBundle {
             while (left > 0 && (k = r.read(b, 0, (int) Math.min(b.length, left))) > 0) { z.write(b, 0, k); left -= k; }
             z.closeEntry();
         } catch (IOException e) { }
+    }
+    private static void fileHead(ZipOutputStream z, String name, File f, long cap) throws IOException {   // (file() keeps a long file's end; this its start)
+        if (!f.isFile()) return;
+        try (InputStream in = new FileInputStream(f)) { z.putNextEntry(new ZipEntry(name)); copy(in, z, cap); z.closeEntry(); } catch (IOException e) { }
     }
     private static void copy(InputStream in, OutputStream out, long max) throws IOException { byte[] b = new byte[1 << 16]; int k; long n = 0; while (n < max && (k = in.read(b)) > 0) { out.write(b, 0, k); n += k; } }
     private static String first(File f) { try (BufferedReader r = new BufferedReader(new FileReader(f))) { String l = r.readLine(); return l == null ? "" : l.trim(); } catch (IOException e) { return ""; } }

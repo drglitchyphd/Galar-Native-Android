@@ -672,7 +672,7 @@ public final class GameMenu {
         //   of a frame on a slow CPU, #99). Off by default until players have run it on many phones
         heading(a, t(a, "Performance"));
         // (not for Legends: Arceus: with it the game crashed at loading screens, Arceus-Native-Android#3; android_main.c / hle_nvn.c keep it off there)
-        if (!GameSettings.arceus(a)) choice(a, "DM_NVN_ASYNC", t(a, "Faster rendering"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on for Adreno and Mali GPUs, off for others") },
+        if (!GameSettings.arceus(a)) choice(a, "DM_NVN_ASYNC", t(a, "Faster rendering"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: on for Adreno, Mali, PowerVR and Xclipse GPUs, off for others") },
             { "1", t(a, "On"), t(a, "On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub") },
             { "0", t(a, "Off"), t(a, "Off: the graphics work runs on the game's own thread") } });
         // barriers between the game's draw passes (nvn_vk.c barrier_relaxed, DM_VK_BARRIER): Auto = fewer on Adreno, a full one before each pass elsewhere, where shadows
