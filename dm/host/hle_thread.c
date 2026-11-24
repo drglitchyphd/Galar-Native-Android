@@ -84,8 +84,11 @@ typedef struct thr {
     int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
     pthread_cond_t pcv;
     int ltid;                  // the host thread's kernel id (Android: the performance hint session, thr_frame_tids)
+    _Atomic uint32_t svc_num; _Atomic uint64_t svc_at, svc_lr;   // the SVC it is in, where it is in the game's code and the return address there (thr_svc_enter; dm_main_where reads them from another thread)
+    char comm[16];             // the kernel name it was given last (thr_comm)
 } thr_t;
 static thr_t *g_all;
+static thr_t *g_main_thr;   // the game's main thread (svc_thread_main_init; never freed)
 extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in hle_nvn.c
 static _Atomic uint64_t g_preempt_n, g_preempt_ns, g_preempt_cap;   // same-core preemption yields: count, total wait, cap hits (svc_thread)
 
@@ -251,6 +254,28 @@ uintptr_t gate_host_stack(uintptr_t sp) {
     if (sp <= h && sp > h - GATE_HOST_SPAN) return 0;   // already on it: a gate inside guest code that host code called
     return h;
 }
+// Game threads named by the game (fable-loads.md I5): nn::os::SetThreadName puts the name where thr_name reads it (ThreadType+0x1a0 → the name), so the thread's
+//   kernel name becomes its first 15 characters once the game has named it (FsDecodeThread, JobThread1 ...) instead of "s+350180", the sdk's thread trampoline
+//   every thread shares. No hook is needed: SetThreadName only writes the ThreadType, which the host already reads. Names set after the thread started are
+//   picked up by dm_thread_names_refresh (android_main.c, at a load and before a load profile is written). DM_THREAD_NAMES=0 keeps the entry-point names
+static int thr_names_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_THREAD_NAMES"); v = !(e && !strcmp(e, "0")); } return v; }
+static const char *thr_name(thr_t *t, char *buf, size_t n);
+static int thr_comm(thr_t *t, char c[16]) {   // 1: the game's name for t (printable, 1-15 characters kept) differs from the kernel name it has
+    if (!thr_names_on() || !t->arg) return 0;
+    char nb[32]; const char *nm = thr_name(t, nb, sizeof nb); if (!strcmp(nm, "?") || !nm[0]) return 0;
+    int k = 0; for (; nm[k] && k < 15; k++) { if (nm[k] < 0x20 || nm[k] > 0x7e) return 0; c[k] = nm[k]; } c[k] = 0;
+    if (!strcmp(c, t->comm)) return 0;
+    snprintf(t->comm, sizeof t->comm, "%s", c); return 1;
+}
+void dm_thread_names_refresh(void) {
+#ifdef __linux__
+    struct { int tid; char c[16]; } ch[64]; int n = 0;
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t && n < 64; t = t->all) if (t->started && !t->exited && !t->host_owned && t->ltid && thr_comm(t, ch[n].c)) ch[n++].tid = t->ltid;
+    pthread_mutex_unlock(&G);
+    for (int i = 0; i < n; i++) { char p[64]; snprintf(p, sizeof p, "/proc/self/task/%d/comm", ch[i].tid); FILE *f = fopen(p, "w"); if (f) { fputs(ch[i].c, f); fclose(f); } }
+#endif
+}
 static void *thread_main(void *p) {
     thr_t *t = p;
     pthread_setspecific(g_keythr, t);
@@ -261,11 +286,17 @@ static void *thread_main(void *p) {
 #ifdef __linux__
     t->ltid = (int)gettid();
     { module_t *m = module_of((void *)(uintptr_t)t->entry); char nm[16]; if (m) snprintf(nm, sizeof nm, "%c+%llx", m->name[0], (unsigned long long)(t->entry - (uint64_t)(uintptr_t)m->base)); else snprintf(nm, sizeof nm, "g%#llx", (unsigned long long)t->entry);
-      prctl(PR_SET_NAME, nm, 0, 0, 0); }   // (named by its entry point: the load report names the game's busy threads, android_main.c)
+      prctl(PR_SET_NAME, nm, 0, 0, 0); snprintf(t->comm, sizeof t->comm, "%s", nm); }   // (named by its entry point: the load report names the game's busy threads, android_main.c)
 #endif
     crash_thread_init();
     guest_thread_init();
-    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
+    char cn[16]; int named;
+    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); named = thr_comm(t, cn); pthread_mutex_unlock(&G);   // (t->comm under G, as dm_thread_names_refresh)
+#ifdef __linux__
+    if (named) prctl(PR_SET_NAME, cn, 0, 0, 0);   // (the game names its threads between CreateThread and StartThread: here they have it)
+#else
+    (void)named;
+#endif
     g_gate_host_sp = ((uintptr_t)__builtin_frame_address(0) - 4096) & ~(uintptr_t)15;   // (below this frame and its callees' spill room)
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
@@ -274,7 +305,6 @@ static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads cha
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
 }
-static const char *thr_name(thr_t *t, char *buf, size_t n);
 static void wake_sync_waiters(const void *obj);
 static void thread_exit(thr_t *t) {
     t->exit_ns = now_ns(); t->exit_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
@@ -314,11 +344,19 @@ static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
     pthread_mutex_unlock(&G);
 }
 // called by the gate on SVC entry / exit (gate_dispatch in hle.c)
-void thr_svc_enter(uint64_t *regs, uint64_t pc) {
+void thr_svc_enter(uint64_t *regs, uint64_t pc, uint32_t num) {
     thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
-    t->svc_pc = pc; atomic_store(&t->svc_regs, regs); atomic_fetch_or(&t->svc_state, 1);
+    t->svc_pc = pc; atomic_store_explicit(&t->svc_num, num, memory_order_relaxed); atomic_store_explicit(&t->svc_at, pc, memory_order_relaxed); atomic_store_explicit(&t->svc_lr, regs[30], memory_order_relaxed);
+    atomic_store(&t->svc_regs, regs); atomic_fetch_or(&t->svc_state, 1);
     if (atomic_load_explicit(&t->qos_pending, memory_order_relaxed) && atomic_exchange(&t->qos_pending, 0)) qos_apply(t);
     if (atomic_load(&t->pause_req)) { pthread_mutex_lock(&G); if (t->pause_req && !t->paused) { t->paused = 1; pthread_cond_broadcast(&t->pcv); } pthread_mutex_unlock(&G); }
+}
+// Where the game's main thread is (fable-loads.md I2, android_main.c's wait profile, from another thread, no signal): in an SVC or not, which one and the game's
+//   addresses (the SVC's own and the return address of the function holding it). 0 before the main thread is registered
+int dm_main_where(int *in_svc, uint32_t *svc, uint64_t *at, uint64_t *lr) {
+    thr_t *t = g_main_thr; if (!t) return 0;
+    *in_svc = atomic_load(&t->svc_state) & 1; *svc = atomic_load_explicit(&t->svc_num, memory_order_relaxed); *at = atomic_load_explicit(&t->svc_at, memory_order_relaxed); *lr = atomic_load_explicit(&t->svc_lr, memory_order_relaxed);
+    return 1;
 }
 void thr_svc_leave(void) {
     thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
@@ -361,6 +399,7 @@ uint32_t svc_thread_main_init(void) {
     pthread_setspecific(g_keythr, t);
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
+    g_main_thr = t;
     return t->handle;
 }
 

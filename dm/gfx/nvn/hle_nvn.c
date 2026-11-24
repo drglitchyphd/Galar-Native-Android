@@ -110,6 +110,26 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #include "nvn_obj.h"
 #include "golden_rec.h"   // golden-frame recordings (DM_GOLDEN_REC): GOLDEN_SUB_BEGIN / _END around a submission, GOLDEN_PRESENT before a present
 
+// The NVN call a thread is in (fable-loads.md I2, the load's wait profile in android_main.c): the calls that can wait or do heavy work (acquire, present,
+//   submit, sync wait, finish, texture / pool / program set-up) mark their thread's slot on entry and restore it on return; a sampler thread reads it by kernel
+//   thread id, with no signal. 64 slots, kept for the process (the threads that call NVN are few and long-lived). Linux only (none on Apple builds)
+#ifdef __linux__
+typedef struct { _Atomic int tid; _Atomic(const char *) at; } nvn_where_t;
+static nvn_where_t g_where[64];
+static __thread nvn_where_t *t_where; static __thread int t_where_tried;
+static const char *where_enter(const char *nm) {
+    if (!t_where && !t_where_tried) { t_where_tried = 1; int me = (int)gettid();
+        for (int i = 0; i < 64; i++) { int z = 0; if (atomic_compare_exchange_strong(&g_where[i].tid, &z, me)) { t_where = &g_where[i]; break; } } }
+    return t_where ? atomic_exchange(&t_where->at, nm) : NULL;
+}
+static void where_leave(const char **prev) { if (t_where) atomic_store(&t_where->at, *prev); }
+const char *dm_nvn_where(int tid) { for (int i = 0; i < 64; i++) { int t = atomic_load(&g_where[i].tid); if (!t) break; if (t == tid) return atomic_load(&g_where[i].at); } return NULL; }
+#define NVN_WHERE() const char *nvn_wprev_ __attribute__((cleanup(where_leave), unused)) = where_enter(__func__ + 2)   // (h_nvn... → nvn...)
+#else
+#define NVN_WHERE() do { } while (0)
+const char *dm_nvn_where(int tid) { (void)tid; return NULL; }
+#endif
+
 // ---------- Device ----------
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
 NVN(nvnDeviceBuilderSetFlags, void, NVNdeviceBuilder *b, int f) { ((dev_builder_t *)b)->flags = f; }
@@ -186,6 +206,7 @@ NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool
 void mtl_pool_flags(const void *mem, int flags) __attribute__((weak));   // (nvn_vk.c; the other back ends have none)
 static uint8_t *vpool_reserve(const pool_t *o); static void vpool_release(const pool_t *o);   // sparse virtual pools, see MapVirtual
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
+    NVN_WHERE();
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size;
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a sparse virtual pool's own address range (see MapVirtual)
@@ -374,6 +395,7 @@ static void ft_flush(const uint8_t *a, uint64_t n) {
     pthread_mutex_unlock(&g_ft_mu);
 }
 NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b) {
+    NVN_WHERE();
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
     if (o->magic == MAGIC('T', 'E', 'X', 0)) rq_drain();   // (a live object initialized again: commands in the queue may name it)
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
@@ -530,6 +552,7 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     return 1;
 }
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
+    NVN_WHERE();
     rq_drain();
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
@@ -568,6 +591,7 @@ _Atomic uint64_t g_wait_sync_ns, g_wait_sync_n;   // DM_VK_PROF: the game thread
 static _Atomic uint64_t g_st_sync_ns;   // the same, never reset (the long-frame log's per-frame differences)
 static NVNsyncWaitResult sync_wait_(const sync_t *o, uint64_t timeout);
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
+    NVN_WHERE();
     const sync_t *o = (const sync_t *)s; uint64_t last = mtl_last_fence(), behind = o->fenced && o->fence <= last ? last - o->fence : 99;
     uint64_t t0 = now_ns(); NVNsyncWaitResult r = sync_wait_(o, timeout); uint64_t d = now_ns() - t0;
     if (timeout) { atomic_fetch_add(&g_wait_sync_ns, d); atomic_fetch_add(&g_wait_sync_n, 1); atomic_fetch_add(&g_st_sync_ns, d);
@@ -624,7 +648,7 @@ NVN(nvnQueueGetError, NVNqueueGetErrorResult, NVNqueue *q, NVNqueueErrorInfo *in
     (void)q; if (info) memset(info, 0, sizeof *info); return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
 }
 NVN(nvnQueueFlush, void, NVNqueue *q) { (void)q; }
-NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; rq_drain(); mtl_finish(); }
+NVN(nvnQueueFinish, void, NVNqueue *q) { NVN_WHERE(); (void)q; rq_drain(); mtl_finish(); }
 
 // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------
 #define CB(c) ((cmd_t *)(c))
@@ -1098,6 +1122,7 @@ void sync_fence_now(sync_t *s) {   // this sync is signalled by what has been su
     if (rq_on()) { s->fence = UINT64_MAX; rq_push((rq_item){ .kind = RQ_FENCE, .s = s }); } else s->fence = mtl_last_fence();
 }
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
+    NVN_WHERE();
     if (rq_on()) { uint64_t *c = malloc((size_t)(n ? n : 1) * sizeof *c); if (!c) die("replay queue allocation failed"); memcpy(c, h, (size_t)n * sizeof *c); rq_push((rq_item){ .kind = RQ_SUBMIT, .n = n, .h = c, .q = q }); return; }
     sub_run(q, n, h);
 }
@@ -1229,6 +1254,7 @@ static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the fi
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
+    NVN_WHERE();
     win_t *o = (win_t *)w;
     *idx = o->ntex ? o->next++ % o->ntex : 0;
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
@@ -1662,7 +1688,65 @@ static void arc_step(uint64_t frame_ns) {
     if (!g_arc_step || !frame_ns) return;
     *g_arc_step = frame_ns >= 25000000ull ? 33333334u : 16666667u;   // (25 ms: halfway between one refresh and two)
 }
+// ---------- Loading screens (fable-loads.md L1 / I1) ----------
+// A load told by the picture (load_detect.h: reads of 8 MB/s or more with under 60 draws in each of the last 15 presents, over at the first present with 60 or
+//   more), judged at every present and by android_main.c's 500 ms poll (a frozen picture). dm_loading() is what the rest asks: android_main.c's load hint,
+//   report, profile and boost, touch_menu.c's scans, nvn_vk.c's upload-ahead budget in a load
+#include "load_detect.h"
+extern _Atomic uint64_t dm_fs_read_bytes __attribute__((weak));   // (host hle_fs.c: bytes the game has read; none in graphics unit tests)
+__attribute__((weak)) void dm_touch_scan_stats(uint64_t *n, uint64_t *ns) { *n = *ns = 0; }   // (touch_menu.c: all-memory scans and their time)
+__attribute__((weak)) void mtl_pso_stats(uint64_t *draw, uint64_t *bg) { *draw = *bg = 0; }   // (nvn_vk.c: pipelines built by draws / in the background)
+__attribute__((weak)) void mtl_pre_stats(uint64_t *budget, uint64_t *queue) { *budget = *queue = 0; }   // (nvn_vk.c: textures left to their first use)
+__attribute__((weak)) void mtl_upload_fg_stats(uint64_t *n, uint64_t *ns) { *n = *ns = 0; }   // (nvn_vk.c: uploads the drawing threads waited for)
+static load_det g_ld; static pthread_mutex_t g_ld_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_ld_on; static _Atomic uint64_t g_ld_since, g_ld_n;
+int dm_loading(void) { return atomic_load(&g_ld_on); }
+uint64_t dm_loading_since(void) { return atomic_load(&g_ld_since); }   // (CLOCK_MONOTONIC ns, 0 before the first load)
+uint64_t dm_loading_count(void) { return atomic_load(&g_ld_n); }      // loads seen so far (a poll that missed a short one sees this move)
+static uint64_t dm_fs_read_bytes_now(void) { return &dm_fs_read_bytes ? atomic_load(&dm_fs_read_bytes) : 0; }
+static uint64_t ld_now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+// What one load cost (I1's corrected report), summed over its presents and printed when it ends
+static struct { uint64_t t0, frames, sync0, psod0, psob0, scans0, scan_ns0, preb0, preq0, up0, upns0; double work_ms, acq_ms; } g_ls;
+static void ld_change(int r, uint64_t t) {
+    if (r > 0) { memset(&g_ls, 0, sizeof g_ls); g_ls.t0 = t; g_ls.sync0 = atomic_load(&g_st_sync_ns); mtl_pso_stats(&g_ls.psod0, &g_ls.psob0);
+        dm_touch_scan_stats(&g_ls.scans0, &g_ls.scan_ns0); mtl_pre_stats(&g_ls.preb0, &g_ls.preq0); mtl_upload_fg_stats(&g_ls.up0, &g_ls.upns0);
+        atomic_store(&g_ld_since, t); atomic_fetch_add(&g_ld_n, 1); atomic_store(&g_ld_on, 1);
+        LOG("[load] a loading screen (the game reads %.0f MB/s, under %d draws in each of the last %d presents)", load_det_rate(&g_ld, t, dm_fs_read_bytes_now()), LD_DRAWS, LD_PRESENTS); }
+    else if (r < 0) { atomic_store(&g_ld_on, 0);
+        uint64_t pd, pb, sc, scn, qb, qq, un, uns; mtl_pso_stats(&pd, &pb); dm_touch_scan_stats(&sc, &scn); mtl_pre_stats(&qb, &qq); mtl_upload_fg_stats(&un, &uns);
+        LOG("[load] over after %.2f s: %llu frames presented, frame work %.1f ms on average, %.2f s slept in the image acquire (the pacing), %.2f s in GPU sync waits; "
+            "texture uploads the drawing threads waited for %llu, %.0f ms; textures left to their first use %llu (budget) + %llu (queue full); pipelines built %llu by draws + %llu in the background; "
+            "all-memory touch scans %llu, %.0f ms", (t - g_ls.t0) / 1e9, (unsigned long long)g_ls.frames, g_ls.frames ? g_ls.work_ms / g_ls.frames : 0, g_ls.acq_ms / 1e3,
+            (atomic_load(&g_st_sync_ns) - g_ls.sync0) / 1e9, (unsigned long long)(un - g_ls.up0), (uns - g_ls.upns0) / 1e6, (unsigned long long)(qb - g_ls.preb0), (unsigned long long)(qq - g_ls.preq0),
+            (unsigned long long)(pd - g_ls.psod0), (unsigned long long)(pb - g_ls.psob0), (unsigned long long)(sc - g_ls.scans0), (scn - g_ls.scan_ns0) / 1e6); }
+}
+static void ld_present(uint64_t draws) {
+    if (!&dm_fs_read_bytes) return;
+    uint64_t t = ld_now_ns(); pthread_mutex_lock(&g_ld_mu); int r = load_det_present(&g_ld, t, dm_fs_read_bytes_now(), draws); ld_change(r, t); pthread_mutex_unlock(&g_ld_mu);
+}
+int dm_loading_poll(void) {   // android_main.c nativeLoading, every 500 ms: a frozen picture while the game reads
+    if (!&dm_fs_read_bytes) return 0;
+    uint64_t t = ld_now_ns(); pthread_mutex_lock(&g_ld_mu); int r = load_det_poll(&g_ld, t, dm_fs_read_bytes_now()); ld_change(r, t); pthread_mutex_unlock(&g_ld_mu);
+    return dm_loading();
+}
+// L1: the frames of a load paced by the display, not by the game's interval. DM_LOAD_PACE=game (the default until a phone A/B decides: today's behaviour) |
+//   display (one refresh a frame) | free (no hold); the profile key load_pace pins a game's own default (Scarlet / Violet: game, dm_dynfps owns their hold).
+//   The cause it removes is not proven: the loads advance with frames on the Adreno 830 and the Xclipse 530 (about 300 frames: 5 s at 60 fps, 9-11 at 30), and
+//   Arceus #98's 15-20 s match 30 fps. Risks: the game's clock runs 2-4 times fast on the loading screen (spinner, fades); Arceus's 60 fps step (arc_step) is
+//   left as it was while a load is paced. Only the acquire's hold and the pacer's slot follow it: the Vulkan present does not use the period
+#ifndef DM_GAME_LOAD_PACE
+#define DM_GAME_LOAD_PACE -1
+#endif
+static int load_pace_mode(void) {
+    static int m = -1; if (m >= 0) return m;
+    const char *e = getenv("DM_LOAD_PACE");
+    m = e && !strcmp(e, "display") ? LP_DISPLAY : e && !strcmp(e, "free") ? LP_FREE : e && !strcmp(e, "game") ? LP_GAME : DM_GAME_LOAD_PACE >= 0 ? DM_GAME_LOAD_PACE : LP_GAME;
+    LOG("[load] loading screens paced by %s (%s)", m == LP_DISPLAY ? "the display (one refresh a frame)" : m == LP_FREE ? "nothing (no hold)" : "the game's own interval",
+        e ? "DM_LOAD_PACE" : DM_GAME_LOAD_PACE >= 0 ? "game profile load_pace" : "default");
+    return m;
+}
+static int g_lp_active;   // the last present's hold was a load's (arc_step leaves the game's step alone then)
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+    NVN_WHERE();
     (void)q; win_t *o = (win_t *)w; o->presents++;
     dm_fps_lock_tick(); dm_res_scale_tick();
     if (dm_fps_state) { static int was; int c = fps_step_cap(); if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? " (prerendered movie)" : ""); was = c; } }
@@ -1688,6 +1772,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; mtl_stats(&ps, &dr);
+    ld_present(dr - prev_draw);   // (the load detector: this present's draws)
     if (nvn_real[0] || nvn_real[1]) {   // DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
         static unsigned isub = ~0u; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
         if (isub == ~0u) for (isub = 0; isub < NVN_NFUNC && strcmp(nvn_names[isub], "nvnQueueSubmitCommands"); isub++) {}
@@ -1704,9 +1789,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         tpush(4, rec * tb.numer / tb.denom / 1e6); tpush(5, sub * tb.numer / tb.denom / 1e6);
     }
     if (prev_in) {
-        arc_step(t0 - prev_in);
+        if (!g_lp_active) arc_step(t0 - prev_in);
         double fr = (t0 - prev_in) / 1e6, wk = (t0 - prev_out) / 1e6, nv = atomic_exchange(&g_nvn_ns, 0) / 1e6;
         tpush(0, fr); tpush(1, wk); tpush(2, nv);
+        if (atomic_load(&g_ld_on)) { g_ls.frames++; g_ls.work_ms += wk; g_ls.acq_ms += g_acq_wait_ns / 1e6; }   // (the load's report)
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
         trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
@@ -1772,10 +1858,12 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
     g_hold_ring[o->presents % 16] = (uint8_t)present_itv(o);
+    int lpm = load_pace_mode(); int hz_ = mtl_display_hz(); uint64_t hold = load_pace_period(lpm, atomic_load(&g_ld_on), period, 1000000000ull / (uint64_t)(hz_ > 0 ? hz_ : 60));
+    g_lp_active = hold != period;   // (a load's hold: L1)
     nvn_pacer pc = {o->pace};
-    uint64_t slot = now + nvn_pace(&pc, now, period);
+    uint64_t slot = now + nvn_pace(&pc, now, hold);
     o->pace = pc.target;
-    if (idx >= 0 && idx < 4) o->avail[idx] = period ? slot + period : 0;
+    if (idx >= 0 && idx < 4) o->avail[idx] = hold ? slot + hold : 0;
     static uint64_t prev_slot; if (prev_slot && period) trow(f, "@display_ms", (slot - prev_slot) / 1e6); prev_slot = slot;   // display interval between two adjacent frames on screen (this is the one to look at for dropped frames)
     // Actual presentation interval (windowed mode): taken 8 presents late (the presented callback has arrived by then), as the difference between the n-th and the (n−1)-th; −1 = discarded
     if (o->presents > 9) { uint64_t n = o->presents - 8; double a_ = mtl_presented_time(n), b_ = mtl_presented_time(n - 1);

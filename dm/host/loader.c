@@ -129,6 +129,13 @@ module_t *module_of(const void *p) {
     }
     return NULL;
 }
+// For callers without dm.h (android_main.c's load profile, fable-loads.md I3 / I4): an address as "<module>+0x<offset>" (1) or not in a game module (0), and
+//   module i's name and build id (0 past the last)
+int dm_addr_module(const void *p, char *out, size_t n) {
+    module_t *m = module_of(p); if (!m) return 0;
+    snprintf(out, n, "%s+0x%llx", m->name, (unsigned long long)((const uint8_t *)p - m->base)); return 1;
+}
+int dm_module_info(int i, const char **name, const char **build) { if (i < 0 || i >= g_nmod) return 0; *name = g_mod[i].name; *build = g_mod[i].build_id; return 1; }
 
 // SDK major version, from the version string the SDK's libraries keep in the sdk module's read-only data ("NintendoSDK_nnSdk-10_4_0"; SDK 12 spells it NintendoSdk_).
 // Behaviour that follows the SDK version is decided by it (the NVN API version, the shared-font layout), not by the game profile. 0 = no sdk module or no version string

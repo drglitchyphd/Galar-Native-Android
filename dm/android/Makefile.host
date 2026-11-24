@@ -73,7 +73,7 @@ $(OUT)/objl/lsfg_import.o: app/jni/lsfg_import.cpp
 	@mkdir -p $(dir $@); $(CXX) $(CXXFLAGS) -c $< -o $@
 LIBOBJ += $(OUT)/objl/lsfg_import.o
 $(OUT)/lib/libnxnative.so: $(LIBOBJ) $(OUT)/libvpx.a $(OUT)/libdxbcspv.a
-	@mkdir -p $(dir $@); $(CXX) -shared -static-libstdc++ -o $@ $(LIBOBJ) $(OUT)/libvpx.a $(OUT)/libdxbcspv.a -lm -ldl -llog -lz -laaudio -lmediandk -lvulkan -landroid -Wl,-Bsymbolic -Wl,--no-undefined -Wl,-z,max-page-size=16384 -u ANativeActivity_onCreate
+	@mkdir -p $(dir $@); $(CXX) -shared -static-libstdc++ -o $@ $(LIBOBJ) $(OUT)/libvpx.a $(OUT)/libdxbcspv.a -lm -ldl -llog -lz -laaudio -lmediandk -lvulkan -landroid -Wl,-Bsymbolic -Wl,--no-undefined -Wl,-z,max-page-size=16384 -Wl,--build-id=sha1 -u ANativeActivity_onCreate
 .PHONY: lib
 lib: $(OUT)/lib/libnxnative.so
 # The driver check (DriverCheckService.java): the probe app's GPU self-tests (probe/jni/selftest.c) as a library of their own, run in a process of their own before Play,
