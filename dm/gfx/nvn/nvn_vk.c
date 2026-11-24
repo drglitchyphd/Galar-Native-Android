@@ -586,11 +586,13 @@ void mtl_init(void) {
     // Mali-G615 on Arm's own driver before r49 (the G615 MC2's r44p1) closed the game three frames in (addr 0x90 in libGLES_mali.so: #63 #65 #82 #105 #112) unless its
     //   uniform buffers were copied at record time (DM_VK_UBO_SNAPSHOT) and its BC textures decoded, not transcoded to ETC2 (DM_VK_BC_TRANSCODE=off): the two logs that play
     //   on v0.5x (#77, #110) have both, and every crash lacks one of them. Both from the first start there (the safe-start ladder took four crashes to reach them);
-    //   env.txt still wins
+    //   env.txt still wins. The snapshots only on the MC1 / MC2 since v0.97: every crash in that table is an MC2, and the G615 MC6 (POCO X6 Pro, r44p1) played the
+    //   field without them, its game thread at 25.8 ms a frame against 39 ms with them (997 draws: the copy at every draw is a third of the replay's time)
     if (quirk_note(Q_G615_SAFE, quirk_default(Q_G615_SAFE, &g_gpuid), vkq_env_src("DM_VK_UBO_SNAPSHOT") > vkq_env_src("DM_VK_BC_TRANSCODE") ? vkq_env_src("DM_VK_UBO_SNAPSHOT") : vkq_env_src("DM_VK_BC_TRANSCODE"))) {
         int u = !getenv("DM_VK_UBO_SNAPSHOT"), b = !getenv("DM_VK_BC_TRANSCODE");
-        setenv("DM_VK_UBO_SNAPSHOT", "1", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
-        VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110)",
+        int small = strstr(g_props.deviceName, "MC1") || strstr(g_props.deviceName, "MC2") || !strstr(g_props.deviceName, " MC");   // (no core count in the name: the safe side)
+        setenv("DM_VK_UBO_SNAPSHOT", small ? "1" : "0", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
+        VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110; snapshots only there)",
              g_props.driverVersion >> 22, g_props.driverVersion >> 12 & 0x3ff, getenv("DM_VK_UBO_SNAPSHOT"), u ? "default here" : "env.txt", getenv("DM_VK_BC_TRANSCODE"), b ? "default here" : "env.txt");
     }
     // BC1–BC7: sampled directly where the GPU has them (Adreno, Xclipse, desktop), else decoded on upload (Mali, PowerVR; DM_VK_NO_BC=1 tries that path anywhere)
