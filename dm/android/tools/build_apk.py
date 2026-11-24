@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# Builds the installable app (no game content): the engine library, the setup screen and the tools the phone runs to set the game up from the player's dump.
+# Builds the installable app (no game content): the engine library, the setup screen and the tools the phone runs to set the game up from the player's own extracted game files.
 # Runs on Windows, Linux and macOS (no Xcode, no sips): Android build-tools (aapt2, d8, zipalign, apksigner), a JDK (javac), Python 3.
-#   lib/arm64-v8a: libnxnative.so (the engine, Makefile.host lib / win_build_lib.py), libnx_extract.so and libdmsh_xlate.so (.NET NativeAOT: extract_aot/, xlate_aot/),
+#   lib/arm64-v8a: libnxnative.so (the engine, Makefile.host lib / win_build_lib.py), libdmsh_xlate.so (.NET NativeAOT: xlate_aot/),
 #                  libspirv_cross.so (spirv_cross/), libpython3.14.so + libpython_exe.so (CPython for Android and its launcher), libcapstone.so, liblz4.so
 #   assets: python.zip (CPython's standard library, trimmed), dm.zip (the setup scripts, the game profile, the Python stand-ins for lz4 and capstone), shader_chain (the engine's shader translation chain)
 # Usage: build_apk.py --libs <dir with the .so files> --pylib <CPython for Android's lib/python3.14> --capstone-py <the capstone Python package> --out <app.apk>
@@ -12,7 +12,7 @@ import argparse, glob, hashlib, io, os, re, shutil, struct, subprocess, sys, tem
 from xml.sax.saxutils import escape as xml_escape   # (the label: "Pokémon Sword & Shield")
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE); DM = os.path.dirname(ANDROID)
-LIBS = ['libnxnative.so', 'libnx_extract.so', 'libdmsh_xlate.so', 'libspirv_cross.so', 'libpython3.14.so', 'libpython_exe.so', 'libcapstone.so', 'liblz4.so', 'libssl_python.so', 'libcrypto_python.so']
+LIBS = ['libnxnative.so', 'libdmsh_xlate.so', 'libspirv_cross.so', 'libpython3.14.so', 'libpython_exe.so', 'libcapstone.so', 'liblz4.so', 'libssl_python.so', 'libcrypto_python.so']
 OPTIONAL = ['libdmsh_gate.so', 'libdmoodle.so', 'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so', 'libVkLayer_khronos_validation.so', 'libdmprobe.so']   # libadrenotools: custom Adreno drivers (Turnip); without them the phone's own driver only
 PY_SKIP = ('test', 'idlelib', 'tkinter', 'turtledemo', 'ensurepip', 'pydoc_data', 'lib2to3', 'venv', 'sqlite3', '__pycache__', 'unittest', 'wsgiref', 'xmlrpc', 'curses', 'dbm')
 DM_PARTS = ['games/game.py', 'tools/patch_nso.py', 'gfx/tools', 'ios/tools/ios_metal.py', 'android/tools']   # and every game profile (setup names the other game when given its dump)
@@ -57,13 +57,6 @@ def load_align(path):   # the smallest p_align of an ELF64's LOAD segments (0: n
     al = [struct.unpack_from('<Q', ph, i * phentsize + 0x30)[0] for i in range(phnum) if struct.unpack_from('<I', ph, i * phentsize)[0] == 1]
     return min(al) if al else 0
 
-def validate_extractor(path):
-    with open(path, 'rb') as f: data = f.read()
-    obsolete_error = 'LibHac cache count was not found'
-    stale_release_hash = 'd40d71f2f0faf4c54bf92476fb9e10c8866f132e296ca73f63aba30623cee6c8'
-    if hashlib.sha256(data).hexdigest() == stale_release_hash or obsolete_error.encode('utf-8') in data or obsolete_error.encode('utf-16le') in data:
-        sys.exit('[RED] stale libnx_extract.so: rebuild it from this checkout before packaging (run scripts/build_apk_pc.sh)')
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--libs', required=True); ap.add_argument('--pylib', required=True); ap.add_argument('--capstone-py', required=True); ap.add_argument('--out', required=True)
@@ -81,7 +74,7 @@ def main():
     bt = a.bt or os.path.expanduser('~/nxnative-work/tools/android-15'); jar = a.jar or os.path.expanduser('~/nxnative-work/tools/android-35/android.jar')
     missing = [l for l in LIBS if not os.path.isfile(os.path.join(a.libs, l))]
     if missing: sys.exit('[RED] missing native libraries in ' + a.libs + ': ' + ', '.join(missing))
-    validate_extractor(os.path.join(a.libs, 'libnx_extract.so'))
+    # (no NSP / XCI unpacker any more: setup takes the player's extracted ExeFS and RomFS folders, no keys. A libnx_extract.so left in an old libs folder is not packaged)
     # 16 KB pages: Android 15+ warns about an app with a 4 KB aligned library ("Android App Compatibility"), and a phone with 16 KB pages cannot load one at all
     # (scripts/build_apk_pc.sh links them all 16 KB aligned). STRICT_16K=1 refuses to package one
     small = [l for l in LIBS + OPTIONAL if os.path.isfile(os.path.join(a.libs, l)) and 0 < load_align(os.path.join(a.libs, l)) < 0x4000]
