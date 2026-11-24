@@ -112,6 +112,8 @@ enum {
     // Mali's white lit scene (#47 #110 #111 #172), a game whose profile says mali_lit_standin (Sword / Shield) on Arm's own driver (mali-all e6f6d0c)
     Q_B10_STANDIN,       // route A: the lit R11G11B10F target drawn and sampled as an RGBA16F stand-in, converted exactly where it meets the game's memory (b10_on)
     Q_MALI_WHITE_CHECK,  // the white-screen check while playing and its ladder (mali_white_vk.inc: route A, then B, then the PanVK offer, start by start)
+    Q_RENDER_AREA_FULL,  // a held frame's passes keep the whole target as their render area, not the part their draws reach (seg_area): no GPU listed yet; the row
+                         //   for a driver that misdraws with a smaller area
     Q_N
 };
 // (env: the switches that decide the rule at its site, named in its [quirk] line when one of them is set)
@@ -148,6 +150,7 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] VKQ_UNUSED = {
     [Q_NVN_ASYNC] = { "DM_NVN_ASYNC", "the replay on its own thread" },
     [Q_B10_STANDIN] = { "DM_VK_B10_AS_RGBA16, DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the lit R11G11B10F target drawn as RGBA16F" },
     [Q_MALI_WHITE_CHECK] = { "DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the white-screen check and its ladder" },
+    [Q_RENDER_AREA_FULL] = { "DM_VK_RENDER_AREA", "passes keep the whole target as their render area" },
 };
 // Arm's own driver: by driver ID where the driver gives one, else by vendor (PanVK reports Arm's vendor ID with its own driver ID)
 VKQ_UNUSED static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }

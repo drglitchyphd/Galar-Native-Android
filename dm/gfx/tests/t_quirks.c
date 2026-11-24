@@ -90,6 +90,8 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     case Q_NVN_ASYNC: return P->nvn_async_never ? 0 : strstr(g->name, "Adreno") != NULL || (g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5);   // v0.97: Arm's own driver too   // hle_nvn.c:1083 autoon = !(e && *e) && g && strstr (g, "Adreno"); :1085 #if DM_GAME_ENG_NVN_ASYNC_NEVER v = 0
     // new with the merged branches, not in 6e0e1dd (docs/ENGINE_UNIFY.md lists it): galar-driver-probes ad0f638 / arceus-vk10-validation 85e72fd, Arm's own driver
     case Q_QUERY_LOD: return g->arm_rel != 0;
+    // perf-render-area: a held frame's passes get the render area their draws reach on every GPU; the row lists none yet
+    case Q_RENDER_AREA_FULL: return 0;
     // mali-all e6f6d0c (the Mali white-screen fix), mali_white_vk.inc mw_init: arm = g_arm_rel != 0; g_mw.want = mw_default_route (arm, DM_PORT_GALAR);
     //   en = mw_enabled (arm, DM_PORT_GALAR, le, se), 1 or 0 with the switches unset. DM_PORT_GALAR → P->mali_lit_standin (a game whose profile says it; part 1
     //   also checks e6f6d0c's own DM_PORT_GALAR for the real profiles)
