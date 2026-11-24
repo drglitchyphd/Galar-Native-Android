@@ -521,3 +521,6 @@ Could not check for updates. Check the internet connection.	Não foi possível p
 The update could not be downloaded: %s	Não foi possível baixar a atualização: %s
 The downloaded file is not an official %s release, so it was not installed.	O arquivo baixado não é uma versão oficial de %s, então não foi instalado.
 The update could not be installed: %s	Não foi possível instalar a atualização: %s
+Local play	Jogo local
+Off: the game says local play is unavailable.	Desativado: o jogo informa que o jogo local não está disponível.
+On: link battles, trades and raids with phones on the same Wi-Fi.	Ativado: batalhas, trocas e reides com celulares na mesma Wi-Fi.

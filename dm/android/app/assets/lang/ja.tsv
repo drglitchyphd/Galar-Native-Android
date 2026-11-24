@@ -524,3 +524,6 @@ Could not check for updates. Check the internet connection.	アップデート�
 The update could not be downloaded: %s	アップデートをダウンロードできませんでした: %s
 The downloaded file is not an official %s release, so it was not installed.	ダウンロードしたファイルは%sの公式版ではないため、インストールしませんでした。
 The update could not be installed: %s	アップデートをインストールできませんでした: %s
+Local play	ローカル通信
+Off: the game says local play is unavailable.	オフ：ゲームではローカル通信が使えないと表示されます。
+On: link battles, trades and raids with phones on the same Wi-Fi.	オン：同じWi-Fiの端末と対戦・交換・レイドができます。
