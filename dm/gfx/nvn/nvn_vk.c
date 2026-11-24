@@ -579,18 +579,20 @@ void mtl_init(void) {
     VLOG("passes: %s; draw state: %s", g_dynren ? "dynamic rendering" : !dynren ? "render passes (the driver has no dynamic rendering)" : baseline ? "render passes (DM_VK_BASELINE)"
          : quirk_default(Q_NO_DYNREN, &g_gpuid) && !getenv("DM_VK_NO_DYNREN") ? "render passes (Adreno's default: DM_VK_NO_DYNREN=0 for dynamic rendering)" : "render passes (DM_VK_NO_DYNREN)",
          g_eds ? "set per draw (extended dynamic state)" : !eds ? "built into each pipeline (the driver has no extended dynamic state)" : baseline ? "built into each pipeline (DM_VK_BASELINE)"
-               : ne ? "built into each pipeline (DM_VK_NO_EDS)" : "built into each pipeline (Qualcomm Vulkan 1.1 driver: per-draw vertex strides drawn wrong; DM_VK_NO_EDS=0 to try)");
+               : ne ? "built into each pipeline (DM_VK_NO_EDS)" : g_gpuid.vendor == VEN_ARM ? "built into each pipeline (Arm's driver before r44 ignores per-draw vertex strides; DM_VK_NO_EDS=0 to try)" : "built into each pipeline (Qualcomm Vulkan 1.1 driver: per-draw vertex strides drawn wrong; DM_VK_NO_EDS=0 to try)");
     if (!fcc.depthClipControl) g_clipctl = 0;
     // custom border colours are made without a format (sampler_get), which needs customBorderColorWithoutFormat: a driver without it gets the nearest standard colour
     if (!fbc.customBorderColors || !fbc.customBorderColorWithoutFormat) { if (fbc.customBorderColors) VLOG("custom border colours need a format on this driver: the nearest standard colour instead"); g_border = 0; }
     // Mali-G615 on Arm's own driver before r49 (the G615 MC2's r44p1) closed the game three frames in (addr 0x90 in libGLES_mali.so: #63 #65 #82 #105 #112) unless its
     //   uniform buffers were copied at record time (DM_VK_UBO_SNAPSHOT) and its BC textures decoded, not transcoded to ETC2 (DM_VK_BC_TRANSCODE=off): the two logs that play
     //   on v0.5x (#77, #110) have both, and every crash lacks one of them. Both from the first start there (the safe-start ladder took four crashes to reach them);
-    //   env.txt still wins
+    //   env.txt still wins. The snapshots only on the MC1 / MC2 since v0.97: every crash in that table is an MC2, and the G615 MC6 (POCO X6 Pro, r44p1) played the
+    //   field without them, its game thread at 25.8 ms a frame against 39 ms with them (997 draws: the copy at every draw is a third of the replay's time)
     if (quirk_note(Q_G615_SAFE, quirk_default(Q_G615_SAFE, &g_gpuid), vkq_env_src("DM_VK_UBO_SNAPSHOT") > vkq_env_src("DM_VK_BC_TRANSCODE") ? vkq_env_src("DM_VK_UBO_SNAPSHOT") : vkq_env_src("DM_VK_BC_TRANSCODE"))) {
         int u = !getenv("DM_VK_UBO_SNAPSHOT"), b = !getenv("DM_VK_BC_TRANSCODE");
-        setenv("DM_VK_UBO_SNAPSHOT", "1", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
-        VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110)",
+        int small = strstr(g_props.deviceName, "MC1") || strstr(g_props.deviceName, "MC2") || !strstr(g_props.deviceName, " MC");   // (no core count in the name: the safe side)
+        setenv("DM_VK_UBO_SNAPSHOT", small ? "1" : "0", 0); setenv("DM_VK_BC_TRANSCODE", "off", 0);
+        VLOG("Mali-G615 on Arm's driver r%up%u: DM_VK_UBO_SNAPSHOT=%s (%s), DM_VK_BC_TRANSCODE=%s (%s): what the G615 MC2 needs to get past its first frames (#110; snapshots only there)",
              g_props.driverVersion >> 22, g_props.driverVersion >> 12 & 0x3ff, getenv("DM_VK_UBO_SNAPSHOT"), u ? "default here" : "env.txt", getenv("DM_VK_BC_TRANSCODE"), b ? "default here" : "env.txt");
     }
     // BC1–BC7: sampled directly where the GPU has them (Adreno, Xclipse, desktop), else decoded on upload (Mali, PowerVR; DM_VK_NO_BC=1 tries that path anywhere)
@@ -3183,7 +3185,34 @@ typedef struct vshader {
     int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod, ptsmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
     uint8_t dp;                                 // reads draw parameters from push constants (a device without them: spv_no_drawparams; the draw pushes them, dp_push)
     uint32_t lacks;                             // SPV_NEED_* the shader needs and the device lacks (spv_feature_needs)
+    uint32_t *glcode; size_t nglw;              // vertex shaders under intbits_on: the GL-depth variant's SPIR-V (code / nw: the shader's own), for the intbits variants
+    struct { uint32_t u, s; int gl; VkShaderModule mod; } ibv[8]; int nibv;   // the vertex modules with integer inputs bitcast (intbits_mod)
 } vshader;
+// Integer vertex formats under float inputs (DM_VK_VFMT_INTBITS, default on; 0 turns it off): see spv_vin_raw. The game feeds 8 / 16-bit UINT attributes (packed
+//   normals, colours, indices: Sword / Shield's field at locations 7, 8, 11) into inputs the translated shader declares float and converts itself. Adreno hands the
+//   bits over unchanged; Arm r44 converts the integer first, and the lit field went white (POCO X6 Pro, G615: 79 % of the lit target at 1024+ -> 0 %)
+static int intbits_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_VFMT_INTBITS"); v = !(e && *e == '0');
+    VLOG("vertex attributes: 8 / 16-bit integer formats under float inputs %s", v ? "read as integers and bitcast in the vertex shader" : "left as they are (DM_VK_VFMT_INTBITS=0)"); } return v; }
+static int intbits_kind(VkFormat f) {   // 1 an 8 / 16-bit UINT format, 2 SINT, 0 other
+    switch (f) { case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT:
+                 case VK_FORMAT_R16G16B16_UINT: case VK_FORMAT_R16G16B16A16_UINT: return 1;
+                 case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT:
+                 case VK_FORMAT_R16G16B16_SINT: case VK_FORMAT_R16G16B16A16_SINT: return 2;
+                 default: return 0; } }
+static pthread_mutex_t g_ibv_mu = PTHREAD_MUTEX_INITIALIZER;
+static VkShaderModule intbits_mod(vshader *vs, int gl, uint32_t u, uint32_t sm) {   // the vertex module (gl: the GL-depth variant) with those inputs bitcast; NULL: the shader's own
+    const uint32_t *code = gl ? vs->glcode : vs->code; size_t cw = gl ? vs->nglw : vs->nw;
+    if (!(u | sm) || !code) return VK_NULL_HANDLE;
+    VkShaderModule r = VK_NULL_HANDLE; pthread_mutex_lock(&g_ibv_mu);
+    for (int i = 0; i < vs->nibv; i++) if (vs->ibv[i].u == u && vs->ibv[i].s == sm && vs->ibv[i].gl == gl) { r = vs->ibv[i].mod; goto out; }
+    if (vs->nibv < 8) { size_t nw = 0; uint32_t *c = spv_vin_raw(code, cw, 0, u, sm, &nw);
+        if (c) { VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nw * 4, .pCode = c };
+                 if (vkCreateShaderModule(g_dev, &mci, NULL, &r)) r = VK_NULL_HANDLE; free(c); }
+        static _Atomic int said; if (atomic_fetch_add(&said, 1) < 8 || !r) VLOG("%svertex shader %s%s: integer inputs bitcast (uint %#x, int %#x)%s", r ? "" : "[RED] ", vs->key, gl ? " (GL depth)" : "", u, sm, r ? "" : ": NOT made, the shader's own module");
+        vs->ibv[vs->nibv].u = u; vs->ibv[vs->nibv].s = sm; vs->ibv[vs->nibv].gl = gl; vs->ibv[vs->nibv].mod = r; vs->nibv++; }
+  out:
+    pthread_mutex_unlock(&g_ibv_mu); return r;
+}
 // A device without draw parameters: the module (any variant of a shader) without them (spv_no_drawparams); c is freed when replaced
 static uint32_t *dp_fix(vshader *s, uint32_t *c, size_t *nw, const char *hex) {
     if (g_drawp || !c) return c;
@@ -3435,7 +3464,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         VkShaderModuleCreateInfo gci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ngl, .pCode = glcode };
         VkResult gr = vkCreateShaderModule(g_dev, &gci, NULL, &s->glmod);
         if (gr) { VLOG("[RED] shader %s: GL depth fallback module failed %d", hex, gr); s->glmod = VK_NULL_HANDLE; }
-        free(glcode);
+        if (!gr && intbits_on()) { s->glcode = glcode; s->nglw = ngl / 4; atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ngl); } else free(glcode);
     } else free(glcode);
     if (st == 1) spv_frag_outputs(code, ns / 4, s->out_cls);
     spv_io_masks(code, ns / 4, &s->in_mask, &s->out_mask);
@@ -3472,7 +3501,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
     atomic_fetch_add(&g_spv_mod_bytes, (uint64_t)ns); if (st == 1) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns);
-    if (st == 1) { s->code = code; s->nw = ns / 4; } else free(code);
+    if (st == 1 || (st == 0 && intbits_on())) { s->code = code; s->nw = ns / 4; if (st == 0) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns); } else free(code);   // (vertex shaders: the intbits variants)
     if (r) { VLOG("[RED] shader %s: vkCreateShaderModule failed %d", hex, r); if (s->glmod) vkDestroyShaderModule(g_dev, s->glmod, NULL); free(s); return NULL; }
     return s;
 }
@@ -4584,7 +4613,8 @@ static VkFormat attr_fmt_for(const vshader *vs, int depth_zero, uint32_t loc, Vk
     else if (cls == 0) { static int said; int ints = (f >= VK_FORMAT_R8_UINT && f <= VK_FORMAT_R8_SINT) || (f >= VK_FORMAT_R8G8_UINT && f <= VK_FORMAT_R8G8_SINT) ||
             (f >= VK_FORMAT_R8G8B8A8_UINT && f <= VK_FORMAT_R8G8B8A8_SINT) || (f >= VK_FORMAT_R16_UINT && f <= VK_FORMAT_R16_SINT) || (f >= VK_FORMAT_R16G16_UINT && f <= VK_FORMAT_R16G16_SINT) ||
             (f >= VK_FORMAT_R16G16B16A16_UINT && f <= VK_FORMAT_R16G16B16A16_SINT);
-        if (ints && !said++) VLOG("[RED] vertex attributes: an 8 / 16-bit integer format %d under a float shader input (location %u): no format gives the same bits; left as it is", (int)f, loc); }
+        if (ints && !said++) VLOG("%svertex attributes: an 8 / 16-bit integer format %d under a float shader input (location %u): %s", intbits_on() ? "" : "[RED] ", (int)f, loc,
+                                  intbits_on() ? "read as integers and bitcast in the vertex shader (intbits_mod)" : "no format gives the same bits; left as it is (DM_VK_VFMT_INTBITS=0)"); }
     return f;
 }
 static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
@@ -4647,7 +4677,12 @@ static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
         else b10_note("a draw blended into the stand-in: the blend's result is kept as it is (R11G11B10F would store a sum below 0 as 0, one past 65024 as 65024)", NULL, (int)cb[i].colorBlendOp);
     }
     VkPipelineShaderStageCreateInfo st[5]; uint32_t nst = 0;
-    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && (k.discard || k.tfpts))) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap, qm) : i == 0 && k.tfpts && pr->sh[0]->ptsmod ? pr->sh[0]->ptsmod : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
+    VkShaderModule ibm = VK_NULL_HANDLE;   // the vertex module with integer-format inputs bitcast (intbits_mod), of the variant this pipeline draws with
+    if (intbits_on() && vs && !k.tfpts && !k.discard) { uint32_t um = 0, sm = 0; int vgl = vs_gl(vs, k.depth_zero), nvi; const spv_input *vi = vs_inputs(vs, k.depth_zero, &nvi);
+        for (int i = 0; i < nvi; i++) { uint32_t loc = vi[i].location; if (loc >= 32 || vi[i].sclass != 0 || !k.attr[loc].used || k.attr[loc].bind == 16) continue;
+            int ik = intbits_kind((VkFormat)k.attr[loc].fmt); if (ik == 1) um |= 1u << loc; else if (ik == 2) sm |= 1u << loc; }
+        if (um | sm) ibm = intbits_mod(vs, vgl, um, sm); }
+    for (int i = 0; i < 5; i++) if (pr->sh[i] && !(i == 1 && (k.discard || k.tfpts))) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = pr->sh[i]->vkstage, .module = i == 1 ? frag_module_(pr, k.cfmt, k.ds_swap, qm) : i == 0 && k.tfpts && pr->sh[0]->ptsmod ? pr->sh[0]->ptsmod : i == 0 && k.discard && pr->sh[0]->tfmod ? pr->sh[0]->tfmod : i == 0 && ibm ? ibm : i == 0 && !g_clipctl && !k.depth_zero && pr->sh[0]->glmod ? pr->sh[0]->glmod : pr->sh[i]->mod, .pName = "main" };
     if (k.tfpts && k.tfpts <= 4) st[nst++] = (VkPipelineShaderStageCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = g_tfp_fs[k.tfpts - 1], .pName = "main" };   // (the points' outputs into the targets)
     // the y flip (spv_flip_y): -1 for the upper-left origin, 1 otherwise; a module without the constant (capture variants) ignores the entry
     static const VkSpecializationMapEntry yfe = { SPV_FLIP_Y_SPEC_ID, 0, 4 }; const float yfv = k.yflip ? -1.0f : 1.0f; const VkSpecializationInfo yfi = { 1, &yfe, 4, &yfv };

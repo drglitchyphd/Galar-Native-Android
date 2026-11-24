@@ -102,8 +102,15 @@ static void *ngc_vtable(void) {
 }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilterC1Ev", "profanity filter, the word list is in a system save; the host builds none and gives the object a host vtable", void, h_ngc_Ctor, void *self) {
     void *vt = ngc_vtable(); if (vt && self) memcpy(self, &vt, sizeof vt);
+    // what the SDK's constructor also clears: the "initialized" flag (+9) and the fields at +0xc / +0x20 / +0x28. Left as the heap's old bytes, an SDK Finalize or
+    //   destructor would see the flag set and "finalize" a work-buffer allocator at +0x18 that is really leftover heap data (Galar #277: the Battle Tower zeroed the
+    //   game heap's vtable that way and crashed at main+0x7d0be4). Only these, the object's size differs by SDK
+    if (self) { uint8_t *o = self; o[9] = 0; memset(o + 0xc, 0, 4); memset(o + 0x20, 0, 8); memset(o + 0x28, 0, 4); }
 }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilterD1Ev", "profanity filter", void, h_ngc_Dtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3ngc15ProfanityFilterD0Ev", "profanity filter (deleting)", void, h_ngc_Dtor0, void *self) { (void)self; }
+// called directly by Sword / Shield at teardown (main+0x7d0ba0, the Battle Tower); the SDK's own would free a work buffer the host never made (#277)
+HLE_FORCE("_ZN2nn3ngc15ProfanityFilter8FinalizeEv", "profanity filter finalize; the host made no work buffer", void, h_ngc_Fin, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilter10InitializeEPvm", "profanity filter init; the host has no word list", Result, h_ngc_Init, void *self, void *work, uint64_t sz) { (void)self; (void)work; (void)sz; return RES_OK; }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilter17GetContentVersionEv", "word list version; the host returns 0", uint32_t, h_ngc_Ver, void *self) { (void)self; return 0; }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKcm", "profanity check; never a hit", Result, h_ngc_Check, void *self, uint32_t *masks, uint32_t pat, const char **words, uint64_t n) {

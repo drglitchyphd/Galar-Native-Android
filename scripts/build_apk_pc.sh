@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the installable app (PokemonShield.apk) from this repository on a PC: Linux, or Windows through WSL (Ubuntu). No game files or keys are involved:
-# the app sets the game up on the phone from the player's own dump.
+# the app sets the game up on the phone from the player's own extracted game files (ExeFS and RomFS).
 #
 #   bash scripts/build_apk_pc.sh            the app, with libadrenotools so players can pick a custom Vulkan driver (Mesa Turnip / PanVK) on the setup screen
 #   TURNIP=0 bash scripts/build_apk_pc.sh   without it: the phone's own Vulkan driver only
@@ -61,8 +61,8 @@ step "2/8 the engine (libnxnative.so)"
 make -C "$A" -f Makefile.host GAME=$GAME NDK="$NDK" API=$API -j"$(nproc)" lib | tail -1
 cp "$A/out/host-$GAME-vulkan/lib/libnxnative.so" "$LIBS/"
 
-step "3/8 the NSP / XCI unpacker and the shader translator (.NET NativeAOT for Android)"
-bash "$A/extract_aot/build_extract_aot.sh" | tail -1; cp "$A/extract_aot/out/libnx_extract.so" "$LIBS/"
+step "3/8 the shader translator (.NET NativeAOT for Android)"
+rm -f "$LIBS/libnx_extract.so"   # (the NSP / XCI unpacker: no longer in the app, setup takes extracted ExeFS / RomFS folders)
 GAME=$GAME bash "$A/xlate_aot/build_xlate_aot.sh" | tail -1; cp "$A/xlate_aot/out/libdmsh_xlate.so" "$LIBS/"
 
 step "4/8 spirv-cross"
@@ -104,4 +104,4 @@ step "8/8 the APK"
 OUT="$WORK/$(python3 "$REPO/dm/games/game.py" $GAME app_name | tr -d ' ').apk"   # GalarNative.apk / PaldeaNative.apk
 python3 "$A/tools/build_apk.py" --game $GAME --libs "$LIBS" --pylib "$PY/prefix/lib/python3.14" --capstone-py "$WORK/capstone-py/capstone" --bt "$BT" --jar "$JAR" \
     --ks "${KS:-$WORK/debug.keystore}" --out "$OUT" $([ "${OFFICIAL:-0}" = 1 ] && echo --official) $([ -n "${VERSION:-}" ] && echo --version "$VERSION")
-echo; echo "done: $OUT (install it, open it, choose your game files and keys)"
+echo; echo "done: $OUT (install it, open it, choose your ExeFS and RomFS folders)"

@@ -6,12 +6,12 @@
 > **Work in progress.** On a Galaxy S25+ (Adreno 830) Violet and Scarlet boot, and Violet plays its opening at about 30 fps: language, look and name selection, the academy application with its ID photo, and the 3D classroom scene. Gameplay past the opening has not been tested yet. The current release, **v0.96, is a pre-release**: it brings Scarlet and Violet up to the engine Galar Native and Arceus Native share (one engine, one version number), and **Scarlet and Violet have not been played on our test phone with it.** See [Known problems](#known-problems).
 
 > [!NOTE]
-> **No game files, code, shaders or keys are included.** You need your own dump (base game + update 4.0.0) and your console's `prod.keys`.
+> **No game files, code, shaders or keys are included.** You need the ExeFS and RomFS folders extracted from your own copy of the game, with update 4.0.0 applied.
 
 ## Install
 
 1. Install `PaldeaNative.apk` from [Releases](https://github.com/simipoB/Paldea-Native-Android/releases) (or [build it](#building)).
-2. Choose your **game files** (`.nsp` / `.xci`: base game, update 4.0.0, any DLC) and **keys**. Keys stay on the phone.
+2. Choose your **game files**: the **ExeFS** and **RomFS** folders you extracted from your game with **update 4.0.0 applied** (the folder holding both, or each in turn), plus one RomFS folder per DLC with **Add DLC** (its folder name must carry the DLC's title ID or number). Setup copies them into the app; with too little room it offers to move them instead. No keys and no `.nsp` / `.xci` any more: v0.98 deletes keys an older version stored.
 3. **Set up the game.** Setup detects Scarlet or Violet from your files. One app runs both, each with its own setup, saves, settings and mods, its own name and icon on its home screen shortcut.
 
 - Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`, the same key as Galar Native's and Arceus Native's. Any other build says "Unofficial build". An official update installs over the last one (v0.60 or v0.82) and keeps your setup and saves; v0.96 needs no new setup.

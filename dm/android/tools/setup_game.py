@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# The game's setup from the player's own dump, on the phone (the app's setup screen runs it with the Python it ships) or on Linux (the reference run):
-#   1. unpack: nx_extract (LibHac, built for the platform) merges the update over the base game → ExeFS / RomFS; DLC → aoc/<n>
+# The game's setup from the player's own extracted game files, on the phone (the app's setup screen runs it with the Python it ships) or on Linux (the reference run):
+#   1. copy: the ExeFS and RomFS folders the player extracted on their own hardware with the update applied, identified by main's build ID (the profiles' build
+#      rows); ExeFS → <work>/extract/ExeFS, RomFS → <work>/extract/RomFS, each DLC's RomFS folder → aoc/<n> (dlc_index). No keys, nothing decrypted or unpacked
 #   2. rewrite: patch_nso.py, Android target, for every module the profile loads → patched/
 #   3. shaders: shader_split.py (the shaders inside RomFS) → dmsh_build.py in SPIR-V-only mode (the translator and spirv-cross built for the platform)
 #      → vk_meta.py (the replay's reflection) → spv_pak.py → shaders.pak
@@ -9,8 +10,9 @@
 #   "STEP <n>/<total> <what>" and "DONE" / "FAILED <why>"; details go to <work>/setup.log.
 #        setup_game.py --captures <dir> --out <game dir> --work <scratch dir> --bin <dir>: translate the shaders the game built in memory and a run saved
 #          (nvn_vk.c mtl_shader_seen: <key>.ctl / <key>.code), into the same shader set, and pack it again; the game picks them up at its next start
-# Usage: setup_game.py --keys <dir with prod.keys [title.keys]> --base <.nsp|.xci> [--update <.nsp>] [--dlc <.nsp> ...] --out <game dir> --work <scratch dir>
-#                      --bin <dir with nx_extract, dmsh_xlate, spirv-cross> [--ext-font <nintendo_ext.ttf>] [--std-font <ttf>]
+# Usage: setup_game.py --exefs <ExeFS folder> --romfs <RomFS folder> [--dlc-dir <DLC RomFS folder> ...] [--move] --out <game dir> --work <scratch dir>
+#                      --bin <dir with dmsh_xlate, spirv-cross> [--ext-font <nintendo_ext.ttf>] [--std-font <ttf>]
+#        (--exefs and --romfs may both be the dump's parent folder that holds exefs/ and romfs/, any case)
 # Environment: DM_GAME (the profile: the app's game, SetupActivity passes it; default 01008DB008C2C000, Pokémon Shield), J (jobs)
 import argparse, glob, hashlib, os, re, shutil, signal, struct, subprocess, sys, threading, time, zlib
 
@@ -21,6 +23,7 @@ PROFILE = _game.load()
 NAME = PROFILE.get('name')
 
 _TOOLS = None
+MOVED_WORK = []   # the setup moved the player's folders (--move): a failure moves them back (restore_moved)
 def chain_tool(name):
     """dmsh_chain.py / dmsh_build.py of this game's shader chain generation (dm/gfx/chains/chain_tree.py, the profile's xlate_chain): dm/gfx/tools itself when it
     is that generation (an APK carries its game's generation there, named in gfx/tools/CHAIN; a checkout's live tools for a game on them), else a tool tree with
@@ -127,7 +130,9 @@ def share_translated(vk, same):
             except FileNotFoundError: pass
             if not os.path.isfile(src): continue
             try: os.link(src, dst)
-            except OSError: shutil.copyfile(src, dst)
+            except OSError:   # (some storage makes the link and still reports an error: copying onto it then fails as the same file, #320)
+                if os.path.lexists(dst): os.remove(dst)
+                shutil.copyfile(src, dst)
             got = got or end == '.spv'
         n += got
     return n
@@ -148,51 +153,184 @@ def translation_kept(work, chain):
     except (OSError, ValueError): return False
     return m.get('chain') == chain and m.get('found') == found_digest(work) and bool(m.get('found'))
 
-def explain_failure(log_path, files):
-    """The unpacker's known failures in words a player can act on (from the end of setup.log), and whether setting up anyway (--allow-damaged) can get past
-    it; ('', False) when it is none of them"""
+# ---- step 1: the player's own extracted game files ----
+# The player extracts the game on their own hardware into two folders with the update applied (a merged base + update): ExeFS (main, main.npdm, rtld, sdk,
+# subsdk*) and RomFS, plus one RomFS folder per DLC. Nothing is decrypted or unpacked here: no keys, no NSP / XCI (nx_extract, prod.keys and title.keys are gone
+# from the app)
+def child_dir(d, name):
+    """d's sub-folder called name in any case (exefs, ExeFS, EXEFS), or None"""
     try:
-        with open(log_path, encoding='utf-8', errors='replace') as f: tail = f.read()[-8000:]
-    except OSError: return '', False
-    run = tail[tail.rfind('$ '):] if '$ ' in tail else tail   # the last run only: an older failure higher up the log is not this one
-    names = [os.path.basename(f) for f in files]
-    m = re.search(r'Exception: (.+?) is incomplete: it has (\d+) of its (\d+) bytes \(([\d.]+)%\)', run)
-    if m:
-        return (f'{m.group(1)} is incomplete: it holds {int(m.group(2)) / (1 << 30):.2f} GB of its {int(m.group(3)) / (1 << 30):.2f} GB ({m.group(4)}%). '
-                'It was cut short while being copied or downloaded: copy the whole file again, then set up again'), False
-    m = re.search(r'\[RED\] damaged: (the update|the base game|your game file) fails its hash check', run)
-    if m:
-        who = {'the update': 'your update file', 'the base game': 'your base game file', 'your game file': 'your game file'}[m.group(1)]
-        return (f'{who} is damaged, or the update does not belong to this base game: its data fails the checksum stored inside it (2002-4604). '
-                'Copy it again in full or dump it again from your Switch. "Set up anyway" tries to go on regardless, but the game may then not start'), True
-    m = re.search(r'\[RED\] the NSP is damaged: (\d+) files fail', run)
-    if m:
-        return (f'{m.group(1)} of the game\'s files are damaged in your dump: they fail the checksum stored inside it (2002-4604). Copy your files again in full or dump them '
-                'again from your Switch. "Set up anyway" keeps the damaged files as they are: the game may crash where it uses them'), True
-    if '2002-4604' in run or 'Hash error' in run or 'VerificationFailed' in run or 'LinkedListEmpty' in run:
-        return ('one of your files is damaged: its data does not match the checksum stored inside it. A file cut short or corrupted while being copied or downloaded '
-                'does this: copy it again in full, or dump it again from your Switch, then set up again'), True
-    if 'MissingKeyException' in run or 'KeyNotFound' in run or 'Unable to decrypt' in run or 'key' in run.lower() and 'missing' in run.lower():
-        return 'a key your dump needs is not in your prod.keys / title.keys: dump the keys again from the same Switch (newer system versions add keys)', False
-    if 'No space left' in run or 'ENOSPC' in run:
-        return 'the phone ran out of storage while unpacking: free some space and set up again', False
-    if 'is not an NSP or XCI' in run or 'has a damaged header' in run:
-        return 'one of your files is not a Switch game file (.nsp / .xci), or its header is damaged: choose your dump files again', False
-    if 'no base game program' in run:
-        return 'none of your files is the base game: choose the base game (.nsp / .xci) too, with the update', False
-    return '', False
+        for e in sorted(os.scandir(d), key=lambda e: e.name):
+            if e.is_dir() and e.name.lower() == name.lower(): return e.path
+    except OSError: pass
+    return None
+
+def resolve_exefs(path):
+    """The ExeFS folder: path itself when it holds main, else its exefs sub-folder (one pick of a dump's parent folder with exefs/ and romfs/, as nxdumptool and the
+    emulators' "dump ExeFS / RomFS" make it)"""
+    if not path or not os.path.isdir(path): raise RuntimeError(f'the ExeFS folder {path or ""} was not found: choose your files again')
+    if os.path.isfile(os.path.join(path, 'main')): return path
+    sub = child_dir(path, 'exefs')
+    if sub and os.path.isfile(os.path.join(sub, 'main')): return sub
+    raise RuntimeError(f'{path} is not an ExeFS folder: it has no file named main. Choose the ExeFS folder extracted from your game (main, main.npdm, rtld, sdk, ...)')
+
+def resolve_romfs(path):
+    """The RomFS folder: path itself, or its romfs sub-folder (the dump's parent folder)"""
+    if not path or not os.path.isdir(path): raise RuntimeError(f'the RomFS folder {path or ""} was not found: choose your files again')
+    sub = child_dir(path, 'romfs')
+    if sub: path = sub
+    if os.path.isfile(os.path.join(path, 'main')): raise RuntimeError(f'{path} is an ExeFS folder, not a RomFS folder: choose the RomFS folder too')
+    try: empty = not any(True for _ in os.scandir(path))
+    except OSError as e: raise RuntimeError(f'the RomFS folder {path} cannot be read ({e})')
+    if empty: raise RuntimeError(f'the RomFS folder {path} is empty')
+    return path
+
+TID_RE = re.compile(r'(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])')
+def app_of(tid):   # the game a title ID belongs to: an update is the game's ID + 0x800, a DLC the game's ID + 0x1000 + its number
+    return (tid & ~0xFFF) - 0x1000 if (tid >> 12) & 1 else tid & ~0xFFF
+
+def dlc_marked(name):   # a folder named after a DLC: a title ID in its name, or a plain number (the app's own aoc/<n>)
+    return bool(TID_RE.search(name)) or (name.isdigit() and 1 <= int(name) <= 2000)
+
+def has_files(d):
+    return any(fs for _, _, fs in os.walk(d))
+
+def dlc_folders(paths):
+    """The DLC folders the player chose, each one DLC's RomFS. One pick can also be a folder of DLC folders: a dump's DLC/ (or aoc/) folder, or the dump's parent
+    folder holding it (exefs/, romfs/, DLC/<title ID>/romfs, as one of the PC dumps here is laid out)"""
+    out = []
+    for p in paths:
+        p = os.path.normpath(p)
+        if not os.path.isdir(p): raise RuntimeError(f'the DLC folder {p} was not found: choose it again')
+        holder = child_dir(p, 'dlc') or child_dir(p, 'aoc')
+        if holder: out += [e.path for e in sorted(os.scandir(holder), key=lambda e: e.name) if e.is_dir() and has_files(e.path)]; continue   # (an empty one: no DLC there)
+        subs = [e.path for e in sorted(os.scandir(p), key=lambda e: e.name) if e.is_dir()]
+        if subs and not child_dir(p, 'romfs') and not dlc_marked(os.path.basename(p)) and all(dlc_marked(os.path.basename(s)) for s in subs): out += [s for s in subs if has_files(s)]   # (the DLC/ folder itself)
+        else: out.append(p)
+    return out
+
+def dlc_index(path, base_tid, name):
+    """aoc/<n>, the index the game asks the add-on content service for (hle_misc.c lists aoc/<n>, hle_fs.c mounts it). nx_extract took it from the DLC's title ID: the
+    base game's + 0x1000 + n (Shield's 01008DB008C2D001 → 1, ...D002 → 2; the index is the ID's low 11 bits, 0 taken as 1). A folder holds no title ID, so it comes
+    from the names: the folder's own and up to three parents', the deepest first (dump tools name their output after the title ID: DLC/0100A3D008C5D001/romfs,
+    "Pokemon Shield [01008DB008C2D002][v0]/romfs"); a name with the base game's or its update's ID says nothing and the search goes on up. A folder named with a
+    plain number (1, 2: the app's own aoc/<n>, or the player's naming; its parent's name when the folder itself is romfs) is that index. The order the folders were
+    chosen in is never used: a player with only the second DLC must get index 2, which a count would make 1. → (index, title ID or '')"""
+    parts = os.path.normpath(os.path.abspath(path)).split(os.sep)
+    own = parts[-2] if parts[-1].lower() == 'romfs' and len(parts) > 1 else parts[-1]
+    for comp in reversed(parts[-4:]):
+        for m in TID_RE.finditer(comp):
+            t = int(m.group(1), 16)
+            if app_of(t) != base_tid:
+                other = _game.by_title(app_of(t))
+                raise RuntimeError(f'the DLC folder {path} is named after a title of {other.get("name") if other else "another game"} ({t:016X}), not of {name}')
+            if 0x1000 <= t - base_tid <= 0x17ff: return (t & 0x7ff) or 1, f'{t:016X}'
+    if own.isdigit() and 1 <= int(own) <= 2000: return int(own), ''
+    raise RuntimeError(f'which DLC {path} is cannot be told from its name: rename its folder to the DLC\'s title ID ({base_tid + 0x1001:016X} for the first DLC of {name}, '
+                       f'{base_tid + 0x1002:016X} for the second) or to its number (1, 2), then choose it again')
+
+def npdm_title(exefs):
+    """The program's title ID from main.npdm (META; its ACI0 at the offset in 0x70, the program ID at ACI0 + 0x10); 0 when there is none"""
+    try:
+        with open(os.path.join(exefs, 'main.npdm'), 'rb') as f: b = f.read(0x10000)
+        if b[:4] != b'META': return 0
+        o = struct.unpack_from('<I', b, 0x70)[0]
+        return struct.unpack_from('<Q', b, o + 0x10)[0] if b[o:o + 4] == b'ACI0' else 0
+    except (OSError, struct.error): return 0
+
+def identify(exefs, games):
+    """Which game and version the ExeFS is, from main's build ID (extracted folders have no control.nacp): the profiles' build rows (dm/games/*/game.tsv) are the
+    versions the apps run, their other_build rows versions they do not. games: the app's games (its own first); empty: the profile's game (DM_GAME) only.
+    → (the game's profile id, build ID); otherwise a RuntimeError says what the files are"""
+    with open(os.path.join(exefs, 'main'), 'rb') as f: h = f.read(0x50)
+    if len(h) < 0x50 or h[:4] != b'NSO0':
+        raise RuntimeError(f'{os.path.join(exefs, "main")} is not a Switch program (NSO0): choose the ExeFS folder as it was extracted, not a decompressed or patched copy')
+    bid = h[0x40:0x50].hex()
+    want = [g.upper() for g in games] or [GAME.upper()]
+    named = lambda ids: ' and '.join(_game.load(g).get('name') for g in ids)
+    need = lambda g: ' or '.join(sorted({b['display'] for b in g.builds().values()}))
+    for gid in want:
+        if bid in {b.get('main') for b in _game.load(gid).builds().values()}: return gid, bid
+    profiles = _game.all_games()
+    for g in profiles:   # a version another app runs (Legends: Arceus files chosen in Galar Native)
+        for b in g.builds().values():
+            if b.get('main') == bid: raise RuntimeError(f'your files are {g.get("name")} {b["display"]}: this app runs {named(want)}')
+    for g in profiles:   # a version of a game the profiles know but no app runs (most often the base game without its update)
+        for disp, *mods in g.values('other_build'):
+            if dict(m.split('=', 1) for m in mods if '=' in m).get('main') != bid: continue
+            if g.id.upper() in want:
+                raise RuntimeError(f'your files are {g.get("name")} {disp}, and this app needs update {need(g)}: extract ExeFS and RomFS again with the {need(g)} update applied')
+            raise RuntimeError(f'your files are {g.get("name")} {disp}: this app runs {named(want)}')
+    tid = npdm_title(exefs)
+    own = next((gid for gid in want if int(gid, 16) == tid), None) if tid else None
+    if own:
+        g = _game.load(own)
+        raise RuntimeError(f'your files are {g.get("name")} of a version this app does not know (main build ID {bid}): this app needs update {need(g)}. '
+                           f'Extract ExeFS and RomFS again with the {need(g)} update applied')
+    if tid:
+        other = _game.by_title(tid)
+        raise RuntimeError(f'your files are {other.get("name") if other else "another game"} ({tid:016X}): this app runs {named(want)}')
+    raise RuntimeError(f'your ExeFS is of an unknown game or version (main build ID {bid}): this app runs ' +
+                       ', '.join(f'{_game.load(g).get("name")} {need(_game.load(g))}' for g in want))
+
+def tree_size(d):
+    n = 0
+    for r, _, fs in os.walk(d):
+        for f in fs:
+            try: n += os.path.getsize(os.path.join(r, f))
+            except OSError: pass
+    return n
+
+def copy_tree(src, dst, prog):
+    """src's files into dst (made). prog = [bytes done, bytes in all, percent shown]: a 'PROGRESS done/total' line at each new percent"""
+    for r, ds, fs in os.walk(src):
+        ds.sort(); t = os.path.join(dst, os.path.relpath(r, src)); os.makedirs(t, exist_ok=True)
+        for f in sorted(fs):
+            s = os.path.join(r, f); shutil.copyfile(s, os.path.join(t, f)); prog[0] += os.path.getsize(s)
+            pct = prog[0] * 100 // max(prog[1], 1)
+            if pct != prog[2]: prog[2] = pct; print(f'PROGRESS {min(prog[0], prog[1])}/{max(prog[1], 1)}', flush=True)
+
+def same_storage(a, b):
+    try: return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError: return False
+
+def moved_mark(work): return os.path.join(work, 'moved.json')
+
+def restore_moved(work, log=None):
+    """The player's folders a setup moved into the game's folder (--move) go back where they were when that setup did not finish: on its failure, or at the start
+    of the next full setup when Android stopped it and it was not resumed. A rename back, nothing copied"""
+    import json
+    try: moved = json.load(open(moved_mark(work), encoding='utf-8'))
+    except (OSError, ValueError): return
+    for src, dst in reversed(moved):
+        if os.path.isdir(dst) and not os.path.exists(src):
+            try:
+                os.makedirs(os.path.dirname(src), exist_ok=True); os.replace(dst, src)
+                if log: log.write(f'moved back: {dst} → {src}\n')
+            except OSError as e:
+                if log: log.write(f'could not move {dst} back to {src}: {e}\n')
+    os.remove(moved_mark(work))
+
+def note_moved(work, src, dst):
+    import json
+    try: moved = json.load(open(moved_mark(work), encoding='utf-8'))
+    except (OSError, ValueError): moved = []
+    moved.append([src, dst]); json.dump(moved, open(moved_mark(work), 'w', encoding='utf-8'))
 
 def main():
     global PROFILE, NAME   # (the dump can name another game of the app: --games)
     ap = argparse.ArgumentParser()
-    ap.add_argument('--keys'); ap.add_argument('--base'); ap.add_argument('--captures'); ap.add_argument('--update'); ap.add_argument('--dlc', action='append', default=[])
+    ap.add_argument('--exefs', help='the ExeFS folder extracted from the game of the player, with the update applied (main, main.npdm, rtld, sdk, subsdk*), or the folder holding exefs/')
+    ap.add_argument('--romfs', help='the RomFS folder extracted with the update applied, or the folder holding romfs/')
+    ap.add_argument('--dlc-dir', action='append', default=[], help='a DLC RomFS folder (or a folder of them), named after the DLC title ID or its number (dlc_index)')
+    ap.add_argument('--move', action='store_true', help='with too little free storage for a copy: move the RomFS and DLC folders into the game folder instead (the player agreed: the setup screen asks)')
+    ap.add_argument('--captures')
     ap.add_argument('--out', required=True); ap.add_argument('--work', required=True); ap.add_argument('--bin', required=True)
     ap.add_argument('--ext-font'); ap.add_argument('--std-font'); ap.add_argument('--games'); ap.add_argument('--root')
-    ap.add_argument('--allow-damaged', action='store_true', help='the unpacker writes files that fail their hash check as read (the setup screen: Set up anyway)')
     ap.add_argument('--live', help='with --captures, while the game runs: the translated shaders also go into this folder for the engine to load at once (nvn_vk.c live_check)')
     ap.add_argument('--mod-shaders', help="the RomFS folders of the mods that are on, ':'-separated: their new shaders translated into the pack")
     ap.add_argument('--shaders-only', action='store_true', help='translate the shaders again from the game already set up in --out (its RomFS and patched/main.patched.bin): '
-                    'no dump and no keys, for an app version whose shader translation changed')
+                    'no game files chosen, for an app version whose shader translation changed')
     ap.add_argument('--scratch', help='the folder for the shader steps\' many small files (the scan\'s packages, the translation, its cache, the reflection, the raw pack): the app\'s private storage, where a file costs a fraction of what it does in shared storage (#262: 10,000 small files written in 0.5 s there, 26 s in /sdcard); default --work')
     ap.add_argument('--installed', help='the folder of an installed app\'s APKs that already hold this game (assets/game: RomFS and the rewritten code; the Legends: Arceus app built on a PC): set up from them instead of a dump')
     ap.add_argument('--flat-normals', action='store_true', help='only make the profile\'s flat normal maps (flat_normals: Legends: Arceus "No reflections") for the game set up in --out')
@@ -204,14 +342,14 @@ def main():
     if a.captures:
         if a.live: live_yield()
         return captures(a)
-    if not a.shaders_only and not (a.installed or (a.keys and a.base)): ap.error('--keys and --base are needed (or --installed, --captures, or --shaders-only)')
+    if not a.shaders_only and not (a.installed or (a.exefs and a.romfs)): ap.error('--exefs and --romfs are needed (or --installed, --captures, or --shaders-only)')
     os.makedirs(a.work, exist_ok=True); os.makedirs(a.out, exist_ok=True)
     S = a.scratch or a.work; os.makedirs(S, exist_ok=True)   # the shader steps' small files (--scratch); setup.log, the unpacked game and the marks stay in --work
     log = open(os.path.join(a.work, 'setup.log'), 'a', buffering=1)
     py = sys.executable; env = dict(os.environ, PYTHONUNBUFFERED='1')
     env['PATH'] = a.bin + os.pathsep + env.get('PATH', '')
     tool = lambda n: os.path.join(a.bin, n)
-    steps = ['unpack the game', 'rewrite the code', 'find the shaders', 'translate the shaders', 'pack the shaders', 'finish']
+    steps = ['copy the game files', 'rewrite the code', 'find the shaders', 'translate the shaders', 'pack the shaders', 'finish']
     def step(i, extra=''):
         print(f'STEP {i}/{len(steps)} {steps[i - 1]}{extra}', flush=True); log.write(f'== {time.strftime("%H:%M:%S")} {steps[i - 1]}{extra}\n')
     def run(cmd, retry_killed=0, **kw):
@@ -230,10 +368,7 @@ def main():
                 try: reason = signal.Signals(-r.returncode).name
                 except ValueError: reason = f'signal {-r.returncode}'
                 raise RuntimeError(f'{name} terminated by {reason} ({r.returncode}); see {log.name}')
-            hint, allow = explain_failure(log.name, files) if name == 'nx_extract' else ('', False)   # (files: the chosen dump files, set before the unpacker runs)
-            if allow and not a.allow_damaged: print('OFFER allow-damaged', flush=True)   # the setup screen offers "Set up anyway"
-            elif allow: hint = 'even set up anyway, your files could not be read: ' + hint.split(':')[0] + '. Copy them again in full or dump them again from your Switch'
-            raise RuntimeError(f'{name} failed ({r.returncode}){": " + hint if hint else ""}; see {log.name}')
+            raise RuntimeError(f'{name} failed ({r.returncode}); see {log.name}')
     def write_translated(work, chain):   # the translation is done: a fresh setup of the same dump keeps it (translation_kept)
         import json
         json.dump({'chain': chain, 'found': found_digest(work)}, open(translated_mark(work), 'w', encoding='utf-8'))
@@ -245,8 +380,6 @@ def main():
         stop5 = threading.Event(); threading.Thread(target=watch_files, args=(vk, '.vkr', max(nspv, 1), stop5), daemon=True).start()
         try: run([py, os.path.join(DM, 'android/tools/vk_meta.py'), built, vk, built])
         finally: stop5.set()
-    keys = os.path.join(a.keys, 'prod.keys') if a.keys else None
-    if not a.shaders_only and not a.installed and not (keys and os.path.isfile(keys)): raise RuntimeError(f'no prod.keys in {a.keys}')
     ex = os.path.join(a.work, 'extract')
 
     # --resume (the setup screen, after Android stopped this setup, #51 / #52: exit 137 during the shader translation): resume.json, written once the shader scan is done,
@@ -259,12 +392,12 @@ def main():
         if st.get('game'):
             PROFILE = _game.load(st['game']); NAME = PROFILE.get('name'); env['DM_GAME'] = os.environ['DM_GAME'] = st['game']
             print(f'GAME {st["game"].upper()}', flush=True)
-        exefs, romfs, pkg, pat = os.path.join(ex, 'ExeFS'), os.path.join(ex, 'RomFS'), os.path.join(S, 'shader_pkg'), os.path.join(a.out, 'patched')
-        if a.shaders_only: romfs = os.path.join(a.out, 'RomFS')   # (a shaders-only update reads the game's own RomFS: nothing was unpacked)
+        exefs, romfs, pkg, pat = os.path.join(ex, 'ExeFS'), st.get('romfs') or os.path.join(ex, 'RomFS'), os.path.join(S, 'shader_pkg'), os.path.join(a.out, 'patched')
+        if a.shaders_only: romfs = os.path.join(a.out, 'RomFS')   # (a shaders-only update reads the game's own RomFS: nothing was copied)
         resumed = True; log.write(f'== {time.strftime("%H:%M:%S")} resumed after a stop: steps 1-3 kept, the translation goes on\n')
     # --shaders-only: an app version whose shader translation changed needs only steps 3-6. The game set up before already holds what they read: RomFS/ (moved there
     #   at the end of that setup) and the rewritten main (patched/main.patched.bin: the decompressed image with only its code rewritten, so the shaders embedded in its
-    #   data are the dump's own). No dump, no keys, nothing unpacked: the player is not asked for anything (before, every such update meant choosing the files and
+    #   data are the game's own). Nothing chosen, nothing copied: the player is not asked for anything (before, every such update meant choosing the files and
     #   unpacking 12 GB again). The old pack and its ready file stay until the new one is complete
     main_src = None
     if not resumed and a.shaders_only:
@@ -340,74 +473,74 @@ def main():
         from_app = True   # (steps 1-3 done: on to the translation)
     elif not resumed:
         step(1)
+        restore_moved(a.work, log)   # (a moved setup Android stopped and nobody resumed: the player's folders go back first, so they can be chosen again)
         if os.path.isdir(ex): shutil.rmtree(ex)
-        # the DLC unpacks into the scratch folder first: which game the files are is only known once they are unpacked, and the chosen game's own DLC (another game's
-        # when the files are the other one of the pair) must stay until this setup replaces it
-        aoc = os.path.join(a.work, 'aoc'); shutil.rmtree(aoc, ignore_errors=True)
-        # every chosen file in one run: the unpacker tells base game, update and DLC apart by their contents, not their names or the order they were chosen in
-        # (an update named without [UPD], a merged XCI, DLC chosen first all work)
-        files = [f for f in [a.base, a.update] + a.dlc if f]
-        log.write('selected files:\n')
-        for f in files:
-            try: log.write(f'  {f} ({os.path.getsize(f)} bytes)\n')
-            except OSError as e: log.write(f'  {f} (stat failed: {e})\n')
-        try:
-            free = shutil.disk_usage(a.work).free
-            log.write(f'free space at extraction start: {free} bytes\n')
-        except OSError as e: free = None; log.write(f'free-space check failed: {e}\n')
-        # the unpacked game takes about as much as the files it comes from, plus the shaders: said now, not as a failure halfway through the unpacking
-        try: need = sum(os.path.getsize(f) for f in files) + (1 << 30)
-        except OSError: need = 0
-        if free is not None and need and free < need:
-            raise RuntimeError(f'not enough free storage: the setup needs about {need / (1 << 30):.1f} GB free and the phone has {free / (1 << 30):.1f} GB. '
-                               'Free some space (or delete files you copied into the app), then set up again')
-        run([tool('nx_extract'), keys, files[0], '-', ex, '--aoc-dir', aoc] + [x for f in files[1:] for x in ('--more', f)] + (['--allow-damaged'] if a.allow_damaged else []))
-        exefs, romfs = os.path.join(ex, 'ExeFS'), os.path.join(ex, 'RomFS')
-        if not os.path.isfile(os.path.join(exefs, 'main')): raise RuntimeError(f'the dump has no main module: is it {NAME}?')
-        # another game (the other one of Sword and Shield most often, #46) said so before the version check, which would otherwise ask for an update the user already chose:
-        # control.nacp holds the title's application ID at 0x3038 and its English name at 0
-        try:
-            nacp = open(os.path.join(ex, 'control.nacp'), 'rb').read()
-            tid = struct.unpack_from('<Q', nacp, 0x3038)[0]
-            name = nacp[:0x200].split(b'\0')[0].decode('utf-8', 'replace')
-        except (OSError, struct.error): tid, name = 0, ''
-        # --games (the app's games, its own first) and --root (the app's folder): the dump says which game it is, and it is set up in that game's place: the first game in
-        # --root, another in --root/<title ID>, replacing what was there (one of each game). Without --games, the profile's game only
+        exefs_src, romfs_src = resolve_exefs(a.exefs), resolve_romfs(a.romfs)
+        log.write(f'ExeFS: {exefs_src}\nRomFS: {romfs_src}\n' + ''.join(f'DLC: {d}\n' for d in a.dlc_dir))
+        # which game: main's build ID against the profiles (identify), checked now rather than as a failure ten minutes later in the shader steps. --games (the app's
+        # games, its own first) and --root (the app's folder): the game is set up in its own place, the first game in --root, another in --root/<title ID>, replacing
+        # what was there (one of each game). Without --games, the profile's game only
         games = [g for g in (a.games or '').split(',') if g]
-        if tid and games:
-            hit = next((i for i, g in enumerate(games) if int(g, 16) == tid), None)
-            if hit is None:
-                have = ' and '.join(_game.load(g).get('name') for g in games)
-                raise RuntimeError(f'your files are {name or "another game"} ({tid:016X}): this app runs {have}')
+        gid, build_id = identify(exefs_src, games)
+        log.write(f'main build ID {build_id}: {_game.load(gid).get("name")}\n')
+        if games:
+            hit = next(i for i, g in enumerate(games) if g.upper() == gid)
             PROFILE = _game.load(games[hit]); NAME = PROFILE.get('name'); env['DM_GAME'] = os.environ['DM_GAME'] = games[hit]
             out = a.root if hit == 0 else os.path.join(a.root, games[hit].upper())
             if os.path.realpath(out) != os.path.realpath(a.out):
                 os.makedirs(out, exist_ok=True); a.out = out
-            log.write(f'the dump is {NAME} ({tid:016X}): set up in {a.out}\n'); print(f'GAME {games[hit].upper()}', flush=True)
-        elif tid and tid != PROFILE.title_id:
-            other = _game.by_title(tid)
-            name = (other.get('name') if other else name) or 'another game'
-            raise RuntimeError(f'your files are {name} ({tid:016X}), not {NAME} ({PROFILE.title_id:016X})')
-        # the game's version, checked now rather than as a failure ten minutes later in the shader steps: the code (main's build ID) must be one the profile knows
-        with open(os.path.join(exefs, 'main'), 'rb') as f: build_id = f.read(0x50)[0x40:0x50].hex()
-        builds = PROFILE.builds(); want = ', '.join(sorted(b['display'] for b in builds.values()))
-        log.write(f'main build ID {build_id}\n')   # (with the unpacker's "N updates in the files" line: which update's code was taken)
-        if build_id not in {b.get('main') for b in builds.values()}:
-            have = ''
-            try: have = open(os.path.join(ex, 'control.nacp'), 'rb').read()[0x3060:0x3070].split(b'\0')[0].decode()
-            except OSError: pass
-            raise RuntimeError(f'your files hold {NAME} {have or "of an unknown version"}, and this app needs update {want}: '
-                               f'choose the {want} update too (a separate update file, or a dump that includes it)')
-
+            log.write(f'the files are {NAME}: set up in {a.out}\n'); print(f'GAME {games[hit].upper()}', flush=True)
+        dlcs = {}
+        for d in dlc_folders(a.dlc_dir):
+            n, tid = dlc_index(d, PROFILE.title_id, NAME); d = resolve_romfs(d)
+            if n in dlcs: raise RuntimeError(f'two DLC folders are DLC {n}: {dlcs[n]} and {d}. Choose each DLC once')
+            dlcs[n] = d; log.write(f'DLC {n}{" (" + tid + ")" if tid else ""}: {d}\n')
+        files = [exefs_src, romfs_src] + [dlcs[n] for n in sorted(dlcs)]
+        rom_out, aoc = os.path.join(a.out, 'RomFS'), os.path.join(a.out, 'aoc')
+        in_place = os.path.realpath(romfs_src) == os.path.realpath(rom_out)   # (the game's own RomFS from an earlier setup chosen again: nothing to copy)
+        # room for the copy and the shaders, said now, not as a failure halfway through: the folders' sizes. An earlier setup's RomFS and DLC of this game, about to
+        # be replaced, count as room. Too little: a move instead of a copy (the player's folders become the game's, one rename each) when they are on the same
+        # storage and the player agreed (--move; the setup screen asks after the OFFER line), else what to free
+        sizes = {'ExeFS': tree_size(exefs_src), 'RomFS': 0 if in_place else tree_size(romfs_src), 'DLC': sum(tree_size(d) for d in dlcs.values())}
+        need = sum(sizes.values()) + (1 << 30)
+        try: free = shutil.disk_usage(a.work).free
+        except OSError as e: free = None; log.write(f'free-space check failed: {e}\n')
+        old = (0 if in_place else tree_size(rom_out)) + (tree_size(aoc) if dlcs else 0)
+        log.write(f'sizes: ' + ', '.join(f'{k} {v >> 20} MB' for k, v in sizes.items()) + f'; free {free if free is None else free >> 20} MB, the old game files {old >> 20} MB\n')
+        move = False
+        if free is not None and free + old < need:
+            movable = all(same_storage(s, a.out) for s in [romfs_src, *dlcs.values()])
+            if movable and a.move and free + old >= sizes['ExeFS'] + (1 << 30): move = True
+            else:
+                if movable and not a.move: print(f'OFFER move {need} {free + old}', flush=True)   # the setup screen offers to move the folders instead
+                raise RuntimeError(f'not enough free storage to copy your game files: the setup needs about {need / (1 << 30):.1f} GB free and the phone has '
+                                   f'{(free + old) / (1 << 30):.1f} GB. Free some space, then set up again')
         # from here the game's folder changes: it is not ready until this setup finishes (a setup stopped halfway left the old ready file, and Play then started a game
         # with its rewritten code deleted)
         try: os.remove(os.path.join(a.out, 'ready'))
         except FileNotFoundError: pass
-        dst = os.path.join(a.out, 'aoc'); shutil.rmtree(dst, ignore_errors=True)
-        if os.path.isdir(aoc): shutil.move(aoc, dst)
-        aoc = dst
-        # the game's icon (home screen shortcut, launcher card, recent apps) written now, not only at the very end: a setup that stops or fails later keeps it
-        if os.path.isfile(os.path.join(ex, 'icon.jpg')): shutil.copyfile(os.path.join(ex, 'icon.jpg'), os.path.join(a.out, 'icon.jpg'))
+        if free is not None and free < need and old:
+            log.write(f'too little room beside the old game files: they go first ({old >> 20} MB)\n')
+            if not in_place: shutil.rmtree(rom_out, ignore_errors=True)
+            if dlcs: shutil.rmtree(aoc, ignore_errors=True)
+        exefs = os.path.join(ex, 'ExeFS'); prog = [0, sizes['ExeFS'] + (0 if move else sizes['RomFS'] + sizes['DLC']), -1]
+        copy_tree(exefs_src, exefs, prog)
+        if dlcs: shutil.rmtree(aoc, ignore_errors=True); os.makedirs(aoc)   # the DLC chosen replace the game's; none chosen: the game keeps the DLC it had
+        if move:
+            # one rename per folder: RomFS straight into the game's folder (setup_work's leftovers are deleted by the app, the game folder's RomFS is not); noted in
+            # moved.json, so a failure moves them back (restore_moved)
+            print('MOVING', flush=True); log.write('moving the RomFS and DLC folders into the game folder (--move)\n')
+            if not in_place: shutil.rmtree(rom_out, ignore_errors=True)
+            for s, d in ([] if in_place else [(romfs_src, rom_out)]) + [(dlcs[n], os.path.join(aoc, str(n))) for n in sorted(dlcs)]:
+                try: os.replace(s, d)
+                except OSError as e: raise RuntimeError(f'{s} could not be moved ({e.strerror}): free some space so it can be copied instead')
+                note_moved(a.work, s, d); MOVED_WORK.append(a.work)
+            romfs = rom_out
+        else:
+            romfs = rom_out if in_place else os.path.join(ex, 'RomFS')
+            if not in_place: copy_tree(romfs_src, romfs, prog)
+            for n in sorted(dlcs): copy_tree(dlcs[n], os.path.join(aoc, str(n)), prog)
+        log.write(f'copied: {prog[0] >> 20} MB\n')
 
         step(2)
         pat = os.path.join(a.out, 'patched'); shutil.rmtree(pat, ignore_errors=True); os.makedirs(pat)
@@ -430,7 +563,7 @@ def main():
             env=dict(env, DM_NVN_CAPTURE=os.path.join(a.out, 'nvn_capture')))
 
         import json
-        json.dump({'out': a.out, 'game': env.get('DM_GAME'), 'games': games, 'files': files}, open(state, 'w', encoding='utf-8'))
+        json.dump({'out': a.out, 'game': env.get('DM_GAME'), 'games': games, 'files': files, 'romfs': romfs}, open(state, 'w', encoding='utf-8'))
     step(4)
     chain = subprocess.run([py, chain_tool('dmsh_chain.py')], capture_output=True, text=True, env=env).stdout.strip()
     # The other game of the pair already set up with the same translation chain (Scarlet and Violet share every one of their 35,937 shaders; Sword and Shield most of
@@ -453,7 +586,9 @@ def main():
         for f in (tmp, target):
             if os.path.exists(f): os.remove(f)
         try: os.link(dp, tmp)   # (no extra space: a later merge into either game writes a new file and leaves the other's alone)
-        except OSError: shutil.copyfile(dp, tmp)
+        except OSError:   # (a link made but reported failed would make the copy below 'the same file': #320)
+            if os.path.lexists(tmp): os.remove(tmp)
+            shutil.copyfile(dp, tmp)
         if missing:
             vk = os.path.join(S, 'vk', 'b-' + chain); cache = os.path.join(S, 'shader_cache')
             kept = not resumed and translation_kept(a.work, chain)
@@ -532,7 +667,7 @@ def main():
     std = a.std_font or next((f for f in ('/system/fonts/Roboto-Regular.ttf', '/system/fonts/NotoSans-Regular.ttf') if os.path.isfile(f)), None)
     if std: shutil.copyfile(std, os.path.join(font, 'standard.ttf'))
     if a.ext_font: shutil.copyfile(a.ext_font, os.path.join(font, 'nintendo_ext.ttf'))
-    if os.path.isfile(os.path.join(ex, 'icon.jpg')): shutil.copyfile(os.path.join(ex, 'icon.jpg'), os.path.join(a.out, 'icon.jpg'))   # the game's icon from the player's dump: the setup screen puts it on the home screen shortcut
+    # (no icon.jpg any more: extracted folders have no control data. One an older setup wrote stays; without it the app's own icon stands in, SetupActivity)
     rom = os.path.join(a.out, 'RomFS')
     if os.path.realpath(rom) != os.path.realpath(romfs):
         shutil.rmtree(rom, ignore_errors=True); os.replace(romfs, rom)   # same storage: a rename, nothing copied
@@ -548,6 +683,8 @@ def main():
         except Exception as e: log.write(f'flat normals: {e}\n')
     open(os.path.join(a.out, 'ready'), 'w').write(chain + '\n')
     try: os.remove(state)
+    except FileNotFoundError: pass
+    try: os.remove(moved_mark(a.work))   # (the folders moved in are the game's now)
     except FileNotFoundError: pass
     print('DONE', flush=True)
 
@@ -825,4 +962,8 @@ def captures(a):
 
 if __name__ == '__main__':
     try: main()
-    except Exception as e: print(f'FAILED {e}', flush=True); sys.exit(1)
+    except Exception as e:
+        for w in MOVED_WORK[:1]:
+            try: restore_moved(w); print('MOVED BACK', flush=True)
+            except OSError: pass
+        print(f'FAILED {e}', flush=True); sys.exit(1)

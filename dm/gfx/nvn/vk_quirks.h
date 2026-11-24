@@ -163,15 +163,19 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     //   Mali, Xclipse and PowerVR keep full barriers for every game (Legends: Arceus flickered with them relaxed: #20 #31 #32)
     case Q_NO_DYNREN: case Q_GATHER_BIAS: case Q_PASS_DEFER: case Q_IMPORT_MARK_OFF: return g->vendor == VEN_QCOM;
     case Q_BARRIER_RELAXED: return g->vendor == VEN_QCOM && !gpu_is_old_qcom(g);
-    // the replay's own thread: by the GPU's name, as Faster rendering's Auto always tested it (Turnip names itself "Turnip Adreno")
-    case Q_NVN_ASYNC: return strstr(g->name, "Adreno") != NULL && !(g->eng & ENG_NVN_ASYNC_NEVER);
+    // the replay's own thread: by the GPU's name, as Faster rendering's Auto always tested it (Turnip names itself "Turnip Adreno"); and Arm's own Mali driver since
+    //   v0.97: the POCO X6 Pro (G615 MC6, r44p1) spent 22-42 ms a frame recording on the game's thread with every pass storing its attachments (the held frame's store
+    //   decisions come with it, DM_VK_FRAME_HOLD=2). Not PanVK (untested there)
+    case Q_NVN_ASYNC: return (strstr(g->name, "Adreno") != NULL || gpu_is_arm_driver(g)) && !(g->eng & ENG_NVN_ASYNC_NEVER);
     // the games apart, each by its own profile (engine_quirks → gpu_id.eng): worker-built pipelines left objects missing for frames on an Adreno 710 (Arceus #34:
     //   async_pso_off); Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides (Arceus #34: qc11_no_eds; Sword / Shield answered #209 with full barriers
     //   instead); the driver self-tests at start (driver_selftests); the replay never on its own thread (nvn_async_never, above).
     //   Pipelines the lists lacked are built in the background on every GPU, not only on Adreno (beta-exit f09e58f, the owner's call 2026-11-22: a hitch waiting for a
     //   pipeline was the stutter left on Mali / Xclipse / PowerVR): no vendor test, only the game's own async_pso_off
     case Q_ASYNC_PSO: return !(g->eng & ENG_ASYNC_PSO_OFF);
-    case Q_NO_EDS: return (g->eng & ENG_QC11_NO_EDS) && g->vendor == VEN_QCOM && (g->api >> 22 & 0x7f) == 1 && (g->api >> 12 & 0x3ff) < 2;   // (VK_API_VERSION_MAJOR / MINOR)
+    //   Arm's own Mali driver before r44 (every game) ignores the per-draw stride and fetches with the pipeline's (0): every vertex reads vertex 0 and nothing
+    //   is drawn (seen on a Mali-G68 r38p1 by another Vulkan layer; our testers' r44p1 is fine, DM_VK_NO_EDS=1 changed nothing there). Not PanVK (custom, Mesa's version)
+    case Q_NO_EDS: return (g->vendor == VEN_ARM && !g->custom && (g->driver_version >> 22) > 0 && (g->driver_version >> 22) < 44) || ((g->eng & ENG_QC11_NO_EDS) && g->vendor == VEN_QCOM && (g->api >> 22 & 0x7f) == 1 && (g->api >> 12 & 0x3ff) < 2);   // (VK_API_VERSION_MAJOR / MINOR)
     case Q_DRIVER_SELFTESTS: return (g->eng & ENG_DRIVER_SELFTESTS) != 0;
     // Mali's white lit scene on Arm's own driver (#47 #110 #111 #172), for a game whose profile says mali_lit_standin (Sword / Shield): route A (the lit target as
     //   an RGBA16F stand-in) and the white-screen check that moves on to route B and the PanVK offer when it stays white. Arm's own driver only (by its release:
@@ -205,7 +209,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
 VKQ_UNUSED static int quirk_late(int q) {
     switch (q) {
     case Q_FLOAT_CONTROLS: case Q_CLAMP_ZERO: case Q_NAN_MINMAX: case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST:
-    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: return 1;
+    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: case Q_NVN_ASYNC: return 1;
     }
     return 0;
 }
