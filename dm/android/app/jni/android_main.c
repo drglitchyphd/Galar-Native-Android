@@ -843,8 +843,10 @@ static void flat_normals(void) {
     fprintf(stderr, "boot: no reflections: the flat normal maps of %s\n", root);
 }
 static pid_t g_game_tid;   // the game's main thread (performance hints below)
+void dm_boot_mark(const char *what) __attribute__((weak));   // (nvn_vk.c: a "[start]" line with the milliseconds since the process started)
 static void *host_thread(void *a) {
     g_game_tid = gettid();
+    if (dm_boot_mark) dm_boot_mark("host thread starts");
     (void)a; static char alt[65536]; stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt}; sigaltstack(&ss, 0);
     char patched[1100]; snprintf(patched, sizeof patched, "%s/patched", g_game);
     char *argv[3] = { "dmhost", patched, NULL };

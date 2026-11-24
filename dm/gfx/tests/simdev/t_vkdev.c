@@ -57,7 +57,7 @@ static PFN_vkCreateInstance real_ci; static PFN_vkCreateDevice real_cd;
 static PFN_vkGetPhysicalDeviceFeatures2 real_f2; static PFN_vkGetPhysicalDeviceProperties2 real_p2; static PFN_vkGetPhysicalDeviceExternalBufferProperties real_xb;
 static uint32_t w_inst_api; static int w_inst_p2ext;    // the instance as made: its apiVersion, VK_KHR_get_physical_device_properties2 enabled
 static int w_f2_calls, w_f2_bad;                         // Features2 / Properties2 / external buffer queries, and those made where the instance has no right to them
-static char w_dext[64][VK_MAX_EXTENSION_NAME_SIZE]; static uint32_t w_ndext; static int w_dev_made;
+static char w_dext[64][VK_MAX_EXTENSION_NAME_SIZE]; static uint32_t w_ndext; static int w_dev_made; static _Atomic int w_dev_count;
 static VkResult w_dev_result = VK_RESULT_MAX_ENUM;
 static int w_struct_bad;
 // The GPU's identity. The profiles layer simulates limits, features, formats and extensions but on purpose not who the device is (vendorID, deviceID, driverVersion,
@@ -158,7 +158,7 @@ static void lvp_mask(VkStructureType t, const char *what, VkBool32 *b, size_t n)
         else printf("SIMGAP feature %s member %zu: the profile has it, lavapipe has not (not enabled)\n", what, i); }
 }
 static VKAPI_ATTR VkResult VKAPI_CALL w_cd(VkPhysicalDevice pd, const VkDeviceCreateInfo *ci, const VkAllocationCallbacks *a, VkDevice *o) {
-    w_dev_made = 1; w_ndext = ci->enabledExtensionCount > 64 ? 64 : ci->enabledExtensionCount;
+    w_dev_made = 1; atomic_fetch_add(&w_dev_count, 1); w_ndext = ci->enabledExtensionCount > 64 ? 64 : ci->enabledExtensionCount;
     for (uint32_t i = 0; i < w_ndext; i++) snprintf(w_dext[i], sizeof w_dext[i], "%s", ci->ppEnabledExtensionNames[i]);
     VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pd, &pp);
     uint32_t api = pp.apiVersion < w_inst_api ? pp.apiVersion : w_inst_api;
@@ -1111,6 +1111,188 @@ static void shmod_work(void) {
         if (sh[i]->mod) { shmod_count(sh[i]->mod, (int64_t)sh[i]->nw * 4, -1); vkDestroyShaderModule(g_dev, sh[i]->mod, NULL); } free(sh[i]->code); free(sh[i]); }
 }
 
+// PREWARM (perf-1124 S1-S5): the wait before play, timed on this device. A synthetic shader set and pipeline list as a phone has them (vk/b-<chain>/<key>.spv + .vkr,
+//   vk_pipelines.bin, plus its .sst list for a driver without extended dynamic state), built by the engine's own prewarm (prewarm_start, the end of mtl_init) twice:
+//   a first start (no pipeline cache file) and a later one (the cache file the first one saved; every pipeline, shader and program made again, as in a new process).
+//   SIMDEV_PW_N pipelines (400 by default) over as many fragment shaders of SIMDEV_PW_OPS arithmetic instructions each (800: about 16 KB of SPIR-V; the game's
+//   are 40 KB on average) and SIMDEV_PW_N / 4 vertex shaders. Each SPIR-V differs in its generator word, so the driver compiles every pipeline.
+//   Printed: "PREWARM <start>: hold <ms> (the game's first submission held), done <ms>", the engine's own [start] / prewarm timer lines around them.
+//   SIMDEV_NO_PREWARM=1: skipped
+static uint32_t *pw_frag_spv(int ops, uint32_t gen, size_t *nw) {   // an OpFAdd / OpFMul chain on constants into the one colour output
+    size_t cap = 64 + (size_t)ops * 5 + 16; uint32_t *w = calloc(cap, 4), n = 0, id = 11;
+    w[n++] = 0x07230203; w[n++] = 0x00010000; w[n++] = gen; w[n++] = 0; w[n++] = 0;   // (the bound below)
+    w[n++] = 2u << 16 | 17; w[n++] = 1;                                   // OpCapability Shader
+    w[n++] = 3u << 16 | 14; w[n++] = 0; w[n++] = 1;                       // OpMemoryModel Logical GLSL450
+    w[n++] = 6u << 16 | 15; w[n++] = 4; w[n++] = 1; w[n++] = 0x6e69616d; w[n++] = 0; w[n++] = 2;   // OpEntryPoint Fragment %1 "main" %2
+    w[n++] = 3u << 16 | 16; w[n++] = 1; w[n++] = 7;                       // OpExecutionMode %1 OriginUpperLeft
+    w[n++] = 4u << 16 | 71; w[n++] = 2; w[n++] = 30; w[n++] = 0;          // OpDecorate %2 Location 0
+    w[n++] = 2u << 16 | 19; w[n++] = 3;                                   // %3 void
+    w[n++] = 3u << 16 | 33; w[n++] = 4; w[n++] = 3;                       // %4 function type
+    w[n++] = 3u << 16 | 22; w[n++] = 5; w[n++] = 32;                      // %5 float
+    w[n++] = 4u << 16 | 23; w[n++] = 6; w[n++] = 5; w[n++] = 4;           // %6 vec4
+    w[n++] = 4u << 16 | 32; w[n++] = 7; w[n++] = 3; w[n++] = 6;           // %7 pointer Output vec4
+    w[n++] = 4u << 16 | 59; w[n++] = 7; w[n++] = 2; w[n++] = 3;           // %2 the output
+    w[n++] = 4u << 16 | 43; w[n++] = 5; w[n++] = 8; w[n++] = 0x3f800000;  // %8 1.0
+    w[n++] = 4u << 16 | 43; w[n++] = 5; w[n++] = 9; w[n++] = 0x3f000000;  // %9 0.5
+    w[n++] = 5u << 16 | 54; w[n++] = 3; w[n++] = 1; w[n++] = 0; w[n++] = 4;   // %1 main
+    w[n++] = 2u << 16 | 248; w[n++] = 10;                                 // %10 its label
+    uint32_t prev = 8;
+    for (int i = 0; i < ops; i++, id++) { w[n++] = 5u << 16 | (i & 1 ? 133u : 129u); w[n++] = 5; w[n++] = id; w[n++] = prev; w[n++] = i % 3 ? 9 : 8; prev = id; }
+    uint32_t col = id++;
+    w[n++] = 7u << 16 | 80; w[n++] = 6; w[n++] = col; w[n++] = prev; w[n++] = prev; w[n++] = prev; w[n++] = 8;   // OpCompositeConstruct
+    w[n++] = 3u << 16 | 62; w[n++] = 2; w[n++] = col;                     // OpStore
+    w[n++] = 1u << 16 | 253; w[n++] = 1u << 16 | 56;                      // OpReturn, OpFunctionEnd
+    w[3] = id; *nw = n; return w;
+}
+static int pw_write(const char *path, const void *d, size_t n) { FILE *f = fopen(path, "wb"); if (!f) return 0; int ok = fwrite(d, 1, n, f) == n; return !fclose(f) && ok; }
+static void pw_key(uint8_t k[8], int kind, int i) { memset(k, 0, 8); k[0] = 0x70; k[1] = (uint8_t)kind; k[2] = (uint8_t)(i >> 8); k[3] = (uint8_t)i; k[7] = 1; }
+static void pw_hex(const uint8_t k[8], char hex[17]) { for (int i = 0; i < 8; i++) sprintf(hex + 2 * i, "%02x", k[i]); }
+// what a new process would not have: every pipeline, program and shader of the first start (the driver's pipeline cache is read again from its file)
+static void pw_forget(void) {
+    pthread_mutex_lock(&g_psomu);
+    for (uint32_t i = 0; i < g_pso.cap; i++) if (g_pso.vals[i]) vkDestroyPipeline(g_dev, (VkPipeline)g_pso.vals[i], NULL);
+    for (uint32_t i = 0; i < g_pso_s.cap; i++) if (g_pso_s.vals[i]) vkDestroyPipeline(g_dev, (VkPipeline)g_pso_s.vals[i], NULL);
+    nvn_hm_clear(&g_pso, NULL); nvn_hm_clear(&g_pso_s, NULL); nvn_hm_clear(&g_pso_fail, NULL); nvn_hm_clear(&g_pso_s_fail, NULL); nvn_hm_clear(&g_pso_used, NULL);
+    nvn_hm_clear(&g_pso_rec, NULL); nvn_hm_clear(&g_pso_rec_s, NULL); nvn_hm_clear(&g_pso_s_rec, NULL);
+    pthread_mutex_unlock(&g_psomu);
+    pthread_mutex_lock(&g_shmu);
+    nvn_hmap fresh = {.klen = 8};
+    for (uint32_t i = 0; i < g_shcache.cap; i++) { vshader *s = g_shcache.vals[i]; if (!s) continue;
+        if (strncmp(s->key, "70", 2)) { nvn_hm_put(&fresh, g_shcache.keys + (size_t)i * 8, s); continue; }   // (the test's own shaders: keys 70...)
+        if (s->mod) { shmod_count(s->mod, (int64_t)s->nw * 4, -1); vkDestroyShaderModule(g_dev, s->mod, NULL); }
+        for (int v = 0; v < s->nvar; v++) if (s->var[v].mod) vkDestroyShaderModule(g_dev, s->var[v].mod, NULL);
+        for (int v = 0; v < s->nibv; v++) if (s->ibv[v].mod) vkDestroyShaderModule(g_dev, s->ibv[v].mod, NULL);
+        if (s->glmod) vkDestroyShaderModule(g_dev, s->glmod, NULL); }   // (the vshader itself is left: a layout made from it may still name it)
+    free(g_shcache.keys); free(g_shcache.vals); g_shcache = fresh;
+    pthread_mutex_unlock(&g_shmu);
+    nvn_hm_clear(&g_pw.progs, NULL); nvn_hm_clear(&g_pw.seen, NULL);
+    atomic_store(&g_pw.next, 0); atomic_store(&g_pw.unfit, 0); atomic_store(&g_pw.built, 0); atomic_store(&g_pw.had, 0); atomic_store(&g_pw.failed, 0); atomic_store(&g_pw.noshader, 0); atomic_store(&g_pw.waits, 0);
+    atomic_store(&g_pw.t_lock, 0); atomic_store(&g_pw.t_shader, 0); atomic_store(&g_pw.t_layout, 0); atomic_store(&g_pw.t_pipe, 0);
+    atomic_store(&g_pw.kept, 0); atomic_store(&g_pw.cached, 0); atomic_store(&g_pw.skipped, 0); atomic_store(&g_pw.dups, 0); nvn_hm_clear(&g_pw_sprogs, NULL);
+    atomic_store(&g_pw_done, 0); atomic_store(&g_pw_total, 0); atomic_store(&g_pw_playing, 0); atomic_store(&g_pw_ended, 0);
+    if (g_pcache) { PFN_vkDestroyPipelineCache dpc = (PFN_vkDestroyPipelineCache)vkGetDeviceProcAddr(g_dev, "vkDestroyPipelineCache"); if (dpc) dpc(g_dev, g_pcache, NULL); g_pcache = VK_NULL_HANDLE; }
+}
+typedef struct { double hold_ms, done_ms; int built, had, at_release, warm, kept, cached, skipped; int saved_before_release, saved; } pw_run_t;
+static long long pw_mtime(const char *p) { struct stat st; if (stat(p, &st)) return -1; return (long long)st.st_mtim.tv_sec * 1000000000ll + st.st_mtim.tv_nsec; }
+// one start: the prewarm as mtl_init starts it, the game's first submission at once (prewarm_wait's wait, without its 200 ms polling)
+static pw_run_t pw_start(const char *label, const char *cache) {
+    pw_run_t r; memset(&r, 0, sizeof r);
+    long long m0 = pw_mtime(cache);
+    uint64_t t0 = mono_ns(); atomic_store(&g_pcache_saved_at, 0); atomic_store(&g_pw_released_at, 0);
+    prewarm_start();
+    while (atomic_load(&g_pw_hold)) usleep(200);
+    r.hold_ms = (mono_ns() - t0) / 1e6; r.at_release = atomic_load(&g_pw_done); r.warm = atomic_load(&g_pw_warm);
+    // (the game's first present is not made here: with a matched stamp the prewarm's threads go on as they would until then)
+    while (!atomic_load(&g_pw_ended)) usleep(500);
+    r.done_ms = (mono_ns() - t0) / 1e6; r.built = atomic_load(&g_pw.built); r.had = atomic_load(&g_pw.had); r.saved = pw_mtime(cache) != m0;
+    r.kept = atomic_load(&g_pw.kept); r.cached = atomic_load(&g_pw.cached); r.skipped = atomic_load(&g_pw.skipped);
+    { uint64_t s = atomic_load(&g_pcache_saved_at), l = atomic_load(&g_pw_released_at); r.saved_before_release = s && (!l || s < l); }
+    printf("PREWARM %s: hold %.0f ms (the game's first submission held, %d entries handled by then), done %.0f ms; %d built, %d already there%s; stamp %s; the cache file was %s before the game went on, %s\n",
+           label, r.hold_ms, r.at_release, r.done_ms, r.built, r.had, r.cached || r.skipped ? " (past the cap: some cache-only or skipped)" : "", r.warm ? "matched" : "not matched",
+           r.saved_before_release ? "WRITTEN" : "not written", r.saved ? "written" : "not written at all");
+    // S1: the game goes on before the cache is written (nvn_vk_prewarm_progress says 0 while the file is still the old one)
+    CHECK(!r.saved_before_release, "prewarm (%s): the pipeline cache file was written before the game was let go", label);
+    return r;
+}
+// the test shaders' SPIR-V hashes as loaded (S2: the same whether shaders load on one thread or many)
+static int pw_hashes(uint64_t *h, int max) {
+    int n = 0; pthread_mutex_lock(&g_shmu);
+    for (uint32_t i = 0; i < g_shcache.cap && n < max; i++) { vshader *s = g_shcache.vals[i]; if (!s || strncmp(s->key, "70", 2)) continue;
+        uint64_t kk = strtoull(s->key, NULL, 16); h[2 * n] = kk; h[2 * n + 1] = s->spv_hash; n++; }
+    pthread_mutex_unlock(&g_shmu);
+    for (int a = 1; a < n; a++) for (int b = a; b > 0 && h[2 * (b - 1)] > h[2 * b]; b--) { uint64_t t0 = h[2 * b], t1 = h[2 * b + 1]; h[2 * b] = h[2 * (b - 1)]; h[2 * b + 1] = h[2 * (b - 1) + 1]; h[2 * (b - 1)] = t0; h[2 * (b - 1) + 1] = t1; }
+    return n;
+}
+static void prewarm_work(void) {
+    if (getenv("SIMDEV_NO_PREWARM")) { printf("PREWARM skipped (SIMDEV_NO_PREWARM)\n"); return; }
+    int N = getenv("SIMDEV_PW_N") ? atoi(getenv("SIMDEV_PW_N")) : 400, OPS = getenv("SIMDEV_PW_OPS") ? atoi(getenv("SIMDEV_PW_OPS")) : 800, NV = N / 4 > 0 ? N / 4 : 1;
+    if (N > 65535) N = 65535;
+    char dir[96], sub[160], p[300], hex[17]; snprintf(dir, sizeof dir, "/tmp/t_vkdev_pw.%d", (int)getpid()); snprintf(sub, sizeof sub, "%s/b-%s", dir, DMSH_CHAIN);
+    mkdir(dir, 0700); mkdir(sub, 0700);
+    snprintf(p, sizeof p, "%s/shader_map.tsv", dir); FILE *map = fopen(p, "w"); if (!map) { CHECK(0, "prewarm: no scratch folder %s", dir); return; }
+    fprintf(map, "package\tindex\tstage\tkey\tsource\n");
+    uint8_t k[8];
+    for (int i = 0; i < NV; i++) { pw_key(k, 0, i); pw_hex(k, hex); size_t sz = sizeof zcopy_vert_spv; uint32_t *w = malloc(sz); memcpy(w, zcopy_vert_spv, sz); w[2] = 0x10000u + (uint32_t)i;
+        snprintf(p, sizeof p, "%s/%s.spv", sub, hex); pw_write(p, w, sz); free(w); snprintf(p, sizeof p, "%s/%s.vkr", sub, hex); pw_write(p, "# t_vkdev prewarm\n", 18);
+        fprintf(map, "pw\t%d\tvertex\t%s\tt_vkdev\n", i, hex); }
+    for (int i = 0; i < N; i++) { pw_key(k, 1, i); pw_hex(k, hex); size_t nw; uint32_t *w = pw_frag_spv(OPS, 0x20000u + (uint32_t)i, &nw);
+        snprintf(p, sizeof p, "%s/%s.spv", sub, hex); pw_write(p, w, nw * 4); free(w); snprintf(p, sizeof p, "%s/%s.vkr", sub, hex); pw_write(p, "# t_vkdev prewarm\n", 18);
+        fprintf(map, "pw\t%d\tpixel\t%s\tt_vkdev\n", i, hex); }
+    fclose(map);
+    snprintf(p, sizeof p, "%s/shader_map.tsv", dir); setenv("DM_NVN_SHMAP", p, 1); setenv("DM_SPV_DIR", dir, 1); unsetenv("DM_SPV_PAK"); unsetenv("DM_LIVE_SPV");
+    shmap_load();
+    char list[200], cache[200], lst[220]; snprintf(list, sizeof list, "%s/vk_pipelines.bin", dir); snprintf(cache, sizeof cache, "%s/vk_pipeline_cache.bin", dir); snprintf(lst, sizeof lst, "%s.sst", list);
+    FILE *f = fopen(list, "wb"), *fs = fopen(lst, "wb");
+    if (!f || !fs) { CHECK(0, "prewarm: the lists cannot be written in %s", dir); if (f) fclose(f); if (fs) fclose(fs); return; }
+    { uint32_t v[2] = { 1, (uint32_t)sizeof(pso_rec) }, vs[2] = { 1, (uint32_t)sizeof(pso_rec_s) }; fwrite(PSO_MAGIC, 1, 4, f); fwrite(v, 4, 2, f); fwrite(PSO_MAGIC_S, 1, 4, fs); fwrite(vs, 4, 2, fs); }
+    for (int i = 0; i < N; i++) {
+        pso_rec_s r; memset(&r, 0, sizeof r);
+        pw_key(r.r.key[0], 0, i % NV); pw_key(r.r.key[1], 1, i);
+        r.r.k.cfmt[0] = VK_FORMAT_R8G8B8A8_UNORM; r.r.k.chmask = 0xf; r.r.k.samples = 1; r.r.k.topo = 2; r.r.k.depth_zero = 1;
+        r.s.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; r.s.dcmp = VK_COMPARE_OP_ALWAYS; for (int q = 0; q < 2; q++) r.s.sop[q][3] = VK_COMPARE_OP_ALWAYS;
+        fwrite(&r.r, sizeof r.r, 1, f); fwrite(&r, sizeof r, 1, fs);
+    }
+    fclose(f); fclose(fs);
+    setenv("DM_VK_PSO_RECORD", list, 1); unsetenv("DM_VK_PSO_SEED"); setenv("DM_VK_PCACHE", cache, 1); unlink(cache);
+    printf("PREWARM list: %d pipelines, %d vertex + %d fragment shaders (%d instructions each), %s\n", N, NV, N, OPS,
+           g_eds ? "the shared list" : "this phone's list with the draw state (no extended dynamic state)");
+    pw_forget(); { char sp[220]; snprintf(sp, sizeof sp, "%s.stamp", cache); unlink(sp); }
+    int cap = pso_cap(), keep = pw_cap_keep(), skip = pw_misses_skip();
+    if (cap) printf("PREWARM the cap: at most %d live pipelines, %d kept by the prewarm\n", cap, keep);
+    pw_run_t c = pw_start("first start", cache);
+    // S3: no stamp yet, the game waits for every pipeline; S4 c: at most the cap's share kept, the rest only into the cache
+    CHECK(!c.warm && c.at_release == N, "prewarm: the first start let the game go after %d of %d", c.at_release, N);
+    if (keep && g_eds) CHECK(c.kept <= keep + 16 && c.kept + c.cached == N, "prewarm: under the cap %d kept (at most %d + threads) and %d cache-only of %d", c.kept, keep, c.cached, N);
+    int nh = N + NV; uint64_t *h1 = calloc((size_t)nh * 2, 8), *h0 = calloc((size_t)nh * 2, 8); int n1 = pw_hashes(h1, nh);
+    CHECK(!g_eds || c.built == N, "prewarm: %d of %d built at the first start", c.built, N);
+    CHECK(pw_mtime(cache) >= 0 && c.saved, "prewarm: no pipeline cache file after the first start");
+    pw_forget();
+    pw_run_t w = pw_start("later start", cache);
+    CHECK(!g_eds || keep || w.built == N, "prewarm: %d of %d built at the later start", w.built, N);
+    // S3: the stamp matched; where a missing pipeline's draws are skipped (this GPU's DM_VK_ASYNC_PSO) the game goes on at once, else after the first 600 entries
+    CHECK(w.warm, "prewarm: the later start did not match the first start's stamp");
+    if (skip) CHECK(w.at_release < N, "prewarm: the later start still held the game for all %d pipelines", N);
+    if (keep && g_eds) CHECK(w.skipped == N - w.kept, "prewarm: past the cap at a matched start %d skipped, want %d", w.skipped, N - w.kept);
+    // S2: the same SPIR-V with shaders loaded one at a time (DM_VK_PREWARM_SHADER_MT=0)
+    pw_forget(); g_sh_mt = 0;
+    pw_start("later start, shaders loaded one at a time", cache);
+    g_sh_mt = 1; int n0 = pw_hashes(h0, nh);
+    CHECK(n1 == nh && n0 == nh && !memcmp(h0, h1, (size_t)nh * 16), "prewarm: the shaders' SPIR-V differs between loading on many threads and on one (%d / %d of %d loaded)", n1, n0, nh);
+    free(h0); free(h1);
+    // S3: DM_VK_PREWARM_HOLD=<count> (Legends: Arceus's default, 600): the game goes on once the first <count> entries are handled
+    { pw_forget(); char hc[16]; int cnt = N / 4 > 0 ? N / 4 : 1; snprintf(hc, sizeof hc, "%d", cnt); setenv("DM_VK_PREWARM_HOLD", hc, 1);
+      pw_run_t h = pw_start("later start, DM_VK_PREWARM_HOLD=N/4", cache); unsetenv("DM_VK_PREWARM_HOLD");
+      CHECK(h.warm && h.at_release >= cnt && h.at_release < N, "prewarm: a count hold of %d let the game go after %d of %d", cnt, h.at_release, N); }
+    // S4 a / b: the record list with a fifth of it repeated (the cap's destroyed-and-rebuilt pipelines, appended again before): the stamp differs, the game waits
+    //   for every pipeline, and after it the list is written again without the repeats (same format, same order)
+    if (g_eds) { FILE *a = fopen(list, "ab"); int extra = N / 5;
+      for (int i = 0; i < extra; i++) { pso_rec r; memset(&r, 0, sizeof r); pw_key(r.key[0], 0, i % NV); pw_key(r.key[1], 1, i);
+          r.k.cfmt[0] = VK_FORMAT_R8G8B8A8_UNORM; r.k.chmask = 0xf; r.k.samples = 1; r.k.topo = 2; r.k.depth_zero = 1; fwrite(&r, sizeof r, 1, a); }
+      fclose(a);
+      pw_forget(); pw_run_t g = pw_start("later start, the list grown by repeats", cache);
+      CHECK(!g.warm && g.at_release == N + extra, "prewarm: a grown list let the game go after %d of %d (want all: the stamp differs)", g.at_release, N + extra);
+      struct stat st; CHECK(!stat(list, &st) && st.st_size == 12 + (off_t)N * (off_t)sizeof(pso_rec), "prewarm: the record list is %lld bytes after the compaction, want %lld (%d entries)",
+                            (long long)st.st_size, 12 + (long long)N * (long long)sizeof(pso_rec), N);
+      pw_forget(); pw_run_t g2 = pw_start("later start, after the compaction", cache);
+      CHECK(g2.warm, "prewarm: the start after the compaction did not match its stamp"); }
+    unsetenv("DM_VK_PSO_RECORD"); unsetenv("DM_VK_PCACHE");
+}
+
+// S5 (perf-1124): mtl_init from two threads at once, as the early set-up thread (nvn_vk_early_init, DM_VK_EARLY_INIT=1) and the game's first memory pool would:
+//   one device, and each caller returns only when the set-up is complete (it used to return as soon as g_dev was set, 200 lines before the end)
+static _Atomic int g_race_ok = -1;
+static void *init_racer(void *a) { (void)a; mtl_init(); atomic_store(&g_race_ok, atomic_load(&g_gpuid_done) && g_pcache != VK_NULL_HANDLE); return NULL; }
+static void init_race(void) {
+    setenv("DM_VK_EARLY_INIT", "1", 1); nvn_vk_early_init(); unsetenv("DM_VK_EARLY_INIT");
+    pthread_t t; int th = !pthread_create(&t, NULL, init_racer, NULL);
+    mtl_init(); int main_ok = atomic_load(&g_gpuid_done) && g_pcache != VK_NULL_HANDLE;
+    if (th) pthread_join(t, NULL);
+    for (int i = 0; i < 2000 && atomic_load(&w_dev_count) < 1; i++) usleep(1000);
+    CHECK(main_ok && atomic_load(&g_race_ok) == 1 && atomic_load(&w_dev_count) == 1, "mtl_init from three threads: set-up complete when it returned %d / %d, %d devices made (want 1)",
+          main_ok, atomic_load(&g_race_ok), atomic_load(&w_dev_count));
+    printf("INIT three callers at once (the early set-up thread, a racer, the main thread): %d device made, each returned with the set-up complete: %s\n",
+           atomic_load(&w_dev_count), main_ok && atomic_load(&g_race_ok) == 1 ? "yes" : "NO");
+}
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -1132,13 +1314,14 @@ int main(void) {
     real_gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
     vkGetInstanceProcAddr = w_gipa; VK_GLOBAL(VK_LOAD_G)   // (what mtl_init does when it opens the loader itself, through the watching wrapper)
     CHECK(nvn_vk_quirk_default(Q_NVN_ASYNC) == -1 && nvn_vk_quirk_default(Q_FLOAT_CONTROLS) == -1, "the table answers -1 before the device exists (hle_nvn.c rq_on: Auto off then)");
-    g_step = "mtl_init"; mtl_init();
+    g_step = "mtl_init"; if (getenv("SIMDEV_ONE_INIT")) mtl_init(); else init_race();
     device_read();
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
     g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "compose"; compose_work();
-                                                   g_step = "memlife"; memlife_work(); g_step = "shmod"; g_shmod_idle_ns = 1000000000ull; shmod_work(); }
+                                                   g_step = "memlife"; memlife_work(); g_step = "shmod"; g_shmod_idle_ns = 1000000000ull; shmod_work(); g_shmod_idle_ns = 60000000000ull;
+                                                   g_step = "prewarm"; prewarm_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
