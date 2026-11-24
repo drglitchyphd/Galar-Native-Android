@@ -1534,7 +1534,8 @@ static void host_start(void) {
     // Frame generation (DM_FRAMEGEN, Lossless Scaling's too) and Faster rendering (DM_NVN_ASYNC) are locked off for now, whatever env.txt says: first a solid frame
     //   rate without them on every phone, then they come back (the owner's call, 2026-11-12). DM_UNLOCK_EXPERIMENTS=1 in env.txt lifts the lock (development)
     //   Faster rendering is unlocked again (2026-11-13): with the Adreno render passes (#205) and the title screen at the game's own 30 (#159) it held a solid 30 with no
-    //   flicker on a Galaxy S25+, title screen and field. Its default (Auto) is on for Adreno only: hle_nvn.c rq_on
+    //   flicker on a Galaxy S25+, title screen and field. Its default (Auto) is the quirk table's Q_NVN_ASYNC (vk_quirks.h: Adreno, Arm's own driver, PowerVR and
+    //   Xclipse since perf-1124 fix 3): hle_nvn.c rq_on
 #if !DM_PORT_ARCEUS   // (Legends: Arceus keeps frame generation: its releases offer it, at the game's own rate)
     { const char *u = getenv("DM_UNLOCK_EXPERIMENTS"); if (!(u && !strcmp(u, "1"))) {
         const char *fg = getenv("DM_FRAMEGEN");

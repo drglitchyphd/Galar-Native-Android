@@ -195,6 +195,7 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     return 1;
 }
 void rq_drain(void);   // the replay thread, below: wait until what is queued has been replayed
+#include "nvn_rq.h"   // Faster rendering's queue (DM_NVN_ASYNC), with the registrations it carries in order
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { rq_drain(); if (((pool_t *)p)->flags & 0x200) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
  nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); } mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0; }
@@ -241,18 +242,18 @@ NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPoo
 }
 NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { (void)tp; }
 NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
-    mtl_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
+    rq_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);   // (nvn_rq.h: in order with the submissions when the replay has its own thread)
 }
 // Image descriptors live in the same pool index space as texture descriptors, and image handles are pool indices (nvnDeviceGetImageHandle; BindImages below), so an image
 // registers into the same table. Hyrule Warriors: Age of Calamity registers the images its compute shaders write in the first battle (earlier games registered only textures)
 NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
-    mtl_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
+    rq_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);   // (nvn_rq.h: in order with the submissions when the replay has its own thread)
 }
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); dpool_add(g_spb, &g_nspb, &g_snext, sp, n, "sampler"); return 1;
 }
 NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { (void)sp; }
-NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { mtl_reg_samp(dpool_base(g_spb, g_nspb, sp) + id, &((const samp_t *)s)->p); }
+NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { rq_reg_samp(dpool_base(g_spb, g_nspb, sp) + id, &((const samp_t *)s)->p); }
 // Unreal Engine reads a descriptor pool's size back at device setup (Octopath Traveler 0)
 NVN(nvnTexturePoolGetMemoryPool, const NVNmemoryPool *, const NVNtexturePool *tp) { return (const NVNmemoryPool *)((const dpool_t *)tp)->pool; }
 NVN(nvnTexturePoolGetMemoryOffset, ptrdiff_t, const NVNtexturePool *tp) { return (ptrdiff_t)((const dpool_t *)tp)->off; }
@@ -1068,19 +1069,12 @@ void dm_gfx_suspend(int on) {
 // submits on both from two threads; the second submission arrived while the first was replaying and the host stopped with "submit re-entered" at the ninth frame. NVN orders work on different queues only
 // through syncs, so replaying the two queues' submissions in lock order is one valid order
 static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
-// DM_NVN_ASYNC: the replay on a thread of its own. Turning NVN commands into Vulkan took 14 to 21 ms of the game thread's frame (Violet, Galaxy S25+), one after the other with
-// the game's own work; side by side a frame costs the longer of the two. It is what the console's GPU does anyway: it runs behind the CPU, and a game may only change what the GPU
-// reads once a sync says it is done. So the game goes on after a submit, and waits only where it asks for a result: a sync wait, Finish, reading texels back, or finalizing an object
-// that commands in the queue still name (rq_drain). At most one present is ahead of the game, so frames stay paced and the delay stays under one frame
+// DM_NVN_ASYNC: the replay on a thread of its own: the queue is nvn_rq.h (included above, with the registrations it carries in order)
 static void sub_run(NVNqueue *q, int n, const NVNcommandHandle *h);
-enum { RQ_SUBMIT, RQ_FENCE, RQ_PRESENT };
-typedef struct { int kind, n, idx; uint64_t *h; NVNqueue *q; sync_t *s; win_t *o; double period; int crop[4]; } rq_item;
-enum { RQ_N = 512 };
-static rq_item g_rq[RQ_N]; static uint64_t g_rq_head, g_rq_tail; static int g_rq_presents;
-static pthread_mutex_t g_rq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_rq_cv = PTHREAD_COND_INITIALIZER;
-// DM_NVN_ASYNC=1 on, 0 / off off; unset (Auto): on for Adreno, where it is tested (a Galaxy S25+ went from 42 ms frames to a steady 33 at 30 fps, the replay's 28-33 ms
-//   moved off the game's thread), off for other GPUs until it has been run there. Auto is the quirk table's Q_NVN_ASYNC (vk_quirks.h: by the GPU's name, Turnip too; off for
-//   a game whose profile says nvn_async_never), asked from nvn_vk.c once its device exists (weak: a build without the Vulkan replay has Auto off, as before)
+// DM_NVN_ASYNC=1 on, 0 / off off; unset (Auto): on where it has been run (Adreno: a Galaxy S25+ went from 42 ms frames to a steady 33 at 30 fps, the replay's 28-33 ms
+//   moved off the game's thread; Arm's own Mali driver; PowerVR and Xclipse since perf-1124 fix 3), off for other GPUs until it has been run there. Auto is the quirk
+//   table's Q_NVN_ASYNC (vk_quirks.h; off for a game whose profile says nvn_async_never), asked from nvn_vk.c once its device exists (weak: a build without the Vulkan
+//   replay has Auto off, as before)
 int nvn_vk_quirk_default(int q) __attribute__((weak)); int nvn_vk_quirk_note(int q, int value, int from_env) __attribute__((weak));
 static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ASYNC");
     int autoon = !(e && *e) && nvn_vk_quirk_default && nvn_vk_quirk_default(Q_NVN_ASYNC) > 0;
@@ -1089,61 +1083,15 @@ static int rq_on(void) { static int v = -1; if (v < 0) { const char *e = getenv(
     v = 0; autoon = 0;            //   Q_NVN_ASYNC's default is off for it already; this also refuses the player's own setting: a crash workaround, not a GPU rule)
 #endif
     if (nvn_vk_quirk_note) nvn_vk_quirk_note(Q_NVN_ASYNC, v, e && *e);
-    LOG("[nvn] the replay %s (DM_NVN_ASYNC %s)", v ? "runs on its own thread" : "runs on the game's thread", e && *e ? e : autoon ? "Auto: on for Adreno" : "Auto: off for this GPU"); } return v; }
-static const char *volatile g_rq_at = "idle";
-// A wait on the replay thread that takes this long has gone wrong: said in the log with who is waiting and what the replay thread is doing
-static void rq_wait(const char *who) {
-    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
-    if (pthread_cond_timedwait(&g_rq_cv, &g_rq_mu, &ts) == ETIMEDOUT) {
-        static int n; if (n++ < 20) LOG("[RED] %s has waited 5 s on the replay thread: it is at %s, queue %llu..%llu, %d presents, caller lr %p", who, g_rq_at, (unsigned long long)g_rq_tail, (unsigned long long)g_rq_head, g_rq_presents, __builtin_return_address(0));
-    }
-}
-#ifdef __linux__
-#include <sys/prctl.h>
-#define DM_THREAD_NAME(n) prctl(PR_SET_NAME, (n), 0, 0, 0)
-#else
-#define DM_THREAD_NAME(n) ((void)0)
-#endif
-static _Atomic int g_rq_tid;   // the replay thread's id (android_main.c: its loads profiled)
+    LOG("[nvn] the replay %s (DM_NVN_ASYNC %s)", v ? "runs on its own thread" : "runs on the game's thread", e && *e ? e : autoon ? "Auto: on for this GPU" : "Auto: off for this GPU"); } return v; }
 int nvn_rq_tid(void) { return atomic_load(&g_rq_tid); }
-static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
-#ifdef __linux__
-    atomic_store(&g_rq_tid, (int)gettid());
-#endif
-
-    (void)a;
-    for (;;) {
-        pthread_mutex_lock(&g_rq_mu);
-        while (g_rq_tail == g_rq_head) pthread_cond_wait(&g_rq_cv, &g_rq_mu);
-        rq_item it = g_rq[g_rq_tail % RQ_N];
-        pthread_mutex_unlock(&g_rq_mu);
-        if (it.kind == RQ_SUBMIT) { g_rq_at = "submit"; sub_run(it.q, it.n, (const NVNcommandHandle *)it.h); free(it.h); }
-        else if (it.kind == RQ_FENCE) { g_rq_at = "fence"; it.s->fence = mtl_last_fence(); }
-        else { g_rq_at = "present"; gfx_enter(); GOLDEN_PRESENT(CTX(it.o->tex[it.idx]), it.crop); uint64_t t = mtl_present(CTX(it.o->tex[it.idx]), it.period, it.crop); it.o->ticket[it.idx] = t; gfx_leave(); }
-        g_rq_at = "idle";
-        pthread_mutex_lock(&g_rq_mu);
-        g_rq_tail++; if (it.kind == RQ_PRESENT) g_rq_presents--;
-        pthread_cond_broadcast(&g_rq_cv); pthread_mutex_unlock(&g_rq_mu);
-    }
-    return NULL;
-}
-static void rq_push(rq_item it) {
-    static int started;
-    pthread_mutex_lock(&g_rq_mu);
-    if (!started) { started = 1; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 16u << 20); pthread_t t; if (pthread_create(&t, &at, rq_main, NULL)) die("replay thread"); pthread_detach(t); }
-    while (g_rq_head - g_rq_tail >= RQ_N) rq_wait("a full queue");
-    g_rq[g_rq_head++ % RQ_N] = it; if (it.kind == RQ_PRESENT) g_rq_presents++;
-    pthread_cond_broadcast(&g_rq_cv);
-    if (it.kind == RQ_PRESENT) while (g_rq_presents > 1) rq_wait("the next present");
-    pthread_mutex_unlock(&g_rq_mu);
+static void rq_run(const rq_item *it) {   // (nvn_rq.h rq_main: on the replay thread)
+    if (it->kind == RQ_SUBMIT) { g_rq_at = "submit"; sub_run((NVNqueue *)it->q, it->n, (const NVNcommandHandle *)it->h); free(it->h); }
+    else if (it->kind == RQ_FENCE) { g_rq_at = "fence"; ((sync_t *)it->s)->fence = mtl_last_fence(); }
+    else { win_t *o = (win_t *)it->o; g_rq_at = "present"; gfx_enter(); GOLDEN_PRESENT(CTX(o->tex[it->idx]), it->crop); uint64_t t = mtl_present(CTX(o->tex[it->idx]), it->period, it->crop); o->ticket[it->idx] = t; gfx_leave(); }
 }
 int nvn_async_on(void) { return rq_on(); }
-void rq_drain(void) {
-    if (!rq_on()) return;
-    pthread_mutex_lock(&g_rq_mu); uint64_t want = g_rq_head;
-    while (g_rq_tail < want) rq_wait("a drain");
-    pthread_mutex_unlock(&g_rq_mu);
-}
+void rq_drain(void) { rq_drain_now(); }
 void sync_fence_now(sync_t *s) {   // this sync is signalled by what has been submitted so far: known once the queue has reached this point (UINT64_MAX until then: not signalled)
     s->fenced = 1;
     if (rq_on()) { s->fence = UINT64_MAX; rq_push((rq_item){ .kind = RQ_FENCE, .s = s }); } else s->fence = mtl_last_fence();
@@ -1342,6 +1290,8 @@ static void dump_frame(void) {
     if (g_tsv) fflush(g_tsv);
     if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu: %u functions %llu calls |%s", g_frame ? "frame" : "init", g_frame, nfn, total, line);
     else if (g_frame % 300 == 0) LOG("[nvn] frame %llu: %u functions %llu calls", g_frame, nfn, total);
+    if (g_frame % 300 == 0 && g_frame && rq_on() && g_rq_order > 0) { pthread_mutex_lock(&g_rq_mu); uint64_t q = g_rq_reg_n, s = g_rq_reg_same; pthread_mutex_unlock(&g_rq_mu);
+        LOG("[nvn] frame %llu: registrations through the replay queue %llu, left out as unchanged %llu (nvn_rq.h)", (unsigned long long)g_frame, (unsigned long long)q, (unsigned long long)s); }
     g_frame++; cs_dump();
     // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
@@ -1985,6 +1935,11 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
 }
 NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *rq) {
     pool_t *o = (pool_t *)p; const map_req *r = (const map_req *)rq;
+    // A sparse pool's pages change under commands that may still be in Faster rendering's queue (an unmap makes them inaccessible and splits the pool the replay
+    //   knows): what is queued is replayed first (nvn_rq.h; DM_NVN_ASYNC_ORDER=0: not). Outside g_vp_mu: the replay takes it to read sparse textures. The
+    //   aliased (non-sparse) pool below only ever gets its first storage here and ignores unmaps: nothing queued can see it change
+    pthread_mutex_lock(&g_vp_mu); int sparse = vpool_of(o) != NULL; pthread_mutex_unlock(&g_vp_mu);
+    if (sparse) rq_before_remap();
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_of(o); int ok = 1;
     for (int i = 0; v && i < n && ok; i++) ok = vpool_map(v, &r[i]);
     pthread_mutex_unlock(&g_vp_mu);

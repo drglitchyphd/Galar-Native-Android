@@ -1915,12 +1915,16 @@ static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFe
 typedef struct { sub_t *s; VkCommandBuffer cbs[2]; uint32_t n; uint64_t f; } held_t;
 static held_t g_held[NSUB]; static _Atomic int g_nheld; static _Atomic uint64_t g_submitted;   // g_submitted: the last fence value given to the GPU
 static uint64_t g_hold_frames, g_hold_split;   // frames submitted whole at their present, early flushes (the present line)
-// Default (the user's choice after the S25+ test, 2026-11-19: mode 2 looked better): mode 2 where the replay has a thread of its own (hle_nvn.c DM_NVN_ASYNC, Auto: Adreno),
-//   whose ~7 ms more a frame then stays off the game's thread; off where the replay runs on the game's thread
+// Default (the user's choice after the S25+ test, 2026-11-19: mode 2 looked better): the quirk table's Q_FRAME_HOLD (mode 2 on Adreno and Arm's own driver, where it has
+//   been run) where the replay has a thread of its own (hle_nvn.c DM_NVN_ASYNC), whose ~7 ms more a frame then stays off the game's thread; off where the replay runs on
+//   the game's thread. It used to follow the replay thread alone, so a GPU given Faster rendering got the held frame too, untested (perf-1124 fix 3: PowerVR and Xclipse
+//   get the thread, not the hold)
 int nvn_async_on(void) __attribute__((weak));
 // (profile engine_quirks frame_hold_off, Legends: Arceus: off by default, DM_VK_FRAME_HOLD=1 / 2 to try: its transform feedback capture passes and report timestamps
 //   have not been run held on a phone)
-static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD"); v = e ? atoi(e) : !DM_GAME_ENG_FRAME_HOLD_OFF && nvn_async_on && nvn_async_on() ? 2 : 0; if (v < 0 || v > 2) v = 0;
+static int hold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FRAME_HOLD");
+    v = e ? atoi(e) : !DM_GAME_ENG_FRAME_HOLD_OFF && nvn_async_on && nvn_async_on() ? quirk_default(Q_FRAME_HOLD, &g_gpuid) : 0; if (v < 0 || v > 2) v = 0;
+    quirk_note(Q_FRAME_HOLD, v, vkq_env_src("DM_VK_FRAME_HOLD"));
     VLOG("frames: %s", v == 2 ? "held whole until presented, each pass's stores decided from the whole frame (DM_VK_FRAME_HOLD=2): up to a frame later on screen"
                        : v ? "held whole until presented (DM_VK_FRAME_HOLD=1): up to a frame later on screen" : "submitted as recorded"); } return v; }
 static uint64_t g_dec_dc, g_dec_fix, g_dec_passes;   // stores left out (overwritten unread), stores put back (read after all: a guess elsewhere was wrong), passes decided

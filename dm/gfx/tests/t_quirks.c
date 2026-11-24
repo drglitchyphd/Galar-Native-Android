@@ -87,7 +87,11 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     case Q_TF_CHECK: return g->arm_rel > 0;                                     // :4688 chk = e ? atoi (e) != 0 : g_arm_rel > 0
     case Q_CLEAR_BY_PASS: return g->vendor == 0x144D;                           // :4947 v = e ? atoi (e) != 0 : g_props.vendorID == 0x144D
     case Q_TF_SELFTEST: return g->arm_rel > 0;                                  // tf_selftest.h:108 run = on ? atoi (on) != 0 : g_arm_rel > 0 (within :746, Q_DRIVER_SELFTESTS)
-    case Q_NVN_ASYNC: return P->nvn_async_never ? 0 : strstr(g->name, "Adreno") != NULL || (g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5);   // v0.97: Arm's own driver too   // hle_nvn.c:1083 autoon = !(e && *e) && g && strstr (g, "Adreno"); :1085 #if DM_GAME_ENG_NVN_ASYNC_NEVER v = 0
+    case Q_NVN_ASYNC: return P->nvn_async_never ? 0 : strstr(g->name, "Adreno") != NULL || (g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5)   // v0.97: Arm's own driver too   // hle_nvn.c:1083 autoon = !(e && *e) && g && strstr (g, "Adreno"); :1085 #if DM_GAME_ENG_NVN_ASYNC_NEVER v = 0
+                             || g->vendor == 0x1010 || g->vendor == 0x144D;   // perf-1124 fix 3: PowerVR and Xclipse, once the queue carries registrations and remaps in order (nvn_rq.h)
+    // perf-1124 fix 3: the held frame split from the replay thread (nvn_vk.c hold_on was: DM_VK_FRAME_HOLD unset → 2 wherever the replay had its own thread), kept
+    //   where the two ran together: what Q_NVN_ASYNC was before PowerVR and Xclipse joined it (the profile's nvn_async_never left out: hold_on asks the thread itself)
+    case Q_FRAME_HOLD: return strstr(g->name, "Adreno") != NULL || (g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5) ? 2 : 0;
     // new with the merged branches, not in 6e0e1dd (docs/ENGINE_UNIFY.md lists it): galar-driver-probes ad0f638 / arceus-vk10-validation 85e72fd, Arm's own driver
     case Q_QUERY_LOD: return g->arm_rel != 0;
     // mali-all e6f6d0c (the Mali white-screen fix), mali_white_vk.inc mw_init: arm = g_arm_rel != 0; g_mw.want = mw_default_route (arm, DM_PORT_GALAR);
@@ -290,6 +294,10 @@ static void phones(const profile *P) {
           && QD(Q_ASYNC_PSO, bxm) == !arc && QD(Q_ASYNC_PSO, g5) == !arc,
           "%s: pipelines the lists lacked built in the background on Turnip, Mali (Arm's driver and PanVK), Xclipse and PowerVR too (beta-exit f09e58f; Adreno only before), "
           "never for Legends: Arceus (async_pso_off, #34)", gm);
+    CHECK(QD(Q_NVN_ASYNC, xcl) == !arc && QD(Q_NVN_ASYNC, bxm) == !arc && QD(Q_NVN_ASYNC, g5) == !arc && !QD(Q_NVN_ASYNC, panvk)
+          && QD(Q_FRAME_HOLD, s25) == 2 && QD(Q_FRAME_HOLD, tu) == 2 && QD(Q_FRAME_HOLD, g615) == 2
+          && !QD(Q_FRAME_HOLD, xcl) && !QD(Q_FRAME_HOLD, bxm) && !QD(Q_FRAME_HOLD, g5) && !QD(Q_FRAME_HOLD, panvk),
+          "%s (perf-1124 fix 3): Faster rendering's Auto on Xclipse and PowerVR too (not Legends: Arceus, not PanVK); the held frame only on Adreno and Arm's own driver", gm);
     int gal = P->port == PORT_GALAR;
     CHECK(QD(Q_B10_STANDIN, g615) == gal && QD(Q_MALI_WHITE_CHECK, g615) == gal && QD(Q_B10_STANDIN, g925) == gal && QD(Q_MALI_WHITE_CHECK, g925) == gal
           && QD(Q_B10_STANDIN, g925r) == gal && QD(Q_MALI_WHITE_CHECK, g925r) == gal,

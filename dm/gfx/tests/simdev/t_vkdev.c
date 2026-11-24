@@ -416,8 +416,10 @@ static void quirk_checks(void) {
           && !!(g->eng & ENG_MALI_LIT_STANDIN) == !!DM_GAME_ENG_MALI_LIT_STANDIN, "gpu_id: engine_quirks bits %#x, not the profile's", g->eng);
     CHECK(quirk_default(Q_NO_DYNREN, g) == qc && quirk_default(Q_ASYNC_PSO, g) == !DM_GAME_ENG_ASYNC_PSO_OFF && quirk_default(Q_NO_EDS, g) == ((qc11 && DM_GAME_ENG_QC11_NO_EDS) || (g->vendor == 0x13B5 && !g->custom && (g->driver_version >> 22) > 0 && (g->driver_version >> 22) < 44)),
           "rules for this game: render passes and draw state on Adreno, background pipelines on every GPU (beta-exit f09e58f)");
-    CHECK(quirk_default(Q_NVN_ASYNC, g) == (strstr(g->name, "Adreno") && !DM_GAME_ENG_NVN_ASYNC_NEVER) && quirk_default(Q_DRIVER_SELFTESTS, g) == !!DM_GAME_ENG_DRIVER_SELFTESTS,
-          "the replay thread's Auto and the start-up self-tests for this game");
+    // Faster rendering's Auto: Adreno by name and Arm's own driver (v0.97), PowerVR and Xclipse (perf-1124 fix 3); the held frame where both were run together
+    { int arm_own = g->driver_id >= 0 ? g->driver_id == 9 : g->vendor == 0x13B5, async = (strstr(g->name, "Adreno") || arm_own || img || g->vendor == 0x144D) && !DM_GAME_ENG_NVN_ASYNC_NEVER;
+      CHECK(quirk_default(Q_NVN_ASYNC, g) == async && quirk_default(Q_FRAME_HOLD, g) == (strstr(g->name, "Adreno") || arm_own ? 2 : 0) && quirk_default(Q_DRIVER_SELFTESTS, g) == !!DM_GAME_ENG_DRIVER_SELFTESTS,
+            "the replay thread's Auto (%d), the held frame (%d) and the start-up self-tests for this game", quirk_default(Q_NVN_ASYNC, g), quirk_default(Q_FRAME_HOLD, g)); }
     // Mali's white-screen fix as mali-all e6f6d0c decided it (mw_default_route / mw_enabled with arm_own = Arm's own driver, galar = DM_PORT_GALAR): route A and the
     //   check on Arm's own driver with Sword / Shield, nowhere else (PanVK's driver ID included)
     CHECK(quirk_default(Q_B10_STANDIN, g) == (MALI_LIT_DEFAULT && g->arm_rel != 0 && DM_PORT_GALAR) && quirk_default(Q_MALI_WHITE_CHECK, g) == (MALI_LIT_DEFAULT && g->arm_rel != 0 && DM_PORT_GALAR),
@@ -433,6 +435,7 @@ static void quirk_checks(void) {
         if (q == Q_DMAHEAP || q == Q_FLOAT_CONTROLS) continue;   // (they note what the route or the driver allowed: checked above)
         if (q == Q_PCACHE_GAPS_OFF) want = d && !g_dynren;      // (applied with render passes only)
         if (q == Q_EXACT_MATH) want = d ? (int)EXACT_ALL : 0;   // (the mask of every edge case)
+        if (q == Q_FRAME_HOLD) want = !DM_GAME_ENG_FRAME_HOLD_OFF && nvn_async_on && nvn_async_on() ? d : 0;   // (only where the replay has its own thread: none here)
         CHECK(g_qval[q] == want, "%s: %d decided at its site, the table's default %d", Q_INFO[q].what, g_qval[q], want);
     }
     if (!getenv("DM_VK_PIPE_KEEP")) CHECK(pso_cap() == quirk_default(Q_PIPE_KEEP, g), "pipelines kept %d, the table %d", pso_cap(), quirk_default(Q_PIPE_KEEP, g));
