@@ -1140,10 +1140,12 @@ static int rq_fence_held(uint64_t f) { return mtl_fence_held(f); }
 int nvn_on_replay_thread(void) { return g_rq_self; }   // (nvn_vk.c mtl_present: the replay thread's present does not sleep, perf-1124 G1')
 int nvn_async_on(void) { return rq_on(); }
 void rq_drain(void) { rq_drain_now(); }
-// DM_NVN_SYNC_DRAIN=1: a sync the game fences waits for everything queued, as before perf-1124 G1' (nvn_rq.h rq_sync_fence; unset / 0: only as far as its own fence)
-static int sync_drain(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SYNC_DRAIN"); v = e && *e && strcmp(e, "0") && strcmp(e, "off");
+// The game's sync waits: everything queued first, then the fence (as before perf-1124 G1'), by default in v0.99: waiting only as far as the sync's own fence lets the
+//   game build the next frame while the replay still reads this one's memory, the in-place rewrite window (fable-cpu fix 3), and that has not been played on a phone.
+//   The present no longer sleeps on the replay thread either way (DM_VK_PRESENT_SLEEP), so a drain waits for work, not for pacing. DM_NVN_SYNC_DRAIN=0: own fence only
+static int sync_drain(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SYNC_DRAIN"); v = !(e && (!strcmp(e, "0") || !strcmp(e, "off")));
     if (rq_on()) LOG("[nvn] the game's sync waits: %s (DM_NVN_SYNC_DRAIN%s)", v ? "everything queued first, then the fence" : "as far as the sync's own fence, at its place in the replay queue",
-                     v ? "=1" : " unset; =1: everything queued first"); } return v; }
+                     v ? " unset; =0: own fence only" : "=0"); } return v; }
 // DM_HINT_WORK=wall: the hint, the fps guard and the frame step get the time from one present to the next, sleeps and waits in it, as before perf-1124 G2'
 //   (nvn_work.h); unset: the work alone. nvn_vk.c asks it too (its hint report)
 int nvn_hint_wall(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_HINT_WORK"); v = e && !strcmp(e, "wall");
