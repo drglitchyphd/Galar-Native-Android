@@ -3,7 +3,8 @@
 //   what the engine decided against what that device reports (read again independently, through the same instance), and against what is known for the GPU named
 //   by SIMDEV_PROFILE (Arm's release from driverVersion, no dual-source blending on r44p1, the Vulkan 1.0 routes, ...). Then a little real work through the engine:
 //   samplers with every optional feature asked for, a memory pool mapped for the GPU, a fill submitted and waited for, a depth / stencil copy drawn (zcopy_draw),
-//   integer textures bound under a float sampler (tex_view_for), the draw-state shadow's reset rules and descriptor pushes, the draw memo (shadow_work).
+//   integer textures bound under a float sampler (tex_view_for), the draw-state shadow's reset rules and descriptor pushes, the draw memo (shadow_work), a load through
+//   the device-memory allocator by lifetime (MEMLIFE), shader modules released and made again (SHMOD).
 //   Build: simdev/build_vkdev.sh. Run: SIMDEV_PROFILE=<name> ./t_vkdev (exit 1 on a failed check; "FAIL" lines name it).
 //   DM_VK_FRAME_HOLD=2 (run_simdev.sh's second t_vkdev run): every submission held and decided, as with Faster rendering on Adreno: its passes in secondaries.
 //   SIMDEV_DC_FC=1 / 2: a float_controls_crashed marker from an earlier start, and DM_VK_FLOAT_CONTROLS=1 from the driver check (1: named in DM_DRIVER_CHECK_KEYS, as
@@ -1031,6 +1032,79 @@ static void compose_work(void) {
     }
     memset(&W.img, 0, sizeof W.img); memset(&W.view, 0, sizeof W.view); W.n = 0;
 }
+// Device memory by lifetime (vk_alloc_c, DM_VK_MEM_LIFETIME): a load as the engine does one, through the real allocator on this device's memory types. Batches of
+//   16 uploads, each a 4 MB texture (VA_LONG, kept) and its 4 MB staging buffer (VA_TEMP, freed when its batch is done), and a 6 MB arena block per batch (VA_ARENA,
+//   freed); then what vk_trim could give back (empty blocks, one kept per memory type). MEMLIFE prints the numbers for both settings (run_simdev.sh runs it as it is;
+//   DM_VK_MEM_LIFETIME=0 ./t_vkdev for the old allocator). With blocks by lifetime every staging / arena block must be empty after the load
+static double ml_returnable(void) {   // MB vk_trim would give back now (blocks with nothing in them, less the first one of each memory type)
+    double r = 0; uint32_t kept = 0; pthread_mutex_lock(&g_amu);
+    for (int k = 0; k < g_nblocks; k++) { vblock *b = g_blocks[k]; if (b->used) continue; if (b->type < 32 && !(kept >> b->type & 1)) { kept |= 1u << b->type; continue; } r += b->size / 1048576.0; }
+    pthread_mutex_unlock(&g_amu); return r;
+}
+static void memlife_work(void) {
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4u << 20, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
+    VkBuffer probe; if (vkCreateBuffer(g_dev, &bi, NULL, &probe)) { printf("SIMGAP memlife: no buffer\n"); return; }
+    VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, probe, &rq); vkDestroyBuffer(g_dev, probe, NULL);
+    enum { NB = 4, PER = 16 }; vmalloc_t keep[NB * PER]; int nk = 0;
+    double b0[VA_NCLS], u0[VA_NCLS]; vk_mem_by_kind(b0, u0);
+    double peak = 0;
+    for (int batch = 0; batch < NB; batch++) {
+        vmalloc_t tmp[PER], ar; VkMemoryRequirements r4 = rq; r4.size = 4u << 20; VkMemoryRequirements r6 = rq; r6.size = 6u << 20;
+        ar = vk_alloc_c(r6, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1, VA_ARENA);
+        for (int i = 0; i < PER; i++) { keep[nk++] = vk_alloc_c(r4, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, VA_LONG);
+                                        tmp[i] = vk_alloc_c(r4, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1, VA_TEMP); }
+        double bb, uu; dm_vk_mem_stats(&bb, &uu); if (bb > peak) peak = bb;
+        for (int i = 0; i < PER; i++) vk_free(tmp[i]);   // (the batch done: its fence signalled, once_reap / pre_batch_end)
+        vk_free(ar);   // (arena_reset)
+    }
+    double b1[VA_NCLS], u1[VA_NCLS], tb = 0, tu = 0; vk_mem_by_kind(b1, u1); for (int c = 0; c < VA_NCLS; c++) { tb += b1[c] - b0[c]; tu += u1[c] - u0[c]; }
+    double ret = ml_returnable();
+    printf("MEMLIFE %s: after the load %.0f MB in blocks for %.0f MB in use (peak %.0f MB in all); vk_trim could give back %.0f MB -> %.0f MB in blocks; "
+           "long-lived %.0f / %.0f, staging %.0f / %.0f, arenas %.0f / %.0f\n", vk_lifetime_on() ? "blocks by lifetime" : "one kind (DM_VK_MEM_LIFETIME=0)", tb, tu, peak, ret, tb - ret,
+           b1[VA_LONG] - b0[VA_LONG], u1[VA_LONG] - u0[VA_LONG], b1[VA_TEMP] - b0[VA_TEMP], u1[VA_TEMP] - u0[VA_TEMP], b1[VA_ARENA] - b0[VA_ARENA], u1[VA_ARENA] - u0[VA_ARENA]);
+    if (vk_lifetime_on()) {
+        CHECK(u1[VA_TEMP] - u0[VA_TEMP] < 0.01 && u1[VA_ARENA] - u0[VA_ARENA] < 0.01, "memlife: staging / arena blocks still hold %.1f / %.1f MB after the load", u1[VA_TEMP] - u0[VA_TEMP], u1[VA_ARENA] - u0[VA_ARENA]);
+        CHECK(u1[VA_LONG] - u0[VA_LONG] > NB * PER * 4 - 0.5, "memlife: the textures are not all in long-lived blocks (%.1f MB)", u1[VA_LONG] - u0[VA_LONG]);
+        // with one memory type for everything (lavapipe, Mali, PowerVR) the staging blocks left over are the slack vk_trim returns
+        CHECK(ret + 32.5 >= (b1[VA_TEMP] - b0[VA_TEMP]) + (b1[VA_ARENA] - b0[VA_ARENA]) || g_memp.memoryTypeCount > 1, "memlife: only %.0f MB of %.0f MB staging / arena blocks could go back", ret,
+              (b1[VA_TEMP] - b0[VA_TEMP]) + (b1[VA_ARENA] - b0[VA_ARENA]));
+    }
+    for (int i = 0; i < nk; i++) vk_free(keep[i]);
+}
+// Shader modules released (shmod_release / shmod_ensure, DM_VK_SHMOD_RELEASE): 400 shaders as shader_load leaves them (SPIR-V kept, module made), released after
+//   their idle time, made again for a build; the module count and the host heap before / after (what this driver frees per module: lavapipe keeps a copy of the SPIR-V
+//   and its NIR). The test shaders go from the cache afterwards
+#include <malloc.h>
+static void shmod_work(void) {
+    if (!shmod_on()) { printf("SHMOD released: off (DM_VK_SHMOD_RELEASE=0)\n"); return; }
+    enum { N = 400 }; vshader *sh[N]; uint8_t key[N][8];
+    int64_t n0 = atomic_load(&g_shmod_n);
+    for (int i = 0; i < N; i++) {
+        const uint32_t *src = i & 1 ? scale_frag_spv : scale_vert_spv; size_t sz = i & 1 ? sizeof scale_frag_spv : sizeof scale_vert_spv;
+        vshader *s = calloc(1, sizeof *s); snprintf(s->key, sizeof s->key, "test%04d", i); s->stage = i & 1; s->code = malloc(sz); memcpy(s->code, src, sz); s->nw = sz / 4;
+        VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sz, .pCode = s->code };
+        CHECK(!vkCreateShaderModule(g_dev, &mci, NULL, &s->mod), "shmod: module %d not made", i); shmod_count(s->mod, (int64_t)sz, 1);
+        atomic_store(&s->used_ns, i < N / 2 ? 1 : mono_ns());   // (the first half long unused, the second just used)
+        memset(key[i], 0, 8); key[i][0] = 0xfe; key[i][1] = (uint8_t)(i >> 8); key[i][2] = (uint8_t)i; pthread_mutex_lock(&g_shmu); nvn_hm_put(&g_shcache, key[i], s); pthread_mutex_unlock(&g_shmu); sh[i] = s;
+    }
+    struct mallinfo2 m0 = mallinfo2(); int64_t na = atomic_load(&g_shmod_n);
+    shmod_release();
+    struct mallinfo2 m1 = mallinfo2(); int64_t nb = atomic_load(&g_shmod_n);
+    int rel = 0, kept = 0; for (int i = 0; i < N; i++) { if (atomic_load(&sh[i]->rel)) rel += !sh[i]->mod; else kept += sh[i]->mod != VK_NULL_HANDLE; }
+    CHECK(rel == N / 2 && kept == N / 2, "shmod: %d released, %d kept (want %d / %d: those unused for %.0f s / those just used)", rel, kept, N / 2, N / 2, g_shmod_idle_ns / 1e9);
+    CHECK(na - nb == N / 2, "shmod: the count of alive modules fell by %lld, not %d", (long long)(na - nb), N / 2);
+    // a build: rdlock, made again (the same SPIR-V), noted as used
+    pthread_rwlock_rdlock(&g_shmod_rw); int ok = 1; for (int i = 0; i < N; i++) ok &= shmod_ensure(sh[i]); pthread_rwlock_unlock(&g_shmod_rw);
+    int back = 0; for (int i = 0; i < N; i++) back += sh[i]->mod && !atomic_load(&sh[i]->rel);
+    CHECK(ok && back == N && atomic_load(&g_shmod_n) == na, "shmod: %d of %d modules made again (alive %lld, want %lld)", back, N, (long long)atomic_load(&g_shmod_n), (long long)na);
+    // a build under way holds the release off
+    pthread_rwlock_rdlock(&g_shmod_rw); for (int i = 0; i < N; i++) atomic_store(&sh[i]->used_ns, 1); shmod_release(); int none = 1; for (int i = 0; i < N; i++) none &= sh[i]->mod != VK_NULL_HANDLE; pthread_rwlock_unlock(&g_shmod_rw);
+    CHECK(none, "shmod: modules released while a pipeline build held them");
+    printf("SHMOD released %d of %d test modules (%lld -> %lld alive, %lld of them the engine's own before): host heap %.2f -> %.2f MB (%.1f KB per module on this driver); made again: %d\n",
+           rel, N, (long long)na, (long long)nb, (long long)n0, m0.uordblks / 1048576.0, m1.uordblks / 1048576.0, ((double)m0.uordblks - (double)m1.uordblks) / 1024.0 / (N / 2), back);
+    for (int i = 0; i < N; i++) { pthread_mutex_lock(&g_shmu); nvn_hm_del(&g_shcache, key[i]); pthread_mutex_unlock(&g_shmu);
+        if (sh[i]->mod) { shmod_count(sh[i]->mod, (int64_t)sh[i]->nw * 4, -1); vkDestroyShaderModule(g_dev, sh[i]->mod, NULL); } free(sh[i]->code); free(sh[i]); }
+}
 
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
@@ -1058,7 +1132,8 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "compose"; compose_work(); }
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "compose"; compose_work();
+                                                   g_step = "memlife"; memlife_work(); g_step = "shmod"; g_shmod_idle_ns = 1000000000ull; shmod_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)

@@ -836,7 +836,14 @@ void mtl_init(void) {
 // ================= Device memory (images, internal buffers) =================
 // A first-fit allocator over 64 MB blocks per memory type (larger requests get a block of their own): drivers cap the number of allocations (4096 is common), and a game holds
 // thousands of textures
-typedef struct { VkDeviceMemory mem; VkDeviceSize size; uint32_t type; void *map; int nfree, cfree; struct { VkDeviceSize off, size; } *fr; int used; uint64_t idle_since; } vblock;   // idle_since: when used fell to 0 (vk_trim)
+// Blocks by lifetime (DM_VK_MEM_LIFETIME=0: one kind, as before): images and other long-lived objects (VA_LONG), staging and one-off buffers (VA_TEMP) and the
+//   submissions' arenas (VA_ARENA) each fill blocks of their own kind. Mixed, an upload's staging sat between textures and a block emptied only when every texture
+//   in it went too, so vk_trim gave back almost nothing: PowerVR #117 held 1,648 MB in blocks for 965 in use, Xclipse 530 1,344 / 854, Mali-G615 896 / 362 (Adreno
+//   576 / 519; perf-1124). Apart, the staging blocks empty after a load and vk_trim returns them. VA_TEMP / VA_ARENA blocks are 32 MB (a request over 16 MB gets one
+//   of its own). An empty block takes any kind (the one vk_trim keeps per memory type serves all). Nothing here frees earlier than before: a block goes back only
+//   when everything in it was freed, and everything the GPU may still use is freed only after its fence (defer_add, arena_reset, once_reap)
+enum { VA_LONG, VA_TEMP, VA_ARENA, VA_NCLS };
+typedef struct { VkDeviceMemory mem; VkDeviceSize size; uint32_t type; void *map; int nfree, cfree; struct { VkDeviceSize off, size; } *fr; int used; uint64_t idle_since; int cls; } vblock;   // idle_since: when used fell to 0 (vk_trim); cls: VA_*
 typedef struct { vblock *b; VkDeviceSize off, size; } vmalloc_t;
 static vblock **g_blocks; static int g_nblocks; static pthread_mutex_t g_amu = PTHREAD_MUTEX_INITIALIZER;
 static int mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) {
@@ -858,29 +865,44 @@ void dm_vk_mem_stats(double *blocks_mb, double *used_mb) {
     for (int k = 0; k < g_nblocks; k++) { vblock *b = g_blocks[k]; double fr = 0; for (int i = 0; i < b->nfree; i++) fr += (double)b->fr[i].size; t += (double)b->size; u += (double)b->size - fr; }
     pthread_mutex_unlock(&g_amu); *blocks_mb = t / 1048576.0; *used_mb = u / 1048576.0;
 }
-static vmalloc_t vk_alloc(VkMemoryRequirements rq, VkMemoryPropertyFlags want, int map) {
+static int vk_lifetime_on(void) {
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_MEM_LIFETIME"); v = !(e && *e == '0');
+        VLOG("device memory: %s", v ? "blocks by lifetime (images, staging and arenas apart, so emptied staging blocks go back)" : "one kind of block for everything (DM_VK_MEM_LIFETIME=0)"); }
+    return v;
+}
+static int vk_take(vblock *b, VkDeviceSize al, VkDeviceSize size, VkDeviceSize *off) {   // (g_amu held) first fit inside b: 1 and the offset when it fits
+    for (int i = 0; i < b->nfree; i++) {
+        VkDeviceSize o = (b->fr[i].off + al - 1) / al * al, end = b->fr[i].off + b->fr[i].size;
+        if (o + size > end) continue;
+        VkDeviceSize f0 = b->fr[i].off, f1 = end; memmove(b->fr + i, b->fr + i + 1, (b->nfree - i - 1) * sizeof *b->fr); b->nfree--;
+        if (o > f0) fr_add(b, f0, o - f0);
+        if (o + size < f1) fr_add(b, o + size, f1 - o - size);
+        b->used++; *off = o; return 1;
+    }
+    return 0;
+}
+static vmalloc_t vk_alloc_c(VkMemoryRequirements rq, VkMemoryPropertyFlags want, int map, int cls) {
     int t = mem_type(rq.memoryTypeBits, want, map ? 0 : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     if (t < 0) VDIE("no memory type for bits %#x flags %#x", rq.memoryTypeBits, want);
     VkDeviceSize gr = g_props.limits.bufferImageGranularity; while (gr & (gr - 1)) gr = (gr | (gr - 1)) + 1;   // (a power of two: one 2016 PowerVR driver reports 9990)
     VkDeviceSize al = rq.alignment > gr ? rq.alignment : gr;
+    int life = vk_lifetime_on(); if (!life) cls = VA_LONG;
     pthread_mutex_lock(&g_amu);
-    for (int k = 0; k < g_nblocks; k++) {
-        vblock *b = g_blocks[k]; if (b->type != (uint32_t)t || (map && !b->map)) continue;
-        for (int i = 0; i < b->nfree; i++) {
-            VkDeviceSize o = (b->fr[i].off + al - 1) / al * al, end = b->fr[i].off + b->fr[i].size;
-            if (o + rq.size > end) continue;
-            VkDeviceSize f0 = b->fr[i].off, f1 = end; memmove(b->fr + i, b->fr + i + 1, (b->nfree - i - 1) * sizeof *b->fr); b->nfree--;
-            if (o > f0) fr_add(b, f0, o - f0);
-            if (o + rq.size < f1) fr_add(b, o + rq.size, f1 - o - rq.size);
-            b->used++; pthread_mutex_unlock(&g_amu);
+    // its own kind first; then (blocks by lifetime) an empty block of another kind, which becomes this kind
+    for (int pass = 0; pass < 1 + life; pass++)
+        for (int k = 0; k < g_nblocks; k++) {
+            vblock *b = g_blocks[k]; VkDeviceSize o; if (b->type != (uint32_t)t || (map && !b->map)) continue;
+            if (pass == 0 ? b->cls != cls : b->used != 0) continue;
+            if (!vk_take(b, al, rq.size, &o)) continue;
+            b->cls = cls; pthread_mutex_unlock(&g_amu);
             return (vmalloc_t){b, o, rq.size};
         }
-    }
-    VkDeviceSize bs = rq.size > (32ull << 20) ? (rq.size + 0xffff) & ~0xffffull : 64ull << 20;
+    VkDeviceSize std = cls == VA_LONG ? 64ull << 20 : 32ull << 20;
+    VkDeviceSize bs = rq.size > std / 2 ? (rq.size + 0xffff) & ~0xffffull : std;
     { static long cap = -2; if (cap == -2) { const char *e = getenv("DM_VK_MEM_CAP_MB"); cap = e ? atol(e) : -1; }   // test runs: stop before the machine runs out of memory
       double total = bs; for (int k = 0; k < g_nblocks; k++) total += g_blocks[k]->size;
       if (cap > 0 && total > cap * 1048576.0) { pthread_mutex_unlock(&g_amu); VDIE("device memory would pass DM_VK_MEM_CAP_MB=%ld (%.0f MB in %d blocks)", cap, total / 1048576, g_nblocks); } }
-    vblock *b = calloc(1, sizeof *b); b->size = bs; b->type = (uint32_t)t;
+    vblock *b = calloc(1, sizeof *b); b->size = bs; b->type = (uint32_t)t; b->cls = cls;
     VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = bs, .memoryTypeIndex = (uint32_t)t };
     VkResult r = vkAllocateMemory(g_dev, &mai, NULL, &b->mem);
     if (r) { pthread_mutex_unlock(&g_amu); VDIE("vkAllocateMemory %llu bytes type %d failed: %d", (unsigned long long)bs, t, r); }
@@ -889,8 +911,17 @@ static vmalloc_t vk_alloc(VkMemoryRequirements rq, VkMemoryPropertyFlags want, i
     b->used = 1;
     g_blocks = realloc(g_blocks, (g_nblocks + 1) * sizeof *g_blocks); g_blocks[g_nblocks++] = b;
     pthread_mutex_unlock(&g_amu);
-    if (getenv("DM_VK_BLOCKLOG")) VLOG("device block %d: %.0f MB type %d for a %.1f MB request from %p", g_nblocks, bs / 1048576.0, t, rq.size / 1048576.0, __builtin_return_address(0));
+    if (getenv("DM_VK_BLOCKLOG")) VLOG("device block %d: %.0f MB type %d kind %d for a %.1f MB request from %p", g_nblocks, bs / 1048576.0, t, cls, rq.size / 1048576.0, __builtin_return_address(0));
     return (vmalloc_t){b, 0, rq.size};
+}
+static vmalloc_t vk_alloc(VkMemoryRequirements rq, VkMemoryPropertyFlags want, int map) { return vk_alloc_c(rq, want, map, VA_LONG); }   // (long-lived: images, kept buffers)
+// Blocks and what is handed out of them, MB, by kind (VA_*): the [mem] line and the tests
+static void vk_mem_by_kind(double blocks[VA_NCLS], double used[VA_NCLS]) {
+    for (int c = 0; c < VA_NCLS; c++) blocks[c] = used[c] = 0;
+    pthread_mutex_lock(&g_amu);
+    for (int k = 0; k < g_nblocks; k++) { vblock *b = g_blocks[k]; double fr = 0; for (int i = 0; i < b->nfree; i++) fr += (double)b->fr[i].size;
+        int c = b->cls >= 0 && b->cls < VA_NCLS ? b->cls : 0; blocks[c] += (double)b->size / 1048576.0; used[c] += ((double)b->size - fr) / 1048576.0; }
+    pthread_mutex_unlock(&g_amu);
 }
 static void vk_free(vmalloc_t a) {
     if (!a.b) return;
@@ -910,7 +941,7 @@ static void vk_trim(void) {
         vblock *b = g_blocks[k];
         if (b->used || now - b->idle_since < 10000000000ull) { k++; continue; }
         if (b->type < 32 && !(kept >> b->type & 1)) { kept |= 1u << b->type; k++; continue; }
-        vkFreeMemory(g_dev, b->mem, NULL);   // (a mapped block is unmapped by its freeing) freed += b->size; nf++;
+        vkFreeMemory(g_dev, b->mem, NULL); freed += b->size; nf++;   // (a mapped block is unmapped by its freeing. The count sat inside this comment until 2026-11-24: the line below never printed)
         free(b->fr); free(b); g_blocks[k] = g_blocks[--g_nblocks];
     }
     pthread_mutex_unlock(&g_amu);
@@ -1630,7 +1661,7 @@ static uint8_t *arena_alloc(sub_t *s, VkDeviceSize n, VkBuffer *buf, VkDeviceSiz
         VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bs, .usage = BUF_ALL };
         VKCHECK(vkCreateBuffer(g_dev, &bi, NULL, &b->buf));
         VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, b->buf, &rq);
-        b->a = vk_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
+        b->a = vk_alloc_c(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1, VA_ARENA);
         VKCHECK(vkBindBufferMemory(g_dev, b->buf, b->a.b->mem, b->a.off)); b->map = (uint8_t *)b->a.b->map + b->a.off;
     }
 have:
@@ -2766,12 +2797,12 @@ static int tex_upload_(vtex *x, const tex_t *t, uint64_t *copy_ns) {
     int batch = !vfy && t_upb && t_upb->n < UPB_MAX;   // (a batch: its command buffer, a staging buffer of its own kept until the batch is done)
     VkCommandBuffer cb = vfy ? NULL : batch ? t_upb->cb : ucb(); int once = !cb; if (once) cb = once_begin();
     if (vfy) { VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = total ? total : 16, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT }; VKCHECK(vkCreateBuffer(g_dev, &bi, NULL, &vb));
-        VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, vb, &rq); vm = vk_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
+        VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, vb, &rq); vm = vk_alloc_c(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1, VA_TEMP);
         VKCHECK(vkBindBufferMemory(g_dev, vb, vm.b->mem, vm.off)); vexp = calloc(1, total ? total : 16); memset((uint8_t *)vm.b->map + vm.off, 0xcd, total); }
     VkBuffer sb; VkDeviceSize so = 0; uint8_t *sp; vmalloc_t tmp = {0};
     if (!once && !batch) sp = arena_alloc(g_sub, total ? total : 16, &sb, &so);
     else { VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = total ? total : 16, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT }; VKCHECK(vkCreateBuffer(g_dev, &bi, NULL, &sb));
-           VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, sb, &rq); tmp = vk_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
+           VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, sb, &rq); tmp = vk_alloc_c(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1, VA_TEMP);
            VKCHECK(vkBindBufferMemory(g_dev, sb, tmp.b->mem, tmp.off)); sp = (uint8_t *)tmp.b->map + tmp.off; }
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .image = x->img, .subresourceRange = { x->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS } };
@@ -3109,11 +3140,12 @@ static vtex *dummy_make(VkFormat f, VkImageType type, uint32_t layers, int cube,
     once_end(cb);
     return x;
 }
-static VkBuffer buf_make(VkDeviceSize n, vmalloc_t *a, void **map) {
+static VkBuffer buf_make_c(VkDeviceSize n, vmalloc_t *a, void **map, int cls) {
     VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = BUF_ALL }; VkBuffer b; VKCHECK(vkCreateBuffer(g_dev, &bi, NULL, &b));
-    VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, b, &rq); *a = vk_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
+    VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_dev, b, &rq); *a = vk_alloc_c(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1, cls);
     VKCHECK(vkBindBufferMemory(g_dev, b, a->b->mem, a->off)); if (map) *map = (uint8_t *)a->b->map + a->off; return b;
 }
+static VkBuffer buf_make(VkDeviceSize n, vmalloc_t *a, void **map) { return buf_make_c(n, a, map, VA_LONG); }
 static void dummies_init(void) {
     static const VkFormat F[3] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT };
     for (int c = 0; c < 3; c++) {
@@ -3325,13 +3357,20 @@ typedef struct vshader {
     uint32_t *code; size_t nw;                  // fragment shaders: the (rebound) SPIR-V, for variants
     uint8_t out_cls[8];                         // fragment outputs by location: 0 float, 1 uint, 2 sint, 255 none
     uint8_t img_writes;                         // the shader stores into storage images (OpImageWrite)
-    struct { uint64_t drop; uint32_t um, sm; int sw; uint32_t qm; VkShaderModule mod; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)   // qm: outputs into R11G11B10F's stand-in, made what the packed format stores (spv_b10_outputs)
+    struct { uint64_t drop; uint32_t um, sm; int sw; uint32_t qm; VkShaderModule mod; uint32_t nb; } var[8]; int nvar;   // sw: outputs 0 and 1 swapped (g_ds_swap)   // variants: inputs the previous stage never writes (drop), float outputs to integer targets (um / sm)   // qm: outputs into R11G11B10F's stand-in, made what the packed format stores (spv_b10_outputs)
     int tf[4][2]; uint16_t tf_stride[4]; VkShaderModule tfmod, ptsmod;   // transform feedback: per buffer { output location, components } and stride; the capture variant (tf_draw)
     uint8_t dp;                                 // reads draw parameters from push constants (a device without them: spv_no_drawparams; the draw pushes them, dp_push)
     uint32_t lacks;                             // SPV_NEED_* the shader needs and the device lacks (spv_feature_needs)
     uint32_t *glcode; size_t nglw;              // vertex shaders under intbits_on: the GL-depth variant's SPIR-V (code / nw: the shader's own), for the intbits variants
-    struct { uint32_t u, s; int gl; VkShaderModule mod; } ibv[8]; int nibv;   // the vertex modules with integer inputs bitcast (intbits_mod)
+    struct { uint32_t u, s; int gl; VkShaderModule mod; uint32_t nb; } ibv[8]; int nibv;   // the vertex modules with integer inputs bitcast (intbits_mod)
+    uint8_t hasgl;                              // a GL-depth variant was made (glmod; it stays 1 while glmod is released: vs_gl)
+    _Atomic int rel; uint8_t relgl, nrel;       // modules released (shmod_release): mod (and glmod: relgl) made again from code / glcode by shmod_ensure; nrel: times
+    _Atomic uint64_t used_ns;                   // the last pipeline built with it (shmod_release)
 } vshader;
+// The game's shader modules alive now (main, GL-depth, capture, point, fragment and integer-input variants) and the SPIR-V bytes handed to the driver for them; those
+//   destroyed by shmod_release and made again by shmod_ensure ([mem] shmod_report)
+static _Atomic int64_t g_shmod_n, g_shmod_bytes; static _Atomic uint64_t g_shmod_rel_n, g_shmod_rel_bytes, g_shmod_remade;
+static void shmod_count(VkShaderModule m, int64_t bytes, int sign) { if (m) { atomic_fetch_add(&g_shmod_n, sign); atomic_fetch_add(&g_shmod_bytes, sign * bytes); } }
 // Integer vertex formats under float inputs (DM_VK_VFMT_INTBITS, default on; 0 turns it off): see spv_vin_raw. The game feeds 8 / 16-bit UINT attributes (packed
 //   normals, colours, indices: Sword / Shield's field at locations 7, 8, 11) into inputs the translated shader declares float and converts itself. Adreno hands the
 //   bits over unchanged; Arm r44 converts the integer first, and the lit field went white (POCO X6 Pro, G615: 79 % of the lit target at 1024+ -> 0 %)
@@ -3351,9 +3390,9 @@ static VkShaderModule intbits_mod(vshader *vs, int gl, uint32_t u, uint32_t sm) 
     for (int i = 0; i < vs->nibv; i++) if (vs->ibv[i].u == u && vs->ibv[i].s == sm && vs->ibv[i].gl == gl) { r = vs->ibv[i].mod; goto out; }
     if (vs->nibv < 8) { size_t nw = 0; uint32_t *c = spv_vin_raw(code, cw, 0, u, sm, &nw);
         if (c) { VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nw * 4, .pCode = c };
-                 if (vkCreateShaderModule(g_dev, &mci, NULL, &r)) r = VK_NULL_HANDLE; free(c); }
-        static _Atomic int said; if (atomic_fetch_add(&said, 1) < 8 || !r) VLOG("%svertex shader %s%s: integer inputs bitcast (uint %#x, int %#x)%s", r ? "" : "[RED] ", vs->key, gl ? " (GL depth)" : "", u, sm, r ? "" : ": NOT made, the shader's own module");
-        vs->ibv[vs->nibv].u = u; vs->ibv[vs->nibv].s = sm; vs->ibv[vs->nibv].gl = gl; vs->ibv[vs->nibv].mod = r; vs->nibv++; }
+                 if (vkCreateShaderModule(g_dev, &mci, NULL, &r)) r = VK_NULL_HANDLE; free(c); shmod_count(r, (int64_t)nw * 4, 1); }
+        static _Atomic int said; if ((!vs->nrel && atomic_fetch_add(&said, 1) < 8) || !r) VLOG("%svertex shader %s%s: integer inputs bitcast (uint %#x, int %#x)%s", r ? "" : "[RED] ", vs->key, gl ? " (GL depth)" : "", u, sm, r ? "" : ": NOT made, the shader's own module");
+        vs->ibv[vs->nibv].u = u; vs->ibv[vs->nibv].s = sm; vs->ibv[vs->nibv].gl = gl; vs->ibv[vs->nibv].mod = r; vs->ibv[vs->nibv].nb = (uint32_t)(nw * 4); vs->nibv++; }
   out:
     pthread_mutex_unlock(&g_ibv_mu); return r;
 }
@@ -3608,6 +3647,7 @@ static vshader *shader_load(const uint8_t key[8], int st) {
         VkShaderModuleCreateInfo gci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ngl, .pCode = glcode };
         VkResult gr = vkCreateShaderModule(g_dev, &gci, NULL, &s->glmod);
         if (gr) { VLOG("[RED] shader %s: GL depth fallback module failed %d", hex, gr); s->glmod = VK_NULL_HANDLE; }
+        s->hasgl = s->glmod != VK_NULL_HANDLE; shmod_count(s->glmod, (int64_t)ngl, 1);
         if (!gr && intbits_on()) { s->glcode = glcode; s->nglw = ngl / 4; atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ngl); } else free(glcode);
     } else free(glcode);
     if (st == 1) spv_frag_outputs(code, ns / 4, s->out_cls);
@@ -3615,11 +3655,11 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     if (st == 0 && (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3])) {   // transform feedback: the capture variant (tf_draw)
         size_t tw; uint32_t *tc = spv_tf_variant(code, ns / 4, (const int (*)[2])s->tf, TF_BIND, &tw);
         tc = dp_fix(s, tc, &tw, hex);
-        if (tc) { VkShaderModuleCreateInfo tci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = tw * 4, .pCode = tc }; if (vkCreateShaderModule(g_dev, &tci, NULL, &s->tfmod)) s->tfmod = VK_NULL_HANDLE; free(tc); }
+        if (tc) { VkShaderModuleCreateInfo tci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = tw * 4, .pCode = tc }; if (vkCreateShaderModule(g_dev, &tci, NULL, &s->tfmod)) s->tfmod = VK_NULL_HANDLE; free(tc); shmod_count(s->tfmod, (int64_t)tw * 4, 1); }
         if (!s->tfmod) VLOG("[RED] shader %s: transform feedback capture variant failed", hex);
         if (g_tf_pts > 0) { size_t pw; uint32_t *pc_ = spv_tf_points_variant(code, ns / 4, (const int (*)[2])s->tf, TFP_W, &pw);   // the point route (tf_points.h)
             pc_ = dp_fix(s, pc_, &pw, hex);
-            if (pc_) { VkShaderModuleCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = pw * 4, .pCode = pc_ }; if (vkCreateShaderModule(g_dev, &pci, NULL, &s->ptsmod)) s->ptsmod = VK_NULL_HANDLE; free(pc_); }
+            if (pc_) { VkShaderModuleCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = pw * 4, .pCode = pc_ }; if (vkCreateShaderModule(g_dev, &pci, NULL, &s->ptsmod)) s->ptsmod = VK_NULL_HANDLE; free(pc_); shmod_count(s->ptsmod, (int64_t)pw * 4, 1); }
             if (!s->ptsmod) VLOG("[RED] shader %s: transform feedback point variant failed", hex); }
     }
     if (g_yflip && st == 0) { size_t nw; uint32_t *c2 = spv_flip_y(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } else RED_ONCE(127, "vertex shader %s: no position to flip (Vulkan 1.0 without maintenance1)", hex); }
@@ -3645,8 +3685,10 @@ static vshader *shader_load(const uint8_t key[8], int st) {
     VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = ns, .pCode = code };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &s->mod);
     atomic_fetch_add(&g_spv_mod_bytes, (uint64_t)ns); if (st == 1) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns);
+    if (!r) shmod_count(s->mod, (int64_t)ns, 1);
+    atomic_store(&s->used_ns, mono_ns());
     if (st == 1 || (st == 0 && intbits_on())) { s->code = code; s->nw = ns / 4; if (st == 0) atomic_fetch_add(&g_spv_kept_bytes, (uint64_t)ns); } else free(code);   // (vertex shaders: the intbits variants)
-    if (r) { VLOG("[RED] shader %s: vkCreateShaderModule failed %d", hex, r); if (s->glmod) vkDestroyShaderModule(g_dev, s->glmod, NULL); free(s); return NULL; }
+    if (r) { VLOG("[RED] shader %s: vkCreateShaderModule failed %d", hex, r); if (s->glmod) { shmod_count(s->glmod, (int64_t)s->nglw * 4, -1); vkDestroyShaderModule(g_dev, s->glmod, NULL); } free(s); return NULL; }
     return s;
 }
 static pthread_mutex_t g_shmu = PTHREAD_MUTEX_INITIALIZER;   // the shader cache: the game's thread and the prewarm thread
@@ -3656,6 +3698,61 @@ static vshader *shader_get(const uint8_t key[8], int st) {
     if (!s) { s = shader_load(key, st); if (s) nvn_hm_put(&g_shcache, key, s); }
     pthread_mutex_unlock(&g_shmu);
     return s;
+}
+// ---- Shader modules released when no pipeline is being built from them (DM_VK_SHMOD_RELEASE=0: kept for the whole run, as before)
+// Every module the game's shaders got stayed alive for the whole run (2,209-5,700 of them in players' logs), though Vulkan lets a module go as soon as the pipelines
+//   that use it are made: a pipeline keeps what it needs (vkDestroyShaderModule, "pipelines created from it remain valid"). Turnip / Xclipse keep roughly the SPIR-V or
+//   more per module (perf-1124: up to 0.1-0.3 MB a module, unmeasured on a phone). A vertex / fragment shader whose module has built no pipeline for 60 s has its
+//   modules destroyed (main, GL-depth, fragment and integer-input variants); the SPIR-V we keep (code / glcode: fragment shaders always, vertex shaders under
+//   DM_VK_VFMT_INTBITS) makes them again, unchanged, at the next build (shmod_ensure), so the pipeline cache's entries still match. Shaders whose SPIR-V is not kept
+//   (compute, geometry, tessellation; capture / point variants) keep theirs. Builds hold g_shmod_rw for reading from making the modules until the driver returned the
+//   pipeline; the release takes it for writing only when no build is under way (trywrlock: else at the next round). Every 300 presents with pso_evict
+static pthread_rwlock_t g_shmod_rw = PTHREAD_RWLOCK_INITIALIZER; static pthread_mutex_t g_shmod_mu = PTHREAD_MUTEX_INITIALIZER;
+static int shmod_on(void) {
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_SHMOD_RELEASE"); v = !(e && *e == '0');
+        VLOG("shader modules: %s", v ? "released 60 s after their last pipeline build, made again from the kept SPIR-V when needed" : "kept for the whole run (DM_VK_SHMOD_RELEASE=0)"); }
+    return v;
+}
+static uint64_t g_shmod_idle_ns = 60000000000ull;   // (the tests shorten it)
+static void shmod_release(void) {
+    if (!shmod_on() || pthread_rwlock_trywrlock(&g_shmod_rw)) return;   // (a pipeline is being built: the next round)
+    uint64_t now = mono_ns(); int n = 0; int64_t bytes = 0;
+    pthread_mutex_lock(&g_shmu);
+    for (uint32_t i = 0; i < g_shcache.cap; i++) {
+        vshader *s = g_shcache.vals[i]; if (!s || !s->code || !s->mod || atomic_load(&s->rel)) continue;
+        if (now - atomic_load(&s->used_ns) < g_shmod_idle_ns) continue;
+        int64_t b = (int64_t)s->nw * 4;
+        vkDestroyShaderModule(g_dev, s->mod, NULL); shmod_count(s->mod, b, -1); s->mod = VK_NULL_HANDLE;
+        if (s->glmod && s->glcode) { int64_t gb = (int64_t)s->nglw * 4; vkDestroyShaderModule(g_dev, s->glmod, NULL); shmod_count(s->glmod, gb, -1); s->glmod = VK_NULL_HANDLE; s->relgl = 1; b += gb; }
+        for (int v = 0; v < s->nvar; v++) if (s->var[v].mod) { vkDestroyShaderModule(g_dev, s->var[v].mod, NULL); shmod_count(s->var[v].mod, s->var[v].nb, -1); }
+        s->nvar = 0;   // (variants are made again by frag_module_ as the next builds ask)
+        for (int v = 0; v < s->nibv; v++) if (s->ibv[v].mod) { vkDestroyShaderModule(g_dev, s->ibv[v].mod, NULL); shmod_count(s->ibv[v].mod, s->ibv[v].nb, -1); }
+        s->nibv = 0;
+        if (s->nrel < 255) s->nrel++;
+        atomic_store(&s->rel, 1); n++; bytes += b;
+    }
+    pthread_mutex_unlock(&g_shmu);
+    pthread_rwlock_unlock(&g_shmod_rw);
+    if (n) { atomic_fetch_add(&g_shmod_rel_n, (uint64_t)n); atomic_fetch_add(&g_shmod_rel_bytes, (uint64_t)bytes);
+             static int said; if (said++ < 20) VLOG("shader modules: %d shaders unused for %.0f s released (%.1f MB of SPIR-V; %lld modules left)", n, g_shmod_idle_ns / 1e9, bytes / 1048576.0, (long long)atomic_load(&g_shmod_n)); }
+}
+// (g_shmod_rw held for reading) s's modules made again if they were released, and its use noted; 0: one could not be made (the pipeline is not built)
+static int shmod_ensure(vshader *s) {
+    if (!s) return 1;
+    atomic_store(&s->used_ns, mono_ns());
+    if (!atomic_load(&s->rel)) return 1;
+    int ok = 1; pthread_mutex_lock(&g_shmod_mu);
+    if (atomic_load(&s->rel)) {
+        VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = s->nw * 4, .pCode = s->code };
+        if (vkCreateShaderModule(g_dev, &mci, NULL, &s->mod)) { s->mod = VK_NULL_HANDLE; ok = 0; } else shmod_count(s->mod, (int64_t)s->nw * 4, 1);
+        if (ok && s->relgl) { VkShaderModuleCreateInfo gci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = s->nglw * 4, .pCode = s->glcode };
+            if (vkCreateShaderModule(g_dev, &gci, NULL, &s->glmod)) { s->glmod = VK_NULL_HANDLE; ok = 0; } else { shmod_count(s->glmod, (int64_t)s->nglw * 4, 1); s->relgl = 0; } }
+        if (ok) { atomic_store(&s->rel, 0); atomic_fetch_add(&g_shmod_remade, 1); }
+        else { if (s->mod) { shmod_count(s->mod, (int64_t)s->nw * 4, -1); vkDestroyShaderModule(g_dev, s->mod, NULL); s->mod = VK_NULL_HANDLE; }
+               RED_ONCE(163, "shader %s: its released module could not be made again: pipelines with it are not built", s->key); }
+    }
+    pthread_mutex_unlock(&g_shmod_mu);
+    return ok;
 }
 typedef struct vprog { vshader *sh[6]; VkDescriptorSetLayout dsl[2]; VkPipelineLayout pl[2]; uint8_t np[2], missing; int gen; } vprog;   // missing: a stage had no shader (built again when live shaders come)   // [0] graphics stages, [1] compute; np: descriptor sets instead of pushes
 static nvn_hmap g_progs = {.klen = 8};   // program serial → vprog
@@ -4334,11 +4431,12 @@ static VkShaderModule frag_module_(vprog *pr, const uint32_t *cfmt, int sw, uint
     VkShaderModule m = VK_NULL_HANDLE; VkShaderModuleCreateInfo mci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nw * 4, .pCode = c };
     VkResult r = vkCreateShaderModule(g_dev, &mci, NULL, &m); free(c);
     if (r) { VLOG("[RED] fragment shader %s: variant failed %d", fs->key, r); return fs->mod; }
-    if (drop) VLOG("fragment shader %s reads varyings %#llx that %s never writes: those read (0, 0, 0, 1)", fs->key, (unsigned long long)drop, pv ? pv->key : "-");
-    if (um | sm) VLOG("fragment shader %s: float outputs %#x / %#x written as uint / int bits (integer colour targets)", fs->key, um, sm);
-    if (sw) { static int said; if (said++ < 16) VLOG("fragment shader %s: a copy with outputs 0 and 1 swapped, for its dual-source blend in two steps", fs->key); }
+    shmod_count(m, (int64_t)nw * 4, 1);
+    if (drop && !fs->nrel) VLOG("fragment shader %s reads varyings %#llx that %s never writes: those read (0, 0, 0, 1)", fs->key, (unsigned long long)drop, pv ? pv->key : "-");
+    if ((um | sm) && !fs->nrel) VLOG("fragment shader %s: float outputs %#x / %#x written as uint / int bits (integer colour targets)", fs->key, um, sm);
+    if (sw && !fs->nrel) { static int said; if (said++ < 16) VLOG("fragment shader %s: a copy with outputs 0 and 1 swapped, for its dual-source blend in two steps", fs->key); }
     pthread_mutex_lock(&g_psomu);
-    if (fs->nvar < 8) { fs->var[fs->nvar].drop = drop; fs->var[fs->nvar].um = um; fs->var[fs->nvar].sm = sm; fs->var[fs->nvar].sw = sw; fs->var[fs->nvar].qm = qm; fs->var[fs->nvar].mod = m; fs->nvar++; }
+    if (fs->nvar < 8) { fs->var[fs->nvar].drop = drop; fs->var[fs->nvar].um = um; fs->var[fs->nvar].sm = sm; fs->var[fs->nvar].sw = sw; fs->var[fs->nvar].qm = qm; fs->var[fs->nvar].mod = m; fs->var[fs->nvar].nb = (uint32_t)(nw * 4); fs->nvar++; }
     pthread_mutex_unlock(&g_psomu);
     return m;
 }
@@ -4802,7 +4900,7 @@ static void *prewarm_main(void *arg) { DM_THREAD_NAME("dm-prewarm"); (void)arg; 
 //   type. A 32-bit integer format under a float input therefore becomes the float format of the same size, and a 32-bit float format under an integer input the
 //   integer one: the same bits reach the shader, by the spec. Smaller integer formats have no bit-for-bit match (left as they are, logged once)
 // The vertex module a pipeline gets (pso_make) and its inputs: the GL-depth variant on a driver without depth clip control while the game's depth is GL's
-static int vs_gl(const vshader *vs, int depth_zero) { return vs && !g_clipctl && !depth_zero && vs->glmod && vs->nglin; }
+static int vs_gl(const vshader *vs, int depth_zero) { return vs && !g_clipctl && !depth_zero && vs->hasgl && vs->nglin; }   // (hasgl: glmod may be released, shmod_release)
 static const spv_input *vs_inputs(const vshader *vs, int depth_zero, int *n) { if (vs_gl(vs, depth_zero)) { *n = vs->nglin; return vs->glin; } *n = vs ? vs->nin : 0; return vs ? vs->in : NULL; }
 static VkFormat attr_fmt_for(const vshader *vs, int depth_zero, uint32_t loc, VkFormat f) {
     int nin; const spv_input *in = vs_inputs(vs, depth_zero, &nin);
@@ -4821,7 +4919,15 @@ static VkFormat attr_fmt_for(const vshader *vs, int depth_zero, uint32_t loc, Vk
                                   intbits_on() ? "read as integers and bitcast in the vertex shader (intbits_mod)" : "no format gives the same bits; left as it is (DM_VK_VFMT_INTBITS=0)"); }
     return f;
 }
-static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {
+static VkPipeline pso_make_(vprog *pr, pkey k, const sst *ss);
+static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss) {   // (the shaders' modules alive from here until the driver returned the pipeline: shmod_release)
+    pthread_rwlock_rdlock(&g_shmod_rw);
+    int ok = 1; for (int i = 0; i < 5; i++) ok &= shmod_ensure(pr->sh[i]);
+    VkPipeline p = ok ? pso_make_(pr, k, ss) : VK_NULL_HANDLE;
+    pthread_rwlock_unlock(&g_shmod_rw);
+    return p;
+}
+static VkPipeline pso_make_(vprog *pr, pkey k, const sst *ss) {
     vshader *vs = pr->sh[0], *fs = pr->sh[1]; VkPipeline p = VK_NULL_HANDLE;
     // a capture drawn as points (a key recorded while that route was on, or now): only with the route on and its shaders made. A recorded one built ahead at a start
     //   with the route off had no point modules: Adreno's driver crashed in vkCreateGraphicsPipelines on the null module
@@ -6223,7 +6329,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     vtex *x = tex_res(t); if (!x || !x->img) return;
     sk_read(x);
     int b10 = b10_swapped_tex(x) && bpb == 4; size_t xb = b10 ? wb * 2 : wb;   // (R11G11B10F's stand-in, DM_VK_B10_AS_RGBA16: read as RGBA16F, packed below)
-    VkDeviceSize n = xb * hb * nz; vmalloc_t a; void *m; VkBuffer b = buf_make(n ? n : 16, &a, &m);
+    VkDeviceSize n = xb * hb * nz; vmalloc_t a; void *m; VkBuffer b = buf_make_c(n ? n : 16, &a, &m, VA_TEMP);
     VkCommandBuffer cb = once_begin();
     VkBufferImageCopy rg = { .bufferOffset = 0, .imageSubresource = { x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : x->aspect, level, x->is3d ? 0 : layer0 + (uint32_t)r->zoffset, x->is3d ? 1 : (uint32_t)nz },
         .imageOffset = { r->xoffset, r->yoffset, x->is3d ? r->zoffset : 0 }, .imageExtent = { (uint32_t)r->width, (uint32_t)r->height, x->is3d ? (uint32_t)nz : 1 } };
@@ -6268,8 +6374,8 @@ static void shot_ex(vtex *x, const int crop[4], const char *path, uint32_t lv, u
     // a blit into an RGBA8 image converts any colour format, then a copy into host memory
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { w, h, 1 }, .mipLevels = 1, .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
-    VkImage im; VKCHECK(vkCreateImage(g_dev, &ci, NULL, &im)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, im, &rq); vmalloc_t ia = vk_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); vkBindImageMemory(g_dev, im, ia.b->mem, ia.off);
-    vmalloc_t ba; void *m; VkBuffer b = buf_make((VkDeviceSize)w * h * 4, &ba, &m);
+    VkImage im; VKCHECK(vkCreateImage(g_dev, &ci, NULL, &im)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(g_dev, im, &rq); vmalloc_t ia = vk_alloc_c(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, VA_TEMP); vkBindImageMemory(g_dev, im, ia.b->mem, ia.off);
+    vmalloc_t ba; void *m; VkBuffer b = buf_make_c((VkDeviceSize)w * h * 4, &ba, &m, VA_TEMP);
     VkCommandBuffer cb = once_begin();
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = im, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
@@ -7691,6 +7797,14 @@ static void present_window_locked(vtex *x, const int crop[4]) {
         FGE.n_gen = FGE.n_plain = FGE.gpu_sum = FGE.gpu_n = FGE.gpu_max = FGE.cpu_sum = FGE.lag_sum = FGE.lag_n = 0; FGE.n_cut = FGE.n_still = FGE.n_menu = 0; FGE.last_log = t_arr; }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) { fg_flush_locked(); swap_destroy(); }
 }
+// What the driver holds for our shaders and pipelines (perf-1124 fix 7: counted before anything was released): the modules alive, their SPIR-V, those released and
+//   made again (shmod_release), the pipelines kept by kind; the host heap beside it (Android) shows what releasing gave back on this driver
+static void shmod_report(long heap) {
+    pthread_mutex_lock(&g_psomu); uint32_t pg = g_pso.n, ps = g_pso_s.n; pthread_mutex_unlock(&g_psomu);
+    VLOG("[mem] shader modules %lld alive (%.1f MB of SPIR-V handed to the driver), %llu released so far (%.1f MB), %llu made again; pipelines kept %u (with draw state %u), compute %u, "
+         "%llu destroyed over the cap; host heap %.0f MB", (long long)atomic_load(&g_shmod_n), atomic_load(&g_shmod_bytes) / 1048576.0, (unsigned long long)atomic_load(&g_shmod_rel_n),
+         atomic_load(&g_shmod_rel_bytes) / 1048576.0, (unsigned long long)atomic_load(&g_shmod_remade), pg, ps, g_cps.n, (unsigned long long)g_pso_evicted, heap / 1048576.0);
+}
 // Once a minute: where the renderer's memory is, so growth can be told apart (caches that level off: shaders, pipelines; anything else that keeps rising is a leak)
 static void mem_report(void) {
     pthread_mutex_lock(&g_amu); double dev = 0, devused = 0; int nb = g_nblocks;
@@ -7709,6 +7823,10 @@ static void mem_report(void) {
          "shaders %u, pipelines %u, textures by serial %u, aliases %u, ghosts %u; host heap %.0f MB; SPIR-V %.0f MB in the driver's modules, %.0f MB kept by us",
          nb, dev / 1048576, devused / 1048576, atomic_load(&g_live_tex), atomic_load(&g_live_tex_bytes) / 1048576.0, npool, pool / 1048576, arena / 1048576, ndp, ndf,
          g_shcache.n, g_pso.n, g_by_serial.n, g_alias.n, g_ghost.n, heap / 1048576.0, atomic_load(&g_spv_mod_bytes) / 1048576.0, atomic_load(&g_spv_kept_bytes) / 1048576.0);
+    { double kb[VA_NCLS], ku[VA_NCLS]; vk_mem_by_kind(kb, ku);
+      VLOG("[mem] device blocks by kind, MB in blocks / in use: long-lived %.0f / %.0f, staging %.0f / %.0f, arenas %.0f / %.0f; %.0f MB in %d empty blocks given back so far",
+           kb[VA_LONG], ku[VA_LONG], kb[VA_TEMP], ku[VA_TEMP], kb[VA_ARENA], ku[VA_ARENA], g_trim_bytes / 1048576.0, g_trim_n); }
+    shmod_report(heap);
 }
 // The front end's frame report (Android: performance hints, android_main.c): the presenting thread's work since its last present against the frame's period
 __attribute__((weak)) void front_frame_work(uint64_t busy_ns, uint64_t target_ns) { (void)busy_ns; (void)target_ns; }   // (no front end report: nothing)
@@ -7852,7 +7970,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
                                        (unsigned long long)g_xf_dc, (unsigned long long)g_xf_bad, (unsigned long long)g_merge_n);
     if (n % 300 == 0 && hold_dec() && g_ra_px_full) VLOG("present %llu: render areas: %llu passes begun on part of their targets; %.1f %% of the targets' pixels loaded / stored (DM_VK_RENDER_AREA)",
                                        (unsigned long long)n, (unsigned long long)g_ra_n, 100.0 * (double)g_ra_px / (double)g_ra_px_full);
-    if (n % 300 == 0) { pso_evict(); vk_trim(); }   // (pipelines kept: Arm's driver, phones under 7.5 GB; empty device blocks given back)
+    if (n % 300 == 0) { pso_evict(); vk_trim(); shmod_release(); }   // (pipelines kept: Arm's driver, Xclipse, phones under 9 GB; empty device blocks given back; idle shader modules released)
     if (n % 300 == 0 && g_dsc_hits + g_dsc_new) VLOG("present %llu: descriptor sets written %llu, reused %llu (%.0f %%)", (unsigned long long)n, (unsigned long long)g_dsc_new, (unsigned long long)g_dsc_hits, 100.0 * (double)g_dsc_hits / (double)(g_dsc_hits + g_dsc_new));
     // the state shadow's count (DM_VK_STATE_LOG=<presents>, 300 by default; 0: never): driver calls a draw for its state (pipeline, dynamic state, vertex and index
     //   buffers, descriptor pushes; the draw itself not counted), sent and left out as unchanged
