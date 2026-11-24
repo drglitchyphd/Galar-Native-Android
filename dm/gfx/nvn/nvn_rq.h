@@ -167,9 +167,11 @@ static int rq_sync_fence(const sync_t *s, uint64_t timeout_ns, uint64_t *fence) 
         if (timeout_ns != UINT64_MAX) {
             if (now.tv_sec > end.tv_sec || (now.tv_sec == end.tv_sec && now.tv_nsec >= end.tv_nsec)) break;
             if (ts.tv_sec > end.tv_sec || (ts.tv_sec == end.tv_sec && ts.tv_nsec > end.tv_nsec)) ts = end;
-        } else if (!said && now.tv_sec - t0.tv_sec >= 5) { said = 1;
-            static int n; if (n++ < 20) LOG("[RED] a sync wait has waited 5 s on the replay thread: it is at %s, queue %llu..%llu, the sync's place %llu, %d presents", g_rq_at,
-                                            (unsigned long long)g_rq_tail, (unsigned long long)g_rq_head, (unsigned long long)s->rq_pos, g_rq_presents); }
+        } else if (!said && now.tv_sec - t0.tv_sec >= 5) { said = 1;   // (quiet while the pipelines are built before play, as rq_wait)
+            extern int nvn_vk_prewarm_progress(int *done, int *total) __attribute__((weak)); int d = 0, tot = 0;
+            if (nvn_vk_prewarm_progress && nvn_vk_prewarm_progress(&d, &tot)) { said = 0; t0 = now; }
+            else { static int n; if (n++ < 20) LOG("[RED] a sync wait has waited 5 s on the replay thread: it is at %s, queue %llu..%llu, the sync's place %llu, %d presents", g_rq_at,
+                                                   (unsigned long long)g_rq_tail, (unsigned long long)g_rq_head, (unsigned long long)s->rq_pos, g_rq_presents); } }
         pthread_cond_timedwait(&g_rq_cv, &g_rq_mu, &ts);
     }
     pthread_mutex_unlock(&g_rq_mu);
