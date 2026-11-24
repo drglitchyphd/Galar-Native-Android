@@ -395,6 +395,9 @@ uint32_t svc_thread_main_init(void) {
     thr_t *t = calloc(1, sizeof *t);
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     t->started = 1; t->prio = 44; t->core = 0; t->mask = 7; t->pt = pthread_self(); t->mport = pthread_mach_thread_np(t->pt); t->host_work = &dm_host_work;
+#ifdef __linux__
+    t->ltid = (int)gettid();   // (the main guest thread too: the state dump finds it by this, thr_bt)
+#endif
     pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
     pthread_setspecific(g_keythr, t);
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
@@ -500,6 +503,96 @@ int thr_find_by_name(const char *name, pthread_t *out) {
 }
 // State dump (called from crash.c on watchdog / crash; read-only, takes no lock): what each guest thread is waiting on and where its most recent SVC was issued from
 // During a state dump, take the backtrace of other guest threads: suspend → read registers → walk the frame pointer chain (both guest code and gate blocks keep the x29 chain) → resume; only main / sdk frames are printed
+#ifdef __ANDROID__
+// Android has no Mach thread suspension (compat/mach/mach.h: the calls fail), so the state dump got no CPU time, registers or backtrace for any thread and a
+//   freeze report (android_main.c "no frame shown for 10 s", the watchdog's stall dump) said only what each thread last waited on (Galar #349: the 10 s freeze
+//   could not be told from a hang). Here each thread is asked for a snapshot instead: a real-time signal sent to it alone (tgkill), whose handler copies its own
+//   registers and walks its frame-pointer chain with safe reads (vm_read_overwrite = process_vm_readv), then returns. The thread is never stopped, so the dump can
+//   not deadlock on it; a thread that does not answer within 50 ms (signals blocked, in the kernel uninterruptibly) is reported as such, and the whole dump waits
+//   at most 2 s for answers. CPU time and the kernel's state letter come from /proc/self/task/<tid>/stat
+#include <signal.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <dlfcn.h>
+typedef struct { uint64_t pc, lr, sp, fp, x[10], bt[20]; int nbt; } snap_t;
+static _Atomic int g_snap_tid, g_snap_done; static snap_t g_snap;
+static void snap_sig(int sig, siginfo_t *si, void *ucv) {
+    (void)sig; (void)si; int e = errno;
+    if ((int)gettid() == atomic_load(&g_snap_tid) && !atomic_load(&g_snap_done)) {
+        ucontext_t *uc = ucv; snap_t *s = &g_snap;
+        s->pc = uc->uc_mcontext.pc; s->sp = uc->uc_mcontext.sp; s->fp = uc->uc_mcontext.regs[29]; s->lr = uc->uc_mcontext.regs[30];
+        for (int i = 0; i < 10; i++) s->x[i] = uc->uc_mcontext.regs[19 + i];
+        s->nbt = 0; uint64_t fp = s->fp; s->bt[s->nbt++] = s->lr;
+        for (int k = 0; k < 64 && fp && s->nbt < 20; k++) {
+            uint64_t fr[2]; vm_size_t g = 0;
+            if (vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &g) || g != 16 || fr[0] <= fp) break;
+            if (fr[1] && fr[1] != s->bt[s->nbt - 1]) s->bt[s->nbt++] = fr[1];
+            fp = fr[0];
+        }
+        atomic_store(&g_snap_done, 1);
+    }
+    errno = e;
+}
+static int snap_take(int tid, snap_t *out, int *budget_ms) {
+    static int installed; if (!installed) { installed = 1; struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = snap_sig; sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask); sigaction(SIGRTMAX - 3, &sa, NULL); }
+    if (*budget_ms <= 0) return 0;
+    atomic_store(&g_snap_done, 0); atomic_store(&g_snap_tid, tid);
+    if (syscall(SYS_tgkill, getpid(), tid, SIGRTMAX - 3)) { atomic_store(&g_snap_tid, 0); return 0; }
+    int ok = 0; for (int w = 0; w < 50 && *budget_ms > 0; w++, (*budget_ms)--) { if (atomic_load(&g_snap_done)) { ok = 1; break; } usleep(1000); }
+    if (!ok) ok = atomic_load(&g_snap_done);
+    atomic_store(&g_snap_tid, 0);
+    if (ok) *out = g_snap;
+    return ok;
+}
+// /proc/self/task/<tid>/stat: the state letter, CPU seconds (user + system), the name; 0 when it cannot be read
+static int proc_task(int tid, char *state, double *cpu, char *name, size_t nn) {
+    char p[64], b[1024]; snprintf(p, sizeof p, "/proc/self/task/%d/stat", tid); int fd = open(p, O_RDONLY); if (fd < 0) return 0;
+    ssize_t n = read(fd, b, sizeof b - 1); close(fd); if (n <= 0) return 0; b[n] = 0;
+    char *o = strchr(b, '('), *c = strrchr(b, ')'); if (!o || !c) return 0;
+    if (name) { size_t l = (size_t)(c - o - 1); if (l >= nn) l = nn - 1; memcpy(name, o + 1, l); name[l] = 0; }
+    unsigned long ut = 0, st = 0; char s = '?';
+    if (sscanf(c + 2, "%c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu", &s, &ut, &st) < 3) return 0;
+    long hz = sysconf(_SC_CLK_TCK); if (hz <= 0) hz = 100;
+    *state = s; *cpu = (double)(ut + st) / (double)hz; return 1;
+}
+static void snap_print(const char *who, const snap_t *s, int guest) {
+    char line[1400]; int p = snprintf(line, sizeof line, "%s pc=", who); module_t *pm = module_of((void *)s->pc); Dl_info di;
+    if (pm) p += snprintf(line + p, sizeof line - p, "%s+%#llx", pm->name, (unsigned long long)(s->pc - (uint64_t)pm->base));
+    else if (dladdr((void *)s->pc, &di) && di.dli_sname) p += snprintf(line + p, sizeof line - p, "%s+%#lx", di.dli_sname, (unsigned long)(s->pc - (uint64_t)di.dli_saddr));
+    else p += snprintf(line + p, sizeof line - p, "%#llx", (unsigned long long)s->pc);
+    if (guest) for (int i = 0; i < 10; i++) p += snprintf(line + p, sizeof line - p, " x%d=%#llx", 19 + i, (unsigned long long)s->x[i]);
+    p += snprintf(line + p, sizeof line - p, " bt:");
+    for (int i = 0; i < s->nbt && p < (int)sizeof line - 80; i++) { uint64_t a = s->bt[i]; module_t *m = module_of((void *)a);
+        if (m) p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, (unsigned long long)(a - (uint64_t)m->base));
+        else if (dladdr((void *)a, &di) && di.dli_sname) p += snprintf(line + p, sizeof line - p, " %s+%#lx", di.dli_sname, (unsigned long)(a - (uint64_t)di.dli_saddr));
+        else if (dladdr((void *)a, &di) && di.dli_fname) { const char *f = strrchr(di.dli_fname, '/'); p += snprintf(line + p, sizeof line - p, " %s+%#lx", f ? f + 1 : di.dli_fname, (unsigned long)(a - (uint64_t)di.dli_fbase)); }
+        else p += snprintf(line + p, sizeof line - p, " %#llx", (unsigned long long)a); }
+    fprintf(stderr, "%s\n", line);
+}
+static int g_snap_budget;   // (ms left for answers in this dump)
+static void thr_bt(thr_t *t) {
+    if (t->exited || !t->ltid || t->ltid == (int)gettid()) return;
+    snap_t s; char who[64]; snprintf(who, sizeof who, "[dm]   %#x registers", t->handle);
+    if (!snap_take(t->ltid, &s, &g_snap_budget)) { fprintf(stderr, "[dm]   %#x registers: the thread did not answer (signals blocked, or in the kernel)\n", t->handle); return; }
+    snap_print(who, &s, 1);
+}
+// the threads that are not the game's (graphics replay, audio, the app's own): name, kernel state, CPU, where each is
+static void host_threads_dump(void) {
+    DIR *d = opendir("/proc/self/task"); if (!d) return; struct dirent *e; int me = (int)gettid();
+    while ((e = readdir(d))) {
+        int tid = atoi(e->d_name); if (tid <= 0 || tid == me) continue;
+        int guest = 0; for (thr_t *t = g_all; t; t = t->all) if (t->ltid == tid && !t->exited) { guest = 1; break; }
+        if (guest) continue;
+        char st = '?', nm[32] = ""; double cpu = -1; proc_task(tid, &st, &cpu, nm, sizeof nm);
+        char who[96]; snprintf(who, sizeof who, "[dm] host thread %d '%s' state %c CPU %.2fs", tid, nm, st, cpu);
+        snap_t s; if (snap_take(tid, &s, &g_snap_budget)) snap_print(who, &s, 0); else fprintf(stderr, "%s (did not answer)\n", who);
+    }
+    closedir(d);
+}
+#else
 static void thr_bt(thr_t *t) {
     if (!t->mport || t->exited || t->mport == mach_thread_self()) return;
     if (thread_suspend(t->mport) != KERN_SUCCESS) return;
@@ -534,7 +627,11 @@ static void thr_bt(thr_t *t) {
     }
     thread_resume(t->mport);
 }
+#endif
 void svc_thread_dump(void) {
+#ifdef __ANDROID__
+    g_snap_budget = 2000;
+#endif
     static const char *kinds[] = {"running/not waiting", "mutex", "condvar", "address", "sync object"};
     int nh = 0; for (int i = 1; i < MAX_H; i++) nh += g_h[i].type != O_FREE;
     fprintf(stderr, "[dm] handle table use %d / %d, threads created so far %llu\n", nh, MAX_H, g_next_id - 0x51);
@@ -547,6 +644,9 @@ void svc_thread_dump(void) {
         if (t->mport && !t->exited) { thread_basic_info_data_t bi; mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
             if (thread_info(t->mport, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) == KERN_SUCCESS)
                 cpu = bi.user_time.seconds + bi.user_time.microseconds / 1e6 + bi.system_time.seconds + bi.system_time.microseconds / 1e6; }
+#ifdef __ANDROID__
+        char kst = 0; if (t->ltid && !t->exited) { double c2; if (proc_task(t->ltid, &kst, &c2, NULL, 0)) cpu = c2; }
+#endif
         char own[96] = ""; if (t->wkind == 1 && t->waddr) { uint32_t w = 0; vm_size_t g2 = 0;   // 0x40000000 | Lock wait: lock word = owner handle | 0x40000000
             if (!vm_read_overwrite(mach_task_self(), t->waddr, 4, (vm_address_t)&w, &g2)) snprintf(own, sizeof own, " owner %#x", w & ~WAITERS_BIT); }
         if (t->wkind == 2 && t->waddr) { uint32_t w = 0, k = 0; vm_size_t g2 = 0;              // Condition wait: current values of the associated lock word and the condition key (the deadlock dump lacked this item)
@@ -556,6 +656,9 @@ void svc_thread_dump(void) {
         int have_raw = (t->wkind == 1 || t->wkind == 2 || t->wkind == 3) && t->waddr && !vm_read_overwrite(mach_task_self(), t->waddr & ~0xfull, 64, (vm_address_t)raw, &g3) && g3 == 64;
         char life[96]; uint64_t nowns = now_ns();
         if (t->exited) snprintf(life, sizeof life, " created at tick %u, exited at tick %u (%.1f s ago)", t->born_tick, t->exit_tick, (nowns - t->exit_ns) / 1e9); else if (!t->born_ns) snprintf(life, sizeof life, " present since process start"); else snprintf(life, sizeof life, " created at tick %u (%.1f s ago)", t->born_tick, (nowns - t->born_ns) / 1e9);
+#ifdef __ANDROID__
+        if (kst) fprintf(stderr, "[dm] thread %#x kernel state %c (R running, S sleeping, D waiting in the kernel)\n", t->handle, kst);
+#endif
         fprintf(stderr, "[dm] thread %#x '%s' priority %d core %d mask %#llx CPU %.2fs svc %llu %s%s%s waits:%s addr=%#llx%s last svc %#x lr=%s+%#llx\n", t->handle, nm, t->prio, t->core, (unsigned long long)t->mask,
                 cpu, t->nsvc, t->exited ? "exited" : "", t->started ? "" : "not started", life, kinds[t->wkind & 7], t->waddr, own, t->last_svc,
                 m ? m->name : "?", m ? t->last_lr - (uint64_t)m->base : t->last_lr);
@@ -563,6 +666,9 @@ void svc_thread_dump(void) {
                         fprintf(stderr, "[dm]   %#x waited-for object, 64 bytes from %#llx: %s\n", t->handle, t->waddr & ~0xfull, hx); }
         thr_bt(t);
     }
+#ifdef __ANDROID__
+    host_threads_dump();
+#else
     // Threads created by the host itself (graphics present, audio, movie decoding, etc.): not in the guest thread table, enumerated as mach threads, the first 12 frames symbolized with dladdr
     thread_act_array_t ths; mach_msg_type_number_t nth = 0;
     if (task_threads(mach_task_self(), &ths, &nth) == KERN_SUCCESS) {
@@ -590,6 +696,7 @@ void svc_thread_dump(void) {
         }
         vm_deallocate(mach_task_self(), (vm_address_t)ths, nth * sizeof *ths);
     }
+#endif
 }
 
 // An approximation of same-core preemption: when an SVC woke a higher-priority thread pinned to this core, wait before the SVC returns until those threads (and every other higher-priority thread of this core) block, for at most 5 ms.
