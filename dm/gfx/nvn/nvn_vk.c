@@ -7082,12 +7082,14 @@ static int pace_off(void) { static int v = -1; if (v < 0) { const char *e = gete
 uint64_t dm_display_refresh_ns(void) { return pace_off() ? 0 : g_refresh_ns; }
 static struct { uint64_t last_log, n, uneven, pauses, sum, nsum, prev_actual; uint32_t id; } g_pace;
 // The asked times (vk_pace.h): the grid (g_vkp.next, shared with frame generation's pictures), the GPU's time of the last frames, the display's record of the
-//   frames paced by it (g_vkp_plain: by presentID, so frame generation's pictures, paced their own way, stay out of it). DM_PACE_LEAD=0: the times as before
-//   2026-11-24 (and DM_VK_PACE_LEAD=<ms>, a fixed lead, implies it)
+//   frames paced by it (g_vkp_plain: by presentID, so frame generation's pictures, paced their own way, stay out of it). Off by default since the S25+ runs of
+//   2026-11-24: the display's record raised the lead to an interval and two refreshes (66.7 ms at 30 fps), and from there each late hand-over moved the grid and
+//   lost a frame: 269-299 frames shown in 10 s (mean interval 33.5-37.3 ms) against 299-302 with the times as before (perf-nolead, v0.98), uneven frames no fewer.
+//   DM_PACE_LEAD=1 turns it on; DM_VK_PACE_LEAD=<ms> (a fixed lead) keeps it off
 #include "vk_pace.h"
 static vk_pacer g_vkp; static uint8_t g_vkp_plain[64]; static uint64_t g_vkp_gf;
-static int pace_adapt(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PACE_LEAD"), *l = getenv("DM_VK_PACE_LEAD"); v = !(e && !strcmp(e, "0")) && !(l && atol(l) > 0);
-    VLOG("frame pacing: %s", v ? "the lead follows the GPU's time and the display's record (DM_PACE_LEAD=0: one frame interval as before)" : "a fixed lead (DM_PACE_LEAD=0 or DM_VK_PACE_LEAD)");
+static int pace_adapt(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PACE_LEAD"), *l = getenv("DM_VK_PACE_LEAD"); v = e && strcmp(e, "0") && !(l && atol(l) > 0);
+    VLOG("frame pacing: %s", v ? "the lead follows the GPU's time and the display's record (DM_PACE_LEAD=1)" : "one frame interval, as before 2026-11-24 (DM_PACE_LEAD=1: the lead follows the GPU's time)");
     // the hold (vk_pace.h): no grid move for a hitch or a load (a 1 s grace period), none chasing a GPU over the interval. DM_PACE_HOLD=0: every late frame moves it
     const char *h = getenv("DM_PACE_HOLD"); g_vkp.hold_off = h && !strcmp(h, "0");
     if (v) VLOG("frame pacing: %s", g_vkp.hold_off ? "every late frame moves the grid (DM_PACE_HOLD=0)" : "hitches and loads keep the grid for 1 s, a GPU over the interval gets a fixed lead (DM_PACE_HOLD=0: off)"); } return v; }
@@ -7143,7 +7145,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
     //   DM_VK_PACE_LEAD=<ms> sets it by hand (16 is the former one refresh)
     uint64_t lead = iv; { static long ms = -2; if (ms == -2) { const char *e = getenv("DM_VK_PACE_LEAD"); ms = e && atol(e) > 0 ? atol(e) : -1; }
         if (ms > 0) lead = (uint64_t)ms * 1000000ull; if (lead < r) lead = r; }
-    // Since 2026-11-24 (vk_pace.h vkp_want, DM_PACE_LEAD=0 for the above): a frame keeps its place on the grid only when its GPU time and the compositor's lead fit
+    // With DM_PACE_LEAD=1 (vk_pace.h vkp_want; off by default, see pace_adapt): a frame keeps its place on the grid only when its GPU time and the compositor's lead fit
     //   before it, else the grid moves once; times sit half a refresh before a reported vsync. At a held 30 the frames had come in 50 / 16.7 ms pairs at an unchanged
     //   33.3 ms mean (S25+ 4-20 %, POCO F6 19-33 % uneven); t_vk_pace's simulated compositor: 9-40 % before, under 1 % now, for 6-17 ms more input delay.
     //   Frame generation's pictures keep their own times (below), the real frame's from the grid
