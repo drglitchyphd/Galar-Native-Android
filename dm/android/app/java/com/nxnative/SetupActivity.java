@@ -1,15 +1,15 @@
-// The app's first screen: the player sets the game up from their own dump, then plays.
-//   Game files → Choose: the .nsp / .xci of the base game, the update and any DLC (several at once). Read in place (all-files access) when they are on the phone's
-//   storage, so nothing large is copied.
-//   Keys → Choose: prod.keys (and title.keys when the dump needs it), copied into the app's private storage (getFilesDir()/keys): never uploaded, never in the APK.
+// The app's first screen: the player sets the game up from their own extracted game files, then plays.
+//   Game files → Choose a folder: the ExeFS and RomFS folders the player extracted from their own game with the update applied (one pick of the folder holding
+//   both, or each in turn); Add DLC: one RomFS folder per DLC. Read where they are (all-files access): no keys, no NSP / XCI, nothing decrypted or unpacked.
 //   Set up: runs dm/android/tools/setup_game.py with the Python the app ships (libpython_exe.so + the standard library unpacked from assets/python.zip), the
-//   unpacker / shader translator / spirv-cross the app ships as native executables. The game ends up in the app's external files folder, where the native
+//   shader translator / spirv-cross the app ships as native executables. setup_game.py copies the folders into the game's folder (or moves them, when there is
+//   no room for a copy and the player agrees). The game ends up in the app's external files folder, where the native
 //   activity (android_main.c) reads it. Once set up, the app starts straight into the game.
 //   Save data can be exported to a ZIP, edited elsewhere, and imported here; the next game start swaps it in and keeps the previous save as a backup.
 //   Shaders the game builds in memory (Shield: 45) are saved by the game the first time it makes them (nvn_vk.c mtl_shader_seen → nvn_capture/); the next start
 //   translates them first (setup_game.py --captures, a few seconds), so they draw from then on.
-//   The game's own icon, from the player's dump (icon.jpg, written by the setup), goes on a home screen shortcut, the recent-apps card and this screen; the app's
-//   launcher icon itself is fixed by the APK, which carries no game artwork.
+//   The game's own icon (icon.jpg, written by setups of older versions from the dump's control data; extracted folders have none) goes on a home screen shortcut,
+//   the recent-apps card and this screen; without it the app's own icon stands in. The app's launcher icon itself is fixed by the APK, which carries no game artwork.
 package com.nxnative;
 
 import android.app.Activity;
@@ -26,7 +26,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
-import android.os.StatFs;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
@@ -49,15 +48,12 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public final class SetupActivity extends Activity {
-    private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_DRIVER = 3, PICK_SAVE_EXPORT = 4, PICK_SAVE_IMPORT = 5;
+    private static final int PICK_FOLDER = 1, PICK_DLC = 2, PICK_DRIVER = 3, PICK_SAVE_EXPORT = 4, PICK_SAVE_IMPORT = 5;
     private TextView driverText;
-    private final List<String> games = new ArrayList<>();
-    private final List<File> importedGames = new ArrayList<>();
-    private static final class PickedGame {
-        final Uri uri; final String name;
-        PickedGame(Uri uri, String name) { this.uri = uri; this.name = name; }
-    }
-    private TextView status, gameText, keysText; private ProgressBar bar; private Button setup, play, shortcut, saveExport, saveImport; private ImageView logo;
+    // the folders chosen (real paths, read in place): the ExeFS, the RomFS, and each DLC's RomFS (setup_game.py --exefs / --romfs / --dlc-dir)
+    private String exefsDir, romfsDir; private final List<String> dlcDirs = new ArrayList<>();
+    private TextView status, gameText; private ProgressBar bar; private Button setup, play, shortcut, saveExport, saveImport; private ImageView logo;
+    private TextView playerText; private Button switchBtn, addBtn, renameBtn, deleteBtn, startOverBtn, restoreBtn;
     // static: the setup runs in its own thread and outlives this screen; a new screen (Android may still make one, despite configChanges in the manifest, which keeps it
     // across rotation: #42) must not start a second setup next to it
     private static volatile boolean running;
@@ -110,7 +106,6 @@ public final class SetupActivity extends Activity {
         return want == 0 || have >= want * 9L / 10;
     }
     private List<String> readyGames() { List<String> r = new ArrayList<>(); for (String[] g : GameSettings.games(this)) if (isReady(g[0])) r.add(g[0]); return r; }
-    private File keysDir() { File d = new File(getFilesDir(), "keys"); d.mkdirs(); return d; }
     private boolean setUp() { return new File(gameDir(), "ready").exists() && new File(gameDir(), "shaders.pak").exists() && packComplete(gameDir()); }
     // set up for this app version: the shader pack's translation chain (the ready file) is the one the engine was built for (assets/shader_chain, build_apk.py);
     // an update that changes the chain otherwise starts the game with a pack the engine refuses (every 3D shader "SPIR-V missing")
@@ -149,6 +144,8 @@ public final class SetupActivity extends Activity {
         else if (!running && !asked && GameSettings.games(this).size() > 1 && !readyGames().isEmpty()) { launcher(official); return; }
         else if (!running && !asked) { List<String> ready = readyGames(); if (ready.size() == 1) GameSettings.choose(this, ready.get(0)); else if (ready.size() > 1) asked = true; }
         cleanLeftovers();   // (before the game may start straight away: a stopped setup's leftovers, in the background)
+        // keys are not used any more: the prod.keys / title.keys older versions copied into the app's private storage are deleted
+        new Thread(() -> deleteTree(new File(getFilesDir(), "keys"))).start();
         if (new File(gameDir(), "ready").exists() && new File(gameDir(), "shaders.pak").exists() && !packComplete(gameDir()) && !shadersOnly())   // (a fast setup's pack: packComplete)
             Toast.makeText(this, T.t(this, "The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept)."), Toast.LENGTH_LONG).show();
         if (ready()) setupShortcut();
@@ -157,8 +154,12 @@ public final class SetupActivity extends Activity {
         if (ready() && !asked && !running && DebugBundle.offerAfterCrash(this, () -> { if (pendingWork(gameDir())) startCaptures(); else startGame(); })) asked = true;
         // both of the Mali white-screen fixes were white on this phone's own driver (the engine's check, MaliLadder): PanVK offered once, before the game starts
         if (ready() && !asked && !running && MaliLadder.offer(this, this::startGame, () -> pick(PICK_DRIVER, false))) asked = true;
+        // more than one player (Profiles): this screen waits on Play, naming the player, so whoever is about to play can change it (the launcher names the player itself)
+        boolean whoPlays = ready() && !asked && !running && Profiles.list(GameSettings.root(this)).size() > 1 && !getIntent().getBooleanExtra("from_launcher", false);
+        if (whoPlays) asked = true;
         if (ready() && !asked && !running) { gameIcon(); if (!pendingWork(gameDir())) { startGame(); return; } }
         setupScreen(official);
+        if (whoPlays) status.setText(T.t(this, "Playing as %s. Tap Play, or change the player below.", Profiles.currentName(GameSettings.root(this))));
         if (getIntent().getBooleanExtra("from_app", false)) startSetupFromApp();   // am start ... --ez setup true --ez from_app true: set up (again) from the installed app, over adb
         if (ready() && !asked) startCaptures();
         else if (!running && shadersOnly()) startShadersOnly();
@@ -178,16 +179,15 @@ public final class SetupActivity extends Activity {
         List<String> cmd = new ArrayList<>(); cmd.add("--shaders-only");
         shadersOnlyRun = true; setup.setText(T.t(this, "Updating the shaders")); resumes = 0; workerCap = 0; runFullSetup(cmd);
     }
-    // The setup screen, in the launcher's look: what a player sees first after installing. Three numbered steps (game files, keys, set up), then Play once the game is
+    // The setup screen, in the launcher's look: what a player sees first after installing. Two numbered steps (game files, set up), then Play once the game is
     //   set up; the rest (which game, save data, the home screen shortcut, the graphics driver) under them, the driver folded away until asked for
     private float dp;
-    private LinearLayout more, saveBox; private Button clear, anyway; private volatile boolean offerAnyway;
+    private LinearLayout more, saveBox; private Button clear, moveBtn; private volatile boolean offerMove;
     private void setupScreen(boolean official) {
         dp = getResources().getDisplayMetrics().density;
         if (getActionBar() != null) getActionBar().hide();
         boolean first = readyGames().isEmpty(), many = GameSettings.games(this).size() > 1; int acc = accent(game()[0]);
         getWindow().setStatusBarColor(0xFF0B0C10); getWindow().setNavigationBarColor(0xFF0B0C10);
-        restoreImported();
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setGravity(Gravity.CENTER_HORIZONTAL);
         root.setPadding(px(20), px(28), px(20), px(28));
         logo = new ImageView(this); logo.setVisibility(android.view.View.GONE); logo.setScaleType(ImageView.ScaleType.CENTER_CROP); logo.setClipToOutline(true);
@@ -197,38 +197,37 @@ public final class SetupActivity extends Activity {
         TextView title = text(root, first && many ? getApplicationInfo().loadLabel(getPackageManager()).toString() : gameName(), 26, 0xFFF2F3F5, true); title.setGravity(Gravity.CENTER);
         title.setPadding(0, px(10), 0, 0);
         if (!official) { TextView u = text(root, unofficial(), 13, 0xffff5252, false); u.setGravity(Gravity.CENTER); }
-        TextView note = text(root, first ? T.t(this, "Welcome! To play, set up %s from your own Switch dump. It takes three steps.", many ? gamesNamed() : gameName())
-                                           + "\n" + T.t(this, "No game files or keys come with this app; yours never leave the phone.")
-                                         : T.t(this, "Set the game up from your own dump. No game files or keys come with this app; yours never leave the phone."), 14, 0xFFA9AFBA, false);
+        TextView note = text(root, first ? T.t(this, "Welcome! To play, set up %s from your own game files. It takes two steps.", many ? gamesNamed() : gameName())
+                                           + "\n" + T.t(this, "No game files come with this app; yours never leave the phone.")
+                                         : T.t(this, "Set the game up from your own game files. No game files come with this app; yours never leave the phone."), 14, 0xFFA9AFBA, false);
         note.setGravity(Gravity.CENTER); note.setPadding(0, px(6), 0, px(6));
         // the author, linked to the official page (a copy uploaded elsewhere keeps it unless the APK is changed, and a changed APK says "Unofficial build" above)
         TextView by = text(root, "SimipoB", 13, acc, false); by.setGravity(Gravity.CENTER); by.setPadding(0, 0, 0, px(6));
         by.setPaintFlags(by.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
         by.setOnClickListener(v -> { try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/simipoB/Galar-Native-Android"))); } catch (Exception e) { } });
         LinearLayout c1 = card(root, "1", T.t(this, "Your game files"), acc);
-        text(c1, T.t(this, "The base game (.nsp or .xci), the %s update and any DLC. You can choose them all at once.", GameSettings.version(this)), 13, 0xFFA9AFBA, false);
+        text(c1, T.t(this, "The ExeFS and RomFS folders extracted from your own game, with the update included. Choose the folder that holds both, or each one in turn.")
+                 + "\n" + updatesNeeded(), 13, 0xFFA9AFBA, false);
         gameText = text(c1, "", 14, 0xFFF2F3F5, false); gameText.setPadding(0, px(8), 0, px(8));
-        LinearLayout r1 = hrow(c1); pill(r1, T.t(this, "Choose game files"), acc, 0xFFFFFFFF, v -> pick(PICK_GAME, true));
-        if (installedApp() != null) {   // the game already on the phone in another app (the PC-built Legends: Arceus app): no dump or keys needed
-            text(c1, T.t(this, "Or use the game from the %s app already on this phone (no dump or keys needed):", gameName()), 13, 0xFFA9AFBA, false);
-            pill(hrow(c1), T.t(this, "Set up from the installed app"), acc, 0xFFFFFFFF, v -> startSetupFromApp()); }
+        LinearLayout r1 = hrow(c1); pill(r1, T.t(this, "Choose a folder"), acc, 0xFFFFFFFF, v -> pick(PICK_FOLDER));
+        pill(r1, T.t(this, "Add DLC"), 0xFF2A2E37, 0xFFF2F3F5, v -> pick(PICK_DLC));
         clear = pill(r1, T.t(this, "Clear"), 0xFF2A2E37, 0xFFC4C9D2, v -> clearGames());
-        LinearLayout c2 = card(root, "2", T.t(this, "Your keys"), acc);
-        text(c2, T.t(this, "prod.keys from your own Switch (and title.keys if your dump needs it)."), 13, 0xFFA9AFBA, false);
-        keysText = text(c2, "", 14, 0xFFF2F3F5, false); keysText.setPadding(0, px(8), 0, px(8));
-        pill(c2, T.t(this, "Choose keys"), acc, 0xFFFFFFFF, v -> pick(PICK_KEYS, true));
-        LinearLayout c3 = card(root, "3", T.t(this, "Set up"), acc);
+        if (installedApp() != null) {   // the game already on the phone in another app (the PC-built Legends: Arceus app): nothing to choose
+            text(c1, T.t(this, "Or use the game from the %s app already on this phone (nothing to choose):", gameName()), 13, 0xFFA9AFBA, false);
+            pill(hrow(c1), T.t(this, "Set up from the installed app"), acc, 0xFFFFFFFF, v -> startSetupFromApp()); }
+        LinearLayout c3 = card(root, "2", T.t(this, "Set up"), acc);
         text(c3, T.t(this, "This takes a long time on a phone: keep this screen open, ideally plugged in."), 13, 0xFFA9AFBA, false);
         setup = pill(c3, first ? T.t(this, "Set up the game") : T.t(this, "Set up again"), acc, 0xFFFFFFFF, v -> startSetup(false));
         ((LinearLayout.LayoutParams) setup.getLayoutParams()).topMargin = px(10);
         bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal); bar.setMax(600); bar.setProgressTintList(android.content.res.ColorStateList.valueOf(acc));
         c3.addView(bar, new LinearLayout.LayoutParams(-1, -2));
         status = text(c3, "", 14, 0xFFF2F3F5, false); status.setPadding(0, px(8), 0, 0);
-        anyway = pill(c3, T.t(this, "Set up anyway"), 0xFF2A2E37, 0xFFF2F3F5, v -> new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Set up anyway?"))
-            .setMessage(T.t(this, "The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix."))
-            .setPositiveButton(T.t(this, "Set up anyway"), (d, w) -> startSetup(true)).setNegativeButton(T.t(this, "Cancel"), null).show());
-        ((LinearLayout.LayoutParams) anyway.getLayoutParams()).topMargin = px(8); anyway.setVisibility(android.view.View.GONE);
-        play = pill(root, T.t(this, "Play"), acc, 0xFFFFFFFF, v -> startGame()); play.setTextSize(18);
+        // too little room for a copy of the files (setup_game.py OFFER move): moving the RomFS and DLC folders into the app instead, only once the player agrees
+        moveBtn = pill(c3, T.t(this, "Move the files instead"), 0xFF2A2E37, 0xFFF2F3F5, v -> new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Move your files instead?"))
+            .setMessage(T.t(this, "There isn't room for a copy of your game files. The setup can move your RomFS and DLC folders into the app instead: nothing is copied, but they leave the folder you chose, and uninstalling the app deletes them. If the setup fails, they are moved back."))
+            .setPositiveButton(T.t(this, "Move them"), (d, w) -> startSetup(true)).setNegativeButton(T.t(this, "Cancel"), null).show());
+        ((LinearLayout.LayoutParams) moveBtn.getLayoutParams()).topMargin = px(8); moveBtn.setVisibility(android.view.View.GONE);
+        play = pill(root, T.t(this, "Play"), acc, 0xFFFFFFFF, v -> { if (pendingWork(gameDir())) startCaptures(); else startGame(); }); play.setTextSize(18);   // (as a start would: shaders captured last time first)
         ((LinearLayout.LayoutParams) play.getLayoutParams()).topMargin = px(16);
         // the rest
         more = new LinearLayout(this); more.setOrientation(LinearLayout.VERTICAL); root.addView(more, new LinearLayout.LayoutParams(-1, -2));
@@ -243,9 +242,20 @@ public final class SetupActivity extends Activity {
             cg.addView(gs);
         }
         saveBox = card(more, null, T.t(this, "Save data"), acc);
-        LinearLayout r4 = hrow(saveBox);
+        // the player whose saves these are (Profiles: one list for every game of the app, each player with their own save in each game)
+        playerText = text(saveBox, "", 15, 0xFFF2F3F5, true); playerText.setPadding(0, 0, 0, px(4));
+        LinearLayout rp = hrow(saveBox);
+        switchBtn = pill(rp, T.t(this, "Change player"), 0xFF2A2E37, 0xFFF2F3F5, v -> switchPlayer());
+        addBtn = pill(rp, T.t(this, "Add a player"), 0xFF2A2E37, 0xFFF2F3F5, v -> nameDialog(null));
+        LinearLayout rp2 = hrow(saveBox); ((LinearLayout.LayoutParams) rp2.getLayoutParams()).topMargin = px(8);
+        renameBtn = pill(rp2, T.t(this, "Rename"), 0xFF2A2E37, 0xFFF2F3F5, v -> nameDialog(Profiles.current(GameSettings.root(this))));
+        deleteBtn = pill(rp2, T.t(this, "Delete player"), 0xFF2A2E37, 0xFFC4C9D2, v -> deletePlayer());
+        LinearLayout r4 = hrow(saveBox); ((LinearLayout.LayoutParams) r4.getLayoutParams()).topMargin = px(14);
         saveExport = pill(r4, T.t(this, "Export save data"), 0xFF2A2E37, 0xFFF2F3F5, v -> chooseSaveExport());
         saveImport = pill(r4, T.t(this, "Import edited save data"), 0xFF2A2E37, 0xFFF2F3F5, v -> chooseSaveImport());
+        LinearLayout r6 = hrow(saveBox); ((LinearLayout.LayoutParams) r6.getLayoutParams()).topMargin = px(8);
+        startOverBtn = pill(r6, T.t(this, "Start over"), 0xFF2A2E37, 0xFFF2F3F5, v -> startOver());
+        restoreBtn = pill(r6, T.t(this, "Restore the previous save"), 0xFF2A2E37, 0xFFF2F3F5, v -> restoreSave());
         shortcut = pill(saveBox, T.t(this, "Add %s to the home screen", gameName()), 0xFF2A2E37, 0xFFF2F3F5, v -> pinShortcut());
         ((LinearLayout.LayoutParams) shortcut.getLayoutParams()).topMargin = px(8);
         // the Vulkan driver: the phone's own, or an Adreno driver package (a zip with meta.json and the library, e.g. Mesa Turnip) opened through libadrenotools;
@@ -272,6 +282,15 @@ public final class SetupActivity extends Activity {
         refresh(); gameIcon();
     }
     private int px(float v) { return (int) (v * dp); }
+    // the update each of the app's games needs (assets/games, the profiles' build rows: Sword and Shield 1.3.2, Scarlet and Violet 4.0.0, Legends: Arceus 1.1.1),
+    //   games of the same update on one line
+    private String updatesNeeded() {
+        java.util.LinkedHashMap<String, List<String>> by = new java.util.LinkedHashMap<>();
+        for (String[] g : GameSettings.games(this)) by.computeIfAbsent(g.length > 3 ? g[3] : GameSettings.version(this), k -> new ArrayList<>()).add(g[1]);
+        List<String> lines = new ArrayList<>();
+        for (java.util.Map.Entry<String, List<String>> e : by.entrySet()) lines.add(T.t(this, "%s: update %s", String.join(", ", e.getValue()), e.getKey()));
+        return String.join("\n", lines);
+    }
     private String gamesNamed() { List<String> n = new ArrayList<>(); for (String[] g : GameSettings.games(this)) n.add(g[1]); return String.join(" " + T.t(this, "or") + " ", n); }
     // the game's colour: the launcher's cards, this screen's buttons
     static int accent(String id) { String up = id.toUpperCase(java.util.Locale.ROOT);
@@ -347,7 +366,8 @@ public final class SetupActivity extends Activity {
             ImageView icon = new ImageView(this); icon.setScaleType(ImageView.ScaleType.CENTER_CROP); icon.setClipToOutline(true);
             android.graphics.drawable.GradientDrawable clip = new android.graphics.drawable.GradientDrawable(); clip.setCornerRadius(16 * dp); clip.setColor(0xFF2A2E37); icon.setBackground(clip);
             File d = k == 0 ? GameSettings.root(this) : new File(GameSettings.root(this), id);
-            android.graphics.Bitmap bm = android.graphics.BitmapFactory.decodeFile(new File(d, "icon.jpg").getPath()); if (bm != null) icon.setImageBitmap(bm);
+            android.graphics.Bitmap bm = android.graphics.BitmapFactory.decodeFile(new File(d, "icon.jpg").getPath());
+            if (bm != null) icon.setImageBitmap(bm); else icon.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));   // (no game icon: extracted files have none)
             card.addView(icon, new LinearLayout.LayoutParams(iconS, iconS));
             TextView name = new TextView(this); name.setText(g[1]); name.setTextSize(17); name.setTextColor(0xFFF2F3F5); name.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
             name.setGravity(Gravity.CENTER); name.setSingleLine(true); name.setPadding(0, (int) (10 * dp), 0, (int) (8 * dp)); card.addView(name);
@@ -356,10 +376,15 @@ public final class SetupActivity extends Activity {
             android.graphics.drawable.GradientDrawable gb = new android.graphics.drawable.GradientDrawable(); gb.setCornerRadius(20 * dp); gb.setColor(ok ? accent : 0xFF262A33); go.setBackground(gb);
             card.addView(go, new LinearLayout.LayoutParams(iconS, -2));
             card.setOnClickListener(v -> { GameSettings.choose(this, id);   // Play goes the way a home screen shortcut goes, not straight to the game: captured shaders are translated into the pack first (pendingWork)
-                if (ok) { Intent it = new Intent(this, SetupActivity.class); it.putExtra("game", id); startActivity(it); finish(); } else openSetup(); });
+                if (ok) { Intent it = new Intent(this, SetupActivity.class); it.putExtra("game", id); it.putExtra("from_launcher", true); startActivity(it); finish(); } else openSetup(); });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.leftMargin = lp.rightMargin = (int) (14 * dp); row.addView(card, lp);
         }
         root.addView(row);
+        if (Profiles.list(GameSettings.root(this)).size() > 1) {   // who plays (Profiles): changed on the setup screen
+            TextView who = new TextView(this); who.setText(T.t(this, "Player: %s", Profiles.currentName(GameSettings.root(this))) + "  ·  " + T.t(this, "Change player"));
+            who.setTextColor(0xFFF2F3F5); who.setTextSize(15); who.setGravity(Gravity.CENTER); who.setPadding(0, (int) (2 * dp), 0, (int) (4 * dp));
+            who.setOnClickListener(v -> openSetup()); root.addView(who);
+        }
         TextView manage = new TextView(this); manage.setText(T.t(this, "Set up or manage a game")); manage.setTextColor(0xFFC4C9D2); manage.setTextSize(14); manage.setGravity(Gravity.CENTER);
         manage.setPadding((int) (18 * dp), (int) (7 * dp), (int) (18 * dp), (int) (7 * dp));
         android.graphics.drawable.GradientDrawable mb = new android.graphics.drawable.GradientDrawable(); mb.setCornerRadius(16 * dp); mb.setColor(0x33FFFFFF); manage.setBackground(mb);
@@ -431,6 +456,8 @@ public final class SetupActivity extends Activity {
                 File vk = new File(game, "vk");
                 if (vk.isDirectory() && new File(game, "shaders.pak").isFile() && new File(game, "ready").isFile() && !running) { freed += treeSize(vk); deleteTree(vk); }
             }
+            // the copies of .nsp / .xci files older versions made in the app's folder when a dump could not be read in place (imported/): nothing reads them any more
+            File imp = new File(GameSettings.root(this), "imported"); if (imp.isDirectory() && !running) { freed += treeSize(imp); deleteTree(imp); }
             if (freed > (64L << 20)) { final String gb = String.format(java.util.Locale.ROOT, "%.1f", freed / 1e9);
                 runOnUiThread(() -> { if (status != null && status.getText().length() == 0) status.setText(T.t(this, "Freed %s GB left over from an earlier setup.", gb)); }); }
         }).start();
@@ -438,230 +465,110 @@ public final class SetupActivity extends Activity {
     private void refresh() {
         if (driverText != null) { String d = envGet("DM_VK_DRIVER"); driverText.setText(d.isEmpty() ? T.t(this, "the phone's own Vulkan driver") : new File(d).getParentFile().getName() + " (" + new File(d).getName() + ")");
                                   if (maliBox != null) maliBox.setVisibility(MaliDriver.isPanvk(d) ? android.view.View.VISIBLE : android.view.View.GONE); }
-        if (!running) { List<String> n = new ArrayList<>(); for (String g : games) n.add("✓ " + new File(g).getName());
-            gameText.setText(games.isEmpty() ? T.t(this, "none chosen") : String.join("\n", n)); }
-        boolean keys = new File(keysDir(), "prod.keys").exists();
-        keysText.setText(keys ? "✓ prod.keys" + (new File(keysDir(), "title.keys").exists() ? " + title.keys" : "") + " " + T.t(this, "(kept in the app's private storage)") : T.t(this, "none chosen"));
-        on(setup, !running && keys && !games.isEmpty()); on(play, !running && ready()); on(clear, !running && !games.isEmpty());
+        boolean chosen = exefsDir != null || romfsDir != null || !dlcDirs.isEmpty();
+        if (!running) { List<String> n = new ArrayList<>();
+            if (exefsDir != null) n.add("✓ " + T.t(this, "ExeFS: %s", exefsDir));
+            if (romfsDir != null) n.add("✓ " + T.t(this, "RomFS: %s", romfsDir));
+            for (String d : dlcDirs) n.add("✓ " + T.t(this, "DLC: %s", d));
+            gameText.setText(chosen ? String.join("\n", n) : T.t(this, "none chosen")); }
+        on(setup, !running && exefsDir != null && romfsDir != null); on(play, !running && ready()); on(clear, !running && chosen);
         play.setVisibility(ready() ? android.view.View.VISIBLE : android.view.View.GONE);
         on(saveExport, !running && setUp()); on(saveImport, !running && setUp());
-        saveBox.setVisibility(setUp() || iconFile().exists() ? android.view.View.VISIBLE : android.view.View.GONE);
+        { File r = GameSettings.root(this); int n = Profiles.list(r).size();
+          playerText.setText(T.t(this, "Player: %s", Profiles.currentName(r)));
+          switchBtn.setVisibility(n > 1 ? android.view.View.VISIBLE : android.view.View.GONE);
+          on(switchBtn, !running); on(addBtn, !running); on(renameBtn, !running); on(deleteBtn, !running && n > 1); on(startOverBtn, !running && setUp());
+          restoreBtn.setVisibility(Profiles.hasBackup(GameSettings.saveDirs(this)) ? android.view.View.VISIBLE : android.view.View.INVISIBLE); on(restoreBtn, !running); }
+        saveBox.setVisibility(setUp() ? android.view.View.VISIBLE : android.view.View.GONE);
         if (running && status.getText().length() == 0)   // a new screen while the setup (or a copy) another one started still runs
             status.setText(T.t(this, "Setup is still running in the background. Wait a few minutes, then close and reopen the app to see whether it has finished."));
         if (!running && setUp() && !chainCurrent() && !shadersOnly() && status.getText().length() == 0)
             status.setText(T.t(this, "This app version translates the game's shaders differently: choose your files and press Set up the game again (the save data is kept)."));
-        shortcut.setVisibility(iconFile().exists() ? android.view.View.VISIBLE : android.view.View.GONE);
+        shortcut.setVisibility(setUp() ? android.view.View.VISIBLE : android.view.View.GONE);
     }
-    // all-files access, asked for once a screen: back from Android's settings the picker opens by itself; refused, the files chosen are copied into the app instead
-    private boolean askedAccess, pickAfterAccess;
+    // all-files access, asked for once a screen: back from Android's settings the picker opens by itself. The folders are read where they are (setup_game.py copies
+    //   them), so without it they cannot be used: a folder picked then says so, and the next pick asks again
+    private boolean askedAccess; private int pickAfterAccess;
     @Override protected void onResume() {
         super.onResume();
-        if (pickAfterAccess) { pickAfterAccess = false; pick(PICK_GAME, true); }
+        if (pickAfterAccess != 0) { int w = pickAfterAccess; pickAfterAccess = 0; pick(w); }
     }
+    private void pick(int what) { pick(what, false); }
     private void pick(int what, boolean multi) {
         if (running) { status.setText(T.t(this, "Please wait for the current setup or file copy to finish.")); return; }
-        if (what == PICK_GAME && Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager() && !askedAccess) {   // read the dump in place: all-files access
-            askedAccess = true; pickAfterAccess = true;
-            status.setText(T.t(this, "Allow access to all files so the app can read your dump where it is (it is several GB; nothing is copied)."));
+        boolean folder = what == PICK_FOLDER || what == PICK_DLC;
+        if (folder && !Environment.isExternalStorageManager() && !askedAccess) {   // read the folders in place: all-files access
+            askedAccess = true; pickAfterAccess = what;
+            status.setText(T.t(this, "Allow access to all files so the app can read your game folders where they are."));
             try { startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName()))); return; }
-            catch (android.content.ActivityNotFoundException e) { pickAfterAccess = false; } }
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*"); i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multi);
+            catch (android.content.ActivityNotFoundException e) { pickAfterAccess = 0; } }
+        Intent i;
+        if (folder) i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        else { i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*"); i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multi); }
         startActivityForResult(i, what);
     }
     @Override protected void onActivityResult(int req, int res, Intent data) {
         if (res != RESULT_OK) return;
-        if (data == null) { status.setText(T.t(this, "The file picker returned no selected file. Try the phone's Files app and select a file from Downloads or Documents.")); return; }
+        if (data == null || data.getData() == null) { status.setText(T.t(this, "Nothing was chosen. Try again, through the phone's own storage.")); return; }
         if (req == PICK_SAVE_EXPORT) { exportSave(data.getData()); return; }
         if (req == PICK_SAVE_IMPORT) { importSave(data.getData()); return; }
-        List<Uri> uris = new ArrayList<>();
-        if (data.getClipData() != null) for (int k = 0; k < data.getClipData().getItemCount(); k++) uris.add(data.getClipData().getItemAt(k).getUri()); else if (data.getData() != null) uris.add(data.getData());
-        if (uris.isEmpty()) { status.setText(T.t(this, "The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.")); return; }
-        List<PickedGame> imports = new ArrayList<>(); List<String> problems = new ArrayList<>();
-        for (Uri u : uris) {
-            String name = nameOf(u);
-            if (req == PICK_DRIVER) { installDriver(u, name); continue; }
-            if (req == PICK_KEYS) { String why = installKeys(u, name); if (why != null) problems.add(why); }
-            else {
-                String why = gameFileProblem(u, name); if (why != null) { problems.add(why); continue; }
-                String p = pathOf(u);
-                if (p == null) imports.add(new PickedGame(u, name));
-                else if (!games.contains(p)) games.add(p);
-            }
-        }
-        refresh();
-        if (!problems.isEmpty()) status.setText(String.join("\n", problems));
-        else if (req == PICK_GAME && imports.isEmpty()) { String why = mixedGames(); status.setText(why != null ? why : ""); }
-        if (!imports.isEmpty()) {
-            importGames(imports);
-        }
+        if (req == PICK_DRIVER) { installDriver(data.getData(), nameOf(data.getData())); return; }
+        String p = treePath(data.getData());
+        if (p == null) { status.setText(T.t(this, "This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).")); return; }
+        File f = new File(p);
+        if (!f.isDirectory() || !f.canRead() || f.list() == null) { askedAccess = false;
+            status.setText(T.t(this, "The app can't read %s. Allow it access to all files in Android's settings, then choose the folder again.", f.getName())); return; }
+        String msg;
+        if (req == PICK_DLC) { if (!dlcDirs.contains(p)) dlcDirs.add(p); msg = ""; }
+        else msg = chooseFolder(f);
+        refresh(); status.setText(msg);
     }
-    // a key file, by its contents: prod.keys names its keys (header_key, master_key_00, ...); title.keys is lines of title ID = title key. null, or why not
-    private String installKeys(Uri u, String name) {
-        byte[] b;
-        try (InputStream in = getContentResolver().openInputStream(u)) {
-            if (in == null) return T.t(this, "Could not read %s.", name);
-            ByteArrayOutputStream o = new ByteArrayOutputStream(); byte[] buf = new byte[1 << 16]; int n;
-            while ((n = in.read(buf)) > 0) { o.write(buf, 0, n); if (o.size() > (4 << 20)) return T.t(this, "%s is not a key file: choose prod.keys (and title.keys).", name); }
-            b = o.toByteArray();
-        } catch (IOException | SecurityException e) { return T.t(this, "Could not read %s.", name) + " " + e.getMessage(); }
-        String t = new String(b, java.nio.charset.StandardCharsets.ISO_8859_1).toLowerCase(java.util.Locale.ROOT);
-        String to = t.contains("header_key") || t.contains("master_key_") || t.contains("key_area_key") ? "prod.keys"
-                  : t.matches("(?s)\\s*[0-9a-f]{32}\\s*=\\s*[0-9a-f]{32}.*") ? "title.keys" : null;
-        if (to == null) return T.t(this, "%s is not a key file: choose prod.keys (and title.keys).", name);
-        try (OutputStream out = new FileOutputStream(new File(keysDir(), to))) { out.write(b); } catch (IOException e) { return T.t(this, "Could not read %s.", name) + " " + e.getMessage(); }
+    // a folder's sub-folder of that name in any case (exefs, ExeFS, EXEFS), or null
+    private static File childDir(File d, String name) { File[] k = d.listFiles(); if (k != null) for (File c : k) if (c.isDirectory() && c.getName().equalsIgnoreCase(name)) return c; return null; }
+    // A folder picked under Game files, by what it holds: an ExeFS (main in it), the folder holding exefs/ and romfs/ (nxdumptool, the emulators' "dump RomFS / ExeFS";
+    //   a DLC/ or aoc/ folder beside them is added too), else a RomFS. setup_game.py checks them again (resolve_exefs / resolve_romfs) and says which game they are.
+    //   → what to tell the player
+    private String chooseFolder(File f) {
+        if (new File(f, "main").isFile()) { exefsDir = f.getPath(); return romfsDir == null ? T.t(this, "ExeFS chosen. Now choose the RomFS folder.") : ""; }
+        File ex = childDir(f, "exefs"), ro = childDir(f, "romfs");
+        if (ex != null || ro != null) {
+            if (ex != null && !new File(ex, "main").isFile()) return T.t(this, "%s has no file named main: it is not an ExeFS folder.", ex.getPath());
+            if (ex != null) exefsDir = ex.getPath();
+            if (ro != null) romfsDir = ro.getPath();
+            File dl = childDir(f, "dlc"); if (dl == null) dl = childDir(f, "aoc");
+            if (dl != null && !dlcDirs.contains(dl.getPath())) dlcDirs.add(dl.getPath());
+            return exefsDir == null ? T.t(this, "RomFS chosen. Now choose the ExeFS folder.") : romfsDir == null ? T.t(this, "ExeFS chosen. Now choose the RomFS folder.") : "";
+        }
+        String[] k = f.list(); if (k == null || k.length == 0) return T.t(this, "%s is empty.", f.getPath());
+        romfsDir = f.getPath(); return exefsDir == null ? T.t(this, "RomFS chosen. Now choose the ExeFS folder.") : "";
+    }
+    // The real path of a folder the system picker returned (ACTION_OPEN_DOCUMENT_TREE), read in place with all-files access: the external storage provider's
+    //   <volume>:<path> (primary: the phone's storage, else /storage/<volume>: an SD card), raw:<path>, home:<path> (Documents); null when it cannot be told
+    private String treePath(Uri u) {
+        try {
+            String id = DocumentsContract.getTreeDocumentId(u);
+            if (id.startsWith("raw:")) return id.substring(4);
+            int sep = id.indexOf(':'); if (sep < 0) return null;
+            String volume = id.substring(0, sep), relative = id.substring(sep + 1);
+            if ("com.android.externalstorage.documents".equals(u.getAuthority())) {
+                File root = "primary".equalsIgnoreCase(volume) ? Environment.getExternalStorageDirectory() : "home".equalsIgnoreCase(volume)
+                    ? Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS) : new File("/storage", volume);
+                return relative.isEmpty() ? root.getPath() : new File(root, relative).getPath();
+            }
+        } catch (IllegalArgumentException e) { }
         return null;
     }
-    // a game file the setup can read: an .nsp (PFS0) or .xci (HEAD at 0x100); compressed ones (.nsz / .xcz) and anything else are said so now, not after minutes of setup
-    private String gameFileProblem(Uri u, String name) {
-        String n = name == null ? "" : name.toLowerCase(java.util.Locale.ROOT);
-        if (n.endsWith(".nsz") || n.endsWith(".xcz")) return T.t(this, "%s is compressed (NSZ): decompress it to .nsp / .xci first, then choose that.", name);
-        if (n.endsWith(".keys") || n.endsWith(".txt")) return T.t(this, "%s is not a game file: choose it under Your keys.", name);
-        byte[] h = new byte[0x10000]; int got = 0;
-        try (InputStream in = getContentResolver().openInputStream(u)) {
-            if (in == null) return null;   // (the copy or the setup says what is wrong)
-            int r; while (got < h.length && (r = in.read(h, got, h.length - got)) > 0) got += r;
-        } catch (IOException | SecurityException e) { return null; }
-        boolean pfs0 = got >= 4 && h[0] == 'P' && h[1] == 'F' && h[2] == 'S' && h[3] == '0', xci = got >= 0x104 && h[0x100] == 'H' && h[0x101] == 'E' && h[0x102] == 'A' && h[0x103] == 'D';
-        if (!pfs0 && !xci) return T.t(this, "%s is not a Switch game file (.nsp or .xci).", name);
-        if (pfs0 && got >= 0x10) {   // the files it holds (offset, size) end where the NSP should: shorter, a copy or download stopped early
-            java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(h, 0, got).order(java.nio.ByteOrder.LITTLE_ENDIAN); int cnt = b.getInt(4), str = b.getInt(8);
-            if (cnt > 0 && 0x10 + 0x18L * cnt <= got && str >= 0) {
-                long end = 0; for (int i = 0; i < cnt; i++) end = Math.max(end, b.getLong(0x10 + 0x18 * i) + b.getLong(0x10 + 0x18 * i + 8));
-                long want = 0x10 + 0x18L * cnt + str + end, have = sizeOf(u);
-                if (have >= 0 && have < want) return T.t(this, "%s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.", name, have >> 20, want >> 20);
-            }
-        }
-        return null;
-    }
-    private long sizeOf(Uri u) { String p = pathOf(u); return p != null ? new File(p).length() : documentSize(u); }
-    // the title ID in a dump's file name ([0100ABF008968000]), or -1
-    private static long titleId(String path) {
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\[(0100[0-9A-Fa-f]{12})\\]").matcher(new File(path).getName());
-        return m.find() ? Long.parseUnsignedLong(m.group(1), 16) : -1;
-    }
-    // the game a title ID belongs to: an update is the game's ID + 0x800, a DLC the game's ID + 0x1000 + its number
-    private static long appOf(long tid) { return ((tid >> 12) & 1) == 1 ? (tid & ~0xFFFL) - 0x1000 : tid & ~0xFFFL; }
-    // files of two different games chosen together (Sword's base game and Shield's update, say): said before the setup, which takes one game at a time
-    private String mixedGames() {
-        Set<Long> apps = new HashSet<>(); for (String g : games) { long t = titleId(g); if (t >= 0) apps.add(appOf(t)); }
-        if (apps.size() < 2) return null;
-        List<String> names = new ArrayList<>();
-        for (long a : apps) { String nm = String.format("%016X", a); for (String[] g : GameSettings.games(this)) if (g[0].equalsIgnoreCase(nm)) nm = g[1]; names.add(nm); }
-        return T.t(this, "These files are from different games (%s): set up one game at a time. Tap Clear and choose the files of one game.", String.join(", ", names));
-    }
-    // Clear: the files chosen so far, and the copies of them in the app's storage
+    // Clear: the folders chosen so far
     private void clearGames() {
         if (running) return;
-        for (File f : importedGames) f.delete();
-        importedGames.clear(); games.clear(); status.setText(""); refresh();
-    }
-    // copies made for an earlier setup that did not finish (the app closed, the setup failed): chosen again rather than left taking space
-    private File importDir() { return new File(GameSettings.root(this), "imported"); }
-    private void restoreImported() {
-        if (running) return;
-        File[] fs = importDir().listFiles(); if (fs == null) return;
-        for (File f : fs) { if (!f.isFile() || f.length() == 0) { f.delete(); continue; } if (!games.contains(f.getPath())) { games.add(f.getPath()); importedGames.add(f); } }
+        exefsDir = romfsDir = null; dlcDirs.clear(); status.setText(""); refresh();
     }
     private String nameOf(Uri u) { try (Cursor c = getContentResolver().query(u, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) { if (c != null && c.moveToFirst()) return c.getString(0); } catch (Exception e) { } return u.getLastPathSegment(); }
-    // Resolve document-provider paths for in-place reads; copying multi-gigabyte game files into the app is not practical.
-    private String pathOf(Uri u) {
-        if ("file".equals(u.getScheme())) return readableFile(u.getPath());
-        if (DocumentsContract.isDocumentUri(this, u)) {
-            try {
-                String id = DocumentsContract.getDocumentId(u);
-                if (id.startsWith("raw:")) return readableFile(id.substring(4));
-                // the picker's Downloads entry: msf:<MediaStore id> (Android 10+), whose _data the media index knows; a copy of a several-GB dump is the fallback
-                if (id.startsWith("msf:")) {
-                    try (Cursor c = getContentResolver().query(android.provider.MediaStore.Files.getContentUri("external", Long.parseLong(id.substring(4))), new String[] { "_data" }, null, null, null)) {
-                        if (c != null && c.moveToFirst() && !c.isNull(0)) { String p = readableFile(c.getString(0)); if (p != null) return p; }
-                    } catch (NumberFormatException | SecurityException e) { }
-                }
-                if ("com.android.externalstorage.documents".equals(u.getAuthority())) {
-                    int sep = id.indexOf(':');
-                    if (sep > 0) {
-                        String volume = id.substring(0, sep), relative = id.substring(sep + 1);
-                        File root = "primary".equalsIgnoreCase(volume) ? Environment.getExternalStorageDirectory() : new File("/storage", volume);
-                        return readableFile(new File(root, relative).getPath());
-                    }
-                }
-            } catch (IllegalArgumentException e) { }
-        }
-        try (Cursor c = getContentResolver().query(u, new String[] { "_data" }, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int column = c.getColumnIndex("_data");
-                if (column >= 0) return readableFile(c.getString(column));
-            }
-        } catch (IllegalArgumentException | SecurityException e) { }
-        return null;
-    }
-    private String readableFile(String path) { if (path == null) return null; File f = new File(path); return f.isFile() && f.canRead() ? f.getPath() : null; }
     private static void copy(InputStream in, OutputStream out) throws IOException { byte[] buf = new byte[1 << 16]; int n; while ((n = in.read(buf)) > 0) out.write(buf, 0, n); }
-
-    private long documentSize(Uri uri) {
-        try (Cursor c = getContentResolver().query(uri, new String[] { OpenableColumns.SIZE }, null, null, null)) {
-            return c != null && c.moveToFirst() && !c.isNull(0) ? c.getLong(0) : -1;
-        } catch (IllegalArgumentException | SecurityException e) { return -1; }
-    }
-    private void importGames(List<PickedGame> imports) {
-        running = true; refresh();
-        gameText.setText(T.t(this, "Copying %d selected file(s) into app storage...", imports.size()));
-        status.setText(T.t(this, "Copying %d selected game file(s) into app storage; large files need extra free space...", imports.size()));
-        new Thread(() -> {
-            List<File> copied = new ArrayList<>();
-            String error = null;
-            try {
-                File dir = importDir();
-                if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("could not create app storage for the selected game file");
-                for (PickedGame picked : imports) {
-                    File destination = uniqueImportFile(dir, picked.name);
-                    long size = documentSize(picked.uri);
-                    long available = new StatFs(dir.getPath()).getAvailableBytes();
-                    if (size >= 0 && available < size + (512L << 20))
-                        throw new IOException("not enough free space to copy " + picked.name + "; select it from phone storage where possible or free at least " + size / (1L << 20) + " MB");
-                    runOnUiThread(() -> status.setText("Copying " + picked.name + " (" + (size >= 0 ? size / (1L << 20) + " MB" : "size unknown") + ") into app storage..."));
-                    try (InputStream in = getContentResolver().openInputStream(picked.uri);
-                         OutputStream out = new BufferedOutputStream(new FileOutputStream(destination))) {
-                        if (in == null) throw new IOException("the file provider could not open " + picked.name);
-                        byte[] buffer = new byte[1 << 20]; int n;
-                        while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
-                    } catch (IOException | SecurityException e) { destination.delete(); throw e; }
-                    if (!destination.isFile() || destination.length() == 0) { destination.delete(); throw new IOException("the selected file was empty or could not be copied: " + picked.name); }
-                    if (size >= 0 && destination.length() != size) { long got = destination.length(); destination.delete();
-                        throw new IOException(T.t(this, "the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage", picked.name, got >> 20, size >> 20)); }
-                    copied.add(destination);
-                }
-            } catch (IOException | SecurityException | IllegalArgumentException e) { error = e.getMessage(); }
-            final String failure = error;
-            runOnUiThread(() -> {
-                running = false;
-                for (File file : copied) { games.add(file.getPath()); importedGames.add(file); }
-                String mixed = mixedGames();
-                if (failure == null) status.setText(mixed != null ? mixed : T.t(this, "Game file(s) copied into app storage and selected."));
-                else status.setText(T.t(this, "Could not import game file: %s", failure) + (copied.isEmpty() ? "" : " " + T.t(this, "Previously copied selections are ready.")));
-                refresh();
-            });
-        }).start();
-    }
-    private static String safeFileName(String name) {
-        String base = new File(name == null ? "game.nsp" : name).getName().replaceAll("[^A-Za-z0-9._ -]", "_").trim();
-        return base.isEmpty() ? "game.nsp" : base;
-    }
-    private static File uniqueImportFile(File directory, String name) throws IOException {
-        File root = directory.getCanonicalFile();
-        String base = safeFileName(name), stem = base, ext = "";
-        int dot = base.lastIndexOf('.');
-        if (dot > 0) { stem = base.substring(0, dot); ext = base.substring(dot); }
-        for (int suffix = 1; ; suffix++) {
-            String candidate = stem + (suffix == 1 ? "" : " (" + suffix + ")") + ext;
-            File file = new File(root, candidate).getCanonicalFile();
-            if (!file.getParentFile().equals(root)) throw new IOException("invalid game file name");
-            if (!file.exists()) return file;
-        }
-    }
 
     private void chooseSaveExport() {
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.setType("application/zip"); i.putExtra(Intent.EXTRA_TITLE, game()[2] + "-save.zip");
+        i.setType("application/zip"); i.putExtra(Intent.EXTRA_TITLE, GameSettings.saveZipName(this));
         startActivityForResult(i, PICK_SAVE_EXPORT);
     }
     private void chooseSaveImport() {   // any file: a ZIP a browser or a chat app saved is often typed octet-stream / x-zip-compressed and the picker greyed it out
@@ -676,7 +583,7 @@ public final class SetupActivity extends Activity {
             String result;
             try (InputStream input = getContentResolver().openInputStream(source)) {
                 if (input == null) throw new IOException("the file provider could not open the selected archive");
-                int files = SaveImport.install(input, new File(gameDir(), "save_import"), nameOf(source));
+                int files = SaveImport.install(input, new File(GameSettings.saveRoot(this), "save_import"), nameOf(source));   // (the chosen player's: android_main.c installs it at the next start)
                 result = T.t(this, "Imported %d save file(s) into %s (%s). Tap Play to load it; your current save is kept as a backup.", files, game()[1], SaveImport.lastFiles);
             } catch (IOException | SecurityException e) {
                 result = T.t(this, "Could not import save data: %s", e.getMessage());
@@ -687,7 +594,7 @@ public final class SetupActivity extends Activity {
     }
     private void exportSave(Uri destination) {
         if (destination == null) return;
-        File save = new File(gameDir(), "save");
+        File save = GameSettings.activeSave(this);   // (the chosen player's, in Documents when the Save folder is set there)
         status.setText(T.t(this, "Exporting save data..."));
         new Thread(() -> {
             String result;
@@ -701,6 +608,77 @@ public final class SetupActivity extends Activity {
             final String message = result;
             runOnUiThread(() -> status.setText(message));
         }).start();
+    }
+    // ---------- Players (Profiles) and Start over. Only here, with the game closed (onCreate sends the app's icon back to a running game), and not during a setup or an import.
+    //   The engine takes the chosen player's save at its next start (android_main.c choose_profile)
+    private boolean busy() { if (!running && !GameActivity.alive) return false; status.setText(T.t(this, "Please wait for the current setup or file copy to finish.")); return true; }
+    private void switchPlayer() {
+        if (busy()) return;
+        File r = GameSettings.root(this); List<String[]> ps = Profiles.list(r); String cur = Profiles.current(r);
+        String[] names = new String[ps.size()]; int at = 0;
+        for (int k = 0; k < ps.size(); k++) { names[k] = ps.get(k)[1]; if (ps.get(k)[0].equals(cur)) at = k; }
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Who is playing?"))
+            .setSingleChoiceItems(names, at, (d, w) -> { d.dismiss(); if (busy()) return;
+                try { Profiles.choose(r, ps.get(w)[0]); status.setText(T.t(this, "Now playing as %s.", ps.get(w)[1])); } catch (IOException e) { status.setText(T.t(this, "That did not work: %s", e.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    // id null: a new player (chosen straight away); else that player's new name
+    private void nameDialog(String id) {
+        if (busy()) return;
+        File r = GameSettings.root(this); List<String[]> ps = Profiles.list(r); String[] p = id == null ? null : Profiles.find(ps, id);
+        android.widget.EditText e = new android.widget.EditText(this); e.setSingleLine(true);
+        e.setFilters(new android.text.InputFilter[] { new android.text.InputFilter.LengthFilter(Profiles.MAX_NAME) });
+        int k = ps.size() + 1; while (Profiles.nameProblem(ps, T.t(this, "Player %d", k), null) != null) k++;   // (the first "Player n" not taken)
+        e.setText(p != null ? p[1] : T.t(this, "Player %d", k)); e.selectAll();
+        android.widget.FrameLayout box = new android.widget.FrameLayout(this); box.setPadding(px(20), px(8), px(20), 0); box.addView(e);
+        new android.app.AlertDialog.Builder(this).setTitle(p == null ? T.t(this, "New player") : T.t(this, "Rename player")).setView(box)
+            .setPositiveButton(p == null ? T.t(this, "Add") : T.t(this, "Rename"), (d, w) -> { if (busy()) return;
+                String name = Profiles.clean(e.getText().toString()), why = Profiles.nameProblem(Profiles.list(r), name, id);
+                if (why != null) { status.setText(why.startsWith("Type") ? T.t(this, "Type a name.") : T.t(this, "That name is taken.")); return; }
+                try {
+                    if (p == null) { Profiles.choose(r, Profiles.add(r, name)); status.setText(T.t(this, "Added %s. Their game starts from the beginning.", name)); }
+                    else { Profiles.rename(r, id, name); status.setText(""); }
+                } catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    private void deletePlayer() {
+        if (busy()) return;
+        File r = GameSettings.root(this); String id = Profiles.current(r), name = Profiles.currentName(r);
+        if (Profiles.list(r).size() <= 1) return;
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Delete %s?", name))
+            .setMessage(T.t(this, "The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.", name))
+            .setPositiveButton(T.t(this, "Delete"), (d, w) -> { if (busy()) return;
+                try { Profiles.delete(r, id, GameSettings.dirs(this)); status.setText(T.t(this, "%s deleted. Now playing as %s.", name, Profiles.currentName(r))); }
+                catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    private static String stamp() { return new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT).format(new java.util.Date()); }
+    // Start over: the chosen player's save in this game put aside as a backup (save.bak-<date> beside it, the older backup deleted), so the game starts anew
+    private void startOver() {
+        if (busy()) return;
+        String name = Profiles.currentName(GameSettings.root(this));
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Start over?"))
+            .setMessage(T.t(this, "%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.", name, gameName()))
+            .setPositiveButton(T.t(this, "Start over"), (d, w) -> { if (busy()) return;
+                try { int n = Profiles.startOver(GameSettings.saveDirs(this), stamp());
+                      status.setText(n > 0 ? T.t(this, "Done: the game starts from the beginning. The old save is kept as a backup.") : T.t(this, "There is no save yet: the game already starts from the beginning.")); }
+                catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
+    }
+    // Restore: the backup and the save change places, so nothing is lost and the player can switch back
+    private void restoreSave() {
+        if (busy()) return;
+        new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "Restore the previous save?"))
+            .setMessage(T.t(this, "The backup becomes the save again, and the save you have now becomes the backup, so you can switch back."))
+            .setPositiveButton(T.t(this, "Restore"), (d, w) -> { if (busy()) return;
+                try { Profiles.restore(GameSettings.saveDirs(this), stamp()); status.setText(T.t(this, "The previous save is back.")); }
+                catch (IOException x) { status.setText(T.t(this, "That did not work: %s", x.getMessage())); }
+                refresh(); })
+            .setNegativeButton(T.t(this, "Cancel"), null).show();
     }
     private int addSaveFiles(File root, File directory, java.util.zip.ZipOutputStream zip) throws IOException {
         File[] children = directory.listFiles();
@@ -721,19 +699,6 @@ public final class SetupActivity extends Activity {
         return count;
     }
 
-    // the game's base, update and DLC told apart by their file names (the title ID ends 000 for the base, 800 for the update; [UPD] / [DLC] tags), else by size
-    private String[] sortGames() {
-        String base = null, upd = null; List<String> dlc = new ArrayList<>();
-        for (String g : games) { String n = new File(g).getName().toUpperCase(); long t = titleId(g);
-            if (t >= 0 && ((t >> 12) & 1) == 1) dlc.add(g);
-            else if (t >= 0 && (t & 0xFFF) == 0x800) upd = g;
-            else if (t >= 0 && (t & 0xFFF) == 0 && base == null) base = g;
-            else if (n.contains("[UPD]") || n.contains("800]")) upd = g; else if (n.contains("[DLC]") || n.contains("[AOC]")) dlc.add(g);
-            else if (base == null || new File(g).length() > new File(base).length()) { if (base != null) dlc.add(base); base = g; } else dlc.add(g); }
-        if (base == null && upd != null) { base = upd; upd = null; }   // (only an update chosen, or an update holding the base game: the unpacker says which it is)
-        if (base == null && !dlc.isEmpty()) base = dlc.remove(0);
-        List<String> a = new ArrayList<>(); a.add(base); a.add(upd); a.addAll(dlc); return a.toArray(new String[0]);
-    }
     // the folder of the installed app's APKs (base and splits) that holds this game (GameSettings.setupFromApp), or null
     private String installedApp() {
         String pkg = GameSettings.setupFromApp(this); if (pkg == null) return null;
@@ -746,24 +711,17 @@ public final class SetupActivity extends Activity {
         bar.setMax(600); bar.setProgress(0); status.setText(T.t(this, "Preparing..."));
         resumes = 0; workerCap = 0; runFullSetup(new ArrayList<>(Arrays.asList("--installed", dir)));
     }
-    private void startSetup(boolean allowDamaged) {
-        if (running || games.isEmpty()) return;
+    // move: the player agreed to move the RomFS and DLC folders into the app (setup_game.py --move), offered when there is no room for a copy
+    private void startSetup(boolean move) {
+        if (running || exefsDir == null || romfsDir == null) return;
         shadersOnlyRun = false;
-        offerAnyway = false; anyway.setVisibility(android.view.View.GONE);
-        String mixed = mixedGames(); if (mixed != null) { status.setText(mixed); return; }
-        for (String g : games) if (!new File(g).canRead()) { status.setText(T.t(this, "Could not read %s.", new File(g).getName()) + " " + T.t(this, "Tap Clear and choose your files again.")); return; }
-        // Sword and Shield run on update 1.3.2 only: a base game named [v0] chosen without any update is said now, not after the unpacking (only for .nsp files named
-        //   with their title IDs: an .xci, or a dump named otherwise, can hold the update, and the setup checks the version itself)
-        { boolean nsp = true, named = true, hasUpd = false, v0 = false;
-          for (String f : games) { String n = new File(f).getName().toLowerCase(java.util.Locale.ROOT); long t = titleId(f);
-              nsp &= n.endsWith(".nsp"); named &= t >= 0; if (t >= 0 && (t & 0xFFF) == 0x800) hasUpd = true; if (t >= 0 && (t & 0xFFF) == 0 && n.contains("[v0]")) v0 = true; }
-          if (nsp && named && v0 && !hasUpd) { status.setText(T.t(this, "Your files are the base game only: this app needs the %s update too. Choose the update (.nsp, its title ID ends in 800) as well.", GameSettings.version(this))); return; } }
+        offerMove = false; moveBtn.setVisibility(android.view.View.GONE);
+        List<String> dirs = new ArrayList<>(Arrays.asList(exefsDir, romfsDir)); dirs.addAll(dlcDirs);
+        for (String d : dirs) if (!new File(d).isDirectory() || !new File(d).canRead()) { status.setText(T.t(this, "Could not read %s.", d) + " " + T.t(this, "Tap Clear and choose your files again.")); return; }
         bar.setMax(600); bar.setProgress(0); status.setText(T.t(this, "Preparing..."));
-        String[] g = sortGames(); List<String> cmd = new ArrayList<>();
-        cmd.add("--keys"); cmd.add(keysDir().getPath()); cmd.add("--base"); cmd.add(g[0]);
-        if (g[1] != null) { cmd.add("--update"); cmd.add(g[1]); }
-        for (int k = 2; k < g.length; k++) { cmd.add("--dlc"); cmd.add(g[k]); }
-        if (allowDamaged) cmd.add("--allow-damaged");
+        List<String> cmd = new ArrayList<>(Arrays.asList("--exefs", exefsDir, "--romfs", romfsDir));
+        for (String d : dlcDirs) { cmd.add("--dlc-dir"); cmd.add(d); }
+        if (move) cmd.add("--move");
         resumes = 0; workerCap = 0; runFullSetup(cmd);
     }
     // Android's memory killer can stop the whole setup on phones that guard memory closely (#51 / #52: "setup stopped (137)" during the shader translation): it is
@@ -776,15 +734,10 @@ public final class SetupActivity extends Activity {
                 status.setText(T.t(this, "Android stopped the setup to free memory: going on from where it was (%s of 3)...", resumes));
                 List<String> again = new ArrayList<>(cmd); if (!again.contains("--resume")) again.add("--resume"); runFullSetup(again); return;
             }
-            if (err != null && offerAnyway) anyway.setVisibility(android.view.View.VISIBLE);
+            if (err != null && offerMove) moveBtn.setVisibility(android.view.View.VISIBLE);
             bar.setProgress(err == null ? 600 : bar.getProgress());
             status.setText(err == null ? T.t(this, "Ready: tap Play.") : T.t(this, "Setup failed: %s", err) + "\n" + T.t(this, "The setup log is in Android/data/%s/files/setup_work.", getPackageName()));
-            if (err == null) {
-                for (File file : importedGames) file.delete();
-                importedGames.clear();
-                importDir().delete(); games.clear();
-                if (gameIcon() != null) pinShortcut();
-            }
+            if (err == null) { exefsDir = romfsDir = null; dlcDirs.clear(); pinShortcut(); }
         });
     }
     private int workers() { return workerCap > 0 ? workerCap : setupWorkers(); }
@@ -880,7 +833,7 @@ public final class SetupActivity extends Activity {
                 cmd.add("--out"); cmd.add(gameDir().getPath()); cmd.add("--work"); cmd.add(work.getPath()); cmd.add("--bin"); cmd.add(bin.getPath());
                 cmd.add("--scratch"); cmd.add(scratchDir(this, gameDir()).getPath());
                 File ext = new File(dm, "android/app/assets/nintendo_ext.ttf"); if (ext.exists() && !args.contains("--captures")) { cmd.add("--ext-font"); cmd.add(ext.getPath()); }
-                if (!args.contains("--captures")) {   // the dump says which game it is: setup puts it in that game's place (GAME line below), one of each game
+                if (!args.contains("--captures")) {   // the files say which game they are: setup puts it in that game's place (GAME line below), one of each game
                     StringBuilder ids = new StringBuilder(); for (String[] g : GameSettings.games(this)) ids.append(ids.length() > 0 ? "," : "").append(g[0]);
                     cmd.add("--games"); cmd.add(ids.toString()); cmd.add("--root"); cmd.add(GameSettings.root(this).getPath()); }
                 ProcessBuilder pb = new ProcessBuilder(cmd).redirectErrorStream(true); toolEnv(this, pb, py, dm, bin, workers());
@@ -896,7 +849,8 @@ public final class SetupActivity extends Activity {
                             + (pct >= 99 ? T.t(this, "Almost done with this step: its last part shows no progress and can take several minutes.") : T.t(this, "This takes a long time on a phone: keep this screen open, ideally plugged in."))); }); }
                     else if (l.startsWith("GAME ")) { String id = l.substring(5).trim(); GameSettings.choose(this, id);
                         runOnUiThread(() -> show(T.t(this, "Your files are %s: setting it up...", GameSettings.game(this)[1]))); }
-                    else if (l.startsWith("OFFER allow-damaged")) offerAnyway = true;
+                    else if (l.startsWith("OFFER move")) offerMove = true;
+                    else if (l.startsWith("MOVING")) runOnUiThread(() -> show(T.t(this, "Moving your files into the app...")));
                     else if (l.startsWith("FAILED")) err = l.substring(6).trim(); } catch (RuntimeException e) { } }
                 if (p.waitFor() != 0 && err == null) err = "setup stopped (" + p.exitValue() + ")";
             } catch (Exception e) { err = e.toString(); if (p != null) p.destroy(); }
@@ -924,8 +878,8 @@ public final class SetupActivity extends Activity {
         android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); ((ActivityManager) c.getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(mi);
         return Math.max(300, (mi.threshold >> 20) + 200);
     }
-    // the environment setup_game.py runs in: Python, the scripts, the tools (bin first: the .NET unpacker dlopens libssl.so.3 / libcrypto.so.3, which binDir() links to
-    // the OpenSSL 3 that ships with CPython for Android), the workers and the memory gate (dmsh_gate.c)
+    // the environment setup_game.py runs in: Python, the scripts, the tools (bin first: libssl.so.3 / libcrypto.so.3, which binDir() links to the OpenSSL 3 that ships
+    // with CPython for Android), the workers and the memory gate (dmsh_gate.c)
     static void toolEnv(Context c, ProcessBuilder pb, File py, File dm, File bin, int workers) {
         String lib = c.getApplicationInfo().nativeLibraryDir; java.util.Map<String, String> e = pb.environment();
         e.put("PYTHONHOME", py.getPath()); e.put("DM_GAME", GameSettings.game(c)[0]); e.put("PYTHONPATH", new File(dm, "android/pyshim").getPath());
@@ -945,15 +899,16 @@ public final class SetupActivity extends Activity {
         return pb.start();
     }
     private File iconFile() { return new File(gameDir(), "icon.jpg"); }
-    // the game's icon from the player's dump: this screen and the recent-apps card
+    // the game's icon (icon.jpg, from a setup of an older version): this screen and the recent-apps card; without it the app's own icon on this screen, and null
     @SuppressWarnings("deprecation")
     private Bitmap gameIcon() {
-        Bitmap b = iconFile().exists() ? BitmapFactory.decodeFile(iconFile().getPath()) : null; if (b == null) return null;
+        Bitmap b = iconFile().exists() ? BitmapFactory.decodeFile(iconFile().getPath()) : null;
+        if (b == null) { if (logo != null) { logo.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager())); logo.setVisibility(android.view.View.VISIBLE); } return null; }
         setTaskDescription(new ActivityManager.TaskDescription(gameName(), b));
         if (logo != null) { logo.setImageBitmap(b); logo.setVisibility(android.view.View.VISIBLE); }
         return b;
     }
-    // once set up the app is the game: it starts straight into it. A long press on its icon offers "Set up again" (another dump, an update, the layout of the setup)
+    // once set up the app is the game: it starts straight into it. A long press on its icon offers "Set up again" (other game files, an update, the layout of the setup)
     private void setupShortcut() {
         ShortcutManager sm = getSystemService(ShortcutManager.class); if (sm == null) return;
         Intent again = new Intent(this, SetupActivity.class).setAction(Intent.ACTION_MAIN).putExtra("setup", true);
@@ -961,22 +916,23 @@ public final class SetupActivity extends Activity {
             .setIcon(Icon.createWithResource(this, android.R.drawable.ic_menu_manage)).setIntent(again).build();
         try { List<ShortcutInfo> all = new ArrayList<>(); all.add(si); for (ShortcutInfo d : sm.getDynamicShortcuts()) if (!d.getId().equals("setup")) all.add(d); sm.setDynamicShortcuts(all); } catch (Exception e) { }
     }
-    // a home screen shortcut with the game's icon (the launcher asks the player to confirm), also offered on a long press of the app's icon
+    // a home screen shortcut with the game's icon, or the app's own when there is none (the launcher asks the player to confirm), also offered on a long press of the app's icon
     private void pinShortcut() {
-        Bitmap b = gameIcon(); ShortcutManager sm = getSystemService(ShortcutManager.class); if (b == null || sm == null) return;
+        Bitmap b = gameIcon(); ShortcutManager sm = getSystemService(ShortcutManager.class); if (sm == null) return;
         // one shortcut per game, naming it (the first game keeps the id "game" its players' shortcut already has)
         String sid = game()[0].equalsIgnoreCase(GameSettings.games(this).get(0)[0]) ? "game" : "game_" + game()[0];
         Intent go = new Intent(this, SetupActivity.class).setAction(Intent.ACTION_MAIN).putExtra("game", game()[0]);
-        ShortcutInfo si = new ShortcutInfo.Builder(this, sid).setShortLabel(gameName()).setLongLabel("Play " + gameName()).setIcon(Icon.createWithBitmap(b)).setIntent(go).build();
+        ShortcutInfo si = new ShortcutInfo.Builder(this, sid).setShortLabel(gameName()).setLongLabel("Play " + gameName()).setIcon(b != null ? Icon.createWithBitmap(b) : Icon.createWithResource(this, getApplicationInfo().icon)).setIntent(go).build();
         try { sm.addDynamicShortcuts(Arrays.asList(si)); } catch (Exception e) { }
         for (ShortcutInfo p : sm.getPinnedShortcuts()) if (p.getId().equals(sid)) { sm.updateShortcuts(Arrays.asList(si)); status.setText(T.t(this, "The %s shortcut is on the home screen.", gameName())); return; }
         if (sm.isRequestPinShortcutSupported()) sm.requestPinShortcut(si, null); else status.setText(T.t(this, "This launcher cannot add shortcuts: long-press the app's icon for %s.", gameName()));
     }
     // the executables the setup runs, under the names the scripts call them by (links into the app's native library folder, where Android allows execution);
-    // also OpenSSL 3 under the names the .NET unpacker dlopens (libssl.so.3 / libcrypto.so.3), so it does not pick up the system's BoringSSL
+    // also OpenSSL 3 under the names it is loaded by (libssl.so.3 / libcrypto.so.3), so the system's BoringSSL is not picked up
     private File binDir() throws IOException {
         File d = new File(getFilesDir(), "bin"); d.mkdirs(); String lib = getApplicationInfo().nativeLibraryDir;
-        String[][] links = { { "nx_extract", "libnx_extract.so" }, { "dmsh_xlate", "libdmsh_xlate.so" }, { "spirv-cross", "libspirv_cross.so" }, { "dmsh_gate", "libdmsh_gate.so" }, { "dmoodle", "libdmoodle.so" },
+        new File(d, "nx_extract").delete();   // (the unpacker older versions linked: the app has none now)
+        String[][] links = { { "dmsh_xlate", "libdmsh_xlate.so" }, { "spirv-cross", "libspirv_cross.so" }, { "dmsh_gate", "libdmsh_gate.so" }, { "dmoodle", "libdmoodle.so" },
                              { "libssl.so.3", "libssl_python.so" }, { "libcrypto.so.3", "libcrypto_python.so" } };
         for (String[] l : links) { File f = new File(d, l[0]); f.delete(); if (!new File(lib, l[1]).exists() && (l[0].equals("dmsh_gate") || l[0].equals("dmoodle"))) continue; try { android.system.Os.symlink(lib + "/" + l[1], f.getPath()); } catch (Exception e) { throw new IOException("link " + l[0] + ": " + e); } }
         return d;

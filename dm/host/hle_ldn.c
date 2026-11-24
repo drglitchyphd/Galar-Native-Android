@@ -8,7 +8,9 @@
 // With a room set (DM_RELAY / DM_RELAY_ROOM: the in-game menu's Online room) the same runs over the room server's virtual network instead (hle_relay.c): this phone's
 // address is its virtual one (10.13.0.x), the announcements go to the network's broadcast, and joins and node lists are datagrams on port 11453 (the server link is TCP:
 // they arrive, in order); a member gone is the server's notice.
-// Off while mods are on (DM_MODS_ACTIVE, android_main.c boot_guard): Initialize reports failure, so the game says local play is unavailable; DM_LDN=0 turns it off too.
+// Off while mods are on (DM_MODS_ACTIVE, android_main.c boot_guard): Initialize reports failure, so the game says local play is unavailable. Off by default too
+// (since v0.97): on only with DM_LDN=1 (the menu's Online page, Local play) or an online room (DM_RELAY_ROOM). Most Dynamax crash logs (the game's memory pool running
+// dry, #211 #341) had local play hosting in the background the whole time (Pia threads made and dropped every few seconds)
 // Structures (offsets in bytes) as switchbrew documents them: NetworkInfo 0x480 = NetworkId 0x20 (IntentId 0x10: LocalCommunicationId u64, SceneId u16 at +0xa;
 // SessionId 0x10), CommonNetworkInfo 0x30 at +0x20 (Bssid 6, Ssid 0x22 {u8 length, 33 bytes}, Channel s16 +0x28, LinkLevel +0x2a, NetworkType +0x2b),
 // LdnNetworkInfo 0x430 at +0x50 (ServerRandom 16, SecurityMode u16 +0x10, StationAcceptPolicy +0x12, NodeCountMax +0x16, NodeCount +0x17, 8 NodeInfo of 0x40 at
@@ -209,8 +211,8 @@ static void start_thread(void *(*fn)(void *)) { pthread_t t; if (!pthread_create
 // ---------- the API ----------
 HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless over the phone's Wi-Fi (off while mods are on)", Result, h_ldn_Init, void) {
     pthread_mutex_lock(&g_mu); Result r = RES_OK;
-    const char *off = getenv("DM_LDN");
-    if (off && !strcmp(off, "0")) { LOG("[ldn] local play is off (DM_LDN=0)"); r = RES_FAIL; }
+    const char *on = getenv("DM_LDN"), *room = getenv("DM_RELAY_ROOM");
+    if (!(on && !strcmp(on, "1")) && !(room && *room)) { LOG("[ldn] local play is off (menu: Online, Local play; DM_LDN=1 turns it on)"); r = RES_FAIL; }
     else if (mods_on()) { LOG("[RED] [ldn] local play is off while mods are on: switch them off in the menu, Mods (play with others only on the unmodified game)"); r = RES_FAIL; }
     else if ((g_relay = getenv("DM_RELAY_ROOM") && *getenv("DM_RELAY_ROOM")) && !relay_start()) { LOG("[RED] [ldn] the online room could not be joined (see [relay] above): local play is off"); r = RES_FAIL; }
     else if (g_relay) { g_ip = relay_vip(); g_mask = 0xFFFF0000u; relay_on_left(peer_left); for (int k = 0; k < MAXN; k++) g_member[k] = -1; g_state = ST_INIT; g_reason = 0;

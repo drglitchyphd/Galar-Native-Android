@@ -16,7 +16,7 @@
 //   frame-capture.zip   the newest ☰ → Capture a frame, when one was made in the last two days
 //   logcat.txt          the system log lines this app may read (its own process: Java exceptions, the Vulkan loader, the driver's messages)
 // Nothing from the game's files, the keys or the save goes in. Made from ☰ → Bug reports, and offered once after a run that crashed (SetupActivity).
-// The GitHub issue it goes with is opened pre-filled (issueUrl: phone, GPU, version, game, driver); the player attaches the ZIP.
+// The GitHub issue it goes with is opened pre-filled (issueUrl: phone, GPU, version, game, driver, and a crash summary in case the player never attaches the ZIP).
 package com.nxnative;
 
 import android.app.Activity;
@@ -65,8 +65,10 @@ final class DebugBundle {
             file(z, "logs/log.txt", new File(dir, "log.txt"));
             file(z, "logs/log.prev.txt", new File(dir, "log.prev.txt"));
             file(z, "logs/setup.log", new File(new File(dir, "setup_work"), "setup.log"));
-            for (String n : new String[] { "boot_state", "safe_start", "gpu.txt", "notice.txt", "save_place.txt", "ready", "captures_done" }) file(z, "logs/" + n, new File(dir, n));
+            for (String n : new String[] { "boot_state", "safe_start", "gpu.txt", "notice.txt", "ready", "captures_done" }) file(z, "logs/" + n, new File(dir, n));
+            file(z, "logs/save_place.txt", new File(GameSettings.saveRoot(c), "save_place.txt"));   // (the chosen player's: Profiles)
             exits(c, z);
+            text(z, "crash-summary.txt", crashSummary(c));   // (the lines the issue text carries)
             text(z, "shaders_at_crash.txt", shaders(c, dir));
             text(z, "memory.txt", memory(dir));
             text(z, "quirks.txt", grep(dir, "[quirk]", "The driver workarounds each run used (vk_quirks.h: the GPU described once, every workaround's value and whether env.txt or the driver check set it).\n"));
@@ -111,7 +113,7 @@ final class DebugBundle {
         g.put("titleId", gm[0]); g.put("name", gm[1]); g.put("version", GameSettings.version(c));
         g.put("setUp", new File(dir, "ready").exists()); g.put("shaderChain", first(new File(dir, "ready")));
         g.put("packComplete", packComplete(dir)); g.put("packShaders", packCount(new File(dir, "shaders.pak")));
-        g.put("savePlace", first(new File(dir, "save_place.txt")));
+        g.put("savePlace", first(new File(GameSettings.saveRoot(c), "save_place.txt"))); g.put("saveProfile", Profiles.current(GameSettings.root(c)));   // (the player's id, not their name)
         j.put("game", g);
 
         JSONObject d = new JSONObject();
@@ -330,13 +332,111 @@ final class DebugBundle {
                     : why == ApplicationExitInfo.REASON_ANR ? "Not responding" : "Crash";
         q(u, "title", "[" + ver + "] " + kind + " on " + phone);
         q(u, "phone", phone); q(u, "gpu", (soc.isEmpty() ? "" : soc + " / ") + gpu); q(u, "version", ver); q(u, "game", GameSettings.game(c)[1]); q(u, "driver", d);
-        String logs = "Debug report: " + (zip != null ? zip.getName() : "debug-report.zip") + " from Download (attach it here). " + (crash ? "Last exit: " + lastExitLine(c) : "");
-        q(u, "logs", logs);
-        // a repository without the issue form (Arceus-Native-Android) takes the plain body instead; with the form, GitHub uses the fields above
+        // GitHub cannot take a file through a link: the player has to attach the ZIP by hand, and many do not (Galar #340). So the crash's essentials go in the
+        //   text itself (crashSummary: Android's crash record and the engine's own crash lines), cut until the whole link stays under GitHub's ~8 KB
+        String name = zip != null ? zip.getName() : "debug-report.zip";
+        String head = "⚠️ ATTACH Download/" + name + " HERE (tap \"Paste, drop, or click to add files\" under this box). GitHub cannot add it for you.\n\n"
+                    + (crash ? "Last exit: " + lastExitLine(c) + "\n" : "");
+        String sum = crash ? crashSummary(c) : "", logs = head;
+        for (int keep = sum.length(); ; keep = keep * 3 / 4) {
+            String s = keep <= 16 ? "" : sum.substring(0, Math.min(keep, sum.length()));
+            logs = s.isEmpty() ? head : head + "\nCrash summary (made by the app):\n```\n" + s + (keep < sum.length() ? "\n(cut: the rest is in the ZIP)" : "") + "\n```\n";
+            if (s.isEmpty() || u.length() + enc(logs).length() < 7600) break;
+        }
+        boolean form = repo.contains("Galar-Native");
+        if (form) { q(u, "logs", logs); return u.toString(); }
+        // a repository without the issue form (Arceus-Native-Android) takes the plain body instead (with the form, GitHub ignores it: left out, it only made the link longer)
         q(u, "body", "**What happens**\n\n(say what you did and what went wrong)\n\n**Phone:** " + phone + "\n**GPU:** " + (soc.isEmpty() ? "" : soc + " / ") + gpu + "\n**Version:** " + ver
                      + "\n**Game:** " + GameSettings.game(c)[1] + "\n**Driver:** " + d + "\n\n" + logs + "\n");
         return u.toString();
     }
+    private static String enc(String v) { try { return java.net.URLEncoder.encode(v, "UTF-8"); } catch (java.io.UnsupportedEncodingException e) { return v; } }
+
+    // ---------- the crash in a few lines ----------
+    // For the issue text and crash-summary.txt: the newest native crash's record from Android (signal, abort message, the crashed thread and its top frames,
+    //   read as dm/android/tools/read_debug_report.py does) and the engine's own crash lines from the newest log that has them ("[dm] CRASH" and the
+    //   "[dm]" lines after it, the last FATAL line)
+    static String crashSummary(Context c) {
+        StringBuilder sb = new StringBuilder();
+        for (ApplicationExitInfo e : exitList(c, 4)) {
+            if (e.getReason() != ApplicationExitInfo.REASON_CRASH_NATIVE) continue;
+            try (InputStream in = e.getTraceInputStream()) {
+                if (in != null) { java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream(); copy(in, o, 32L << 20); sb.append(tombstone(o.toByteArray())); }
+            } catch (Exception ex) { sb.append("(crash record not readable: ").append(ex.getClass().getSimpleName()).append(")\n"); }
+            break;
+        }
+        File dir = GameSettings.dir(c);
+        for (String n : new String[] { "log.txt", "log.prev.txt" }) {
+            File f = new File(dir, n); if (!f.isFile()) continue;
+            List<String> got = new ArrayList<>(); String fatal = "";
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
+                String l; int after = 0;
+                while ((l = r.readLine()) != null) {
+                    if (l.contains("[dm] CRASH")) { got.clear(); after = 8; }
+                    if (after > 0 && l.contains("[dm]")) { got.add(cut(l.trim(), 400)); after--; }
+                    if (l.contains("FATAL")) fatal = cut(l.trim(), 300);
+                }
+            } catch (IOException ex) { continue; }
+            if (got.isEmpty() && fatal.isEmpty()) continue;
+            sb.append("engine log (").append(n).append("):\n"); for (String l : got) sb.append(l).append('\n');
+            if (!fatal.isEmpty() && !got.contains(fatal)) sb.append(fatal).append('\n');
+            break;
+        }
+        return sb.toString().trim();
+    }
+    private static String cut(String s, int n) { return s.length() > n ? s.substring(0, n) : s; }
+    // tombstone.proto by hand: Tombstone tid 6, signal_info 10 (number 1, name 2, code_name 4, has_fault_address 8, fault_address 9), abort_message 14,
+    //   causes 15 (human_readable 1), threads 16 (map entry: key 1, Thread 2: name 2, current_backtrace 4: rel_pc 1, function_name 4, function_offset 5, file_name 6)
+    static String tombstone(byte[] b) {
+        if (b.length > 3 && b[0] == '*' && b[1] == '*' && b[2] == '*') return new String(b, 0, Math.min(b.length, 3000), StandardCharsets.UTF_8) + "\n";   // (the text form, on some phones)
+        java.util.Map<Integer, List<Object>> t = pb(b); StringBuilder sb = new StringBuilder();
+        if (t.containsKey(10)) {
+            java.util.Map<Integer, List<Object>> g = pbm(t, 10);
+            sb.append("signal ").append(pv(g, 1)).append(' ').append(ps(g, 2)).append(' ').append(ps(g, 4));
+            if (pv(g, 8) != 0) sb.append(" fault addr 0x").append(Long.toHexString(pv(g, 9)));
+            sb.append('\n');
+        }
+        if (t.containsKey(14)) sb.append("abort: ").append(cut(ps(t, 14), 400)).append('\n');
+        if (t.containsKey(15)) for (Object o : t.get(15)) if (o instanceof byte[]) sb.append("cause: ").append(cut(ps(pb((byte[]) o), 1), 300)).append('\n');
+        long tid = pv(t, 6);
+        if (t.containsKey(16)) for (Object o : t.get(16)) {
+            if (!(o instanceof byte[])) continue;
+            java.util.Map<Integer, List<Object>> m = pb((byte[]) o); if (pv(m, 1) != tid) continue;
+            java.util.Map<Integer, List<Object>> th = pbm(m, 2);
+            sb.append("thread ").append(tid).append(" \"").append(ps(th, 2)).append("\"\n");
+            List<Object> fr = th.containsKey(4) ? th.get(4) : new ArrayList<>();
+            for (int i = 0; i < fr.size() && i < 16; i++) {
+                if (!(fr.get(i) instanceof byte[])) continue;
+                java.util.Map<Integer, List<Object>> f = pb((byte[]) fr.get(i));
+                String file = ps(f, 6), fn = ps(f, 4); int sl = file.lastIndexOf('/'); if (sl >= 0) file = file.substring(sl + 1);
+                sb.append(String.format(Locale.ROOT, "#%02d %s+0x%x", i, file.isEmpty() ? "?" : file, pv(f, 1)));
+                if (!fn.isEmpty()) sb.append(" (").append(cut(fn, 80)).append('+').append(pv(f, 5)).append(')');
+                sb.append('\n');
+            }
+            break;
+        }
+        return sb.toString();
+    }
+    // one protobuf message: field number -> its values (Long, or byte[] for length-delimited); stops at the first thing that does not parse
+    static java.util.Map<Integer, List<Object>> pb(byte[] b) {
+        java.util.Map<Integer, List<Object>> d = new java.util.HashMap<>(); int i = 0;
+        try {
+            while (i < b.length) {
+                long[] k = vi(b, i); i = (int) k[1]; int f = (int) (k[0] >>> 3), w = (int) (k[0] & 7); Object v;
+                if (w == 0) { long[] x = vi(b, i); v = x[0]; i = (int) x[1]; }
+                else if (w == 1 || w == 5) { int n = w == 1 ? 8 : 4; long x = 0; for (int j = n - 1; j >= 0; j--) x = x << 8 | (b[i + j] & 0xff); v = x; i += n; }
+                else if (w == 2) { long[] n = vi(b, i); i = (int) n[1]; if (n[0] < 0 || n[0] > b.length - i) break; v = java.util.Arrays.copyOfRange(b, i, i + (int) n[0]); i += (int) n[0]; }
+                else break;
+                List<Object> l = d.get(f); if (l == null) d.put(f, l = new ArrayList<>()); l.add(v);
+            }
+        } catch (RuntimeException e) { }
+        return d;
+    }
+    private static long[] vi(byte[] b, int i) { long v = 0; int s = 0; while (true) { int x = b[i++] & 0xff; v |= (long) (x & 0x7f) << s; if (x < 0x80) break; s += 7; if (s > 63) throw new IllegalArgumentException("varint"); } return new long[] { v, i }; }
+    private static long pv(java.util.Map<Integer, List<Object>> d, int f) { List<Object> l = d.get(f); return l != null && l.get(0) instanceof Long ? (Long) l.get(0) : 0; }
+    private static String ps(java.util.Map<Integer, List<Object>> d, int f) { List<Object> l = d.get(f); return l != null && l.get(0) instanceof byte[] ? new String((byte[]) l.get(0), StandardCharsets.UTF_8) : ""; }
+    private static java.util.Map<Integer, List<Object>> pbm(java.util.Map<Integer, List<Object>> d, int f) { List<Object> l = d.get(f); return pb(l != null && l.get(0) instanceof byte[] ? (byte[]) l.get(0) : new byte[0]); }
+
     private static void q(StringBuilder u, String k, String v) {
         try { u.append('&').append(k).append('=').append(java.net.URLEncoder.encode(v, "UTF-8").replace("+", "%20")); } catch (java.io.UnsupportedEncodingException e) { }
     }
@@ -355,7 +455,7 @@ final class DebugBundle {
                 if (zf == null) { android.widget.Toast.makeText(a, T.t(a, "The debug report could not be made: %s", er), android.widget.Toast.LENGTH_LONG).show(); return; }
                 String where = zf.getParent() != null && zf.getParent().equals(DL) ? "Download/" + zf.getName() : zf.getPath();
                 new android.app.AlertDialog.Builder(a).setTitle(T.t(a, "Debug report ready"))
-                    .setMessage(T.t(a, "Saved as %s. Open a GitHub issue (phone, GPU, version and driver are filled in), say what happened, and attach this file.", where))
+                    .setMessage(T.t(a, "Saved as %s. Open a GitHub issue (phone, GPU, version, driver and a crash summary are filled in), say what happened, and attach this file in the Logs box: GitHub cannot add it by itself.", where))
                     .setPositiveButton(T.t(a, "Open a GitHub issue"), (dl, w) -> { try { a.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(issueUrl(a, zf)))); } catch (Exception e) { } })
                     .setNegativeButton(T.t(a, "Close"), null).show();
             });

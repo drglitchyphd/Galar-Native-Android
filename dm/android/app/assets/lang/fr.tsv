@@ -12,7 +12,6 @@ Adaptive	Adaptatif
 Adaptive: High, a lighter picture while the phone is hot or slow	Adaptatif : Élevé, une image plus légère quand le téléphone chauffe ou ralentit
 Add %s to the home screen	Ajouter %s à l'écran d'accueil
 Adding %d shader(s) the game made last time...	Ajout de %d shader(s) créé(s) par le jeu la dernière fois...
-Allow access to all files so the app can read your dump where it is (it is several GB; nothing is copied).	Autorisez l'accès à tous les fichiers pour que l'app lise votre dump là où il est (plusieurs Go ; rien n'est copié).
 Applies next start	Au prochain lancement
 Auto	Auto
 Auto (the phone's language)	Auto (la langue du téléphone)
@@ -34,12 +33,9 @@ Controller buttons	Boutons de la manette
 Controller buttons reset.	Boutons de la manette réinitialisés.
 Controllers only	Manettes uniquement
 Controls	Commandes
-Copying %d selected file(s) into app storage...	Copie de %d fichier(s) sélectionné(s) dans le stockage de l'app...
-Copying %d selected game file(s) into app storage; large files need extra free space...	Copie de %d fichier(s) du jeu dans le stockage de l'app ; les gros fichiers demandent de l'espace libre en plus...
 Could not add the new shaders (%s); the game still plays without them.	Impossible d'ajouter les nouveaux shaders (%s) ; le jeu fonctionne sans eux.
 Could not add your mods' shaders (%s); the game still plays, some mod effects may not show.	Impossible d'ajouter les shaders de vos mods (%s) ; le jeu fonctionne, certains effets peuvent manquer.
 Could not export the save: %s	Impossible d'exporter la sauvegarde : %s
-Could not import game file: %s	Impossible d'importer le fichier du jeu : %s
 Could not import the save: %s	Impossible d'importer la sauvegarde : %s
 Could not install the mod: %s	Impossible d'installer le mod : %s
 Delete	Supprimer
@@ -67,7 +63,6 @@ Full decode: more memory, no conversion (Snapdragon is not affected either way)	
 Full: the game's textures as they are	Complètes : les textures du jeu telles quelles
 GPU	GPU
 GPU memory reported to the game	Mémoire GPU annoncée au jeu
-Game file(s) copied into app storage and selected.	Fichier(s) du jeu copié(s) et sélectionné(s).
 Game files	Fichiers du jeu
 Graphics	Graphismes
 Graphics driver	Pilote graphique
@@ -125,7 +120,6 @@ Please wait for the current setup or file copy to finish.	Attendez la fin de l'i
 Preparing...	Préparation...
 Press a key…	Appuyez sur un bouton…
 Press the controller button for %s.	Appuyez sur le bouton de la manette pour %s.
-Previously copied selections are ready.	Les sélections copiées auparavant sont prêtes.
 Put each mod in its own folder in Android/data/%s/files/mods/ — <mod>/romfs for files, <mod>/exefs for .pchtxt code patches (they must be made for %s %s).	Mettez chaque mod dans son propre dossier dans Android/data/%s/files/mods/ — <mod>/romfs pour les fichiers, <mod>/exefs pour les correctifs .pchtxt (ils doivent être faits pour %s %s).
 Reading the shaders of your mods...	Lecture des shaders de vos mods...
 Ready. The setup log is in Android/data/%s/files/setup_work.	Prêt. Le journal est dans Android/data/%s/files/setup_work.
@@ -143,7 +137,6 @@ Saved: applies the next time you start the game.	Enregistré : s'applique au pro
 Saved: close the game and start it again, then use the game's local link options.	Enregistré : fermez le jeu, relancez-le, puis utilisez les options de communication locale du jeu.
 Saves	Sauvegardes
 Screen	Écran
-Set the game up from your own dump. No game files or keys come with this app; yours never leave the phone.	Installez le jeu à partir de votre propre dump. Aucun fichier de jeu ni clé n'est fourni ; les vôtres ne quittent jamais le téléphone.
 Set up the game	Installer le jeu
 Settings (picture, graphics, textures, controller buttons, touch controls, mods) are in the game: tap the menu button at the top left, or hold − on a controller for 3 seconds for the controller buttons.	Les paramètres (image, graphismes, textures, boutons de la manette, commandes tactiles, mods) sont dans le jeu : touchez le bouton de menu en haut, ou maintenez − sur une manette 3 secondes pour les boutons.
 Setup failed: %s	L'installation a échoué : %s
@@ -159,8 +152,6 @@ Tap a button, then press the controller key you want for it.	Touchez un bouton, 
 Texture format	Format des textures
 Textures	Textures
 The %s shortcut is on the home screen.	Le raccourci de %s est sur l'écran d'accueil.
-The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.	Le sélecteur n'a pas renvoyé de fichier. Essayez l'app Fichiers du téléphone et choisissez un fichier dans Téléchargements ou Documents.
-The file picker returned no selected file. Try the phone's Files app and select a file from Downloads or Documents.	Le sélecteur n'a renvoyé aucun fichier. Essayez l'app Fichiers du téléphone et choisissez un fichier dans Téléchargements ou Documents.
 The game closed while starting its graphics	Le jeu s'est fermé au démarrage de ses graphismes
 The new driver is used from the next start.	Le nouveau pilote est utilisé au prochain lancement.
 The phone's own driver	Le pilote du téléphone
@@ -198,25 +189,16 @@ server (address:port)	serveur (adresse:port)
 shares files with %d other mod(s)	partage des fichiers avec %d autre(s) mod(s)
 translate %s shaders	traduire %s shaders
 translate the shaders	traduire les shaders
-unpack the game	décompresser le jeu
 warm	tiède
-%s is compressed (NSZ): decompress it to .nsp / .xci first, then choose that.	%s est compressé (NSZ) : décompressez-le d'abord en .nsp / .xci, puis choisissez celui-ci.
-%s is not a Switch game file (.nsp or .xci).	%s n'est pas un fichier de jeu Switch (.nsp ou .xci).
-%s is not a game file: choose it under Your keys.	%s n'est pas un fichier de jeu : choisissez-le dans Vos clés.
-%s is not a key file: choose prod.keys (and title.keys).	%s n'est pas un fichier de clés : choisissez prod.keys (et title.keys).
-(kept in the app's private storage)	(conservé dans le stockage privé de l'app)
 Background	Arrière-plan
 Change the driver (only if the game does not start)	Changer de pilote (seulement si le jeu ne démarre pas)
 Choose	Choisir
-Choose game files	Choisir les fichiers du jeu
-Choose keys	Choisir les clés
 Clear	Effacer
 Could not read %s.	Impossible de lire %s.
 Game	Jeu
 Keep playing	Continuer à jouer
 Keep playing: the game and its sound go on in the background	Continuer à jouer : le jeu et son son continuent en arrière-plan
 Leaving the game	En quittant le jeu
-No game files or keys come with this app; yours never leave the phone.	Aucun fichier de jeu ni clé n'est fourni ; les vôtres ne quittent jamais le téléphone.
 Pause	Pause
 Pause: the game stops while it is not on screen	Pause : le jeu s'arrête tant qu'il n'est pas à l'écran
 Ready: tap Play.	Prêt : touchez Jouer.
@@ -225,21 +207,11 @@ Set up	Installer
 Set up again	Réinstaller
 Set up or manage a game	Installer ou gérer un jeu
 Tap Clear and choose your files again.	Touchez Effacer et choisissez à nouveau vos fichiers.
-The base game (.nsp or .xci), the %s update and any DLC. You can choose them all at once.	Le jeu de base (.nsp ou .xci), la mise à jour %s et les DLC. Vous pouvez tous les choisir en même temps.
 The setup log is in Android/data/%s/files/setup_work.	Le journal d'installation se trouve dans Android/data/%s/files/setup_work.
-These files are from different games (%s): set up one game at a time. Tap Clear and choose the files of one game.	Ces fichiers viennent de jeux différents (%s) : installez un jeu à la fois. Touchez Effacer et choisissez les fichiers d'un seul jeu.
-Welcome! To play, set up %s from your own Switch dump. It takes three steps.	Bienvenue ! Pour jouer, installez %s à partir de votre propre dump Switch. Il y a trois étapes.
 Your game files	Vos fichiers de jeu
-Your keys	Vos clés
 none chosen	rien de choisi
 or	ou
-prod.keys from your own Switch (and title.keys if your dump needs it).	prod.keys de votre propre Switch (et title.keys si votre dump en a besoin).
 the phone's own Vulkan driver	le pilote Vulkan du téléphone
-Set up anyway	Installer quand même
-Set up anyway?	Installer quand même ?
-The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	Les parties endommagées de vos fichiers sont gardées telles quelles. Le jeu peut planter ou afficher des défauts là où il les utilise. Recopier vos fichiers en entier est la vraie solution.
-the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	la copie de %s s'est arrêtée trop tôt (%s sur %s Mo) : choisissez-le à nouveau, de préférence depuis le stockage du téléphone
-%s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s est incomplet : il contient %s de ses %s Mo. Il a été coupé pendant la copie ou le téléchargement : recopiez le fichier en entier.
 Up to 60 fps: smoother where the phone can, the game keeps its real speed	Jusqu'à 60 fps : plus fluide là où le téléphone le peut, le jeu garde sa vraie vitesse
 Shadows	Ombres
 Standard	Standard
@@ -252,7 +224,6 @@ Running for %s	En cours depuis %s
 Almost done with this step: its last part shows no progress and can take several minutes.	Cette étape est presque finie : sa dernière partie n'affiche pas de progression et peut prendre plusieurs minutes.
 Imported %d save file(s) into %s (%s). Tap Play to load it; your current save is kept as a backup.	%d fichier(s) de sauvegarde importé(s) dans %s (%s). Touchez Jouer pour la charger ; votre sauvegarde actuelle est gardée en copie.
 Could not import save data: %s	Impossible d'importer la sauvegarde : %s
-Your files are the base game only: this app needs the %s update too. Choose the update (.nsp, its title ID ends in 800) as well.	Vos fichiers ne contiennent que le jeu de base : cette app a aussi besoin de la mise à jour %s. Choisissez aussi la mise à jour (.nsp, son ID de titre finit par 800).
 Bug reports	Rapports de bug
 Capture a frame	Capturer une image
 Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue.	Fermez ce menu dans les 3 secondes et restez là où le problème se voit : l'image suivante est enregistrée, étape par étape, en images et en notes dans Download (un ZIP qui finit par frame-capture.zip). Joignez-le à votre signalement.
@@ -285,7 +256,6 @@ No replacement driver supports this GPU yet. Please report it with the log in Do
 Faster rendering (experimental)	Rendu plus rapide (expérimental)
 On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub	Activé : le travail graphique tourne sur son propre fil, à côté de celui du jeu. Pas encore testé sur tous les téléphones : si le jeu se comporte mal, désactivez-le et dites-le-nous sur GitHub
 Freed %s GB left over from an earlier setup.	%s Go restants d’une configuration précédente ont été libérés.
-Or use the game from the %s app already on this phone (no dump or keys needed):	Ou utilisez le jeu de l'appli %s déjà sur ce téléphone (sans dump ni clés) :
 Set up from the installed app	Installer depuis l'appli installée
 Min / max as on the Switch	Min / max comme sur la Switch
 Auto: on with ARM's driver (v0.57)	Auto : activé avec le pilote d'ARM (v0.57)
@@ -348,7 +318,7 @@ Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied ther
 The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	La dernière installation n'a traduit qu'une partie des shaders du jeu, d'où des parties du jeu non affichées. Touchez Installer encore une fois : elle les termine (celles déjà faites sont gardées).
 FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0 : l'upscaler d'AMD, agrandissement attentif aux contours puis netteté
 Faster rendering	Rendu plus rapide
-Auto: on for Adreno GPUs, off for others	Auto : activé sur les GPU Adreno, désactivé sur les autres
+Auto: on for Adreno and Mali GPUs, off for others	Auto : activé sur les GPU Adreno et Mali, désactivé sur les autres
 Off: the graphics work runs on the game's own thread	Désactivé : le travail graphique se fait sur le fil du jeu lui-même
 Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself.	Scènes éclairées : deux corrections de l'écran blanc avec le pilote Mali d'ARM. Auto laisse le jeu en choisir une et vérifier l'image lui-même.
 Bright scenes in a wider format	Scènes éclairées dans un format plus large
@@ -424,11 +394,6 @@ Record the frame's passes	Enregistrer les passes de l’image
 For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Pour les scènes lentes : fermez ce menu dans les 3 secondes et restez là où le jeu ralentit. Les passes de rendu de trois images, avec leur temps GPU si le téléphone le donne, sont enregistrées dans Téléchargements (un fichier finissant par framegraph.txt). Joignez-le à votre issue.
 Recording in 3 seconds: close the menu.	Enregistrement dans 3 secondes : fermez le menu.
 Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	À gauche : Auto, ce que donne le réglage Graphismes, abaissé tout seul quand le téléphone chauffe. Plus bas : plus frais et plus rapide, la 3D plus douce ; le texte et les menus restent nets.
-Lossless Scaling pictures	Images de Lossless Scaling
-2x: one picture between each two of the game's frames (30 fps moves like 60)	2x : une image entre deux images du jeu (30 ips bougent comme 60)
-3x: two pictures between each two frames (like 90 fps; even on a 90 Hz screen only)	3x : deux images entre deux images (comme 90 ips ; régulier seulement sur un écran 90 Hz)
-4x: three pictures between each two frames (like 120 fps; needs a 120 Hz screen and a fast GPU)	4x : trois images entre deux images (comme 120 ips ; nécessite un écran 120 Hz et un GPU rapide)
-Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto : autant que la fréquence de l'écran le permet (un jeu à 30 ips : 4x à 120 Hz, 3x à 90 Hz, 2x à 60 Hz)
 Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	En pause : ici le jeu tourne à %s i/s, sous sa fréquence d’images réglée. Elle se réactive seule dès que le jeu la tient à nouveau.
 Mode	Mode
 Auto: as the Graphics setting decides	Auto : ce que décide le réglage Graphismes
@@ -477,7 +442,6 @@ Copy shared data on the GPU	Copier les données partagées sur le GPU
 On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	Activé : les données que le jeu place hors de l'alignement du pilote sont copiées sur le GPU, après ce que le GPU a écrit avant, au lieu du CPU (un test pour les polygones qui explosent sur les anciens Adreno)
 Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	À gauche : Auto, la résolution du jeu lui-même. Plus bas : plus frais et plus rapide, la 3D plus douce ; le texte et les menus restent nets.
 Auto: 2x, light (the game's frame rate shown doubled)	Auto : 2x, léger (la fréquence d’images du jeu, affichée doublée)
-Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	En pause : ici le jeu tourne à %s i/s, sous sa fréquence d’images réglée. Elle se réactive seule dès que le jeu la tient à nouveau.
 Draw distance	Distance d'affichage
 Near	Proche
 Default	Par défaut
@@ -501,8 +465,6 @@ Normal: as the game is made	Normal : comme le jeu est conçu
 Low: softer shadows, lighter on the GPU (from the next start)	Basses : ombres plus douces, moins de charge GPU (au prochain démarrage)
 Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	Minimales : ombres douces seulement près de vous, pas d'ombres lointaines : le plus léger (au prochain démarrage)
 How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	Jusqu'où l'herbe et les détails du terrain sont affichés (au prochain démarrage). Moins : plus léger et plus frais. Plus : plus de détails au loin, plus de charge GPU.
-Dynamic	Dynamique
-Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dynamique : 60 là où le téléphone le peut, 30 ailleurs, à pleine qualité d'image ; la vitesse du jeu reste juste
 Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	La génération d'images de Lossless Scaling ne peut pas tourner sur ce téléphone : celle de l'appli est utilisée à la place (le journal dit pourquoi).
 # the in-app updater (AppUpdater.java, About -> Updates)
 Updates	Mises à jour
@@ -521,3 +483,61 @@ Could not check for updates. Check the internet connection.	Impossible de recher
 The update could not be downloaded: %s	Impossible de télécharger la mise à jour : %s
 The downloaded file is not an official %s release, so it was not installed.	Le fichier téléchargé n'est pas une version officielle de %s : il n'a pas été installé.
 The update could not be installed: %s	Impossible d'installer la mise à jour : %s
+Local play	Jeu local
+Off: the game says local play is unavailable.	Désactivé : le jeu indique que le jeu local est indisponible.
+On: link battles, trades and raids with phones on the same Wi-Fi.	Activé : combats, échanges et raids avec des téléphones sur le même Wi-Fi.
+%s has no file named main: it is not an ExeFS folder.	%s n'a pas de fichier nommé main : ce n'est pas un dossier ExeFS.
+%s is empty.	%s est vide.
+%s: update %s	%s : mise à jour %s
+Add DLC	Ajouter un DLC
+Allow access to all files so the app can read your game folders where they are.	Autorisez l'accès à tous les fichiers pour que l'application puisse lire les dossiers du jeu là où ils sont.
+Choose a folder	Choisir un dossier
+DLC: %s	DLC : %s
+ExeFS chosen. Now choose the RomFS folder.	ExeFS choisi. Choisissez maintenant le dossier RomFS.
+ExeFS: %s	ExeFS : %s
+Move the files instead	Déplacer les fichiers
+Move them	Les déplacer
+Move your files instead?	Déplacer vos fichiers ?
+Moving your files into the app...	Déplacement de vos fichiers dans l'application...
+No game files come with this app; yours never leave the phone.	Aucun fichier de jeu n'est fourni avec cette application ; les vôtres ne quittent jamais le téléphone.
+Nothing was chosen. Try again, through the phone's own storage.	Rien n'a été choisi. Réessayez depuis le stockage du téléphone.
+Or use the game from the %s app already on this phone (nothing to choose):	Ou utilisez le jeu de l'application %s déjà présente sur ce téléphone (rien à choisir) :
+RomFS chosen. Now choose the ExeFS folder.	RomFS choisi. Choisissez maintenant le dossier ExeFS.
+RomFS: %s	RomFS : %s
+Set the game up from your own game files. No game files come with this app; yours never leave the phone.	Installez le jeu à partir de vos propres fichiers de jeu. Aucun fichier de jeu n'est fourni avec cette application ; les vôtres ne quittent jamais le téléphone.
+The ExeFS and RomFS folders extracted from your own game, with the update included. Choose the folder that holds both, or each one in turn.	Les dossiers ExeFS et RomFS extraits de votre propre jeu, mise à jour incluse. Choisissez le dossier qui contient les deux, ou chacun à son tour.
+The app can't read %s. Allow it access to all files in Android's settings, then choose the folder again.	L'application ne peut pas lire %s. Autorisez-lui l'accès à tous les fichiers dans les paramètres d'Android, puis choisissez à nouveau le dossier.
+There isn't room for a copy of your game files. The setup can move your RomFS and DLC folders into the app instead: nothing is copied, but they leave the folder you chose, and uninstalling the app deletes them. If the setup fails, they are moved back.	Il n'y a pas la place de copier vos fichiers de jeu. L'installation peut plutôt déplacer vos dossiers RomFS et DLC dans l'application : rien n'est copié, mais ils quittent le dossier choisi et la désinstallation de l'application les supprime. Si l'installation échoue, ils sont remis à leur place.
+This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	Ce dossier ne peut pas être lu. Choisissez-le depuis le stockage du téléphone (pas Récents ni Téléchargements).
+Welcome! To play, set up %s from your own game files. It takes two steps.	Bienvenue ! Pour jouer, installez %s à partir de vos propres fichiers de jeu. Cela se fait en deux étapes.
+copy the game files	copier les fichiers du jeu
+Player: %s. Players are changed on the setup screen, with the game closed.	Joueur : %s. Le joueur se change sur l'écran de configuration, jeu fermé.
+Playing as %s. Tap Play, or change the player below.	Joueur actuel : %s. Touchez Jouer, ou changez de joueur plus bas.
+Player: %s	Joueur : %s
+Change player	Changer de joueur
+Add a player	Ajouter un joueur
+Rename	Renommer
+Delete player	Supprimer le joueur
+Start over	Recommencer
+Restore the previous save	Restaurer la sauvegarde précédente
+Who is playing?	Qui joue ?
+Now playing as %s.	Joueur actuel : %s.
+That did not work: %s	Échec : %s
+Player %d	Joueur %d
+New player	Nouveau joueur
+Rename player	Renommer le joueur
+Add	Ajouter
+Type a name.	Saisissez un nom.
+That name is taken.	Ce nom est déjà pris.
+Added %s. Their game starts from the beginning.	%s ajouté. Sa partie commence depuis le début.
+Delete %s?	Supprimer %s ?
+The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.	Les sauvegardes de %s dans tous les jeux de cette appli sont supprimées définitivement. Exportez-les d'abord pour les garder.
+%s deleted. Now playing as %s.	%s supprimé. Joueur actuel : %s.
+Start over?	Recommencer ?
+%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.	%s recommence %s depuis le début. La sauvegarde actuelle est conservée en secours, et Restaurer la sauvegarde précédente la ramène. Une seule copie est gardée : une plus ancienne est supprimée.
+Done: the game starts from the beginning. The old save is kept as a backup.	C'est fait : le jeu commence depuis le début. L'ancienne sauvegarde est conservée en secours.
+There is no save yet: the game already starts from the beginning.	Pas encore de sauvegarde : le jeu commence déjà depuis le début.
+Restore the previous save?	Restaurer la sauvegarde précédente ?
+The backup becomes the save again, and the save you have now becomes the backup, so you can switch back.	La copie de secours redevient la sauvegarde, et la sauvegarde actuelle devient la copie : vous pouvez revenir en arrière.
+Restore	Restaurer
+The previous save is back.	La sauvegarde précédente est revenue.

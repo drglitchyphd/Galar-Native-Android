@@ -414,7 +414,7 @@ static void quirk_checks(void) {
     CHECK(!!(g->eng & ENG_QC11_NO_EDS) == !!DM_GAME_ENG_QC11_NO_EDS && !!(g->eng & ENG_ASYNC_PSO_OFF) == !!DM_GAME_ENG_ASYNC_PSO_OFF
           && !!(g->eng & ENG_DRIVER_SELFTESTS) == !!DM_GAME_ENG_DRIVER_SELFTESTS && !!(g->eng & ENG_NVN_ASYNC_NEVER) == !!DM_GAME_ENG_NVN_ASYNC_NEVER
           && !!(g->eng & ENG_MALI_LIT_STANDIN) == !!DM_GAME_ENG_MALI_LIT_STANDIN, "gpu_id: engine_quirks bits %#x, not the profile's", g->eng);
-    CHECK(quirk_default(Q_NO_DYNREN, g) == qc && quirk_default(Q_ASYNC_PSO, g) == !DM_GAME_ENG_ASYNC_PSO_OFF && quirk_default(Q_NO_EDS, g) == (qc11 && DM_GAME_ENG_QC11_NO_EDS),
+    CHECK(quirk_default(Q_NO_DYNREN, g) == qc && quirk_default(Q_ASYNC_PSO, g) == !DM_GAME_ENG_ASYNC_PSO_OFF && quirk_default(Q_NO_EDS, g) == ((qc11 && DM_GAME_ENG_QC11_NO_EDS) || (g->vendor == 0x13B5 && !g->custom && (g->driver_version >> 22) > 0 && (g->driver_version >> 22) < 44)),
           "rules for this game: render passes and draw state on Adreno, background pipelines on every GPU (beta-exit f09e58f)");
     CHECK(quirk_default(Q_NVN_ASYNC, g) == (strstr(g->name, "Adreno") && !DM_GAME_ENG_NVN_ASYNC_NEVER) && quirk_default(Q_DRIVER_SELFTESTS, g) == !!DM_GAME_ENG_DRIVER_SELFTESTS,
           "the replay thread's Auto and the start-up self-tests for this game");
