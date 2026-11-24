@@ -454,6 +454,24 @@ static void notice(const char *kind, const char *text) {
     char p[1200]; snprintf(p, sizeof p, "%s/notice.txt", g_files); FILE *f = fopen(p, "a"); if (f) { fprintf(f, "%s\t%s\n", kind, text); fclose(f); }
     fprintf(stderr, "boot: notice %s: %s\n", kind, text);
 }
+// gpu.txt: the GPU's name (first line: what the app's driver choices and the debug report read), and a second line when the chosen driver package did not load
+//   (nvn_vk.c pkg_check → dm_driver_note): the debug report keeps it (DebugBundle: logs/gpu.txt and gpu.packageNotLoaded)
+static char g_drv_note[1400];
+static void gpu_txt_write(const char *gpu) {
+    char gp[1200]; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "w");
+    if (g) { fprintf(g, "%s\n", gpu); if (g_drv_note[0]) fprintf(g, "%s\n", g_drv_note); fclose(g); }
+}
+// the driver package chosen in the settings did not load and the phone's own driver runs the game: for the debug report, and told on the setup screen
+//   (notice.txt kind "driver_pkg": SetupActivity shows the text)
+void dm_driver_note(const char *text) {
+    snprintf(g_drv_note, sizeof g_drv_note, "%s", text);
+    const char *gpu = nvn_vk_gpu_name ? nvn_vk_gpu_name() : NULL; if (gpu) gpu_txt_write(gpu);
+    const char *drv = getenv("DM_VK_DRIVER_NOT_LOADED"); const char *nm = drv ? strrchr(drv, '/') : NULL; char t[1400], pk[300] = "";
+    if (drv) { snprintf(pk, sizeof pk, "%s", drv); char *e = strrchr(pk, '/'); if (e) { *e = 0; char *d = strrchr(pk, '/'); if (d) memmove(pk, d + 1, strlen(d + 1) + 1); } }   // (the package's folder name)
+    snprintf(t, sizeof t, "The graphics driver package %s did not load on this phone, so the game ran on the phone's own driver. Choose another driver package, or the phone's own driver, in the settings.",
+             pk[0] ? pk : nm ? nm + 1 : "you chose");
+    notice("driver_pkg", t);
+}
 static int mods_off(const char *mods) {   // every mod switched off; returns how many
     struct dirent **ents = NULL; int n = scandir(mods, &ents, NULL, alphasort), off = 0; if (n < 0) return 0;
     for (int i = 0; i < n; i++) { const char *nm = ents[i]->d_name; char a[1200], b[1200]; struct stat st; size_t l = strlen(nm);
@@ -494,7 +512,7 @@ static void *boot_guard_main(void *p) {
     for (;;) { sleep(1);
         const char *gpu = nvn_vk_gpu_name ? nvn_vk_gpu_name() : NULL;
         if (gpu && !dev) { dev = 1; dm_boot_device_up();
-            char gp[1200]; snprintf(gp, sizeof gp, "%s/gpu.txt", g_files); FILE *g = fopen(gp, "w"); if (g) { fprintf(g, "%s\n", gpu); fclose(g); } }
+            gpu_txt_write(gpu); }
         uint64_t fr = dm_nvn_frame_count ? dm_nvn_frame_count() : 0;
         if (dev && fr >= 300 && time(NULL) - t0 >= 30) {   // played: the run is known good
             if (g_boot_fd >= 0) { static const char m[] = "playing\n"; (void)!write(g_boot_fd, m, sizeof m - 1); }

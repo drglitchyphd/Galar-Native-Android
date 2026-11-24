@@ -56,6 +56,9 @@ t_prewarm: t_prewarm.c ../nvn/prewarm_policy.h ../nvn/nvn_hmap.h
 # A pool backed late while other threads write it (nvn_dirty.c freeze / thaw, nvn_vk.c pool_back): Linux, any compiler; its own fault handler instead of crash.c
 t_pool_late: t_pool_late.c ../nvn/nvn_dirty.c ../nvn/nvn_dirty.h $(GAME_H)
 	$(CC) -O1 -g -Wall -Wno-unused-function -I../../android/compat -I../nvn/include -I$(dir $(GAME_H)) -o $@ t_pool_late.c -lpthread
+# Pipelines that crashed the driver (pso_guard.h): the in-progress marker and the skip list, plain C, any OS
+t_pso_guard: t_pso_guard.c ../nvn/pso_guard.h
+	$(CC) -O2 -Wall -I../nvn -o $@ t_pso_guard.c
 t_crumbs: t_crumbs.c ../nvn/vk_crumbs.h
 	$(CC) -O2 -Wall -I../nvn -I../../third_party/vulkan-headers/include -o $@ t_crumbs.c -lpthread
 t_fgen: t_fgen.c ../nvn/nvn_fgen.h

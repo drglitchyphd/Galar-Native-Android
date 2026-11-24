@@ -131,6 +131,7 @@ final class DebugBundle {
 
         JSONObject gpu = new JSONObject();
         gpu.put("name", first(new File(dir, "gpu.txt")));
+        { String nl = second(new File(dir, "gpu.txt")); if (!nl.isEmpty()) gpu.put("packageNotLoaded", nl); }   // (android_main.c dm_driver_note: the chosen driver package did not load)
         String drv = DriverPackages.current(c);
         gpu.put("driver", drv.isEmpty() ? "system" : DriverPackages.label(drv));
         if (!drv.isEmpty()) { gpu.put("driverPath", drv); gpu.put("driverSha256", sha256(new File(drv))); gpu.put("driverSha256Setting", GameSettings.get(c, "DM_VK_DRIVER_SHA256"));
@@ -507,6 +508,7 @@ final class DebugBundle {
     }
     private static void copy(InputStream in, OutputStream out, long max) throws IOException { byte[] b = new byte[1 << 16]; int k; long n = 0; while (n < max && (k = in.read(b)) > 0) { out.write(b, 0, k); n += k; } }
     private static String first(File f) { try (BufferedReader r = new BufferedReader(new FileReader(f))) { String l = r.readLine(); return l == null ? "" : l.trim(); } catch (IOException e) { return ""; } }
+    private static String second(File f) { try (BufferedReader r = new BufferedReader(new FileReader(f))) { r.readLine(); String l = r.readLine(); return l == null ? "" : l.trim(); } catch (IOException e) { return ""; } }
     private static String read(File f, int max) { try (InputStream in = new FileInputStream(f)) { byte[] b = new byte[max]; int n = in.read(b); return n > 0 ? new String(b, 0, n, StandardCharsets.UTF_8) : ""; } catch (IOException e) { return ""; } }
     private static String asset(Context c, String n) { try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getAssets().open(n)))) { String l = r.readLine(); return l == null ? "" : l.trim(); } catch (IOException e) { return ""; } }
     // the pack holds at least 9/10 of the setup's shaders (the rule of Galar's SetupActivity.packComplete, kept here so this file is the same in every port)

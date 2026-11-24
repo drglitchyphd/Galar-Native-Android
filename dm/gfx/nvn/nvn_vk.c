@@ -98,7 +98,11 @@ static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperti
 #include "pso_lru.h"     // which pipelines the cap destroys (pso_evict), least recently used first
 #include "prewarm_policy.h"   // the prewarm's stamp, hold, list compaction and cap share (perf-1124 S3 / S4)
 #include "vk_quirks.h"   // the unified driver layer's table: every per-GPU workaround's default, from one description of the GPU
+#include "pso_guard.h"   // pipelines that crashed the driver at an earlier start: not built again (pg_* below mark_file)
 static gpu_id g_gpuid = { .driver_id = -1 };
+static uint64_t g_pg_ident;   // this driver as one number (pso_guard.h pg_ident: mtl_init, where the driver properties are read)
+static char g_drv_info[256];  // VkPhysicalDeviceDriverProperties.driverInfo where the driver gives it (mtl_init)
+static void pg_init(void); static void pkg_check(void);   // (below mark_file)
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
 static int g_mclamp;   // MIRROR_CLAMP_TO_EDGE samplers allowed (VK_KHR_sampler_mirror_clamp_to_edge, or Vulkan 1.2's samplerMirrorClampToEdge); else wrapm falls back
 static int g_inst_xmemcaps;   // VK_KHR_external_memory_capabilities enabled on the instance
@@ -683,7 +687,7 @@ static void mtl_init_(void) {
         const char *e = getenv("DM_VK_FLOAT_CONTROLS"); g_gpuid.driver_id = drvp ? (int)dp.driverID : -1;
         int arm = gpu_is_arm_driver(&g_gpuid), sec = gpu_is_samsung_driver(&g_gpuid);
         arm_known = 1; if (arm) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); g_arm_beta = drvp && strstr(dp.driverInfo, "bet") != NULL; }
-        if (drvp) g_drv_id = (int)dp.driverID;
+        if (drvp) { g_drv_id = (int)dp.driverID; snprintf(g_drv_info, sizeof g_drv_info, "%s", dp.driverInfo); }
         g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi(e) != 0 : quirk_default(Q_FLOAT_CONTROLS, &g_gpuid));
         // The test shader below crashed a driver (#89: Mali-G57, the start ended right after this line): a start that dies there leaves the marker, and later starts on
         //   this driver go without float controls (DM_VK_FLOAT_CONTROLS=1 in env.txt tries again). A DM_VK_FLOAT_CONTROLS=1 from the driver check (driver-check.env:
@@ -714,8 +718,11 @@ static void mtl_init_(void) {
     // A driver without Vulkan 1.2 or the float-controls extension: Arm's own when it is ARM's vendor ID and not a driver package (PanVK reports ARM's ID too)
     if (!arm_known && g_props.vendorID == 0x13B5 && !(getenv("DM_VK_DRIVER") && *getenv("DM_VK_DRIVER"))) { g_arm_rel = (int)(g_props.driverVersion >> 22); g_arm_p = (int)(g_props.driverVersion >> 12 & 0x3ff); }
     g_gpuid.arm_rel = g_arm_rel; g_gpuid.arm_p = g_arm_p; g_gpuid.arm_beta = g_arm_beta;   // (the quirk table's description complete from here)
+    pkg_check();   // a driver package that did not load (the phone's own driver answered instead): said, and gpu_id says the phone's own driver
     atomic_store(&g_gpuid_done, 1);
     gpu_id_log(&g_gpuid); quirk_note(Q_FLOAT_CONTROLS, g_fctl, vkq_env_src("DM_VK_FLOAT_CONTROLS"));
+    g_pg_ident = pg_ident(g_props.vendorID, g_gpuid.driver_id, g_props.driverVersion, g_props.deviceName, g_drv_info);
+    pg_init();   // the pipelines that crashed this driver at an earlier start (before the prewarm and the first draw)
     // Arm erratum 3779215 (r38p1 to r49p0 and r50p0 to r51p0, fixed in r49p1 and r52p0; a beta r49p1, the G925's, is not known to have the fix): a clamp to zero of a value
     //   selected between constants compiled as a plain min or max. Shaders on those drivers get spv_clamp_zero; DM_VK_CLAMP_ZERO=0 / 1 decides on any driver
     { const char *e = getenv("DM_VK_CLAMP_ZERO");
@@ -1528,7 +1535,9 @@ static void shadow_sync(void) {
     pthread_mutex_unlock(&g_mu);
 }
 // What the GPU writes into a mirrored pool (copies, fills, readbacks, writable storage buffers) is copied back to the game's pages when the submission is done
-typedef struct { uint64_t addr, n; } wb_t;
+//   src set: rows the GPU copied into the submission's arena (a staging buffer), copied by the CPU into the game's memory at completion, whatever backs the pool
+//   (wb_note_staged: the linear write-back on Turnip, vk_quirks.h Q_LINEAR_WB_STAGED)
+typedef struct { uint64_t addr, n; const uint8_t *src; uint32_t row, stride, rows; } wb_t;
 static void wb_note(uint64_t addr, uint64_t n);
 // (hle_nvn.c asks only whether shader code sits in a pool: a lookup that never backs one; buf is VK_NULL_HANDLE for a pool not backed yet)
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
@@ -1609,7 +1618,13 @@ static void wb_note(uint64_t addr, uint64_t n) {
     pthread_mutex_lock(&g_mu); int k = pool_find(addr, n); int sh = k >= 0 && g_pools[k].shadow; pthread_mutex_unlock(&g_mu);
     if (!sh) return;
     sub_t *s = g_sub; if (s->nwb == s->cwb) { s->cwb = s->cwb ? s->cwb * 2 : 64; s->wb = realloc(s->wb, sizeof *s->wb * (size_t)s->cwb); }
-    s->wb[s->nwb++] = (wb_t){ addr, n };
+    s->wb[s->nwb++] = (wb_t){ addr, n, NULL, 0, 0, 0 };
+}
+// rows rows of row bytes in the arena at src (tightly packed), for the game's memory at addr, stride bytes apart: copied there at completion (wb_apply)
+static void wb_note_staged(uint64_t addr, const uint8_t *src, uint32_t row, uint32_t stride, uint32_t rows) {
+    if (!g_sub || !rows || !row) return;
+    sub_t *s = g_sub; if (s->nwb == s->cwb) { s->cwb = s->cwb ? s->cwb * 2 : 64; s->wb = realloc(s->wb, sizeof *s->wb * (size_t)s->cwb); }
+    s->wb[s->nwb++] = (wb_t){ addr, (uint64_t)(rows - 1) * stride + row, src, row, stride, rows };
 }
 static VkSemaphore g_tl;
 static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ccv = PTHREAD_COND_INITIALIZER;
@@ -1653,6 +1668,10 @@ static uint64_t report_time(sub_t *s, uint32_t q, uint64_t now_ticks) {   // a r
 static void wb_apply(sub_t *s) {
     int wrote = 0;
     for (int i = 0; i < s->nwb; i++) {
+        if (s->wb[i].src) { const wb_t *w = &s->wb[i];   // staged rows (wb_note_staged): the arena is host-visible and coherent, the GPU is done with it
+            dm_guest_write_prepare((void *)(uintptr_t)w->addr, w->n);
+            for (uint32_t r = 0; r < w->rows; r++) memcpy((uint8_t *)(uintptr_t)w->addr + (size_t)r * w->stride, w->src + (size_t)r * w->row, w->row);
+            continue; }
         pthread_mutex_lock(&g_mu); int k = pool_find(s->wb[i].addr, s->wb[i].n); pool_ent e = k >= 0 ? g_pools[k] : (pool_ent){0}; pthread_mutex_unlock(&g_mu);
         if (k < 0 || !e.shadow) continue;
         dm_guest_write_prepare((void *)(uintptr_t)s->wb[i].addr, s->wb[i].n);
@@ -2168,6 +2187,94 @@ static int fd_export_mark(int op) {
     if (!op) return access(m, F_OK) == 0;
     FILE *f = fopen(m, "w"); if (f) { fputs("allocating exportable GPU memory for the first pool; if this file is still here the driver crashed doing so, and the next start moves its mappings instead\n", f); fclose(f); }
     return f != NULL;
+}
+// ---- Pipelines that crashed the driver (pso_guard.h): the marker pso_inflight and the list pso_skip.txt, next to the pipeline cache ----
+//   Each build (pso_make, prewarm_compute, dispatch) writes its shader keys into its thread's slot first (pg_begin: one pwrite) and clears it after (pg_end); the
+//   crash handler marks the slot of the thread that crashed (nvn_vk_pso_crash_note). pg_init, at start once the driver is known, takes what the last run left
+//   into the list. Cheap: two small pwrites a pipeline, and a lookup only while the list has something. DM_VK_PSO_SKIP=0: none of it
+static int g_pg_on, g_pg_fd = -1; static pg_list g_pg; static pthread_mutex_t g_pg_mu = PTHREAD_MUTEX_INITIALIZER;
+static pg_slot g_pg_mem[PG_SLOTS];   // what each slot holds now (the crash handler finds its thread's slot here, without reading the file)
+static _Atomic int g_pg_next; static __thread int t_pg_slot = -1;
+static int pg_path(const char *name, char *m, size_t n) {
+    const char *pc = getenv("DM_VK_PCACHE"); if (!pc) return 0;
+    snprintf(m, n, "%s", pc); char *sl = strrchr(m, '/'); if (!sl) return 0; snprintf(sl + 1, n - (size_t)(sl + 1 - m), "%s", name); return 1;
+}
+static void pg_init(void) {
+    const char *e = getenv("DM_VK_PSO_SKIP"); if (e && !strcmp(e, "0")) { VLOG("pipelines that crashed the driver: not tracked (DM_VK_PSO_SKIP=0)"); return; }
+    char mp[1100], lp[1100]; if (!pg_path("pso_inflight", mp, sizeof mp) || !pg_path("pso_skip.txt", lp, sizeof lp)) return;
+    pg_slot old[PG_SLOTS]; memset(old, 0, sizeof old);
+    int fd = open(mp, O_RDONLY | O_CLOEXEC); if (fd >= 0) { ssize_t got = pread(fd, old, sizeof old, 0); if (got < 0) memset(old, 0, sizeof old); close(fd); }
+    int had = pg_load(lp, g_pg_ident, &g_pg), n0 = g_pg.n, ns0 = g_pg.ns, sus = 0;
+    if (had < 0) { VLOG("pipelines that crashed the driver: the list was another driver's (pso_skip.txt): it starts over"); unlink(lp); }
+    int added = pg_take(&g_pg, old, PG_SLOTS, &sus);
+    for (int i = 0; i < PG_SLOTS; i++) { const pg_slot *s = &old[i]; if (s->magic != PG_MAGIC) continue;
+        char a[17], b[17]; pg_hex(s->k0, 8, a); pg_hex(s->k1, 8, b); uint8_t k[16]; pg_keys(s->k0, s->k1, k);
+        int skip = pg_find(g_pg.e, g_pg.n, (int)s->kind, k) >= 0;
+        int gr = s->kind != PG_COMPUTE;
+        VLOG("%sthe last run ended while %s the %s pipeline (%s %s%s%s): %s", skip ? "[RED] " : "", s->crashed ? "the driver crashed building" : "this phone built",
+             gr ? "graphics" : "compute", gr ? "vertex" : "compute", a, gr ? " fragment " : "", gr ? b : "",
+             s->ident != g_pg_ident ? "another driver's, not counted" : skip ? "skipped on this driver from now on" : "noted, skipped if a run ends in it again"); }
+    if (added || had < 0 || g_pg.n != n0 || g_pg.ns != ns0 || sus) { if (g_pg.n || g_pg.ns) pg_save(lp, &g_pg); else unlink(lp); }
+    if (g_pg.n) VLOG("[RED] %d pipeline%s skipped on this driver: %s crashed it at an earlier start (%s; delete it or DM_VK_PSO_SKIP=0 to build them again)", g_pg.n, g_pg.n == 1 ? "" : "s",
+                     g_pg.n == 1 ? "it" : "they", lp);
+    g_pg_fd = open(mp, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (g_pg_fd < 0) { VLOG("pipelines that crashed the driver: %s could not be made (errno %d): not tracked", mp, errno); return; }
+    if (ftruncate(g_pg_fd, (off_t)sizeof(pg_slot) * PG_SLOTS)) {}
+    g_pg_on = 1;
+}
+// the slot of this thread (one per building thread: prewarm, workers, the replay; threads past PG_SLOTS share)
+static int pg_begin(int kind, const uint8_t k0[8], const uint8_t k1[8]) {
+    if (!g_pg_on) return -1;
+    if (t_pg_slot < 0) t_pg_slot = atomic_fetch_add(&g_pg_next, 1) % PG_SLOTS;
+    pg_slot s; memset(&s, 0, sizeof s); s.magic = PG_MAGIC; s.kind = (uint32_t)kind; s.ident = g_pg_ident; s.tid = (int32_t)gettid();
+    memcpy(s.k0, k0, 8); if (k1) memcpy(s.k1, k1, 8);
+    g_pg_mem[t_pg_slot] = s;
+    if (pwrite(g_pg_fd, &s, sizeof s, (off_t)t_pg_slot * (off_t)sizeof s) != (ssize_t)sizeof s) return -1;
+    return t_pg_slot;
+}
+static void pg_end(int slot) {
+    if (slot < 0 || g_pg_fd < 0) return;
+    static const uint32_t z = 0; g_pg_mem[slot].magic = 0; if (pwrite(g_pg_fd, &z, sizeof z, (off_t)slot * (off_t)sizeof(pg_slot))) {}
+}
+// the crash handler (host/crash.c on_crash, before its record): the slot of the crashing thread marked "crashed". pwrite and gettid only
+void nvn_vk_pso_crash_note(void) {
+    if (g_pg_fd < 0) return;
+    int32_t tid = (int32_t)gettid(); static const uint32_t one = 1;
+    for (int i = 0; i < PG_SLOTS; i++) if (g_pg_mem[i].magic == PG_MAGIC && g_pg_mem[i].tid == tid)
+        if (pwrite(g_pg_fd, &one, sizeof one, (off_t)i * (off_t)sizeof(pg_slot) + (off_t)offsetof(pg_slot, crashed))) {}
+}
+// 1: this pipeline is on the list (not built); what: logged once per shader pair, in red
+static int pg_skipped(int kind, const uint8_t k0[8], const uint8_t k1[8], const char *a, const char *b) {
+    if (!g_pg.n) return 0;
+    uint8_t k[16]; pg_keys(k0, k1, k);
+    pthread_mutex_lock(&g_pg_mu); int i = pg_find(g_pg.e, g_pg.n, kind, k), say = i >= 0 && !g_pg.e[i].said; if (say) g_pg.e[i].said = 1; pthread_mutex_unlock(&g_pg_mu);
+    if (say) VLOG("[RED] pipeline skipped: it crashed the driver last time (%s %s%s%s; its draws are left out, as a missing shader's)", kind == PG_COMPUTE ? "compute" : "vertex", a,
+                  b ? " fragment " : "", b ? b : "");
+    return i >= 0;
+}
+// A driver package (DM_VK_DRIVER) that libadrenotools did not load: it falls back to the phone's own driver without telling (logcat "hook failed: ... falling
+//   back!": a Qualcomm package needing android.hardware.graphics.allocator-V2-ndk.so, which the Galaxy Z Fold4 does not have), and the game ran on the system
+//   driver that crashed it while the log said "a driver package". After the device is made: where its functions come from (dladdr of vkCreateGraphicsPipelines: the
+//   phone's /vendor or /system library, not the package's file) and whether the driver is the kind the package is (Mesa Turnip: driver ID 18, PanVK 20). On a
+//   mismatch: a red line, gpu_id says the phone's own driver, the start goes on as one on it (DM_VK_DRIVER unset; DM_VK_DRIVER_NOT_LOADED names the package), the
+//   debug report's gpu.txt gets the line and the setup screen tells the player (android_main.c dm_driver_note)
+static void pkg_check(void) {
+#ifdef __ANDROID__
+    const char *drv = getenv("DM_VK_DRIVER"); if (!drv || !*drv) return;
+    Dl_info di; const char *lib = vkCreateGraphicsPipelines && dladdr((void *)vkCreateGraphicsPipelines, &di) && di.dli_fname ? di.dli_fname : NULL;
+    struct stat a, b; int same = lib && !stat(lib, &a) && !stat(drv, &b) && a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+    int sys = lib && !same && (!strncmp(lib, "/vendor/", 8) || !strncmp(lib, "/system/", 8) || !strncmp(lib, "/odm/", 5) || !strncmp(lib, "/apex/", 6));
+    int want = strcasestr(drv, "turnip") || strcasestr(drv, "freedreno") ? 18 : strcasestr(drv, "panvk") || strcasestr(drv, "panfrost") ? 20 : -1;
+    int id_wrong = want >= 0 && g_gpuid.driver_id >= 0 && g_gpuid.driver_id != want;
+    VLOG("driver package %s: its functions come from %s (%s); driver ID %d, version %#x, \"%s\"", drv, lib ? lib : "(unknown)", same ? "the package's library" : sys ? "the phone's own driver" : "another library",
+         g_gpuid.driver_id, g_props.driverVersion, g_drv_info);
+    if (!sys && !id_wrong) return;
+    char t[1400]; snprintf(t, sizeof t, "the driver package did not load (%s): the system driver is used (%s %s, driver ID %d, version %#x%s%s)", drv, g_props.deviceName,
+                           sys ? lib : "not the package's kind of driver", g_gpuid.driver_id, g_props.driverVersion, g_drv_info[0] ? ", " : "", g_drv_info);
+    VLOG("[RED] %s", t);
+    setenv("DM_VK_DRIVER_NOT_LOADED", drv, 1); unsetenv("DM_VK_DRIVER"); g_gpuid.custom = 0;
+    { extern void dm_driver_note(const char *text) __attribute__((weak)); if (dm_driver_note) dm_driver_note(t); }
+#endif
 }
 static int mirror_ordered(void);
 static void queue_submit(VkCommandBuffer *cbs, uint32_t n, uint64_t signal, VkFence vf) {
@@ -5231,7 +5338,9 @@ static void prewarm_compute(void) {
             if (!cs || !pl) { missing++; continue; }
             VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
             VkPipeline pp = VK_NULL_HANDLE;
-            if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &pp)) failed++; else { vkDestroyPipeline(g_dev, pp, NULL); built++; } }
+            if (pg_skipped(PG_COMPUTE, k, NULL, cs->key, NULL)) { failed++; continue; }   // (it crashed this driver at an earlier start: pso_guard.h)
+            int pgs = pg_begin(PG_COMPUTE, k, NULL); VkResult cr = vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &pp); pg_end(pgs);
+            if (cr) failed++; else { vkDestroyPipeline(g_dev, pp, NULL); built++; } }
         fclose(f); }
     if (n) VLOG("prewarm: %d compute pipelines listed: %d built into the pipeline cache, %d failed, %d with a shader missing, %.1f s", n, built, failed, missing, (mono_ns() - t0) / 1e9);
 }
@@ -5427,6 +5536,9 @@ static VkPipeline pso_make_(vprog *pr, pkey k, const sst *ss) {
     VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rci, .stageCount = nst, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
         .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &bs, .pDynamicState = &dy, .layout = prog_layout(pr, 0) };
     if (!g_dynren) { gi.pNext = NULL; gi.renderPass = rp_for_pipeline(ncb, cf, k.dfmt ? k.dfmt : k.sfmt, k.samples, 0); gi.subpass = 0; }
+    // a pipeline whose build crashed this driver at an earlier start is not built again (pso_guard.h): its draws are left out
+    uint8_t pk0[8] = {0}, pk1[8] = {0}; if (vs) hexkey(vs->key, pk0); if (fs) hexkey(fs->key, pk1);
+    if (pg_skipped(PG_GRAPHICS, pk0, pk1, vs ? vs->key : "-", fs ? fs->key : NULL)) return VK_NULL_HANDLE;
 #ifdef __ANDROID__
     // the last line before a driver crash names the shaders it was compiling. One line per pipeline was ~4000 line-buffered writes in every start's wait (perf-1124
     //   S6): only with DM_VK_PIPE_LOG=1, or at the start after one that crashed with the device up (boot_state: DM_LAST_CRASH_DEVICE), so a crash that comes
@@ -5440,7 +5552,9 @@ static VkPipeline pso_make_(vprog *pr, pkey k, const sst *ss) {
     //   is made without the cache on PowerVR; every other pipeline, and every other GPU, keeps it
     VkPipelineCache pc_ = g_pcache;
     if (quirk_default(Q_PCACHE_GAPS_OFF, &g_gpuid) && !g_dynren) for (uint32_t i = 0; i < ncb; i++) if (!cf[i]) { pc_ = VK_NULL_HANDLE; break; }
+    int pgs = pg_begin(PG_GRAPHICS, pk0, pk1);   // (the build marked while it runs: pso_guard.h)
     VkResult r = vkCreateGraphicsPipelines(g_dev, pc_, 1, &gi, NULL, &p);
+    pg_end(pgs);
     if (r == VK_INCOMPLETE && p) { RED_ONCE(107, "graphics pipeline creation answered VK_INCOMPLETE (out of spec; Mali, Adreno 5xx): the pipeline it made is used"); r = VK_SUCCESS; }
     if (r) { VLOG("[RED] graphics pipeline (vertex %s fragment %s) failed: %d", vs->key, fs ? fs->key : "-", r); return VK_NULL_HANDLE; }
     return p;
@@ -6135,7 +6249,10 @@ static void dispatch(const p_dispatch *dp) {
     VkPipelineLayout pl = prog_layout(pr, 1); g_np = pr->np[1];
     void *key = pr; VkPipeline p = nvn_hm_get(&g_cps, &key);
     if (!p) { VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mod, .pName = "main" }, .layout = pl };
-        if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &p)) { VLOG("[RED] compute pipeline %s failed", cs->key); return; }
+        uint8_t ck[8] = {0}; hexkey(cs->key, ck);
+        if (pg_skipped(PG_COMPUTE, ck, NULL, cs->key, NULL)) return;   // (it crashed this driver at an earlier start: the dispatch left out, pso_guard.h)
+        int pgs = pg_begin(PG_COMPUTE, ck, NULL); VkResult cr = vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &p); pg_end(pgs);
+        if (cr) { VLOG("[RED] compute pipeline %s failed", cs->key); return; }
         nvn_hm_put(&g_cps, &key, p); cs_record(cs); }   // (listed for the next start's prewarm: prewarm_compute)
     outside_pass();
     VkCommandBuffer cb = CB();
@@ -6512,6 +6629,25 @@ static void copy_t2t(const p_copy_t2t *c) {
           int bw, bh, bpb = nvn_fmt_bpb(c->dst->d.format, &bw, &bh);
           if (bpb && bw == 1 && bh == 1) {
               size_t stride = c->dst->d.stride ? c->dst->d.stride : (size_t)c->dst->d.width * bpb;
+              // Mesa Turnip (vk_quirks.h Q_LINEAR_WB_STAGED; DM_VK_LINEAR_WB_STAGED=0 / 1 decides on any driver): not straight into the pool's memory (a dma-buf there,
+              //   device lost right after Violet's ID photo on a Galaxy Z Fold4) but into a staging buffer of the submission's arena, which the CPU copies into the
+              //   game's memory when the submission is done (wb_apply, through the write tracking's dm_guest_write_prepare), before the game sees its fence
+              static int staged = -1; if (staged < 0) { const char *e = getenv("DM_VK_LINEAR_WB_STAGED");
+                  staged = quirk_note(Q_LINEAR_WB_STAGED, e ? atoi(e) != 0 : quirk_default(Q_LINEAR_WB_STAGED, &g_gpuid), e != NULL); }
+              if (staged && c->dr.width > 0 && c->dr.height > 0 && g_sub) {
+                  uint32_t rowb = (uint32_t)c->dr.width * (uint32_t)bpb, hh = (uint32_t)c->dr.height;
+                  VkBuffer sb; VkDeviceSize so; uint8_t *sp = arena_alloc(g_sub, (VkDeviceSize)rowb * hh, &sb, &so);
+                  VkBufferImageCopy r = { .bufferOffset = so, .imageSubresource = { d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : d->aspect, 0, dz0 + (uint32_t)c->dr.zoffset, 1 },
+                                          .imageOffset = { c->dr.xoffset, c->dr.yoffset, 0 }, .imageExtent = { (uint32_t)c->dr.width, hh, 1 } };
+                  vkCmdCopyImageToBuffer(CB(), d->img, VK_IMAGE_LAYOUT_GENERAL, sb, 1, &r);
+                  VkMemoryBarrier hb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+                  vkCmdPipelineBarrier(CB(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL);
+                  barrier_all(CB());
+                  wb_note_staged((uint64_t)(uintptr_t)(c->dst->mem + (size_t)c->dr.yoffset * stride + (size_t)c->dr.xoffset * bpb), sp, rowb, (uint32_t)stride, hh);
+                  static int said; if (!said++) VLOG("linear texture %ux%u (format %#x, stride %zu) written by a texture copy: also written to its memory through a staging buffer and the CPU (Q_LINEAR_WB_STAGED)",
+                                                     c->dst->d.width, c->dst->d.height, c->dst->d.format, stride);
+                  return;
+              }
               p_copy_b2t wb; memset(&wb, 0, sizeof wb);
               wb.src = (uint64_t)(uintptr_t)(c->dst->mem + (size_t)c->dr.yoffset * stride + (size_t)c->dr.xoffset * bpb); wb.tex = c->dst; wb.view = c->dv; wb.has_view = c->has_dv; wb.r = c->dr;
               wb.r.depth = 1;
