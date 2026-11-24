@@ -96,6 +96,7 @@ void dm_boot_mark(const char *what) { VLOG("[start] %s: %.0f ms since the proces
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperties g_memp;
 #include "pso_lru.h"     // which pipelines the cap destroys (pso_evict), least recently used first
+#include "prewarm_policy.h"   // the prewarm's stamp, hold, list compaction and cap share (perf-1124 S3 / S4)
 #include "vk_quirks.h"   // the unified driver layer's table: every per-GPU workaround's default, from one description of the GPU
 static gpu_id g_gpuid = { .driver_id = -1 };
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
@@ -310,7 +311,18 @@ const char *nvn_vk_gpu_name(void) { return g_dev ? g_props.deviceName : NULL; } 
 static _Atomic int g_gpuid_done;
 int nvn_vk_quirk_default(int q) { return !g_dev || (quirk_late(q) && !atomic_load(&g_gpuid_done)) ? -1 : quirk_default(q, &g_gpuid); }
 int nvn_vk_quirk_note(int q, int value, int from_env) { return quirk_note(q, value, from_env); }
+// mtl_init once for every caller (perf-1124 S5): it used to test g_dev, which is set about 200 lines before the set-up ends, so a second thread arriving meanwhile
+//   went on with half a device. With the early start (nvn_vk_early_init, below) a helper thread and the game's first memory pool can both ask: the second waits
+//   for the first's set-up to end. The hot callers (every submission, every pool) pay one acquire load as before
+static void mtl_init_(void);
+static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER; static atomic_int g_init_done;
 void mtl_init(void) {
+    if (atomic_load_explicit(&g_init_done, memory_order_acquire)) return;
+    pthread_mutex_lock(&g_init_mu);
+    if (!atomic_load_explicit(&g_init_done, memory_order_relaxed)) { mtl_init_(); atomic_store_explicit(&g_init_done, 1, memory_order_release); }
+    pthread_mutex_unlock(&g_init_mu);
+}
+static void mtl_init_(void) {
     if (g_dev) return;
     dm_boot_mark("graphics set-up begins (mtl_init)");
     if (!vkGetInstanceProcAddr) {
@@ -358,7 +370,7 @@ void mtl_init(void) {
         if (drv && *drv) {
             VLOG("[RED] the chosen Vulkan driver %s found no GPU on this phone (instance %d): the phone's own driver is used (Settings: graphics driver)", drv, (int)ir);
             if (ir == VK_SUCCESS) { PFN_vkDestroyInstance di = (PFN_vkDestroyInstance)vkGetInstanceProcAddr(g_inst, "vkDestroyInstance"); if (di) di(g_inst, NULL); }
-            g_inst = VK_NULL_HANDLE; unsetenv("DM_VK_DRIVER"); vkGetInstanceProcAddr = NULL; mtl_init(); return;
+            g_inst = VK_NULL_HANDLE; unsetenv("DM_VK_DRIVER"); vkGetInstanceProcAddr = NULL; mtl_init_(); return;
         }
         if (ir != VK_SUCCESS) VDIE("vkCreateInstance failed: %d", (int)ir);
         VDIE("no Vulkan device");
@@ -1053,6 +1065,24 @@ static int g_plast = -1;
 #else
 #define DM_THREAD_NAME(n) ((void)0)
 #endif
+// S5 (perf-1124): the device, its self-tests, the pipeline cache's read and the prewarm started on a helper thread as soon as the crash handler is in (host/main.c
+//   host_preload, before the game's modules are mapped), so they overlap the loader and the game's boot instead of starting at the game's first NVN memory pool.
+//   Nothing in mtl_init needs the window (the surface and swapchain are made at the first present, as before), and every setting it reads (env.txt, the safe-start
+//   level, the driver check's settings, boot_state's crash notes) is in the environment before the host thread starts (android_main.c host_start). Off by default
+//   until it has run on phones: DM_VK_EARLY_INIT=1 turns it on
+static void *early_main(void *a) {
+    (void)a; DM_THREAD_NAME("dm-vkinit");
+    { extern void crash_thread_init(void) __attribute__((weak)); if (crash_thread_init) crash_thread_init(); }   // (the crash handler's own stack on this thread too)
+    dm_boot_mark("early graphics set-up starts (DM_VK_EARLY_INIT=1)");
+    mtl_init();
+    return NULL;
+}
+void nvn_vk_early_init(void) {
+    const char *e = getenv("DM_VK_EARLY_INIT"); if (!(e && atoi(e) > 0)) return;
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 8u << 20);   // (mtl_init ran on the host thread's 64 MB stack: room for the self-tests)
+    pthread_t t; if (!pthread_create(&t, &at, early_main, NULL)) pthread_detach(t); else VLOG("[RED] early graphics set-up: no thread, at the first memory pool as before");
+    pthread_attr_destroy(&at);
+}
 // pages a freed pool could no longer read (pool_pages.h pages_copy, #281): said the first few times, with the running total
 static void pages_lost_note(uintptr_t base) {
     static uint64_t said; static int n; uint64_t l = atomic_load(&pages_lost);
@@ -3645,7 +3675,7 @@ static void live_check(void) {   // under g_shmu
     VLOG("live shaders: %d translated while the game runs (%s)", n, g_live_dir);
 }
 // Gather nudge (Adreno), decided once for every thread that loads shaders (shader_load runs on several prewarm threads at once: shader_get)
-static int g_gbias;
+static int g_gbias; static pthread_once_t g_gb_once = PTHREAD_ONCE_INIT;
 static void gbias_decide(void) {
     const char *e = getenv("DM_VK_GATHER_BIAS"); g_gbias = quirk_note(Q_GATHER_BIAS, e ? atoi(e) != 0 : quirk_default(Q_GATHER_BIAS, &g_gpuid), e != NULL);
     if (g_gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)");
@@ -3722,7 +3752,7 @@ static vshader *shader_load(const uint8_t key[8], int st, const char *live) {
         if (left) RED_ONCE(160, "b10 swap: shader %s stores fewer than 3 components into an image declared R11G11B10F: left as they are", hex);
         if (spv_image_format_swap(code, ns / 4, SPV_IMGFMT_R11G11B10F, SPV_IMGFMT_RGBA16F)) b10_note("a shader's storage image declared R11G11B10F: declared RGBA16F (the image it is given)", NULL, 0); }
     // Adreno picks another 2x2 block than Maxwell for a gather on a texel centre: its gathers are nudged by 1/512 of a texel (spv_gather_bias). DM_VK_GATHER_BIAS=0 / 1 decides
-    static pthread_once_t gb_once = PTHREAD_ONCE_INIT; pthread_once(&gb_once, gbias_decide); int gbias = g_gbias;
+    pthread_once(&g_gb_once, gbias_decide); int gbias = g_gbias;
     if (gbias) { size_t nw; uint32_t *c2 = spv_gather_bias(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_fctl) { size_t nw; uint32_t *c2 = spv_float_controls(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; } }
     if (g_nanmm) { size_t nw; uint32_t *c2 = spv_nan_minmax(code, ns / 4, &nw); if (c2) { free(code); code = c2; ns = nw * 4; atomic_fetch_add(&g_nanmm_n, 1); } }   // (before spv_clamp_zero, which knows both)
@@ -4795,13 +4825,15 @@ static VkPipeline pso_lookup(vprog *pr, const pkey *k, int record) {
 }
 static size_t g_pcache_disk;   // the bytes of pipeline cache the file holds as far as this run knows: what the driver took at pcache_open, then each save's
 static _Atomic uint64_t g_pcache_saved_at, g_pw_released_at;   // (mono_ns) the last save's start, and when prewarm_finished let the game go (simdev t_vkdev: S1's order)
+static atomic_int g_pw_complete; static void pw_stamp_after_save(int before, size_t n);   // (S3, below)
 static void pcache_save(void) {
     const char *path = getenv("DM_VK_PCACHE"); if (!path || !g_pcache) return;
     uint64_t t0 = mono_ns(); atomic_store(&g_pcache_saved_at, t0);
+    pw_stamp_after_save(1, 0);   // (the lists' sizes before the cache is read: a pipeline recorded after that is not claimed to be in it)
     size_t n = 0; if (vkGetPipelineCacheData(g_dev, g_pcache, &n, NULL) || !n) return;
     void *d = malloc(n); if (vkGetPipelineCacheData(g_dev, g_pcache, &n, d)) { free(d); return; }
     char tmp[1100]; snprintf(tmp, sizeof tmp, "%s.tmp", path); FILE *f = fopen(tmp, "wb");
-    if (f) { int ok = fwrite(d, 1, n, f) == n; ok &= !fclose(f); if (ok && !rename(tmp, path)) g_pcache_disk = n; }
+    if (f) { int ok = fwrite(d, 1, n, f) == n; ok &= !fclose(f); if (ok && !rename(tmp, path)) { g_pcache_disk = n; pw_stamp_after_save(0, n); } }
     free(d); atomic_store(&g_pso_new, 0);
     VLOG("pipeline cache saved: %.1f MB in %.0f ms", n / 1048576.0, (mono_ns() - t0) / 1e6);
 }
@@ -4811,8 +4843,10 @@ static void pcache_save(void) {
 static void pcache_save_new(void) {
     const char *path = getenv("DM_VK_PCACHE"), *e = getenv("DM_VK_PCACHE_SAVE"); if (!path || !g_pcache) return;
     size_t n = 0;
+    pw_stamp_after_save(1, 0);
     if (!(e && !strcmp(e, "always")) && !vkGetPipelineCacheData(g_dev, g_pcache, &n, NULL) && n == g_pcache_disk) {
-        VLOG("pipeline cache: nothing new since it was read (%.1f MB): not written again (DM_VK_PCACHE_SAVE=always writes it)", n / 1048576.0); return; }
+        VLOG("pipeline cache: nothing new since it was read (%.1f MB): not written again (DM_VK_PCACHE_SAVE=always writes it)", n / 1048576.0);
+        pw_stamp_after_save(0, g_pcache_disk); return; }
     pcache_save();
 }
 void nvn_vk_cache_save(void) { if (g_dev) pcache_save(); }
@@ -4856,17 +4890,17 @@ int nvn_vk_prewarm_progress(int *done, int *total) { *done = atomic_load(&g_pw_d
 static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_released_at, mono_ns()); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
 // the game's first submission: waits until the prewarm is done (at most DM_VK_PREWARM_WAIT seconds, 300 by default; then the rest is built while it plays)
 // the game is playing (its first submission past prewarm_wait): from then on the prewarm builds on one thread, one pipeline after each present (prewarm_pace)
-static atomic_int g_pw_playing;
+static atomic_int g_pw_playing; static atomic_int g_pw_warm; static void pw_release(const char *why);
 static void prewarm_wait(void) {
     { static int first; if (!first++) dm_boot_mark("the game's first submission"); }
-    if (!atomic_load(&g_pw_hold)) { atomic_store(&g_pw_playing, 1); return; }
+    if (!atomic_load(&g_pw_hold)) { if (!atomic_load(&g_pw_warm)) atomic_store(&g_pw_playing, 1); return; }   // (a matched stamp: from the first present, mtl_present)
     const char *e = getenv("DM_VK_PREWARM_WAIT"); double lim = e ? atof(e) : 300; uint64_t t0 = mono_ns();
     pthread_mutex_lock(&g_pw_mu);
     while (atomic_load(&g_pw_hold) && (mono_ns() - t0) / 1e9 < lim) {
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
         pthread_cond_timedwait(&g_pw_cv, &g_pw_mu, &ts);
     }
-    int late = atomic_load(&g_pw_hold); atomic_store(&g_pw_hold, 0); atomic_store(&g_pw_playing, 1); pthread_mutex_unlock(&g_pw_mu);
+    int late = atomic_load(&g_pw_hold); atomic_store(&g_pw_hold, 0); if (!atomic_load(&g_pw_warm)) atomic_store(&g_pw_playing, 1); pthread_mutex_unlock(&g_pw_mu);
     VLOG("prewarm: the game waited %.1f s for its pipelines (%d of %d)%s", (mono_ns() - t0) / 1e9, atomic_load(&g_pw_done), atomic_load(&g_pw_total),
          late ? ": the wait ran out, the rest are built while it plays" : "");
     dm_boot_mark("the game goes on past its first submission");
@@ -4887,48 +4921,173 @@ static void prewarm_pace(int i, int *waits) {
     if (!prewarm_all() && prewarm_play_free()) usleep(3000);
     if (i % 8) return;
     static long floor_mb = -1; if (floor_mb < 0) { const char *e = getenv("DM_VK_PREWARM_MIN_MB"); floor_mb = e ? atol(e) : 1536; }
-    for (int k = 0; k < 600; k++) { long m = mem_avail_mb(); if (m < 0 || m >= floor_mb) break; if (!k) (*waits)++; usleep(100000); }   // at most a minute per wait
+    // S4 (d): under the floor while the game waits, the game is let go instead (the pauses counted against the wait: most of a Mali-G610's 21-26 s, #112);
+    //   the rest is built while it plays, with the same pauses. DM_VK_PREWARM_LOWMEM=wait: the game waits through them, as before
+    static int lm = -1; if (lm < 0) { const char *e = getenv("DM_VK_PREWARM_LOWMEM"); lm = !(e && !strcmp(e, "wait")); }
+    for (int k = 0; k < 600; k++) { long m = mem_avail_mb(); if (m < 0 || m >= floor_mb) break; if (!k) { (*waits)++; if (lm) pw_release("low memory"); } usleep(100000); }   // at most a minute per wait
 }
+// ---- A later start without the hold, the list kept from growing, the cap (perf-1124 fable-loads.md S3 / S4; the rules without a GPU: prewarm_policy.h)
+// S3: a complete prewarm leaves a stamp beside the pipeline cache (<DM_VK_PCACHE>.stamp: the lists' sizes, the cache's, the driver's pipelineCacheUUID and
+//   version, the app's version code, the shader pack and the shader rewrites in force). A later start that finds the same stamp knows every listed pipeline is
+//   in the driver's cache: DM_VK_PREWARM_HOLD decides how much of the list the game waits for then. "none" where a pipeline missing in play is built in the
+//   background with its draws skipped (DM_VK_ASYNC_PSO, every GPU's default), so the game goes on at once and the prewarm's threads keep building from the
+//   cache until the first present; the first 600 list entries (boot, title screen, the first area: the list is in first-use order) where a missing pipeline is
+//   built on the spot, a hitch (Legends: Arceus, profile async_pso_off). "all": every pipeline, as before. A start whose stamp differs (the first, a grown list,
+//   a new driver or app) holds for every pipeline as before. Measured waits: Arceus on an Adreno 830 + Turnip 5-11 s at every start with a 105.8 MB cache,
+//   Shield on the S25+ 1.6 s, a Mali-G610 21-26 s (fable-loads.md section 1)
+static atomic_int g_pw_warm;       // this start matched the stamp: the prewarm's threads go on until the first present (prewarm_wait, mtl_present)
+static int g_pw_hold_n;            // >0: the game is let go once the first g_pw_hold_n list entries are handled
+static atomic_int g_pw_hold_cnt;   // (of those, handled so far)
+static atomic_int g_pw_complete;   // every list entry was handled this run: the cache holds the lists (the stamp may be written)
+static uint32_t pw_flags(void) {   // the shader rewrites in force (another set: other SPIR-V, the driver's cache entries do not match)
+    pthread_once(&g_gb_once, gbias_decide);
+    uint32_t v[] = { (uint32_t)g_fctl, (uint32_t)g_nanmm, (uint32_t)g_clampzero, (uint32_t)g_fmz, g_exact, (uint32_t)g_initloc, (uint32_t)g_qlod, (uint32_t)g_yflip, (uint32_t)g_drawp,
+                     (uint32_t)b10_on(), (uint32_t)g_eds, (uint32_t)g_dynren, (uint32_t)g_probe, (uint32_t)intbits_on(), (uint32_t)g_gbias, (uint32_t)g_tf_pts, (uint32_t)g_clipctl, g_api };
+    uint32_t h = 2166136261u; for (size_t i = 0; i < sizeof v / sizeof *v; i++) { h ^= v[i]; h *= 16777619u; }
+    return h;
+}
+static uint64_t pw_fsize(const char *p, const char *suffix, uint64_t *mtime) {
+    char q[1200]; struct stat st; if (mtime) *mtime = 0;
+    if (!p || !*p || snprintf(q, sizeof q, "%s%s", p, suffix) >= (int)sizeof q || stat(q, &st)) return 0;
+    if (mtime) *mtime = (uint64_t)st.st_mtime;
+    return (uint64_t)st.st_size;
+}
+static void pw_stamp_now(pw_stamp *s) {
+    memset(s, 0, sizeof *s); const char *seed = getenv("DM_VK_PSO_SEED"), *rec = getenv("DM_VK_PSO_RECORD"), *app = getenv("DM_APP_VERSION");
+    s->seed = pw_fsize(seed, "", NULL); s->rec = pw_fsize(rec, "", NULL); s->rec_sst = pw_fsize(rec, ".sst", NULL); s->cs_seed = pw_fsize(seed, ".cs", NULL); s->cs_rec = pw_fsize(rec, ".cs", NULL);
+    s->pak = pw_fsize(getenv("DM_SPV_PAK"), "", &s->pak_mtime);
+    s->vendor = g_props.vendorID; s->device = g_props.deviceID; s->drv_ver = g_props.driverVersion; memcpy(s->uuid, g_props.pipelineCacheUUID, 16);
+    s->flags = pw_flags(); snprintf(s->app, sizeof s->app, "%s", app ? app : ""); snprintf(s->chain, sizeof s->chain, "%s", DMSH_CHAIN);
+}
+static int pw_stamp_path(char *p, size_t n) { const char *c = getenv("DM_VK_PCACHE"); return c && *c && snprintf(p, n, "%s.stamp", c) < (int)n; }
+// the stamp after a save (s: the lists as they were before the cache was read for it; s->cache: what the file holds now)
+static void pw_stamp_write(const pw_stamp *s) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; char p[1200], t[1300], line[512];
+    if (!atomic_load(&g_pw_complete) || !pw_stamp_path(p, sizeof p)) return;
+    pw_stamp_fmt(s, line, sizeof line); snprintf(t, sizeof t, "%s.tmp", p);
+    pthread_mutex_lock(&mu);
+    FILE *f = fopen(t, "w"); if (f) { int ok = fputs(line, f) >= 0; ok &= !fclose(f); if (ok) rename(t, p); }
+    pthread_mutex_unlock(&mu);
+}
+static void pw_stamp_clear(void) { char p[1200]; if (pw_stamp_path(p, sizeof p)) unlink(p); }
+// pcache_save's two halves: before (1) the lists as they are before the cache is read; after (0) the stamp with the bytes written (n). Only once this run's
+//   prewarm was complete: every listed pipeline went through the cache, and every one a draw built since was recorded and built through it too
+static pw_stamp g_pw_pre; static pthread_mutex_t g_pw_pre_mu = PTHREAD_MUTEX_INITIALIZER;
+static void pw_stamp_after_save(int before, size_t n) {
+    if (!atomic_load(&g_pw_complete)) return;
+    if (before) { pw_stamp s; pw_stamp_now(&s); pthread_mutex_lock(&g_pw_pre_mu); g_pw_pre = s; pthread_mutex_unlock(&g_pw_pre_mu); return; }
+    pthread_mutex_lock(&g_pw_pre_mu); pw_stamp s = g_pw_pre; pthread_mutex_unlock(&g_pw_pre_mu);
+    s.cache = n; pw_stamp_write(&s);
+}
+// 1: a pipeline missing in play is built in the background and its draws skipped (apso_on's rule, read here without starting its workers); 0: built on the spot
+static int pw_misses_skip(void) {
+    const char *e = getenv("DM_VK_ASYNC_PSO"); int a = e ? atoi(e) != 0 : quirk_default(Q_ASYNC_PSO, &g_gpuid);
+    if (!g_eds) { const char *s = getenv("DM_VK_ASYNC_PSO_S"); a = a && (!s || atoi(s) != 0); }
+    return a;
+}
+// the game let go before every pipeline is built (a matched stamp's count, low memory: S4 d); once
+static void pw_release(const char *why) {
+    if (!atomic_load(&g_pw_hold)) return;
+    prewarm_finished();
+    VLOG("prewarm: the game goes on after %d of %d pipelines (%s); the rest are built while it plays", atomic_load(&g_pw_done), atomic_load(&g_pw_total), why);
+}
+static void pw_count_handled(int i) {   // list entry i handled (built, already there, skipped): the count hold's release
+    if (i >= g_pw_hold_n) return;
+    int lim = g_pw_hold_n < atomic_load(&g_pw_total) ? g_pw_hold_n : atomic_load(&g_pw_total);
+    if (atomic_fetch_add(&g_pw_hold_cnt, 1) + 1 == lim) { char w[96]; snprintf(w, sizeof w, "the stamp matched: the first %d list entries (DM_VK_PREWARM_HOLD)", g_pw_hold_n); pw_release(w); }
+}
+// S4 (a): a pipeline from the lists counts as recorded, so one the cap destroys and a draw builds again is not appended again (the record list only grew on
+//   phones under the cap: 31336 listed for 4120 distinct on a Mali-G610, #112). (b) the record lists without their repeats when they are over a tenth of them.
+//   DM_VK_PSO_COMPACT=0: neither
+static int pw_compact_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PSO_COMPACT"); v = !(e && *e == '0'); } return v; }
+// (read, compacted and written beside it without the lock; under g_psomu, where pso_record / pso_record_s append, only the check that nothing was appended
+//   meanwhile, the rename and the reopening: the game's own pipeline lookups wait for that much, not for a 20 MB read and write)
+static void pso_list_compact(const char *path, const char *magic, size_t esz, const nvn_hmap *skip, FILE **open_f) {
+    if (!path) return;
+    FILE *f = fopen(path, "rb"); uint8_t *d = NULL; long l = 0;
+    if (f) { fseek(f, 0, SEEK_END); l = ftell(f); rewind(f); if (l > 12) { d = malloc((size_t)l); if (d && fread(d, 1, (size_t)l, f) != (size_t)l) { free(d); d = NULL; } } fclose(f); }
+    uint32_t v[2] = { 0, 0 }; if (d) memcpy(v, d + 4, 8);
+    if (!d || memcmp(d, magic, 4) || v[0] != 1 || v[1] != esz || ((size_t)l - 12) % esz) { free(d); return; }
+    int n = (int)(((size_t)l - 12) / esz), m = pw_dedupe(d + 12, n, esz, skip);
+    if (pw_compact_worth(n, m)) {
+        char t[1200]; snprintf(t, sizeof t, "%s.tmp", path); FILE *o = fopen(t, "wb"); int ok = 0;
+        if (o) { ok = fwrite(d, 1, 12 + (size_t)m * esz, o) == 12 + (size_t)m * esz; ok &= !fclose(o); }
+        pthread_mutex_lock(&g_psomu);
+        struct stat st; int same = !stat(path, &st) && st.st_size == l;   // (an entry appended meanwhile: left as it is, compacted at a later start)
+        if (ok && same && !rename(t, path)) {
+            if (*open_f) { fclose(*open_f); *open_f = fopen(path, "ab"); }   // (this run's appends go on into the new file)
+            pthread_mutex_unlock(&g_psomu);
+            VLOG("pipeline list %s: %d entries, %d of them repeats or in the shipped list: written again with %d", path, n, n - m, m);
+        } else { pthread_mutex_unlock(&g_psomu); unlink(t); }
+    }
+    free(d);
+}
+static void pw_compact_lists(void) {
+    if (!pw_compact_on()) return;
+    const char *rec = getenv("DM_VK_PSO_RECORD"), *seed = getenv("DM_VK_PSO_SEED"); if (!rec || !*rec) return;
+    nvn_hmap sk = {.klen = sizeof(pso_rec)}; pso_rec *rs = NULL; int n = 0;
+    if (pso_rec_load(seed, &rs, &n)) for (int i = 0; i < n; i++) nvn_hm_put(&sk, &rs[i], (void *)1);
+    free(rs);
+    pso_list_compact(rec, PSO_MAGIC, sizeof(pso_rec), sk.n ? &sk : NULL, &g_psorec);
+    free(sk.keys); free(sk.vals);
+    char p[1100]; snprintf(p, sizeof p, "%s.sst", rec); pso_list_compact(p, PSO_MAGIC_S, sizeof(pso_rec_s), NULL, &g_psorec_s);
+}
+// S4 (c): under a cap of live pipelines (vk_quirks.h Q_PIPE_KEEP: Arm's driver, Xclipse, phones under 9 GB) the prewarm built every listed one and the cap destroyed
+//   most of them 10 s into play (about 3400 of 4120 on a Mali-G610). Now the first cap x 9/10 are kept; the rest only go into the driver's cache (built and let go,
+//   as DM_VK_PREWARM=cache) at a start whose stamp differs, and are skipped at one whose stamp matched (the cache has them). DM_VK_PREWARM_CAP=0: every one kept
+static int pw_cap_keep(void) { const char *e = getenv("DM_VK_PREWARM_CAP"); if (e && *e == '0') return 0; return pw_keep_of_cap(pso_cap()); }
 // The prewarm without extended dynamic state: this phone's own list of pipelines with their draw state (pso_record_s), the same pacing as below
+static nvn_hmap g_pw_sprogs = {.klen = 40};   // (its programs, by their shaders' keys)
 static void *prewarm_static(void) {
     const char *e = getenv("DM_VK_PSO_RECORD"); char path[1100]; if (!e) return NULL; snprintf(path, sizeof path, "%s.sst", e);
     FILE *f = fopen(path, "rb");
     if (!f) { VLOG("prewarm: nothing yet (no extended dynamic state: pipelines are recorded with their draw state as the game draws, and built from the next start)"); return NULL; }
     char m[4]; uint32_t v[2];
     if (fread(m, 1, 4, f) != 4 || memcmp(m, PSO_MAGIC_S, 4) || fread(v, 4, 2, f) != 2 || v[0] != 1 || v[1] != sizeof(pso_rec_s)) { fclose(f); VLOG("[RED] pipeline list %s: not this version's format", path); return NULL; }
-    uint64_t t0 = mono_ns(); int waits = 0, n = 0, built = 0, had = 0, failed = 0, noshader = 0;
-    static nvn_hmap progs = {.klen = 40};
+    uint64_t t0 = mono_ns(); int waits = 0, n = 0, built = 0, had = 0, failed = 0, noshader = 0, cached = 0, skipped = 0, kept = 0;
+    int keep = pw_cap_keep(), compact = pw_compact_on();
     pso_rec_s r;
     { long here = ftell(f); fseek(f, 0, SEEK_END); long end = ftell(f); fseek(f, here, SEEK_SET); atomic_store(&g_pw_total, (int)((end - here) / (long)sizeof r)); }
     while (fread(&r, sizeof r, 1, f) == 1) {
+        if (n) pw_count_handled(n - 1);   // (the entry before this one is handled)
         n++; atomic_fetch_add(&g_pw_done, 1);
-        vprog *pr = nvn_hm_get(&progs, r.r.key);
+        vprog *pr = nvn_hm_get(&g_pw_sprogs, r.r.key);
         if (!pr) {
             pr = calloc(1, sizeof *pr); int ok = 1;
             for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(r.r.key[st], z, 8)) continue; pr->sh[st] = shader_get(r.r.key[st], st); if (!pr->sh[st]) ok = 0; }
             if (!ok || !pr->sh[0]) { free(pr); noshader++; continue; }
-            nvn_hm_put(&progs, r.r.key, pr);
+            nvn_hm_put(&g_pw_sprogs, r.r.key, pr);
         }
         pkey k = r.r.k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
         b10_key_here(&k);   // (DM_VK_B10_AS_RGBA16: an R11G11B10F target is the stand-in here)
         prog_layout(pr, 0);
         sst_fold(&r.s);   // (a list recorded before the fold: the key the draws look up now)
         pkey_s ks; memset(&ks, 0, sizeof ks); ks.k = k; ks.s = r.s;
-        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso_s, &ks) != NULL; pthread_mutex_unlock(&g_psomu);
-        if (have) { had++; continue; }
+        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso_s, &ks) != NULL;
+        if (compact) { nvn_hm_put(&g_pso_rec_s, &ks, (void *)1); nvn_hm_put(&g_pso_s_rec, &k, (void *)1); }   // (S4 a: listed already)
+        pthread_mutex_unlock(&g_psomu);
+        if (have) { had++; kept++; continue; }
+        if (keep && kept >= keep) {   // (S4 c: past the cap)
+            if (atomic_load(&g_pw_warm)) { skipped++; continue; }
+            prewarm_pace_play(); VkPipeline p = pso_make(pr, k, &r.s); if (p) { vkDestroyPipeline(g_dev, p, NULL); cached++; } else failed++;
+            prewarm_pace(built + cached + failed, &waits); continue; }
         prewarm_pace_play();
-        if (pso_lookup_s(pr, &k, &r.s, 0)) built++; else failed++;
-        prewarm_pace(built + failed, &waits);
+        if (pso_lookup_s(pr, &k, &r.s, 0)) { built++; kept++; } else failed++;
+        prewarm_pace(built + cached + failed, &waits);
     }
+    if (n) pw_count_handled(n - 1);
     fclose(f);
     VLOG("prewarm (draw state built in): %d pipelines recorded on this phone: %d built, %d already there, %d failed, %d with a shader missing, %.1f s (paused %d times for low memory)",
          n, built, had, failed, noshader, (mono_ns() - t0) / 1e9, waits);
+    if (keep && (cached || skipped)) VLOG("prewarm: %d kept (the cap: at most %d live pipelines), %d past it only put into the pipeline cache, %d skipped (already in it)", kept, pso_cap(), cached, skipped);
+    atomic_store(&g_pw_complete, 1);
     return NULL;   // (the cache is saved by prewarm_main, after the game is let go)
 }
 // the main prewarm's shared state: the list, the next entry to take, the programs made so far (their layouts made once, under pw.mu: prog_layout is not for two threads)
 // t_*: the prewarm's stage timers (perf-1124 I7), nanoseconds summed over its threads: waiting for pw.mu, loading shaders (shader_get), making layouts
 //   (prog_layout), building pipelines (pso_lookup / pso_make). Printed with the prewarm's summary, so a log says which part of the wait is ours and which the driver's
-static struct { pso_rec *rs; int n, ns, cache_only; atomic_int next, unfit, built, had, failed, noshader, waits; pthread_mutex_t mu; nvn_hmap progs, seen;
+// keep / kept: the cap's share (S4 c) and how many are kept so far; cached / skipped: past it, put into the driver's cache only / left out (a matched stamp)
+static struct { pso_rec *rs; int n, ns, cache_only, keep, compact; atomic_int next, unfit, built, had, failed, noshader, waits, kept, cached, skipped, dups; pthread_mutex_t mu; nvn_hmap progs, seen;
                 _Atomic uint64_t t_lock, t_shader, t_layout, t_pipe; } g_pw = {
     .mu = PTHREAD_MUTEX_INITIALIZER, .progs = {.klen = 40}, .seen = {.klen = sizeof(pso_rec)} };
 // a pipeline from the shipped list (recorded on another phone): its colour / depth / stencil targets and vertex formats must be ones this GPU has, or it is left
@@ -4944,47 +5103,60 @@ static int pso_formats_ok(const pkey *k) {
     for (int i = 0; i < 32; i++) if (k->attr[i].used && !fmt_has(k->attr[i].fmt, VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT, 1)) return 0;
     return 1;
 }
+// one list entry; 1: this extra thread stops (the game plays: one thread builds the rest)
+static int prewarm_one(int i, void *arg, int *waits) {
+    atomic_fetch_add(&g_pw_done, 1);
+    if (i < g_pw.ns && !pso_formats_ok(&g_pw.rs[i].k)) { atomic_fetch_add(&g_pw.unfit, 1); return 0; }
+    uint64_t tl = mono_ns(); pthread_mutex_lock(&g_pw.mu); atomic_fetch_add(&g_pw.t_lock, mono_ns() - tl);
+    if (nvn_hm_get(&g_pw.seen, &g_pw.rs[i])) { pthread_mutex_unlock(&g_pw.mu); if (i >= g_pw.ns) atomic_fetch_add(&g_pw.dups, 1); return 0; }
+    nvn_hm_put(&g_pw.seen, &g_pw.rs[i], (void *)1);
+    vprog *pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key);
+    if (!pr && sh_mt()) {   // (perf-1124 S2: the shaders loaded outside pw.mu, on every prewarm thread; only the layout under it)
+        pthread_mutex_unlock(&g_pw.mu);
+        vprog *np = calloc(1, sizeof *np); int ok = 1; uint64_t ts = mono_ns();
+        for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; np->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!np->sh[st]) ok = 0; }
+        atomic_fetch_add(&g_pw.t_shader, mono_ns() - ts);
+        if (!ok || !np->sh[0]) { free(np); atomic_fetch_add(&g_pw.noshader, 1); return 0; }
+        tl = mono_ns(); pthread_mutex_lock(&g_pw.mu); atomic_fetch_add(&g_pw.t_lock, mono_ns() - tl);
+        if ((pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key))) free(np);   // (another thread made the same program meanwhile)
+        else { uint64_t tp = mono_ns(); prog_layout(np, 0); atomic_fetch_add(&g_pw.t_layout, mono_ns() - tp); nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, np); pr = np; }
+    }
+    if (!pr) {
+        pr = calloc(1, sizeof *pr); int ok = 1; uint64_t ts = mono_ns();
+        for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
+        uint64_t tp = mono_ns(); atomic_fetch_add(&g_pw.t_shader, tp - ts);
+        if (!ok || !pr->sh[0]) { free(pr); pthread_mutex_unlock(&g_pw.mu); atomic_fetch_add(&g_pw.noshader, 1); return 0; }
+        prog_layout(pr, 0); atomic_fetch_add(&g_pw.t_layout, mono_ns() - tp);
+        nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, pr);
+    }
+    pthread_mutex_unlock(&g_pw.mu);
+    pkey k = g_pw.rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
+    b10_key_here(&k);   // (DM_VK_B10_AS_RGBA16: an R11G11B10F target is the stand-in here)
+    pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL;
+    if (g_pw.compact) nvn_hm_put(&g_pso_rec, &k, (void *)1);   // (S4 a: listed already, not appended again when the cap destroys it and a draw builds it again)
+    pthread_mutex_unlock(&g_psomu);
+    if (have) { atomic_fetch_add(&g_pw.had, 1); atomic_fetch_add(&g_pw.kept, 1); return 0; }
+    int cache_only = g_pw.cache_only;
+    if (g_pw.keep && !cache_only && atomic_load(&g_pw.kept) >= g_pw.keep) {   // (S4 c: past the cap)
+        if (atomic_load(&g_pw_warm)) { atomic_fetch_add(&g_pw.skipped, 1); return 0; }
+        cache_only = 2;
+    }
+    int last_one = arg && atomic_load(&g_pw_playing) && !prewarm_play_free();   // (the game started: this extra thread builds the one it took, then one thread builds the rest)
+    prewarm_pace_play();
+    uint64_t tb = mono_ns();
+    if (cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); atomic_fetch_add(cache_only == 2 ? &g_pw.cached : &g_pw.built, 1); } else atomic_fetch_add(&g_pw.failed, 1); }   // (into the driver's cache, not kept)
+    else if (pso_lookup(pr, &k, 0)) { atomic_fetch_add(&g_pw.built, 1); atomic_fetch_add(&g_pw.kept, 1); } else atomic_fetch_add(&g_pw.failed, 1);
+    atomic_fetch_add(&g_pw.t_pipe, mono_ns() - tb);
+    prewarm_pace(atomic_load(&g_pw.built) + atomic_load(&g_pw.cached) + atomic_load(&g_pw.failed), waits);
+    return last_one;
+}
 static void *prewarm_worker(void *arg) {
     if (arg) DM_THREAD_NAME("dm-prewarm");   // (the threads started for it; the caller keeps its own name)
     int waits = 0;
     for (int i; (i = atomic_fetch_add(&g_pw.next, 1)) < g_pw.n; ) {
-        atomic_fetch_add(&g_pw_done, 1);
-        if (i < g_pw.ns && !pso_formats_ok(&g_pw.rs[i].k)) { atomic_fetch_add(&g_pw.unfit, 1); continue; }
-        uint64_t tl = mono_ns(); pthread_mutex_lock(&g_pw.mu); atomic_fetch_add(&g_pw.t_lock, mono_ns() - tl);
-        if (nvn_hm_get(&g_pw.seen, &g_pw.rs[i])) { pthread_mutex_unlock(&g_pw.mu); continue; }
-        nvn_hm_put(&g_pw.seen, &g_pw.rs[i], (void *)1);
-        vprog *pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key);
-        if (!pr && sh_mt()) {   // (perf-1124 S2: the shaders loaded outside pw.mu, on every prewarm thread; only the layout under it)
-            pthread_mutex_unlock(&g_pw.mu);
-            vprog *np = calloc(1, sizeof *np); int ok = 1; uint64_t ts = mono_ns();
-            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; np->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!np->sh[st]) ok = 0; }
-            atomic_fetch_add(&g_pw.t_shader, mono_ns() - ts);
-            if (!ok || !np->sh[0]) { free(np); atomic_fetch_add(&g_pw.noshader, 1); continue; }
-            tl = mono_ns(); pthread_mutex_lock(&g_pw.mu); atomic_fetch_add(&g_pw.t_lock, mono_ns() - tl);
-            if ((pr = nvn_hm_get(&g_pw.progs, g_pw.rs[i].key))) free(np);   // (another thread made the same program meanwhile)
-            else { uint64_t tp = mono_ns(); prog_layout(np, 0); atomic_fetch_add(&g_pw.t_layout, mono_ns() - tp); nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, np); pr = np; }
-        }
-        if (!pr) {
-            pr = calloc(1, sizeof *pr); int ok = 1; uint64_t ts = mono_ns();
-            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
-            uint64_t tp = mono_ns(); atomic_fetch_add(&g_pw.t_shader, tp - ts);
-            if (!ok || !pr->sh[0]) { free(pr); pthread_mutex_unlock(&g_pw.mu); atomic_fetch_add(&g_pw.noshader, 1); continue; }
-            prog_layout(pr, 0); atomic_fetch_add(&g_pw.t_layout, mono_ns() - tp);
-            nvn_hm_put(&g_pw.progs, g_pw.rs[i].key, pr);
-        }
-        pthread_mutex_unlock(&g_pw.mu);
-        pkey k = g_pw.rs[i].k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
-        b10_key_here(&k);   // (DM_VK_B10_AS_RGBA16: an R11G11B10F target is the stand-in here)
-        pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso, &k) != NULL; pthread_mutex_unlock(&g_psomu);
-        if (have) { atomic_fetch_add(&g_pw.had, 1); continue; }
-        int last_one = arg && atomic_load(&g_pw_playing) && !prewarm_play_free();   // (the game started: this extra thread builds the one it took, then one thread builds the rest)
-        prewarm_pace_play();
-        uint64_t tb = mono_ns();
-        if (g_pw.cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); atomic_fetch_add(&g_pw.built, 1); } else atomic_fetch_add(&g_pw.failed, 1); }   // (into the driver's cache, not kept)
-        else if (pso_lookup(pr, &k, 0)) atomic_fetch_add(&g_pw.built, 1); else atomic_fetch_add(&g_pw.failed, 1);
-        atomic_fetch_add(&g_pw.t_pipe, mono_ns() - tb);
-        prewarm_pace(atomic_load(&g_pw.built) + atomic_load(&g_pw.failed), &waits);
-        if (last_one) break;
+        int stop = prewarm_one(i, arg, &waits);
+        pw_count_handled(i);
+        if (stop) break;
     }
     atomic_fetch_add(&g_pw.waits, waits);
     return NULL;
@@ -5052,31 +5224,52 @@ static void *prewarm_run(void) {
     // DM_VK_PREWARM=cache: every pipeline built once into the driver's pipeline cache (saved below) and destroyed at once, instead of kept (opt-in: on the S25+ it
     //   saved nothing, the heap grew the same with 365 pipelines as with 1157 kept, 2026-11-20)
     { const char *e = getenv("DM_VK_PREWARM"); g_pw.cache_only = e && !strcmp(e, "cache"); if (g_pw.cache_only) VLOG("prewarm: into the pipeline cache only, not kept (DM_VK_PREWARM=cache)"); }
+    g_pw.keep = pw_cap_keep(); g_pw.compact = pw_compact_on();   // (read once here: pso_cap's first call logs, not for several threads)
     for (int i = 1; i < nt; i++) if (!pthread_create(&th[started], NULL, prewarm_worker, (void *)1)) started++;
     prewarm_worker(NULL);
     for (int i = 0; i < started; i++) pthread_join(th[i], NULL);
     VLOG("prewarm: %d pipelines listed (%d shipped, %d recorded here): %d built%s, %d already there, %d failed, %d with a shader missing, %d shipped ones with formats this GPU lacks, %.1f s on %d thread(s)%s (paused %d times for low memory)",
          n, ns, nr, atomic_load(&g_pw.built), g_pw.cache_only ? " (cache only)" : "", atomic_load(&g_pw.had), atomic_load(&g_pw.failed), atomic_load(&g_pw.noshader), atomic_load(&g_pw.unfit), (mono_ns() - t0) / 1e9, started + 1,
          prewarm_all() ? ", before the game" : "", atomic_load(&g_pw.waits));
+    if (g_pw.keep && (atomic_load(&g_pw.cached) || atomic_load(&g_pw.skipped)))
+        VLOG("prewarm: %d kept (the cap: at most %d live pipelines), %d past it only put into the pipeline cache, %d skipped (already in it; DM_VK_PREWARM_CAP=0 keeps every one)",
+             atomic_load(&g_pw.kept), pso_cap(), atomic_load(&g_pw.cached), atomic_load(&g_pw.skipped));
+    if (atomic_load(&g_pw.dups)) VLOG("prewarm: %d entries of the list recorded here repeat earlier ones", atomic_load(&g_pw.dups));
     VLOG("prewarm timers (summed over its %d thread(s)): %.0f ms waiting for the program lock, %.0f ms loading shaders, %.0f ms making layouts, %.0f ms building pipelines",
          started + 1, atomic_load(&g_pw.t_lock) / 1e6, atomic_load(&g_pw.t_shader) / 1e6, atomic_load(&g_pw.t_layout) / 1e6, atomic_load(&g_pw.t_pipe) / 1e6);
     dm_boot_mark("prewarm: every listed pipeline handled");
     free(rs); g_pw.rs = NULL;
+    atomic_store(&g_pw_complete, 1);
     return NULL;   // (the cache is saved by prewarm_main, after the game is let go)
 }
 static atomic_int g_pw_ended;   // the prewarm thread has returned (simdev t_vkdev's start-up timing)
 static void *prewarm_main(void *arg) {
     DM_THREAD_NAME("dm-prewarm"); (void)arg;
     prewarm_run();
-    prewarm_finished();   // the game goes on first (perf-1124 S1), then the cache is written, if anything new went into it
+    prewarm_finished();   // the game goes on first (perf-1124 S1), then the lists and the cache are written, if anything changed
+    pw_compact_lists();
     pcache_save_new(); dm_boot_mark("prewarm: pipeline cache handled");
     atomic_store(&g_pw_ended, 1); return NULL;
 }
 // the end of mtl_init: the pipeline cache read, and the prewarm started when there is a list (the game's first submission waits for it: prewarm_wait)
 static void prewarm_start(void) {
     pcache_open();
+    atomic_store(&g_pw_warm, 0); atomic_store(&g_pw_complete, 0); atomic_store(&g_pw_hold_cnt, 0); g_pw_hold_n = 0;
     if (getenv("DM_VK_PSO_SEED") || getenv("DM_VK_PSO_RECORD")) {
-        if (prewarm_all()) atomic_store(&g_pw_hold, 1);
+        if (prewarm_all()) {
+            // S3: the stamp of the last complete prewarm against this start's lists, cache and driver
+            pw_stamp now; pw_stamp_now(&now); now.cache = g_pcache_disk;
+            char p[1200], text[512] = ""; FILE *f = pw_stamp_path(p, sizeof p) ? fopen(p, "r") : NULL; if (f) { if (!fgets(text, sizeof text, f)) text[0] = 0; fclose(f); }
+            int warm = pw_stamp_match(text, &now), skip = pw_misses_skip();
+            int mode = pw_hold_parse(getenv("DM_VK_PREWARM_HOLD"), skip ? PW_HOLD_NONE : 600);
+            pw_stamp_clear();   // (written again when this start's prewarm is complete: a start that ends before it leaves none)
+            if (!warm || mode == PW_HOLD_ALL) atomic_store(&g_pw_hold, 1);
+            else { atomic_store(&g_pw_warm, 1); if (mode > 0) { g_pw_hold_n = mode; atomic_store(&g_pw_hold, 1); } }
+            VLOG("prewarm: %s: %s", !text[0] ? "no stamp of a complete prewarm" : warm ? "the stamp matches (every listed pipeline is in the pipeline cache)" : "the stamp differs (lists, cache, driver, app or shaders changed)",
+                 !warm || mode == PW_HOLD_ALL ? "the game waits for every listed pipeline" : mode > 0 ? "the game waits for the first list entries only (a pipeline missing in play is a hitch here)"
+                 : "the game goes on at once, the pipelines are built from the cache meanwhile (a missing one's draws are skipped until it is built)");
+            if (warm && mode > 0) VLOG("prewarm: the first %d list entries before the game (DM_VK_PREWARM_HOLD=all | none | <count>)", mode);
+        }
         pthread_t t; if (!pthread_create(&t, NULL, prewarm_main, NULL)) pthread_detach(t); else { atomic_store(&g_pw_hold, 0); atomic_store(&g_pw_ended, 1); }
     }
 }
@@ -8124,7 +8317,7 @@ static void seg_record_prim(sub_t *s) {
 }
 void nvn_fgr_arm_series(void) { fgr_arm_series(atomic_load(&g_present_n)); }   // (hle_resscale.c: a battle begins)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
-    { static _Atomic int first; if (!atomic_exchange(&first, 1)) dm_boot_mark("first present"); }
+    { static _Atomic int first; if (!atomic_exchange(&first, 1)) { dm_boot_mark("first present"); atomic_store(&g_pw_playing, 1); } }   // (the prewarm builds one pipeline a present from here)
     uint64_t hp_scene = g_hp_scene_seq == g_hp_seq + 1;   // (HUD-free: this frame's scene copy was made; read before hp_learn starts the next frame)
     // (the copy was taken at the pass learnt from the frame before; this frame's own split can differ (a title screen's passes change from frame to frame):
     //   then the copy is not this frame's scene and this frame goes without HUD-free; S25+, Legends: Arceus's title screen split, 2026-11-20)

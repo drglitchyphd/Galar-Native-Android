@@ -89,6 +89,11 @@ static void host_preload(int argc, char **argv) {
         if (setrlimit(RLIMIT_NOFILE, &rl)) LOG("open file limit %llu could not be raised", (unsigned long long)was);
     }
     crash_install();
+#if defined(__linux__)
+    // the graphics device set up on a thread of its own from here, beside the loader and the game's boot (nvn_vk.c nvn_vk_early_init, perf-1124 S5; off unless
+    //   DM_VK_EARLY_INIT=1): after crash_install, so a driver crash there is noted for the next start's safe-start level as one at the first pool is
+    { extern void nvn_vk_early_init(void) __attribute__((weak)); if (nvn_vk_early_init) nvn_vk_early_init(); }
+#endif
     const char *race = getenv("DM_TEST_KEYRACE");
     if (race && *race) {
         g_race_want = (unsigned)strtoul(race, NULL, 10);

@@ -44,6 +44,9 @@ t_quirks: t_quirks.c ../nvn/vk_quirks.h
 	$(CC) -O2 -Wall -I../nvn -o $@ t_quirks.c
 t_pso_lru: t_pso_lru.c ../nvn/pso_lru.h
 	$(CC) -O1 -Wall -I../nvn -o $@ t_pso_lru.c
+# The prewarm's rules without a GPU (nvn/prewarm_policy.h: the later start's stamp, the hold's setting, the cap's share, the list compaction; perf-1124 S3 / S4)
+t_prewarm: t_prewarm.c ../nvn/prewarm_policy.h ../nvn/nvn_hmap.h
+	$(CC) -O1 -Wall -I../nvn -o $@ t_prewarm.c
 # A pool backed late while other threads write it (nvn_dirty.c freeze / thaw, nvn_vk.c pool_back): Linux, any compiler; its own fault handler instead of crash.c
 t_pool_late: t_pool_late.c ../nvn/nvn_dirty.c ../nvn/nvn_dirty.h $(GAME_H)
 	$(CC) -O1 -g -Wall -Wno-unused-function -I../../android/compat -I../nvn/include -I$(dir $(GAME_H)) -o $@ t_pool_late.c -lpthread

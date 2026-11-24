@@ -57,7 +57,7 @@ static PFN_vkCreateInstance real_ci; static PFN_vkCreateDevice real_cd;
 static PFN_vkGetPhysicalDeviceFeatures2 real_f2; static PFN_vkGetPhysicalDeviceProperties2 real_p2; static PFN_vkGetPhysicalDeviceExternalBufferProperties real_xb;
 static uint32_t w_inst_api; static int w_inst_p2ext;    // the instance as made: its apiVersion, VK_KHR_get_physical_device_properties2 enabled
 static int w_f2_calls, w_f2_bad;                         // Features2 / Properties2 / external buffer queries, and those made where the instance has no right to them
-static char w_dext[64][VK_MAX_EXTENSION_NAME_SIZE]; static uint32_t w_ndext; static int w_dev_made;
+static char w_dext[64][VK_MAX_EXTENSION_NAME_SIZE]; static uint32_t w_ndext; static int w_dev_made; static _Atomic int w_dev_count;
 static VkResult w_dev_result = VK_RESULT_MAX_ENUM;
 static int w_struct_bad;
 // The GPU's identity. The profiles layer simulates limits, features, formats and extensions but on purpose not who the device is (vendorID, deviceID, driverVersion,
@@ -158,7 +158,7 @@ static void lvp_mask(VkStructureType t, const char *what, VkBool32 *b, size_t n)
         else printf("SIMGAP feature %s member %zu: the profile has it, lavapipe has not (not enabled)\n", what, i); }
 }
 static VKAPI_ATTR VkResult VKAPI_CALL w_cd(VkPhysicalDevice pd, const VkDeviceCreateInfo *ci, const VkAllocationCallbacks *a, VkDevice *o) {
-    w_dev_made = 1; w_ndext = ci->enabledExtensionCount > 64 ? 64 : ci->enabledExtensionCount;
+    w_dev_made = 1; atomic_fetch_add(&w_dev_count, 1); w_ndext = ci->enabledExtensionCount > 64 ? 64 : ci->enabledExtensionCount;
     for (uint32_t i = 0; i < w_ndext; i++) snprintf(w_dext[i], sizeof w_dext[i], "%s", ci->ppEnabledExtensionNames[i]);
     VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(pd, &pp);
     uint32_t api = pp.apiVersion < w_inst_api ? pp.apiVersion : w_inst_api;
@@ -1168,10 +1168,11 @@ static void pw_forget(void) {
     nvn_hm_clear(&g_pw.progs, NULL); nvn_hm_clear(&g_pw.seen, NULL);
     atomic_store(&g_pw.next, 0); atomic_store(&g_pw.unfit, 0); atomic_store(&g_pw.built, 0); atomic_store(&g_pw.had, 0); atomic_store(&g_pw.failed, 0); atomic_store(&g_pw.noshader, 0); atomic_store(&g_pw.waits, 0);
     atomic_store(&g_pw.t_lock, 0); atomic_store(&g_pw.t_shader, 0); atomic_store(&g_pw.t_layout, 0); atomic_store(&g_pw.t_pipe, 0);
+    atomic_store(&g_pw.kept, 0); atomic_store(&g_pw.cached, 0); atomic_store(&g_pw.skipped, 0); atomic_store(&g_pw.dups, 0); nvn_hm_clear(&g_pw_sprogs, NULL);
     atomic_store(&g_pw_done, 0); atomic_store(&g_pw_total, 0); atomic_store(&g_pw_playing, 0); atomic_store(&g_pw_ended, 0);
     if (g_pcache) { PFN_vkDestroyPipelineCache dpc = (PFN_vkDestroyPipelineCache)vkGetDeviceProcAddr(g_dev, "vkDestroyPipelineCache"); if (dpc) dpc(g_dev, g_pcache, NULL); g_pcache = VK_NULL_HANDLE; }
 }
-typedef struct { double hold_ms, done_ms; int built, had; int saved_before_release, saved; } pw_run_t;
+typedef struct { double hold_ms, done_ms; int built, had, at_release, warm, kept, cached, skipped; int saved_before_release, saved; } pw_run_t;
 static long long pw_mtime(const char *p) { struct stat st; if (stat(p, &st)) return -1; return (long long)st.st_mtim.tv_sec * 1000000000ll + st.st_mtim.tv_nsec; }
 // one start: the prewarm as mtl_init starts it, the game's first submission at once (prewarm_wait's wait, without its 200 ms polling)
 static pw_run_t pw_start(const char *label, const char *cache) {
@@ -1180,13 +1181,15 @@ static pw_run_t pw_start(const char *label, const char *cache) {
     uint64_t t0 = mono_ns(); atomic_store(&g_pcache_saved_at, 0); atomic_store(&g_pw_released_at, 0);
     prewarm_start();
     while (atomic_load(&g_pw_hold)) usleep(200);
-    r.hold_ms = (mono_ns() - t0) / 1e6;
-    atomic_store(&g_pw_playing, 1);   // (prewarm_wait's: the game plays from here)
+    r.hold_ms = (mono_ns() - t0) / 1e6; r.at_release = atomic_load(&g_pw_done); r.warm = atomic_load(&g_pw_warm);
+    // (the game's first present is not made here: with a matched stamp the prewarm's threads go on as they would until then)
     while (!atomic_load(&g_pw_ended)) usleep(500);
     r.done_ms = (mono_ns() - t0) / 1e6; r.built = atomic_load(&g_pw.built); r.had = atomic_load(&g_pw.had); r.saved = pw_mtime(cache) != m0;
+    r.kept = atomic_load(&g_pw.kept); r.cached = atomic_load(&g_pw.cached); r.skipped = atomic_load(&g_pw.skipped);
     { uint64_t s = atomic_load(&g_pcache_saved_at), l = atomic_load(&g_pw_released_at); r.saved_before_release = s && (!l || s < l); }
-    printf("PREWARM %s: hold %.0f ms (the game's first submission held), done %.0f ms; %d built, %d already there; the cache file was %s before the game went on, %s\n",
-           label, r.hold_ms, r.done_ms, r.built, r.had, r.saved_before_release ? "WRITTEN" : "not written", r.saved ? "written" : "not written at all");
+    printf("PREWARM %s: hold %.0f ms (the game's first submission held, %d entries handled by then), done %.0f ms; %d built, %d already there%s; stamp %s; the cache file was %s before the game went on, %s\n",
+           label, r.hold_ms, r.at_release, r.done_ms, r.built, r.had, r.cached || r.skipped ? " (past the cap: some cache-only or skipped)" : "", r.warm ? "matched" : "not matched",
+           r.saved_before_release ? "WRITTEN" : "not written", r.saved ? "written" : "not written at all");
     // S1: the game goes on before the cache is written (nvn_vk_prewarm_progress says 0 while the file is still the old one)
     CHECK(!r.saved_before_release, "prewarm (%s): the pipeline cache file was written before the game was let go", label);
     return r;
@@ -1233,23 +1236,63 @@ static void prewarm_work(void) {
     setenv("DM_VK_PSO_RECORD", list, 1); unsetenv("DM_VK_PSO_SEED"); setenv("DM_VK_PCACHE", cache, 1); unlink(cache);
     printf("PREWARM list: %d pipelines, %d vertex + %d fragment shaders (%d instructions each), %s\n", N, NV, N, OPS,
            g_eds ? "the shared list" : "this phone's list with the draw state (no extended dynamic state)");
-    pw_forget();
+    pw_forget(); { char sp[220]; snprintf(sp, sizeof sp, "%s.stamp", cache); unlink(sp); }
+    int cap = pso_cap(), keep = pw_cap_keep(), skip = pw_misses_skip();
+    if (cap) printf("PREWARM the cap: at most %d live pipelines, %d kept by the prewarm\n", cap, keep);
     pw_run_t c = pw_start("first start", cache);
+    // S3: no stamp yet, the game waits for every pipeline; S4 c: at most the cap's share kept, the rest only into the cache
+    CHECK(!c.warm && c.at_release == N, "prewarm: the first start let the game go after %d of %d", c.at_release, N);
+    if (keep && g_eds) CHECK(c.kept <= keep + 16 && c.kept + c.cached == N, "prewarm: under the cap %d kept (at most %d + threads) and %d cache-only of %d", c.kept, keep, c.cached, N);
     int nh = N + NV; uint64_t *h1 = calloc((size_t)nh * 2, 8), *h0 = calloc((size_t)nh * 2, 8); int n1 = pw_hashes(h1, nh);
     CHECK(!g_eds || c.built == N, "prewarm: %d of %d built at the first start", c.built, N);
     CHECK(pw_mtime(cache) >= 0 && c.saved, "prewarm: no pipeline cache file after the first start");
     pw_forget();
     pw_run_t w = pw_start("later start", cache);
-    CHECK(!g_eds || w.built == N, "prewarm: %d of %d built at the later start", w.built, N);
+    CHECK(!g_eds || keep || w.built == N, "prewarm: %d of %d built at the later start", w.built, N);
+    // S3: the stamp matched; where a missing pipeline's draws are skipped (this GPU's DM_VK_ASYNC_PSO) the game goes on at once, else after the first 600 entries
+    CHECK(w.warm, "prewarm: the later start did not match the first start's stamp");
+    if (skip) CHECK(w.at_release < N, "prewarm: the later start still held the game for all %d pipelines", N);
+    if (keep && g_eds) CHECK(w.skipped == N - w.kept, "prewarm: past the cap at a matched start %d skipped, want %d", w.skipped, N - w.kept);
     // S2: the same SPIR-V with shaders loaded one at a time (DM_VK_PREWARM_SHADER_MT=0)
     pw_forget(); g_sh_mt = 0;
     pw_start("later start, shaders loaded one at a time", cache);
     g_sh_mt = 1; int n0 = pw_hashes(h0, nh);
     CHECK(n1 == nh && n0 == nh && !memcmp(h0, h1, (size_t)nh * 16), "prewarm: the shaders' SPIR-V differs between loading on many threads and on one (%d / %d of %d loaded)", n1, n0, nh);
     free(h0); free(h1);
+    // S3: DM_VK_PREWARM_HOLD=<count> (Legends: Arceus's default, 600): the game goes on once the first <count> entries are handled
+    { pw_forget(); char hc[16]; int cnt = N / 4 > 0 ? N / 4 : 1; snprintf(hc, sizeof hc, "%d", cnt); setenv("DM_VK_PREWARM_HOLD", hc, 1);
+      pw_run_t h = pw_start("later start, DM_VK_PREWARM_HOLD=N/4", cache); unsetenv("DM_VK_PREWARM_HOLD");
+      CHECK(h.warm && h.at_release >= cnt && h.at_release < N, "prewarm: a count hold of %d let the game go after %d of %d", cnt, h.at_release, N); }
+    // S4 a / b: the record list with a fifth of it repeated (the cap's destroyed-and-rebuilt pipelines, appended again before): the stamp differs, the game waits
+    //   for every pipeline, and after it the list is written again without the repeats (same format, same order)
+    if (g_eds) { FILE *a = fopen(list, "ab"); int extra = N / 5;
+      for (int i = 0; i < extra; i++) { pso_rec r; memset(&r, 0, sizeof r); pw_key(r.key[0], 0, i % NV); pw_key(r.key[1], 1, i);
+          r.k.cfmt[0] = VK_FORMAT_R8G8B8A8_UNORM; r.k.chmask = 0xf; r.k.samples = 1; r.k.topo = 2; r.k.depth_zero = 1; fwrite(&r, sizeof r, 1, a); }
+      fclose(a);
+      pw_forget(); pw_run_t g = pw_start("later start, the list grown by repeats", cache);
+      CHECK(!g.warm && g.at_release == N + extra, "prewarm: a grown list let the game go after %d of %d (want all: the stamp differs)", g.at_release, N + extra);
+      struct stat st; CHECK(!stat(list, &st) && st.st_size == 12 + (off_t)N * (off_t)sizeof(pso_rec), "prewarm: the record list is %lld bytes after the compaction, want %lld (%d entries)",
+                            (long long)st.st_size, 12 + (long long)N * (long long)sizeof(pso_rec), N);
+      pw_forget(); pw_run_t g2 = pw_start("later start, after the compaction", cache);
+      CHECK(g2.warm, "prewarm: the start after the compaction did not match its stamp"); }
     unsetenv("DM_VK_PSO_RECORD"); unsetenv("DM_VK_PCACHE");
 }
 
+// S5 (perf-1124): mtl_init from two threads at once, as the early set-up thread (nvn_vk_early_init, DM_VK_EARLY_INIT=1) and the game's first memory pool would:
+//   one device, and each caller returns only when the set-up is complete (it used to return as soon as g_dev was set, 200 lines before the end)
+static _Atomic int g_race_ok = -1;
+static void *init_racer(void *a) { (void)a; mtl_init(); atomic_store(&g_race_ok, atomic_load(&g_gpuid_done) && g_pcache != VK_NULL_HANDLE); return NULL; }
+static void init_race(void) {
+    setenv("DM_VK_EARLY_INIT", "1", 1); nvn_vk_early_init(); unsetenv("DM_VK_EARLY_INIT");
+    pthread_t t; int th = !pthread_create(&t, NULL, init_racer, NULL);
+    mtl_init(); int main_ok = atomic_load(&g_gpuid_done) && g_pcache != VK_NULL_HANDLE;
+    if (th) pthread_join(t, NULL);
+    for (int i = 0; i < 2000 && atomic_load(&w_dev_count) < 1; i++) usleep(1000);
+    CHECK(main_ok && atomic_load(&g_race_ok) == 1 && atomic_load(&w_dev_count) == 1, "mtl_init from three threads: set-up complete when it returned %d / %d, %d devices made (want 1)",
+          main_ok, atomic_load(&g_race_ok), atomic_load(&w_dev_count));
+    printf("INIT three callers at once (the early set-up thread, a racer, the main thread): %d device made, each returned with the set-up complete: %s\n",
+           atomic_load(&w_dev_count), main_ok && atomic_load(&g_race_ok) == 1 ? "yes" : "NO");
+}
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -1271,7 +1314,7 @@ int main(void) {
     real_gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
     vkGetInstanceProcAddr = w_gipa; VK_GLOBAL(VK_LOAD_G)   // (what mtl_init does when it opens the loader itself, through the watching wrapper)
     CHECK(nvn_vk_quirk_default(Q_NVN_ASYNC) == -1 && nvn_vk_quirk_default(Q_FLOAT_CONTROLS) == -1, "the table answers -1 before the device exists (hle_nvn.c rq_on: Auto off then)");
-    g_step = "mtl_init"; mtl_init();
+    g_step = "mtl_init"; if (getenv("SIMDEV_ONE_INIT")) mtl_init(); else init_race();
     device_read();
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
