@@ -91,7 +91,8 @@ enum {
     Q_PASS_DEFER,        // target changes that need no new pass keep it open: Adreno
     Q_ASYNC_PSO,         // pipelines built on worker threads: every GPU (beta-exit f09e58f, 2026-11-22; Adreno only before), unless the game's profile says
                          //   async_pso_off (Arceus #34)
-    Q_PIPE_KEEP,         // at most 800 pipelines kept (least recently used destroyed): Mali, or a phone under 7.5 GB
+    Q_PIPE_KEEP,         // at most 800 pipelines kept (least recently used destroyed): Mali, Xclipse, or a phone under 9 GB (an "8 GB" Galaxy A55 / A56 reports ~7.6 M kB,
+                         //   which the old 7.5 GB line missed: 428-1,450 MB swapped, #97 #179 #324, Arceus #78 #92)
     Q_CLEAR_BY_PASS,     // clears in a layered pass over a 3D target as passes of their own: Xclipse
     Q_PCACHE_GAPS_OFF,   // a pipeline with a colour gap made without the pipeline cache: PowerVR's driver crashes on it
     Q_NO_EDS,            // draw state built into each pipeline: Qualcomm's Vulkan 1.1 drivers misread per-draw vertex strides, for a game whose profile says qc11_no_eds
@@ -208,7 +209,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST: return g->arm_rel != 0;
     case Q_VIEW_QUARANTINE: return g->arm_rel && g->dynren ? 2048 : 0;
     case Q_TEX_HALF_UNSAFE: return g->arm_rel && g->arm_rel < 49;
-    case Q_PIPE_KEEP: return g->vendor == VEN_ARM || (g->ram_kb > 0 && g->ram_kb < 7500000) ? 800 : 0;
+    case Q_PIPE_KEEP: return g->vendor == VEN_ARM || g->vendor == VEN_SAMSUNG || (g->ram_kb > 0 && g->ram_kb < 9000000) ? 800 : 0;   // (2026-11-24: Xclipse and 8 GB phones too, now that the cap evicts gradually, pso_lru.h)
     }
     return 0;
 }

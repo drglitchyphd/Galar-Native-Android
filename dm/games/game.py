@@ -180,6 +180,10 @@ def header(g):
     port = g.get('port', '') or (load(g.get('tables_from')).get('port', '') if g.get('tables_from', '') else '')   # the released app this profile ships in
     if port not in PORTS: sys.exit(f'{g.id}: port must be one of {", ".join(PORTS)} (or come from tables_from): {port!r}')
     eq = g.words('engine_quirks', '') or (load(g.get('tables_from')).words('engine_quirks', '') if g.get('tables_from', '') else [])
+    vsp = g.get('vk_split', '') or (load(g.get('tables_from')).get('vk_split', '') if g.get('tables_from', '') else '') or '150'   # nvn_vk.c sub_split: draws per submission part (DM_VK_SPLIT)
+    if not vsp.isdigit(): sys.exit(f'{g.id}: vk_split must be a number of draws (0: never split): {vsp}')
+    vsh = g.get('vk_split_held', '') or (load(g.get('tables_from')).get('vk_split_held', '') if g.get('tables_from', '') else '') or 'split'   # a frame held whole (DM_VK_FRAME_HOLD): split as any (split) or not (whole)
+    if vsh not in ('split', 'whole'): sys.exit(f'{g.id}: vk_split_held must be split or whole: {vsh}')
     if any(q not in ENGINE_QUIRKS for q in eq): sys.exit(f'{g.id}: engine_quirks takes {", ".join(sorted(ENGINE_QUIRKS))}: {eq}')
     docs = g.get('docs_dir', '') or (load(g.get('tables_from')).get('docs_dir', '') if g.get('tables_from', '') else '') or 'NXNative'   # Documents/<docs_dir>/<title id>/save (android_main.c save_place)
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -190,6 +194,8 @@ def header(g):
          f'#define DM_GAME_FILE_STEM {q(file_stem(g))}',
          *[f'#define DM_PORT_{p.upper()} {int(p == port)}' for p in PORTS],
          *[f'#define DM_GAME_ENG_{k.upper()} {int(k in eq)}' for k in sorted(ENGINE_QUIRKS)],
+         f'#define DM_GAME_VK_SPLIT {int(vsp)}',
+         f'#define DM_GAME_VK_SPLIT_HELD_WHOLE {int(vsh == "whole")}',
          f'#define DM_GAME_DOCS_DIR {q(docs)}',
          '#define DM_GAME_FAMILY {' + ', '.join('{' + q(f.id) + ', ' + q(file_stem(f)) + '}' for f in fam) + '}',
          f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id"), 16):016X}ull',

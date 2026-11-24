@@ -42,6 +42,8 @@ t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 #   reads ../../games/*/game.tsv), and the GPU breadcrumbs (vk_crumbs.h): plain C, any OS (gcc or clang)
 t_quirks: t_quirks.c ../nvn/vk_quirks.h
 	$(CC) -O2 -Wall -I../nvn -o $@ t_quirks.c
+t_pso_lru: t_pso_lru.c ../nvn/pso_lru.h
+	$(CC) -O1 -Wall -I../nvn -o $@ t_pso_lru.c
 t_crumbs: t_crumbs.c ../nvn/vk_crumbs.h
 	$(CC) -O2 -Wall -I../nvn -I../../third_party/vulkan-headers/include -o $@ t_crumbs.c -lpthread
 t_fgen: t_fgen.c ../nvn/nvn_fgen.h
