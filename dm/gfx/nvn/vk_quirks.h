@@ -112,6 +112,11 @@ enum {
     // Mali's white lit scene (#47 #110 #111 #172), a game whose profile says mali_lit_standin (Sword / Shield) on Arm's own driver (mali-all e6f6d0c)
     Q_B10_STANDIN,       // route A: the lit R11G11B10F target drawn and sampled as an RGBA16F stand-in, converted exactly where it meets the game's memory (b10_on)
     Q_MALI_WHITE_CHECK,  // the white-screen check while playing and its ladder (mali_white_vk.inc: route A, then B, then the PanVK offer, start by start)
+    // Violet's ID photo on Mesa Turnip (Galaxy Z Fold4, Adreno 730, Turnip faux123 v1.2.10): the linear texture's write-back (copy_t2t: the copied area into the game's
+    //   memory, commit 3998ace) copied the image straight into the dma-buf pool, then a 317 ms submission and vkQueueSubmit -4 (device lost) right after character
+    //   creation. Mesa Turnip by driver ID: the image goes into a host-visible staging buffer of the submission's arena instead, and the CPU copies it into the game's
+    //   memory when the submission is done (wb_apply). Not confirmed on the phone yet; DM_VK_NO_LINEAR_WB=1 (no write-back at all) stays the player's isolation test
+    Q_LINEAR_WB_STAGED,
     Q_N
 };
 // (env: the switches that decide the rule at its site, named in its [quirk] line when one of them is set)
@@ -148,6 +153,7 @@ static const struct { const char *env, *what; } Q_INFO[Q_N] VKQ_UNUSED = {
     [Q_NVN_ASYNC] = { "DM_NVN_ASYNC", "the replay on its own thread" },
     [Q_B10_STANDIN] = { "DM_VK_B10_AS_RGBA16, DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the lit R11G11B10F target drawn as RGBA16F" },
     [Q_MALI_WHITE_CHECK] = { "DM_MALI_LADDER, DM_MALI_WHITE_SIM", "the white-screen check and its ladder" },
+    [Q_LINEAR_WB_STAGED] = { "DM_VK_LINEAR_WB_STAGED", "linear texture write-back through a staging buffer and the CPU" },
 };
 // Arm's own driver: by driver ID where the driver gives one, else by vendor (PanVK reports Arm's vendor ID with its own driver ID)
 VKQ_UNUSED static int gpu_is_arm_driver(const gpu_id *g) { return g->driver_id >= 0 ? g->driver_id == 9 /* VK_DRIVER_ID_ARM_PROPRIETARY */ : g->vendor == VEN_ARM; }
@@ -201,6 +207,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
     case Q_VIEW_QUARANTINE: return g->arm_rel && g->dynren ? 2048 : 0;
     case Q_TEX_HALF_UNSAFE: return g->arm_rel && g->arm_rel < 49;
     case Q_PIPE_KEEP: return g->vendor == VEN_ARM || (g->ram_kb > 0 && g->ram_kb < 7500000) ? 800 : 0;
+    case Q_LINEAR_WB_STAGED: return g->driver_id == 18;   // (VK_DRIVER_ID_MESA_TURNIP)
     }
     return 0;
 }
@@ -209,7 +216,7 @@ VKQ_UNUSED static int quirk_default(int q, const gpu_id *g) {
 VKQ_UNUSED static int quirk_late(int q) {
     switch (q) {
     case Q_FLOAT_CONTROLS: case Q_CLAMP_ZERO: case Q_NAN_MINMAX: case Q_EXACT_MATH: case Q_INIT_LOCALS: case Q_QUERY_LOD: case Q_TF_CHECK: case Q_TF_SELFTEST:
-    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: case Q_NVN_ASYNC: return 1;
+    case Q_VIEW_QUARANTINE: case Q_TEX_HALF_UNSAFE: case Q_B10_STANDIN: case Q_MALI_WHITE_CHECK: case Q_NVN_ASYNC: case Q_LINEAR_WB_STAGED: return 1;
     }
     return 0;
 }

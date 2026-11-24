@@ -95,6 +95,8 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     //   also checks e6f6d0c's own DM_PORT_GALAR for the real profiles)
     case Q_B10_STANDIN: return ref_mw_default_route(g->arm_rel != 0, P->mali_lit_standin) == 1;   // (MW_ROUTE_A)
     case Q_MALI_WHITE_CHECK: return ref_mw_enabled(g->arm_rel != 0, P->mali_lit_standin, NULL, NULL) == 1;
+    // new with paldea-crashfix (Violet on Turnip, Galaxy Z Fold4): the linear write-back staged and copied on the CPU, Mesa Turnip by driver ID only
+    case Q_LINEAR_WB_STAGED: return g->driver_id == 18;
     }
     return -999;   // a quirk with no reference here: add its rule above
 }
@@ -261,6 +263,8 @@ static void phones(const profile *P) {
     CHECK(!QD(Q_BARRIER_RELAXED, a650) && QD(Q_NO_DYNREN, a650), "%s, Adreno 650 on Qualcomm's 1.1 driver (Galar #209): full barriers", gm);
     gpu_id tu = phone(P, V13, 0x5143, 18, 0, 0, 0, 1, "Turnip Adreno (TM) 650", 7600000, 1);
     CHECK(QD(Q_BARRIER_RELAXED, tu) && QD(Q_NO_DYNREN, tu) && QD(Q_NVN_ASYNC, tu) == !arc, "%s, Turnip on the Adreno 650: barriers relaxed (not Qualcomm's old driver), render passes", gm);
+    CHECK(QD(Q_LINEAR_WB_STAGED, tu) && !QD(Q_LINEAR_WB_STAGED, s25) && !QD(Q_LINEAR_WB_STAGED, a710) && !QD(Q_LINEAR_WB_STAGED, a650),
+          "%s: the linear write-back staged on Turnip only (Violet's ID photo, Galaxy Z Fold4), not on Qualcomm's own drivers", gm);
     gpu_id g615 = phone(P, 1u << 22 | 3u << 12, 0x13B5, 9, 44, 1, 0, 0, "Mali-G615 MC2", 7800000, 1);
     CHECK(QD(Q_G615_SAFE, g615) && QD(Q_CLAMP_ZERO, g615) && QD(Q_NAN_MINMAX, g615) == 2 && QD(Q_VIEW_QUARANTINE, g615) == 2048 && QD(Q_TEX_HALF_UNSAFE, g615)
           && QD(Q_PIPE_KEEP, g615) == 800 && QD(Q_EXACT_MATH, g615) && QD(Q_INIT_LOCALS, g615) && QD(Q_FLOAT_CONTROLS, g615) && QD(Q_DMAHEAP, g615) && QD(Q_GPU_TIME_OFF, g615)

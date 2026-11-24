@@ -174,6 +174,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     }
     crash_gate(sig);
     if (dm_crash_note) dm_crash_note(module_of((void *)DM_UC_SS(uc).__pc) != NULL);
+    { extern void nvn_vk_pso_crash_note(void) __attribute__((weak)); if (nvn_vk_pso_crash_note) nvn_vk_pso_crash_note(); }   // (nvn_vk.c, pso_guard.h: a pipeline this thread was building is skipped from the next start; pwrite only)
     crash_first_line(sig, si, uc);
     if (dm_crash_log_copy) dm_crash_log_copy();   // (that line into the copy a player finds at once, in case the record below cannot finish)
     // The stderr lock may be held by another thread (stuck or suspended): the fprintf below would hang with it, the time limit's SIGALRM could not end the run, and the log would get nothing.

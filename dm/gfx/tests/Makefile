@@ -40,6 +40,9 @@ t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 #   reads ../../games/*/game.tsv), and the GPU breadcrumbs (vk_crumbs.h): plain C, any OS (gcc or clang)
 t_quirks: t_quirks.c ../nvn/vk_quirks.h
 	$(CC) -O2 -Wall -I../nvn -o $@ t_quirks.c
+# Pipelines that crashed the driver (pso_guard.h): the in-progress marker and the skip list, plain C, any OS
+t_pso_guard: t_pso_guard.c ../nvn/pso_guard.h
+	$(CC) -O2 -Wall -I../nvn -o $@ t_pso_guard.c
 t_crumbs: t_crumbs.c ../nvn/vk_crumbs.h
 	$(CC) -O2 -Wall -I../nvn -I../../third_party/vulkan-headers/include -o $@ t_crumbs.c -lpthread
 t_fgen: t_fgen.c ../nvn/nvn_fgen.h
