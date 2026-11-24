@@ -32,6 +32,11 @@ void nvn_dirty_add_range(const void *mem, size_t size) { (void)mem; (void)size; 
 void nvn_dirty_remove_range(const void *mem) { (void)mem; }
 int nvn_dirty_tracked(const void *addr, size_t len) { (void)addr; (void)len; return 0; }
 void nvn_dirty_protect(const void *addr, size_t len) { (void)addr; (void)len; }
+int nvn_dirty_off(void) { return 0; }   // (pools backed late, at their first use as a buffer: the route the phones take)
+static uintptr_t g_fz_a; static size_t g_fz_n;   // (no tracked pages here: the thaw leaves the frozen range writable, as nvn_dirty.c does for untracked pages)
+void nvn_dirty_freeze(const void *addr, size_t len, int wp) { (void)wp; size_t pg = (size_t)getpagesize(); g_fz_a = (uintptr_t)addr & ~(pg - 1); g_fz_n = (((uintptr_t)addr + len + pg - 1) & ~(pg - 1)) - g_fz_a; }
+void nvn_dirty_thaw(void) { if (g_fz_n) mprotect((void *)g_fz_a, g_fz_n, PROT_READ | PROT_WRITE); g_fz_n = 0; }
+void nvn_dirty_release(const void *addr, size_t len) { (void)addr; (void)len; }
 uint64_t nvn_dirty_now(void) { return 1; }
 const void *nvn_dirty_span(const void *addr, size_t len) { (void)addr; (void)len; return NULL; }
 int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) { (void)span; (void)addr; (void)len; (void)stamp; return 1; }

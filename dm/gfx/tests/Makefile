@@ -44,6 +44,9 @@ t_quirks: t_quirks.c ../nvn/vk_quirks.h
 	$(CC) -O2 -Wall -I../nvn -o $@ t_quirks.c
 t_pso_lru: t_pso_lru.c ../nvn/pso_lru.h
 	$(CC) -O1 -Wall -I../nvn -o $@ t_pso_lru.c
+# A pool backed late while other threads write it (nvn_dirty.c freeze / thaw, nvn_vk.c pool_back): Linux, any compiler; its own fault handler instead of crash.c
+t_pool_late: t_pool_late.c ../nvn/nvn_dirty.c ../nvn/nvn_dirty.h $(GAME_H)
+	$(CC) -O1 -g -Wall -Wno-unused-function -I../../android/compat -I../nvn/include -I$(dir $(GAME_H)) -o $@ t_pool_late.c -lpthread
 t_crumbs: t_crumbs.c ../nvn/vk_crumbs.h
 	$(CC) -O2 -Wall -I../nvn -I../../third_party/vulkan-headers/include -o $@ t_crumbs.c -lpthread
 t_fgen: t_fgen.c ../nvn/nvn_fgen.h
