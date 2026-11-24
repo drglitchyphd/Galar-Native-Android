@@ -524,3 +524,6 @@ Could not check for updates. Check the internet connection.	No se pudo buscar ac
 The update could not be downloaded: %s	No se pudo descargar la actualización: %s
 The downloaded file is not an official %s release, so it was not installed.	El archivo descargado no es una versión oficial de %s, así que no se instaló.
 The update could not be installed: %s	No se pudo instalar la actualización: %s
+Local play	Juego local
+Off: the game says local play is unavailable.	Desactivado: el juego indica que el juego local no está disponible.
+On: link battles, trades and raids with phones on the same Wi-Fi.	Activado: combates, intercambios e incursiones con teléfonos en la misma Wi-Fi.

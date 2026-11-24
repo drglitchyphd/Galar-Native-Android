@@ -1630,3 +1630,102 @@ uint32_t *spv_b10_image_writes(const uint32_t *code, size_t words, size_t *out_w
 none:
     free(ty); free(rt); return NULL;
 }
+
+// ---- vertex inputs fetched as integers (the Mali white screen fix) ----
+// A copy of a vertex shader whose float inputs at the locations in umask / smask are declared uint / int vectors of the same component count and OpBitcast to
+// float at each load: the pipeline keeps the attribute's 8 / 16-bit UINT / SINT format. The Switch's GPU hands a float input fed by an integer format the integer's
+// bits (the shader converts them itself); Vulkan leaves that pairing undefined (VUID-VkGraphicsPipelineCreateInfo-Input-08733), and Arm's drivers convert the
+// integer to a float first (255 -> 255.0f), so the shader's own conversion read 0x437f0000: Sword / Shield's lit field went white on Mali.
+// hmask (half floats read as uint and converted with UnpackHalf2x16) is a diagnostic left in. Loads through an access chain to one component and whole-vector
+// loads are handled; any other use of such an input gives NULL (the caller keeps the shader's own module)
+uint32_t *spv_vin_raw(const uint32_t *code, size_t words, uint32_t hmask, uint32_t umask, uint32_t smask, size_t *out_words) {
+    enum { OpExtInstImport_ = 11, OpExtInst_ = 12, OpFunction_ = 54, OpLoad_ = 61, OpAccessChain_ = 65, OpInBoundsAccessChain_ = 66, OpCompositeConstruct_ = 80,
+           OpCompositeExtract_ = 81, OpBitcast_ = 124, UnpackHalf2x16 = 62 };
+    uint32_t mask = hmask | umask | smask;
+    if (words < 5 || code[0] != 0x07230203u || !mask) return NULL;
+    uint32_t bound = code[3]; if (!bound || bound > (1u << 22)) return NULL;
+    uint32_t *locof = calloc(bound, 4), *ptee = calloc(bound, 4); uint8_t *fw = calloc(bound, 1), *tgt = calloc(bound, 1), *rawp = calloc(bound, 1), *mode = calloc(bound, 1);
+    // fw: 1 the 32-bit float, 2-4 its vectors; tgt: a target input variable (its component count); rawp: an access chain into one (a component pointer);
+    // mode: 0 half, 1 uint bits, 2 int bits (of a target variable / component pointer)
+    uint32_t glsl = 0, tf = 0, tu = 0, ti = 0, uv[5] = { 0 }, iv[5] = { 0 }, v2f = 0, pin_u = 0, pin_i = 0, pin_uv[5] = { 0 }, pin_iv[5] = { 0 };
+    size_t first_var = 0, first_fn = 0, ntgt = 0, nload = 0; int bad = 0, need[5] = { 0 }, needi[5] = { 0 }, needh = 0, needs_i = 0;
+    if (!locof || !ptee || !fw || !tgt || !rawp || !mode) goto none;
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; if (!n || i + n > words) goto none; const uint32_t *x = code + i;
+        if (op == OpExtInstImport_ && n >= 3 && !strncmp((const char *)(x + 2), "GLSL.std.450", 4 * (n - 2))) glsl = x[1];
+        else if (op == OpDecorate && n >= 4 && x[2] == DecLocation && x[1] < bound) locof[x[1]] = x[3] + 1;
+        else if (op == OpTypeFloat && n >= 3 && x[2] == 32 && x[1] < bound) { tf = x[1]; fw[x[1]] = 1; }
+        else if (op == OpTypeInt && n >= 4 && x[2] == 32 && x[3] == 0 && !first_fn) tu = x[1];
+        else if (op == OpTypeInt && n >= 4 && x[2] == 32 && x[3] == 1 && !first_fn) ti = x[1];
+        else if (op == OpTypeVector && n == 4 && x[1] < bound && x[3] >= 2 && x[3] <= 4) { if (tf && x[2] == tf) { fw[x[1]] = (uint8_t)x[3]; if (x[3] == 2) v2f = x[1]; }
+            else if (tu && x[2] == tu) uv[x[3]] = x[1]; else if (ti && x[2] == ti) iv[x[3]] = x[1]; }
+        else if (op == OpTypePointer && n == 4 && x[1] < bound && x[2] == SC_Input) { ptee[x[1]] = x[3];
+            if (tu && x[3] == tu) pin_u = x[1];
+            if (ti && x[3] == ti) pin_i = x[1];
+            for (int k = 2; k <= 4; k++) { if (uv[k] && x[3] == uv[k]) pin_uv[k] = x[1]; if (iv[k] && x[3] == iv[k]) pin_iv[k] = x[1]; } }
+        else if (op == OpVariable && n >= 4 && !first_fn) {
+            if (x[3] == SC_Input && x[2] < bound && x[1] < bound && locof[x[2]] && locof[x[2]] <= 32 && (mask >> (locof[x[2]] - 1) & 1) && ptee[x[1]] < bound && fw[ptee[x[1]]]) {
+                uint32_t lb = 1u << (locof[x[2]] - 1); int k = fw[ptee[x[1]]], md = hmask & lb ? 0 : umask & lb ? 1 : 2;
+                tgt[x[2]] = (uint8_t)k; mode[x[2]] = (uint8_t)md;
+                if (md == 2) { needi[k] = 1; needs_i = 1; } else need[k] = 1;
+                if (md == 0) needh = 1;
+                ntgt++; first_var = 1; } }
+        else if (op == OpFunction_ && !first_fn) first_fn = i;
+        else if ((op == OpAccessChain_ || op == OpInBoundsAccessChain_) && n == 5 && x[2] < bound && x[3] < bound && tgt[x[3]]) { rawp[x[2]] = 1; mode[x[2]] = mode[x[3]]; }
+        else if ((op == OpAccessChain_ || op == OpInBoundsAccessChain_) && x[3] < bound && tgt[x[3]]) bad = 1;   // (deeper chains: not handled)
+        else if (op == OpLoad_ && n >= 4 && x[3] < bound && (rawp[x[3]] || tgt[x[3]])) nload++;
+        i += n; }
+    if (!ntgt || (needh && !glsl) || !tf || !first_var || !first_fn || bad) goto none;
+    // any other reference to a target variable or a component pointer (besides its declaration, the chains, the loads, the entry point's interface) → not handled
+    for (size_t i = 5; i < words; i += code[i] >> 16) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        // (only the instructions that can take a pointer operand: a literal elsewhere may equal an id)
+        if (op != 62 /* OpStore */ && op != 63 /* OpCopyMemory */ && op != 83 /* OpCopyObject */ && op != 57 /* OpFunctionCall */ && op != 67 /* OpPtrAccessChain */
+            && op != 169 /* OpSelect */ && op != 245 /* OpPhi */) continue;
+        for (uint32_t j = 1; j < n; j++) if (x[j] < bound && (tgt[x[j]] || rawp[x[j]])) { bad = 1; break; } }
+    if (bad) goto none;
+    {
+    uint32_t next = bound; size_t cap = words + 160 + nload * 80; uint32_t *o = malloc(4 * cap); if (!o) goto none; size_t w = 5; memcpy(o, code, 20);
+    for (size_t i = 5; i < words;) { uint32_t n = code[i] >> 16, op = code[i] & 0xffff; const uint32_t *x = code + i;
+        if (i == first_fn) {   // the types the copy needs, then the inputs it retypes (moved here: their new pointer types may only exist now), before the first function
+            if (!tu) { tu = next++; o[w++] = 4u << 16 | OpTypeInt; o[w++] = tu; o[w++] = 32; o[w++] = 0; }
+            if (needs_i && !ti) { ti = next++; o[w++] = 4u << 16 | OpTypeInt; o[w++] = ti; o[w++] = 32; o[w++] = 1; }
+            if (needh && !v2f) { v2f = next++; o[w++] = 4u << 16 | OpTypeVector; o[w++] = v2f; o[w++] = tf; o[w++] = 2; }
+            if (!pin_u) { pin_u = next++; o[w++] = 4u << 16 | OpTypePointer; o[w++] = pin_u; o[w++] = SC_Input; o[w++] = tu; }
+            if (needs_i && !pin_i) { pin_i = next++; o[w++] = 4u << 16 | OpTypePointer; o[w++] = pin_i; o[w++] = SC_Input; o[w++] = ti; }
+            for (int k = 2; k <= 4; k++) {
+                if (need[k]) { if (!uv[k]) { uv[k] = next++; o[w++] = 4u << 16 | OpTypeVector; o[w++] = uv[k]; o[w++] = tu; o[w++] = (uint32_t)k; }
+                    if (!pin_uv[k]) { pin_uv[k] = next++; o[w++] = 4u << 16 | OpTypePointer; o[w++] = pin_uv[k]; o[w++] = SC_Input; o[w++] = uv[k]; } }
+                if (needi[k]) { if (!iv[k]) { iv[k] = next++; o[w++] = 4u << 16 | OpTypeVector; o[w++] = iv[k]; o[w++] = ti; o[w++] = (uint32_t)k; }
+                    if (!pin_iv[k]) { pin_iv[k] = next++; o[w++] = 4u << 16 | OpTypePointer; o[w++] = pin_iv[k]; o[w++] = SC_Input; o[w++] = iv[k]; } } }
+            for (uint32_t v = 0; v < bound; v++) if (tgt[v]) { if (w + 8 > cap) { cap *= 2; uint32_t *o2 = realloc(o, 4 * cap); if (!o2) { free(o); goto none; } o = o2; }
+                int si = mode[v] == 2;
+                o[w++] = 4u << 16 | OpVariable; o[w++] = tgt[v] == 1 ? (si ? pin_i : pin_u) : (si ? pin_iv[tgt[v]] : pin_uv[tgt[v]]); o[w++] = v; o[w++] = SC_Input; }
+        }
+        memcpy(o + w, x, 4 * n);
+        if (op == OpVariable && x[2] < bound && tgt[x[2]]) { }   // (declared again before the first function)
+        else if ((op == OpAccessChain_ || op == OpInBoundsAccessChain_) && x[2] < bound && rawp[x[2]]) { o[w + 1] = mode[x[2]] == 2 ? pin_i : pin_u; w += n; }
+        else if (op == OpLoad_ && n >= 4 && x[3] < bound && (rawp[x[3]] || tgt[x[3]])) {
+            uint32_t res = x[2]; int k = rawp[x[3]] ? 1 : tgt[x[3]], md = mode[x[3]];
+            uint32_t ity = md == 2 ? (k == 1 ? ti : iv[k]) : (k == 1 ? tu : uv[k]);
+            uint32_t u = next++; o[w + 1] = ity; o[w + 2] = u; w += n;
+            if (md != 0) { o[w++] = 4u << 16 | OpBitcast_; o[w++] = x[1]; o[w++] = res; o[w++] = u; }   // (same component count and width: one bitcast)
+            else {
+                uint32_t f[4];
+                for (int c = 0; c < k; c++) {
+                    uint32_t uc = u;
+                    if (k > 1) { uc = next++; o[w++] = 5u << 16 | OpCompositeExtract_; o[w++] = tu; o[w++] = uc; o[w++] = u; o[w++] = (uint32_t)c; }
+                    uint32_t h = next++; o[w++] = 6u << 16 | OpExtInst_; o[w++] = v2f; o[w++] = h; o[w++] = glsl; o[w++] = UnpackHalf2x16; o[w++] = uc;
+                    f[c] = k == 1 ? res : next++; o[w++] = 5u << 16 | OpCompositeExtract_; o[w++] = tf; o[w++] = f[c]; o[w++] = h; o[w++] = 0;
+                }
+                if (k > 1) { o[w++] = (3u + (uint32_t)k) << 16 | OpCompositeConstruct_; o[w++] = x[1]; o[w++] = res; for (int c = 0; c < k; c++) o[w++] = f[c]; }
+            }
+        }
+        else w += n;
+        i += n;
+        if (w + 128 > cap) { cap *= 2; uint32_t *o2 = realloc(o, 4 * cap); if (!o2) { free(o); goto none; } o = o2; }
+    }
+    o[3] = next; *out_words = w;
+    free(locof); free(ptee); free(fw); free(tgt); free(rawp); free(mode); return o;
+    }
+  none:
+    free(locof); free(ptee); free(fw); free(tgt); free(rawp); free(mode); return NULL;
+}

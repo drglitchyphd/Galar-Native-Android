@@ -589,6 +589,9 @@ public final class GameMenu {
     // Online room (hle_relay.c, dm/server): local play with players elsewhere through a room server someone hosts (their own Railway service, or any PC); everyone enters the
     // same server address and room code. Applies from the next start; mods stay off for local play, as on Wi-Fi
     private static void online(Activity a) {
+        heading(a, t(a, "Local play"));
+        choice(a, "DM_LDN", t(a, "Local play"), new String[][] { { "", t(a, "Off"), t(a, "Off: the game says local play is unavailable.") },
+            { "1", t(a, "On"), t(a, "On: link battles, trades and raids with phones on the same Wi-Fi.") } });
         heading(a, t(a, "Online room"));
         note(a, t(a, "Play the game's local link battles, trades and raids with friends anywhere: everyone enters the same room server and room code. Host your own server (dm/server in the project: Railway or any PC). Mods must be off."));
         String room = GameSettings.get(a, "DM_RELAY_ROOM");
