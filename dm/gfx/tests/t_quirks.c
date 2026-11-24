@@ -81,7 +81,7 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     case Q_ARM_FORMATS: return g->vendor == 0x13B5;                             // :2279 arm = g_props.vendorID == 0x13B5 || getenv ("DM_VK_ARM_FORMATS") != NULL
     case Q_GATHER_BIAS: return g->vendor == 0x5143;                             // :3072 gbias = e ? atoi (e) != 0 : g_props.vendorID == 0x5143
     case Q_PASS_DEFER: return g->vendor == 0x5143;                              // :3573 v = e ? atoi (e) != 0 : g_props.vendorID == 0x5143
-    case Q_PIPE_KEEP: return (g->vendor == 0x13B5 || (g->ram_kb > 0 && g->ram_kb < 7500000)) ? 800 : 0;   // :3850 cap = e ? atoi (e) : (... || (kb > 0 && kb < 7500000)) ? 800 : 0
+    case Q_PIPE_KEEP: return (g->vendor == 0x13B5 || g->vendor == 0x144D || (g->ram_kb > 0 && g->ram_kb < 9000000)) ? 800 : 0;   // :3850 (... || (kb > 0 && kb < 7500000)) ? 800 : 0; 2026-11-24: Xclipse, under 9 GB
     case Q_ASYNC_PSO: return !P->async_pso_off;                                 // 3d21471 nvn_vk.c:3964 v = e ? atoi (e) != 0 : !DM_GAME_ENG_ASYNC_PSO_OFF (f09e58f: every GPU)
     case Q_PCACHE_GAPS_OFF: return g->vendor == 0x1010;                         // :4194 if (g_props.vendorID == 0x1010 && !g_dynren) ... pc_ = VK_NULL_HANDLE (!g_dynren stays at the site)
     case Q_TF_CHECK: return g->arm_rel > 0;                                     // :4688 chk = e ? atoi (e) != 0 : g_arm_rel > 0
@@ -281,6 +281,10 @@ static void phones(const profile *P) {
     gpu_id xcl = phone(P, 1u << 22 | 3u << 12, 0x144D, 21, 0, 0, 0, 0, "Samsung Xclipse 940", 7800000, 1);
     CHECK(QD(Q_HOST_IMPORT_OFF, xcl) && QD(Q_DMAHEAP, xcl) && QD(Q_FLOAT_CONTROLS, xcl) && QD(Q_CLEAR_BY_PASS, xcl) && !QD(Q_BARRIER_RELAXED, xcl) && !QD(Q_NO_DYNREN, xcl),
           "%s, Xclipse 940 (#39 #41): Samsung's set, full barriers (#31)", gm);
+    gpu_id a55 = phone(P, 1u << 22 | 3u << 12, 0x144D, 21, 0, 0, 0, 0, "Samsung Xclipse 530", 7600000, 1);
+    gpu_id x940big = phone(P, 1u << 22 | 3u << 12, 0x144D, 21, 0, 0, 0, 0, "Samsung Xclipse 940", 11800000, 1);
+    CHECK(QD(Q_PIPE_KEEP, a55) == 800 && QD(Q_PIPE_KEEP, xcl) == 800 && QD(Q_PIPE_KEEP, x940big) == 800 && QD(Q_PIPE_KEEP, a650) == 800 && QD(Q_PIPE_KEEP, tu) == 800,
+          "%s: pipelines capped on Xclipse at any memory size and on \"8 GB\" phones reporting ~7.6 M kB (Galaxy A55 #324, Adreno 650 / Turnip phones)", gm);
     gpu_id bxm = phone(P, 1u << 22 | 1u << 12, 0x1010, 7, 0, 0, 0, 0, "PowerVR B-Series BXM-8-256", 3800000, 0);
     CHECK(QD(Q_PCACHE_GAPS_OFF, bxm) && QD(Q_PIPE_KEEP, bxm) == 800 && QD(Q_BC_GPU_OFF, bxm) && QD(Q_BC_DECODE, bxm) && QD(Q_GPU_TIME_OFF, bxm) && !QD(Q_BARRIER_RELAXED, bxm),
           "%s, PowerVR BXM-8-256 on 4 GB: no cache for gap pipelines, pipelines capped, BC on the CPU and decoded, no GPU timestamps", gm);
@@ -309,9 +313,9 @@ int main(int argc, char **argv) {
     static const uint32_t apis[] = { 1u << 22, 1u << 22 | 1u << 12 | 128, 1u << 22 | 2u << 12 | 200, 1u << 22 | 3u << 12 | 231, 1u << 22 | 4u << 12 };
     static const char *const names[] = { "Mali-G615 MC2", "Mali-G720-Immortalis MC12", "Adreno (TM) 830", "Adreno (TM) 710", "Turnip Adreno (TM) 650", "Samsung Xclipse 940",
                                          "PowerVR D-Series DXT-48-1536", "llvmpipe (LLVM 15.0.7, 256 bits)", "" };
-    static const long rams[] = { 0, 3800000, 7499999, 7500000, 11800000 };
+    static const long rams[] = { 0, 3800000, 7499999, 7500000, 7600000, 8999999, 9000000, 11800000 };
     static const uint32_t dvs[] = { 0, 44u << 22 | 1u << 12, 48u << 22, 49u << 22, 0x80000000u | 512u << 12 | 762u, 0x5d9576 };   // (none, r44p1, r48p0, r49p0, Qualcomm 512.762, PowerVR)
-    const grid_t G = { vens, 7, dids, 9, apis, 5, names, 9, rams, 5, dvs, 6, 1 };
+    const grid_t G = { vens, 7, dids, 9, apis, 5, names, 9, rams, 8, dvs, 6, 1 };
     for (int i = 0; i < NPROF; i++) {
         long c0 = checks; cmp_ctx c = { &PROFILES[i], PROFILES[i].app, 0, 0 };
         long n = grid_run(&G, PROFILES[i].port, eng_of(&PROFILES[i]), cmp_both, &c);

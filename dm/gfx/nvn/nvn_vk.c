@@ -74,6 +74,7 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 // ================= Device =================
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceProperties g_props; static VkPhysicalDeviceMemoryProperties g_memp;
+#include "pso_lru.h"     // which pipelines the cap destroys (pso_evict), least recently used first
 #include "vk_quirks.h"   // the unified driver layer's table: every per-GPU workaround's default, from one description of the GPU
 static gpu_id g_gpuid = { .driver_id = -1 };
 static int g_has_swapchain, g_host_import, g_clipctl, g_border, g_divisor, g_eds2, g_moltenvk;
@@ -1937,8 +1938,10 @@ static uint64_t submit_tracked(sub_t *s, VkCommandBuffer *cbs, uint32_t n) {
     pthread_mutex_lock(&g_cmu);
     uint64_t f = ++g_fence; s->fence = f; cr_submitted(s);
     if (!g_tlsem) {   // a new fence for this submission (the slot is reused only after its last submission completed, so the old fence is no longer waited on)
-        if (s->vf) vkDestroyFence(g_dev, s->vf, NULL);
-        VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; s->vf = VK_NULL_HANDLE; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &s->vf));
+        static int reuse = -1; if (reuse < 0) { const char *e = getenv("DM_VK_FENCE_REUSE"); reuse = !(e && !strcmp(e, "0")); }   // (DM_VK_FENCE_REUSE=0: destroyed and made again, as before)
+        if (s->vf && reuse) VKCHECK(vkResetFences(g_dev, 1, &s->vf));   // (the same fence again: no destroy + create per submission, fable-cpu fix 4)
+        else { if (s->vf) vkDestroyFence(g_dev, s->vf, NULL);
+               VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; s->vf = VK_NULL_HANDLE; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &s->vf)); }
     }
     if (hold_on() && n <= 2) {   // held until the present (or until something waits on it)
         int k = atomic_load(&g_nheld); held_t *h = &g_held[k]; h->s = s; h->n = n; h->f = f; for (uint32_t i = 0; i < n; i++) h->cbs[i] = cbs[i];
@@ -4107,6 +4110,11 @@ static nvn_hmap g_pso = {.klen = sizeof(pkey)}, g_pso_fail = {.klen = sizeof(pke
 //   values that change nothing folded together (no depth test: no writes, compare ALWAYS; no stencil test: ops KEEP / ALWAYS; unused streams: stride 0)
 typedef struct { uint8_t cull, front, topo, dt, dw, dcmp, st, pad; uint8_t sop[2][4]; uint32_t stride[16]; } sst;   // sop[face]: fail, pass, depth fail, compare
 typedef struct { pkey k; sst s; } pkey_s;
+// Points and lines are never culled (Vulkan culls polygons only; the dynamic path sends NONE for them, draw_), so their cull mode is folded to NONE in the key: fewer
+//   pipelines to build without extended dynamic state (fable-cpu fix 6). The prewarm folds the recorded lists the same way. DM_VK_SST_FOLD=0: kept as the game set it
+static int sst_fold_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_SST_FOLD"); v = !(e && !strcmp(e, "0")); } return v; }
+static int topo_class(VkPrimitiveTopology t);
+static void sst_fold(sst *s) { if (sst_fold_on() && topo_class((VkPrimitiveTopology)s->topo) < 2) s->cull = VK_CULL_MODE_NONE; }
 static nvn_hmap g_pso_s = {.klen = sizeof(pkey_s)}, g_pso_s_fail = {.klen = sizeof(pkey_s)}, g_pso_s_rec = {.klen = sizeof(pkey)};
 static VkPipelineCache g_pcache;
 static pthread_mutex_t g_psomu = PTHREAD_MUTEX_INITIALIZER;   // g_pso / g_pso_fail, shader variants, the record file: the game's thread and the prewarm thread
@@ -4221,11 +4229,13 @@ static void pso_record_s(const vprog *pr, const pkey *k, const sst *s) {   // ca
     fwrite(&r, sizeof r, 1, g_psorec_s); fflush(g_psorec_s);
 }
 static VkPipeline pso_make(vprog *pr, pkey k, const sst *ss);
-// ---- Pipelines kept (Arm's driver, phones under 7.5 GB): at most pso_cap(), the ones unused longest destroyed. Arm's driver keeps ~0.4 MB of the process's memory
+// ---- Pipelines kept (Arm's driver, Xclipse, phones under 9 GB: vk_quirks.h Q_PIPE_KEEP): at most pso_cap(), the ones unused longest destroyed. Arm's driver keeps ~0.4 MB of the process's memory
 //   and a GPU mapping for each pipeline: 5500 of them were 2.3 GB of malloc and 61k mappings when a Mali-G720 closed after ~30 minutes in another Android port of a Switch game;
 //   here the Mali players' apps held 1.7-2.6 GB against 1 GB on an Adreno (Shield builds ~1500 at start). Every 300 presents (pso_evict), over the
 //   cap, the pipelines unused for 900 presents go, oldest first, after the GPU is done with them (defer_add); one needed again is built again from the pipeline
 //   cache. The record lists get each pipeline once (g_pso_rec*), not again when it comes back. DM_VK_PIPE_KEEP=<n> (0: never)
+//   DM_VK_PIPE_LRU (default 1; 0: the old rule): a pipeline counts as used when built, so the prewarm's are not all destroyed at the first check (#215: 1747 of 2467
+//   right after the prewarm, then built again one by one in play), and one check destroys at most DM_VK_PIPE_EVICT_STEP (half the cap): pso_lru.h
 static nvn_hmap g_pso_used = {.klen = sizeof(VkPipeline)}, g_pso_rec = {.klen = sizeof(pkey)}, g_pso_rec_s = {.klen = sizeof(pkey_s)};
 static uint64_t g_pso_evicted;
 static int pso_cap(void) {
@@ -4235,24 +4245,38 @@ static int pso_cap(void) {
     if (cap > 0) VLOG("pipelines kept: at most %d (the least recently used ones destroyed when unused for 30 s)", cap); else cap = 0;
     return cap;
 }
+static int pso_lru_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PIPE_LRU"); v = !(e && !strcmp(e, "0")); } return v; }
+static int pso_evict_step(int cap) {
+    static int v = -2; if (v > -2) return v;
+    const char *e = getenv("DM_VK_PIPE_EVICT_STEP"); v = !pso_lru_on() ? 0 : e && *e ? atoi(e) : pso_lru_step_default(cap);
+    if (v < 0) v = 0;
+    if (cap > 0) VLOG("pipelines over the cap: %s", v ? "a pipeline counts as used when built; at most this many destroyed per check (DM_VK_PIPE_LRU, DM_VK_PIPE_EVICT_STEP)" : "all destroyed at once (DM_VK_PIPE_LRU=0)");
+    if (v) VLOG("pipelines destroyed per check: at most %d", v);
+    return v;
+}
+// a pipeline just built (caller holds g_psomu): its first use is now (pso_lru.h), so the prewarm's are as recent as the start of the game
+static void pso_built_locked(VkPipeline p) { if (p && pso_cap() && pso_lru_on()) nvn_hm_put(&g_pso_used, &p, (void *)(uintptr_t)pso_lru_stamp(g_frame_no, 1)); }
 static void pso_used(VkPipeline p) {   // a draw binds p (the cap is on): its last use
     pthread_mutex_lock(&g_psomu); nvn_hm_put(&g_pso_used, &p, (void *)(uintptr_t)(g_frame_no + 1)); pthread_mutex_unlock(&g_psomu);
 }
-typedef struct { uint64_t last; VkPipeline p; int s; uint32_t slot; } pso_old;
-static int pso_old_cmp(const void *a, const void *b) { uint64_t x = ((const pso_old *)a)->last, y = ((const pso_old *)b)->last; return x < y ? -1 : x > y; }
+typedef struct { VkPipeline p; int s; uint32_t slot; } pso_old;
 static void pso_evict(void) {
     int cap = pso_cap(); if (!cap) return;
+    int step = pso_evict_step(cap);
     pthread_mutex_lock(&g_psomu);
     uint32_t live = g_pso.n + g_pso_s.n;
     if (live <= (uint32_t)cap) { pthread_mutex_unlock(&g_psomu); return; }
-    pso_old *c = malloc(sizeof *c * live); uint32_t nc = 0;
-    for (int which = 0; which < 2 && c; which++) { nvn_hmap *m = which ? &g_pso_s : &g_pso;
-        for (uint32_t i = 0; i < m->cap; i++) { if (!m->vals[i]) continue; VkPipeline p = (VkPipeline)m->vals[i];
-            uint64_t last = (uint64_t)(uintptr_t)nvn_hm_get(&g_pso_used, &p); if (last && last + 900 > g_frame_no + 1) continue;   // (used in the last 30 s)
-            c[nc++] = (pso_old){ last, p, which, i }; } }
+    pso_old *all = malloc(sizeof *all * live), *c = malloc(sizeof *c * live); pso_lru_ent *le = malloc(sizeof *le * live); uint32_t n = 0, nc = 0;
+    for (int which = 0; which < 2 && all && c && le; which++) { nvn_hmap *m = which ? &g_pso_s : &g_pso;
+        for (uint32_t i = 0; i < m->cap && n < live; i++) { if (!m->vals[i]) continue; VkPipeline p = (VkPipeline)m->vals[i];
+            all[n] = (pso_old){ p, which, i }; le[n] = (pso_lru_ent){ (uint64_t)(uintptr_t)nvn_hm_get(&g_pso_used, &p), n }; n++; } }
+    if (all && c && le) {   // (pso_lru.h: not used in the last 30 s, least recently used first, at most step)
+        nc = pso_lru_pick(le, n, g_frame_no + 1, cap, step);
+        for (uint32_t i = 0; i < nc; i++) c[i] = all[le[i].id];
+    }
+    free(all); free(le);
     if (c && nc) {
-        qsort(c, nc, sizeof *c, pso_old_cmp);
-        uint32_t drop = live - (uint32_t)cap * 9 / 10; if (drop > nc) drop = nc;
+        uint32_t drop = nc;
         // the keys of the chosen slots first (deleting from a map moves its other entries), then the deletions by key
         uint8_t *keys = malloc((size_t)drop * (sizeof(pkey_s) > sizeof(pkey) ? sizeof(pkey_s) : sizeof(pkey)));
         size_t ks = sizeof(pkey_s) > sizeof(pkey) ? sizeof(pkey_s) : sizeof(pkey);
@@ -4261,21 +4285,28 @@ static void pso_evict(void) {
             if (nvn_hm_del(m, keys + i * ks)) { nvn_hm_del(&g_pso_used, &c[i].p); defer_add((dfr){ .kind = DF_PIPELINE, .h.pipe = c[i].p }); g_pso_evicted++; } }
         free(keys);
     }
-    uint32_t now = g_pso.n + g_pso_s.n; pthread_mutex_unlock(&g_psomu); free(c);
+    uint32_t now = g_pso.n + g_pso_s.n; pthread_mutex_unlock(&g_psomu); free(c);   // (live - now: destroyed by this check)
     static int said; if (said++ < 20) VLOG("pipelines kept: %u of %u left (%llu destroyed so far, at most %d kept)", now, live, (unsigned long long)g_pso_evicted, cap);
 }
-// the pipeline for k with the draw state ss built in (g_eds 0); record: a draw's (the shared list gets k once, this phone's list k with ss), not the prewarm's
+static int apso_s_queue(vprog *pr, const pkey_s *ks);   // (below, with the background workers)
+// the pipeline for k with the draw state ss built in (g_eds 0); record: 1 a draw's (the shared list gets k once, this phone's list k with ss), 2 a background worker's
+//   (built now, recorded as a draw's), 0 the prewarm's
 static VkPipeline pso_lookup_s(vprog *pr, const pkey *k, const sst *ss, int record) {
     pkey_s ks; memset(&ks, 0, sizeof ks); ks.k = *k; ks.s = *ss;
     pthread_mutex_lock(&g_psomu);
     VkPipeline p = nvn_hm_get(&g_pso_s, &ks); int failed = p ? 0 : nvn_hm_get(&g_pso_s_fail, &ks) != NULL;
     pthread_mutex_unlock(&g_psomu);
     if (p || failed) return p;
+    if (record == 1) {   // a draw's miss: to the background workers as with extended dynamic state (apso_s_queue), not built on the replay thread (#99: p95 216 ms on 1.1)
+        int r = apso_s_queue(pr, &ks);
+        if (r == 0) return VK_NULL_HANDLE;   // (still being built: the draw is skipped this frame, as pso_lookup does)
+        if (r > 0) { pthread_mutex_lock(&g_psomu); p = nvn_hm_get(&g_pso_s, &ks); pthread_mutex_unlock(&g_psomu); return p; }
+    }
     p = pso_make(pr, *k, ss);
     pthread_mutex_lock(&g_psomu);
     VkPipeline q = nvn_hm_get(&g_pso_s, &ks);
     if (q) { pthread_mutex_unlock(&g_psomu); if (p) vkDestroyPipeline(g_dev, p, NULL); return q; }
-    if (p) { nvn_hm_put(&g_pso_s, &ks, p); atomic_fetch_add(&g_pso_new, 1);
+    if (p) { nvn_hm_put(&g_pso_s, &ks, p); atomic_fetch_add(&g_pso_new, 1); pso_built_locked(p);
              if (record && !nvn_hm_get(&g_pso_rec_s, &ks)) { nvn_hm_put(&g_pso_rec_s, &ks, (void *)1); atomic_fetch_add(&g_pso_ingame, 1); pso_record_s(pr, k, ss);
                            if (!nvn_hm_get(&g_pso_s_rec, k)) { nvn_hm_put(&g_pso_s_rec, k, (void *)1); pso_record(pr, k); } } }
     else nvn_hm_put(&g_pso_s_fail, &ks, (void *)1);
@@ -4289,17 +4320,19 @@ static VkPipeline pso_lookup_s(vprog *pr, const pkey *k, const sst *ss, int reco
 //   their first frame (a short hitch at most) instead of objects missing for seconds while one worker went through a new scene's list (6,336 draws skipped, S25+)
 #define APSO_N 256
 #define APSO_WORKERS 3
+// (a queue entry's has_s: the draw state built in, pso_lookup_s on a driver without extended dynamic state; its key then waits in g_pso_pend_s)
 static pthread_cond_t g_apso_dcv = PTHREAD_COND_INITIALIZER; static _Atomic int64_t g_apso_budget_ns = 8000000; static int64_t g_apso_frame_ns = 8000000;
-static struct { vprog *pr; pkey k; } g_apso[APSO_N]; static int g_apso_h, g_apso_n; static pthread_mutex_t g_apso_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_apso_cv = PTHREAD_COND_INITIALIZER; static nvn_hmap g_pso_pend = {.klen = sizeof(pkey)}; static _Atomic uint64_t g_apso_done, g_apso_skipped;
+static struct { vprog *pr; pkey k; sst s; uint8_t has_s; } g_apso[APSO_N]; static int g_apso_h, g_apso_n; static pthread_mutex_t g_apso_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_apso_cv = PTHREAD_COND_INITIALIZER; static nvn_hmap g_pso_pend = {.klen = sizeof(pkey)}, g_pso_pend_s = {.klen = sizeof(pkey_s)}; static _Atomic uint64_t g_apso_done, g_apso_skipped;
 static VkPipeline pso_lookup(vprog *pr, const pkey *k, int record);
 static void *apso_main(void *a) { DM_THREAD_NAME("dm-pipelines");
     (void)a;
     for (;;) {
         pthread_mutex_lock(&g_apso_mu); while (!g_apso_n) pthread_cond_wait(&g_apso_cv, &g_apso_mu);
-        vprog *pr = g_apso[g_apso_h].pr; pkey k = g_apso[g_apso_h].k; g_apso_h = (g_apso_h + 1) % APSO_N; g_apso_n--; pthread_mutex_unlock(&g_apso_mu);
-        pso_lookup(pr, &k, 2);   // (2: compile now, recorded as the game's)
-        pthread_mutex_lock(&g_psomu); nvn_hm_del(&g_pso_pend, &k); pthread_mutex_unlock(&g_psomu); atomic_fetch_add(&g_apso_done, 1);
+        vprog *pr = g_apso[g_apso_h].pr; pkey_s ks; memset(&ks, 0, sizeof ks); ks.k = g_apso[g_apso_h].k; int has_s = g_apso[g_apso_h].has_s; if (has_s) ks.s = g_apso[g_apso_h].s;
+        g_apso_h = (g_apso_h + 1) % APSO_N; g_apso_n--; pthread_mutex_unlock(&g_apso_mu);
+        if (has_s) pso_lookup_s(pr, &ks.k, &ks.s, 2); else pso_lookup(pr, &ks.k, 2);   // (2: compile now, recorded as the game's)
+        pthread_mutex_lock(&g_psomu); if (has_s) nvn_hm_del(&g_pso_pend_s, &ks); else nvn_hm_del(&g_pso_pend, &ks.k); pthread_mutex_unlock(&g_psomu); atomic_fetch_add(&g_apso_done, 1);
         pthread_mutex_lock(&g_apso_mu); pthread_cond_broadcast(&g_apso_dcv); pthread_mutex_unlock(&g_apso_mu);   // (a draw waiting for it: see apso_wait)
     }
     return NULL;
@@ -4316,12 +4349,12 @@ static int apso_on(void) {
     return v;
 }
 static int64_t apso_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
-// waits (within what is left of this frame's budget) for a queued pipeline; 1 when it is built
-static int apso_wait(const pkey *k) {
+// waits (within what is left of this frame's budget) for a queued pipeline (pend: g_pso_pend, or g_pso_pend_s for a key with draw state); 1 when it is built
+static int apso_wait_in(nvn_hmap *pend, const void *k) {
     int64_t left = atomic_load(&g_apso_budget_ns); if (left <= 0) return 0;
     int64_t t0 = apso_now(); int done = 0;
     for (;;) {
-        pthread_mutex_lock(&g_psomu); done = !nvn_hm_get(&g_pso_pend, k); pthread_mutex_unlock(&g_psomu);
+        pthread_mutex_lock(&g_psomu); done = !nvn_hm_get(pend, k); pthread_mutex_unlock(&g_psomu);
         if (done) break;
         int64_t used = apso_now() - t0; if (used >= left) break;
         struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); int64_t ns = dl.tv_nsec + (left - used < 2000000 ? left - used : 2000000);   // (re-checked every 2 ms at most)
@@ -4331,13 +4364,37 @@ static int apso_wait(const pkey *k) {
     atomic_fetch_sub(&g_apso_budget_ns, apso_now() - t0);
     return done;
 }
+static int apso_wait(const pkey *k) { return apso_wait_in(&g_pso_pend, k); }
+// Without extended dynamic state (Vulkan 1.1 drivers: Adreno 610 / 613 / 710 on Qualcomm's 1.1, Arm before r44) a draw's pipeline holds its draw state, so many more are
+//   needed, and they used to be built on the replay thread whatever DM_VK_ASYNC_PSO said: "pipelines built in play", p95 216 ms on an Adreno 613 (#99). They go to the
+//   same workers now, under the same rule and the same 8 ms budget a frame. DM_VK_ASYNC_PSO_S=0: built on the spot as before. Legends: Arceus keeps async_pso_off
+//   (apso_on 0 there): built on the spot. Returns 1 built (look again), 0 still being built (skip the draw this frame), -1 not queued (build it now)
+static int apso_s_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_ASYNC_PSO_S"); v = (!e || atoi(e) != 0) && apso_on();
+        if (!g_eds) VLOG("pipelines with the draw state built in: %s", v ? "the ones the lists lacked built in the background too (DM_VK_ASYNC_PSO_S)" : "built when a draw needs them"); }
+    return v;
+}
+static int apso_s_queue(vprog *pr, const pkey_s *ks) {
+    if (!apso_s_on()) return -1;
+    pthread_mutex_lock(&g_psomu);
+    int queued = nvn_hm_get(&g_pso_pend_s, ks) != NULL;
+    if (!queued) { pthread_mutex_lock(&g_apso_mu);
+        if (g_apso_n < APSO_N) { int t = (g_apso_h + g_apso_n) % APSO_N; g_apso[t].pr = pr; g_apso[t].k = ks->k; g_apso[t].s = ks->s; g_apso[t].has_s = 1; g_apso_n++; queued = 1;
+                                 nvn_hm_put(&g_pso_pend_s, ks, (void *)1); pthread_cond_signal(&g_apso_cv); }
+        pthread_mutex_unlock(&g_apso_mu); }
+    pthread_mutex_unlock(&g_psomu);
+    if (!queued) return -1;   // (the queue full: built on the spot, as pso_lookup does)
+    if (apso_wait_in(&g_pso_pend_s, ks)) return 1;
+    atomic_fetch_add(&g_apso_skipped, 1); return 0;
+}
 static VkPipeline pso_lookup(vprog *pr, const pkey *k, int record) {
     pthread_mutex_lock(&g_psomu);
     VkPipeline p = nvn_hm_get(&g_pso, k); int failed = p ? 0 : nvn_hm_get(&g_pso_fail, k) != NULL;
     if (!p && !failed && record == 1 && apso_on()) {   // the game's draw: to the worker, skipped this time
         int queued = nvn_hm_get(&g_pso_pend, k) != NULL;
         if (!queued) { pthread_mutex_lock(&g_apso_mu);
-            if (g_apso_n < APSO_N) { int t = (g_apso_h + g_apso_n) % APSO_N; g_apso[t].pr = pr; g_apso[t].k = *k; g_apso_n++; queued = 1; nvn_hm_put(&g_pso_pend, k, (void *)1); pthread_cond_signal(&g_apso_cv); }
+            if (g_apso_n < APSO_N) { int t = (g_apso_h + g_apso_n) % APSO_N; g_apso[t].pr = pr; g_apso[t].k = *k; g_apso[t].has_s = 0; g_apso_n++; queued = 1; nvn_hm_put(&g_pso_pend, k, (void *)1); pthread_cond_signal(&g_apso_cv); }
             pthread_mutex_unlock(&g_apso_mu); }
         if (queued) { pthread_mutex_unlock(&g_psomu);
             if (apso_wait(k)) { pthread_mutex_lock(&g_psomu); p = nvn_hm_get(&g_pso, k); failed = p ? 0 : nvn_hm_get(&g_pso_fail, k) != NULL; pthread_mutex_unlock(&g_psomu); return p; }
@@ -4349,7 +4406,7 @@ static VkPipeline pso_lookup(vprog *pr, const pkey *k, int record) {
     pthread_mutex_lock(&g_psomu);
     VkPipeline q = nvn_hm_get(&g_pso, k);
     if (q) { pthread_mutex_unlock(&g_psomu); if (p) vkDestroyPipeline(g_dev, p, NULL); return q; }   // the other thread finished the same one first
-    if (p) { nvn_hm_put(&g_pso, k, p); if (record && !nvn_hm_get(&g_pso_rec, k)) { nvn_hm_put(&g_pso_rec, k, (void *)1); pso_record(pr, k); atomic_fetch_add(&g_pso_ingame, 1); } atomic_fetch_add(&g_pso_new, 1); }
+    if (p) { nvn_hm_put(&g_pso, k, p); pso_built_locked(p); if (record && !nvn_hm_get(&g_pso_rec, k)) { nvn_hm_put(&g_pso_rec, k, (void *)1); pso_record(pr, k); atomic_fetch_add(&g_pso_ingame, 1); } atomic_fetch_add(&g_pso_new, 1); }
     else nvn_hm_put(&g_pso_fail, k, (void *)1);
     pthread_mutex_unlock(&g_psomu);
     return p;
@@ -4458,6 +4515,7 @@ static void *prewarm_static(void) {
         pkey k = r.r.k; for (int st = 0; st < 5; st++) k.sh[st] = pr->sh[st];
         b10_key_here(&k);   // (DM_VK_B10_AS_RGBA16: an R11G11B10F target is the stand-in here)
         prog_layout(pr, 0);
+        sst_fold(&r.s);   // (a list recorded before the fold: the key the draws look up now)
         pkey_s ks; memset(&ks, 0, sizeof ks); ks.k = k; ks.s = r.s;
         pthread_mutex_lock(&g_psomu); int have = nvn_hm_get(&g_pso_s, &ks) != NULL; pthread_mutex_unlock(&g_psomu);
         if (have) { had++; continue; }
@@ -4758,6 +4816,7 @@ static VkPipeline pso_get(vprog *pr, VkPrimitiveTopology topo) {
             for (int fc = 0; fc < 2; fc++) for (int j = 0; j < 4; j++) { int v = f[fc][j] - 1; s.sop[fc][j] = (uint8_t)(v >= 0 && v <= 7 ? v : j == 3 ? 7 : 0); }
         } else for (int fc = 0; fc < 2; fc++) s.sop[fc][3] = 7;
         for (int loc = 0; loc < 32; loc++) if (k.attr[loc].used && k.attr[loc].bind < 16) s.stride[k.attr[loc].bind] = S.stream[k.attr[loc].bind].stride;
+        sst_fold(&s);
         return pso_lookup_s(pr, &k, &s, 1);
     }
     return pso_lookup(pr, &k, 1);
@@ -5788,10 +5847,28 @@ void mtl_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }
 //   (Scarlet: 43 ms a frame waiting on the submission it had just made) otherwise waits for the whole replay and then the whole GPU frame, one after the other; on the
 //   console the GPU starts at once. The cut waits for the next change of render target, so no pass is split (cutting inside a pass, then opening it again, made
 //   Sword flash white)
+// A frame held whole (DM_VK_FRAME_HOLD) is not split (2026-11-24, fable-cpu fix 4): its parts would not reach the GPU before the present anyway, and from 5 parts on
+//   (NSUB - 1, above ~750 draws at 150) the hold was flushed early, so in the heaviest scenes the frame was never whole (store decisions, passes run as one) and each part
+//   cost a command pool reset, a command buffer and a queue submission. Profile vk_split_held whole (Sword / Shield; Scarlet / Violet split them as before, they wait on
+//   the submission they just made); DM_VK_SPLIT_HELD=1 / 0 overrides. Not held: every DM_GAME_VK_SPLIT draws (profile vk_split: 150, Sword / Shield 600; DM_VK_SPLIT=<n>)
+#ifndef DM_GAME_VK_SPLIT
+#define DM_GAME_VK_SPLIT 150   // (a game_profile.h from before the profile keys)
+#endif
+#ifndef DM_GAME_VK_SPLIT_HELD_WHOLE
+#define DM_GAME_VK_SPLIT_HELD_WHOLE 0
+#endif
 static int g_split_n, g_split_due;
+static int split_every(void) {   // draws per part; 0: never split
+    static int every = -1;
+    if (every < 0) { const char *e = getenv("DM_VK_SPLIT"), *h = getenv("DM_VK_SPLIT_HELD"); every = e ? atoi(e) : DM_GAME_VK_SPLIT; if (every < 0) every = 0;   // (Scarlet outdoors 70 to 33 ms a frame; DM_VK_SPLIT=0 off)
+        int held = hold_on() && (h && *h ? atoi(h) == 0 : DM_GAME_VK_SPLIT_HELD_WHOLE);
+        if (held && every) VLOG("submissions: a frame held whole is not split (DM_VK_SPLIT_HELD=1 splits it every %d draws)", every);
+        else if (every) VLOG("submissions go to the GPU every %d draws (DM_VK_SPLIT)", every);
+        if (held) every = 0; }
+    return every;
+}
 static void sub_split(void) {
-    static int every = -1; if (every < 0) { const char *e = getenv("DM_VK_SPLIT"); every = e ? atoi(e) : 150;   // (on by default: Scarlet outdoors 70 to 33 ms a frame; DM_VK_SPLIT=0 off)
-        if (every) VLOG("submissions go to the GPU every %d draws (DM_VK_SPLIT)", every); }
+    int every = split_every();
     if (!every || ++g_split_n < every) return;
     g_split_due = 1;   // cut at the next change of render target, between passes: a pass cut and opened again flashed white in Sword
 }

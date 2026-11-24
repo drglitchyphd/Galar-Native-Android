@@ -511,6 +511,16 @@ static vtex *zt_image(VkFormat f, uint32_t w, uint32_t h, VkImageUsageFlags usag
     x->w = w; x->h = h; x->d = 1; x->levels = 1; x->layers = 1; x->samples = 1; x->usage = usage; x->aspect = fmt_aspect(f); x->fixed_fmt = 1;   // (depth: not mutable, as tex_new)
     return x;
 }
+// The submission ring reused twice over (NSUB slots): without timeline semaphores each slot's fence is reset and used again (DM_VK_FENCE_REUSE, fable-cpu fix 4),
+//   which the validation layer judges (a fence reset while pending is an error); and sub_split's interval: none for a frame held whole where the profile says vk_split_held whole, else the profile's vk_split
+static void ring_work(void) {
+    g_step = "submission ring"; uint64_t f = 0;
+    for (int i = 0; i < 2 * NSUB + 1; i++) { mtl_sub_begin(); f = mtl_sub_commit(); }
+    CHECK(mtl_wait(f, 2000000000ull), "the ring's last submission (%llu) done", (unsigned long long)f); mtl_finish();
+    for (int i = 0; i < NSUB; i++) if (!g_tlsem) CHECK(g_subs[i].vf != VK_NULL_HANDLE, "slot %d has its fence", i);
+    if (!getenv("DM_VK_SPLIT") && !getenv("DM_VK_SPLIT_HELD")) CHECK(split_every() == (hold_on() && DM_GAME_VK_SPLIT_HELD_WHOLE ? 0 : DM_GAME_VK_SPLIT), "split every %d draws (held %d, profile %d, held frames whole %d)", split_every(), hold_on(), DM_GAME_VK_SPLIT, DM_GAME_VK_SPLIT_HELD_WHOLE);
+    printf("submissions: %s, split every %d draws (0: held frames whole)\n", g_tlsem ? "timeline semaphore" : "a fence per slot, reset and reused", split_every());
+}
 static void zcopy_work(void) {
     enum { S = 16, D = 8 };
     if (g_api < VK_API_VERSION_1_1) { printf("SIMGAP zcopy: not on Vulkan 1.0 (view_get's view usage structure is Vulkan 1.1's)\n"); return; }
@@ -795,7 +805,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); zcopy_work(); inttex_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); }
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
     fflush(stdout);
     _exit(fails ? 1 : 0);   // (the engine's threads keep running; the device is not torn down)
