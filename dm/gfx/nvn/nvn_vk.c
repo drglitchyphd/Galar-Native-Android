@@ -1404,7 +1404,44 @@ typedef struct {
 } sub_t;
 #define NSUB 6
 static sub_t g_subs[NSUB]; static sub_t *g_sub; static int g_sub_next;
+// Uniform snapshots reused within a submission (DM_VK_UBO_SNAPSHOT on; DM_VK_UBO_SNAPSHOT_REUSE=0: a copy for every uniform binding of every draw, as before).
+//   That copy cost the G615 MC6 on r44p1 about 10 ms of replay CPU a frame and 144 MB of arenas, against 24 MB without snapshots (poco-runs b7 / b10, 997 draws):
+//   a scene or light block bound by hundreds of draws was copied hundreds of times. A copy is now bound again by later draws of the same submission that bind the
+//   same address and length, as long as nothing wrote into the copied range since, so each draw still reads the game's memory as it was when that draw was recorded.
+//   Dropped on every write the replay knows of: uniform updates written through (sub_update) and every range the GPU writes in this submission (wb_note: copies,
+//   fills, transform feedback, writable storage buffers, texture-to-buffer copies, deferred updates landing; those land when the GPU runs, after every copy was
+//   taken, so dropping them is only the safe side), the transform feedback check's marker, and the mirrored pools' write-backs of finished submissions (wb_apply, on
+//   the completion thread: the whole table goes at the next lookup). Not dropped for the 16-byte counter reports and semaphore values the completion thread
+//   writes (no game binds them as uniforms). Keyed by address and length, two ways a set, the one used least recently replaced (a draw's own object block, bound
+//   once, must not push out the scene block every draw binds); cleared at each submission's start (the copies are in its arena)
+enum { SNAPC_N = 512 };
+static struct { uint64_t addr, len, gen, use; VkBuffer b; VkDeviceSize o; } g_snapc[SNAPC_N]; static uint64_t g_snapc_use;
+static uint64_t g_snapc_gen = 1, g_snapc_lo = UINT64_MAX, g_snapc_hi, g_snapc_wbseen;   // (lo / hi: what the live entries span, for a quick miss in snapc_drop)
+static _Atomic uint64_t g_snapc_wbgen;   // mirrored pools written back by wb_apply (the completion thread)
+static uint64_t g_snap_copies, g_snap_reused, g_snap_bytes;   // copies made / bound again, bytes copied (the present line, per 300 presents)
+static int g_snapc_on = -1;
+static int snapc_on(void) { if (g_snapc_on < 0) { const char *e = getenv("DM_VK_UBO_SNAPSHOT_REUSE"); g_snapc_on = !(e && !strcmp(e, "0"));
+    VLOG("uniform snapshots: %s", g_snapc_on ? "one copy per submission, bound again until its range is written (DM_VK_UBO_SNAPSHOT_REUSE=0: a copy per draw)" : "a copy per draw (DM_VK_UBO_SNAPSHOT_REUSE=0)"); } return g_snapc_on; }
+static void snapc_clear(void) { g_snapc_gen++; g_snapc_lo = UINT64_MAX; g_snapc_hi = 0; }
+static void snapc_drop(uint64_t lo, uint64_t n) {
+    uint64_t hi = lo + n; if (!n || hi <= g_snapc_lo || lo >= g_snapc_hi) return;
+    for (int i = 0; i < SNAPC_N; i++) if (g_snapc[i].gen == g_snapc_gen && lo < g_snapc[i].addr + g_snapc[i].len && g_snapc[i].addr < hi) g_snapc[i].gen = 0;
+}
+static uint32_t snapc_set(uint64_t a, uint64_t n) { uint64_t h = (a >> 4) * 0x9E3779B97F4A7C15ull ^ n * 0xbf58476d1ce4e5b9ull; h ^= h >> 31; return (uint32_t)(h >> 23) & (SNAPC_N - 2); }   // (even: the set's first way)
+static int snapc_get(uint64_t a, uint64_t n, VkBuffer *b, VkDeviceSize *o) {
+    uint64_t w = atomic_load(&g_snapc_wbgen); if (w != g_snapc_wbseen) { g_snapc_wbseen = w; snapc_clear(); return 0; }
+    uint32_t s = snapc_set(a, n);
+    for (uint32_t k = s; k < s + 2; k++) if (g_snapc[k].gen == g_snapc_gen && g_snapc[k].addr == a && g_snapc[k].len == n) {
+        g_snapc[k].use = ++g_snapc_use; *b = g_snapc[k].b; *o = g_snapc[k].o; return 1; }
+    return 0;
+}
+static void snapc_put(uint64_t a, uint64_t n, VkBuffer b, VkDeviceSize o) {
+    uint32_t s = snapc_set(a, n); if (g_snapc[s].gen == g_snapc_gen && (g_snapc[s + 1].gen != g_snapc_gen || g_snapc[s + 1].use < g_snapc[s].use)) s++;
+    g_snapc[s].addr = a; g_snapc[s].len = n; g_snapc[s].b = b; g_snapc[s].o = o; g_snapc[s].gen = g_snapc_gen; g_snapc[s].use = ++g_snapc_use;
+    if (a < g_snapc_lo) g_snapc_lo = a; if (a + n > g_snapc_hi) g_snapc_hi = a + n;
+}
 static void wb_note(uint64_t addr, uint64_t n) {
+    snapc_drop(addr, n);   // (the uniform snapshots' copies of it: above)
     if (!n || !g_sub || !atomic_load(&g_nshadow)) return;
     pthread_mutex_lock(&g_mu); int k = pool_find(addr, n); int sh = k >= 0 && g_pools[k].shadow; pthread_mutex_unlock(&g_mu);
     if (!sh) return;
@@ -1451,12 +1488,14 @@ static uint64_t report_time(sub_t *s, uint32_t q, uint64_t now_ticks) {   // a r
     return r;
 }
 static void wb_apply(sub_t *s) {
+    int wrote = 0;
     for (int i = 0; i < s->nwb; i++) {
         pthread_mutex_lock(&g_mu); int k = pool_find(s->wb[i].addr, s->wb[i].n); pool_ent e = k >= 0 ? g_pools[k] : (pool_ent){0}; pthread_mutex_unlock(&g_mu);
         if (k < 0 || !e.shadow) continue;
         dm_guest_write_prepare((void *)(uintptr_t)s->wb[i].addr, s->wb[i].n);
-        memcpy((void *)(uintptr_t)s->wb[i].addr, e.shadow + (s->wb[i].addr - e.base), s->wb[i].n);
+        memcpy((void *)(uintptr_t)s->wb[i].addr, e.shadow + (s->wb[i].addr - e.base), s->wb[i].n); wrote = 1;
     }
+    if (wrote) atomic_fetch_add(&g_snapc_wbgen, 1);   // (after the writes: the recording thread's next snapshot lookup drops every copy)
     s->nwb = 0;
 }
 static void post_apply(sub_t *s) {
@@ -1621,6 +1660,7 @@ void mtl_sub_begin(void) {
     defer_drain();
     VKCHECK(vkResetCommandPool(g_dev, s->pool, 0)); arena_reset(s);
     for (int i = 0; i < s->ndp; i++) vkResetDescriptorPool(g_dev, s->dp[i], 0); s->cdp = 0; g_dsc_gen++;   // (desc_flush's reused sets were in these pools)
+    snapc_clear();   // (the uniform snapshots' copies were in the last submission's arena)
     s->npost = 0; s->ucb_open = 0;
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     if (!s->prim) s->prim = s->cb;   // (the submission's own primary: allocated with it)
@@ -4845,7 +4885,8 @@ static VkDescriptorSet desc_set_alloc(VkDescriptorSetLayout dsl) {
 // DM_VK_UBO_SNAPSHOT=1 (mtl_init sets it for a Mali-G615 on Arm's driver before r49, which needed it to start; the menu's Mali tests: Auto / Off = 0 / On = 1):
 //   uniform buffers copied when their draw is recorded (push_stage), uniform updates written into the game's memory as they are recorded (sub_update)
 static uint64_t g_snap_wt;   // uniform updates written through for the snapshots (the present line)
-static int ubo_snap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UBO_SNAPSHOT"); v = e && atoi(e) > 0; VLOG("uniform buffers: %s", v ? "copied when their draw is recorded, updates written through (DM_VK_UBO_SNAPSHOT)" : "read by the GPU from the pools"); } return v; }
+static int g_ubo_snap = -1;
+static int ubo_snap_on(void) { if (g_ubo_snap < 0) { const char *e = getenv("DM_VK_UBO_SNAPSHOT"); g_ubo_snap = e && atoi(e) > 0; VLOG("uniform buffers: %s", g_ubo_snap ? "copied when their draw is recorded, updates written through (DM_VK_UBO_SNAPSHOT)" : "read by the GPU from the pools"); if (g_ubo_snap) snapc_on(); } return g_ubo_snap; }
 enum { DSC_N = 4096 };
 static struct { uint64_t h1, h2, gen; VkDescriptorSet ds; } g_dsc[DSC_N];
 static uint64_t g_dsc_hits, g_dsc_new;   // sets reused / written (the present line)
@@ -4927,10 +4968,13 @@ static void push_stage_h(vshader *s, int st, VkPipelineBindPoint bp, VkPipelineL
                         VkDeviceSize want = left, cap = r->kind == SPV_RES_UBO ? g_props.limits.maxUniformBufferRange : g_props.limits.maxStorageBufferRange; (void)size;
                         if (want > left) want = left; if (want > cap) want = cap;
                         // DM_VK_UBO_SNAPSHOT=1 (diagnosis, Mali white #47 / #53 / #64 / #68): every uniform buffer copied when its draw is recorded, as Adreno's 64-byte alignment makes
-                        //   most of them, instead of the GPU reading the pool live; the game's bound size + 4 KB (what the lighting reads past it), at most 64 KB
+                        //   most of them, instead of the GPU reading the pool live; the game's bound size + 4 KB (what the lighting reads past it), at most 64 KB.
+                        //   One copy per submission while its range is not written (snapc_get, above wb_note), unless DM_VK_UBO_SNAPSHOT_REUSE=0
                         if (ubo_snap_on() && r->kind == SPV_RES_UBO) {
                             VkDeviceSize m = size ? size + 4096 : 65536; if (m > want) m = want; if (m > 65536) m = 65536;
-                            uint8_t *d = arena_alloc(g_sub, m, &b, &o); memcpy(d, (const void *)(uintptr_t)addr, m); n = m;
+                            if (snapc_on() && snapc_get(addr, m, &b, &o)) g_snap_reused++;
+                            else { uint8_t *d = arena_alloc(g_sub, m, &b, &o); memcpy(d, (const void *)(uintptr_t)addr, m); g_snap_copies++; g_snap_bytes += m; if (snapc_on()) snapc_put(addr, m, b, o); }
+                            n = m;
                         }
                         else if (po % al == 0) { b = pb; o = po; n = want; }
                         else if (r->kind == SPV_RES_UBO) {   // misaligned uniform data: a snapshot in the arena (the GPU-side updates of this submission are in the pool already)
@@ -5225,7 +5269,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
         { static int chk = -1; if (chk < 0) { const char *e = getenv("DM_VK_TF_CHECK"); chk = quirk_note(Q_TF_CHECK, e ? atoi(e) != 0 : quirk_default(Q_TF_CHECK, &g_gpuid), e != NULL); }
           extern uint64_t g_tfchk_at, g_tfchk_frame; extern uint32_t g_tfchk_n;
           if (chk == 1 && tfb[0] && pr->sh[0]->tf_stride[0]) { chk = 2; uint64_t at = S.tf[0].addr + S.tf_off[0], n = (uint64_t)dw->count * pr->sh[0]->tf_stride[0]; if (n > 64) n = 64;
-              n &= ~3ull; if (n) { dm_guest_write_prepare((void *)(uintptr_t)at, n); for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(uintptr_t)(at + i) = 0x7fc0deadu;
+              n &= ~3ull; if (n) { dm_guest_write_prepare((void *)(uintptr_t)at, n); snapc_drop(at, n); for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(uintptr_t)(at + i) = 0x7fc0deadu;
                   g_tfchk_at = at; g_tfchk_n = (uint32_t)n; g_tfchk_frame = g_frame_no; } } }
         if (pr->sh[0]->dp) { uint32_t dv[3] = { (uint32_t)dw->first, (uint32_t)dw->base_instance, 0 }; vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, SPV_DRAWP_PC_OFFSET, sizeof dv, dv); }
         vkCmdDraw(cb, (uint32_t)dw->count, 1, (uint32_t)dw->first, (uint32_t)dw->base_instance);
@@ -5335,7 +5379,7 @@ static void sub_update(const void *data, uint64_t dst, uint64_t n) {   // the da
     // With the uniform snapshots (ubo_snap_on) every draw reads its uniform data as the game's memory holds it when the draw is recorded, so an update recorded
     //   before it must be there by then: written into that memory now, in recording order, as well as by the copy below (which lands only when the GPU runs it,
     //   after every snapshot of this submission was taken: those draws read the data from before the update)
-    if (ubo_snap_on()) { dm_guest_write_prepare((void *)(uintptr_t)dst, n); memcpy((void *)(uintptr_t)dst, data, n); g_snap_wt++; }
+    if (ubo_snap_on()) { dm_guest_write_prepare((void *)(uintptr_t)dst, n); memcpy((void *)(uintptr_t)dst, data, n); g_snap_wt++; snapc_drop(dst, n); }   // (copies of the range taken before it: gone)
     if (P.open && !P_tf && g_nubd < UBD_MAX && ubd_on()) {   // kept until the pass ends (see ubd_flush); draws after it read it through ubd_shadow
         VkBuffer tb; VkDeviceSize to; uint8_t *m = arena_alloc(g_sub, n, &tb, &to); memcpy(m, data, n);
         g_ubd[g_nubd++] = (ubd_ent){ dst, dst + n, tb, to, m }; g_ubd_deferred++; return; }
@@ -7392,7 +7436,10 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (n % 1800 == 0 && (g_nanmm || g_clampzero || g_fmz)) VLOG("shaders changed so far: %d for NaN in min / max / saturate, %d for Arm erratum 3779215, %d for FMZ", atomic_load(&g_nanmm_n), atomic_load(&g_clampzero_n), atomic_load(&g_fmz_n));
     if ((n == 1 || n % 300 == 0) && atomic_load(&g_pre_done) + atomic_load(&g_pre_late) + atomic_load(&g_pre_full))
         VLOG("textures uploaded ahead %llu (%ld MB of them not drawn yet), used before the worker got to them %llu, left to their first use (budget or queue full) %llu; in %llu batches", (unsigned long long)atomic_load(&g_pre_done), atomic_load(&g_pre_unused) >> 20, (unsigned long long)atomic_load(&g_pre_late), (unsigned long long)atomic_load(&g_pre_full), (unsigned long long)atomic_load(&g_pre_batches));
-    if (n % 300 == 0 && ubo_snap_on()) VLOG("present %llu: uniform snapshots: %llu updates written through so far", (unsigned long long)n, (unsigned long long)g_snap_wt);
+    if (n % 300 == 0 && ubo_snap_on()) {   // (copies / reused / MB: the last 300 presents; the arenas' size is in the [mem] line)
+        VLOG("present %llu: uniform snapshots: %llu updates written through so far; last 300 presents: %.0f copies a frame (%.1f MB), %.0f bound again (DM_VK_UBO_SNAPSHOT_REUSE=%d)", (unsigned long long)n,
+             (unsigned long long)g_snap_wt, g_snap_copies / 300.0, g_snap_bytes / 300.0 / 1048576.0, g_snap_reused / 300.0, snapc_on());
+        g_snap_copies = g_snap_reused = g_snap_bytes = 0; }
     if (n % 300 == 0 && (sk_on() || ubd_on() || barrier_relaxed()))
         VLOG("present %llu: barriers before passes full %llu / narrowed %llu / left out %llu; uniform updates deferred in a pass %llu (passes ended to land them %llu); "
              "stores skipped %llu (read after all %llu), depth / stencil begun store-none %llu (written after all %llu)", (unsigned long long)n,
