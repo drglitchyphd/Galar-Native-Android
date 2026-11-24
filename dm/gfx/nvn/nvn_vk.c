@@ -3699,6 +3699,9 @@ static void gbias_decide(void) {
     if (g_gbias) VLOG("texture gathers nudged by 1/512 of a texel (Adreno rounding)");
 }
 // live: g_live_dir as shader_get read it under g_shmu (live_check sets it under that lock; the load itself may run outside it)
+// Prewarm's lookups (the shipped pipeline lists name shaders the game builds in memory, not in this player's pack until the game hands them over): a missing one
+//   is counted in prewarm's summary line, not a [RED] each (a Shield report: 23 "SPIR-V missing" warnings, all prewarm's, none drawn without)
+static __thread int g_sh_quiet;
 static vshader *shader_load(const uint8_t key[8], int st, const char *live) {
     char hex[17]; for (int i = 0; i < 8; i++) sprintf(hex + 2 * i, "%02x", key[i]);
     char p[1200]; size_t ns = 0, nr = 0, ngl = 0; uint32_t *code = NULL, *glcode = NULL; char *meta = NULL;
@@ -3713,7 +3716,7 @@ static vshader *shader_load(const uint8_t key[8], int st, const char *live) {
             if (st == 0) { free(glcode); glcode = NULL; snprintf(p, sizeof p, "%s/%s.gl.spv", live, hex); glcode = file_read(p, &ngl); }
         }
     }
-    if (!code || !meta) { VLOG("[RED] shader %s: %s missing", hex, !code ? "SPIR-V" : "reflection (.vkr)"); free(code); free(meta); free(glcode); return NULL; }
+    if (!code || !meta) { if (!g_sh_quiet) VLOG("[RED] shader %s: %s missing", hex, !code ? "SPIR-V" : "reflection (.vkr)"); free(code); free(meta); free(glcode); return NULL; }
     meta = realloc(meta, nr + 1); meta[nr] = 0;
     vshader *s = calloc(1, sizeof *s); strcpy(s->key, hex); s->stage = st; s->shift = stage_shift(st);
     int spst; uint32_t ls[3];
@@ -5072,7 +5075,7 @@ static void *prewarm_static(void) {
         vprog *pr = nvn_hm_get(&g_pw_sprogs, r.r.key);
         if (!pr) {
             pr = calloc(1, sizeof *pr); int ok = 1;
-            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(r.r.key[st], z, 8)) continue; pr->sh[st] = shader_get(r.r.key[st], st); if (!pr->sh[st]) ok = 0; }
+            for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(r.r.key[st], z, 8)) continue; g_sh_quiet = 1; pr->sh[st] = shader_get(r.r.key[st], st); g_sh_quiet = 0; if (!pr->sh[st]) ok = 0; }
             if (!ok || !pr->sh[0]) { free(pr); noshader++; continue; }
             nvn_hm_put(&g_pw_sprogs, r.r.key, pr);
         }
@@ -5132,7 +5135,7 @@ static int prewarm_one(int i, void *arg, int *waits) {
     if (!pr && sh_mt()) {   // (perf-1124 S2: the shaders loaded outside pw.mu, on every prewarm thread; only the layout under it)
         pthread_mutex_unlock(&g_pw.mu);
         vprog *np = calloc(1, sizeof *np); int ok = 1; uint64_t ts = mono_ns();
-        for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; np->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!np->sh[st]) ok = 0; }
+        for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; g_sh_quiet = 1; np->sh[st] = shader_get(g_pw.rs[i].key[st], st); g_sh_quiet = 0; if (!np->sh[st]) ok = 0; }
         atomic_fetch_add(&g_pw.t_shader, mono_ns() - ts);
         if (!ok || !np->sh[0]) { free(np); atomic_fetch_add(&g_pw.noshader, 1); return 0; }
         tl = mono_ns(); pthread_mutex_lock(&g_pw.mu); atomic_fetch_add(&g_pw.t_lock, mono_ns() - tl);
@@ -5141,7 +5144,7 @@ static int prewarm_one(int i, void *arg, int *waits) {
     }
     if (!pr) {
         pr = calloc(1, sizeof *pr); int ok = 1; uint64_t ts = mono_ns();
-        for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); if (!pr->sh[st]) ok = 0; }
+        for (int st = 0; st < 5; st++) { static const uint8_t z[8]; if (!memcmp(g_pw.rs[i].key[st], z, 8)) continue; g_sh_quiet = 1; pr->sh[st] = shader_get(g_pw.rs[i].key[st], st); g_sh_quiet = 0; if (!pr->sh[st]) ok = 0; }
         uint64_t tp = mono_ns(); atomic_fetch_add(&g_pw.t_shader, tp - ts);
         if (!ok || !pr->sh[0]) { free(pr); pthread_mutex_unlock(&g_pw.mu); atomic_fetch_add(&g_pw.noshader, 1); return 0; }
         prog_layout(pr, 0); atomic_fetch_add(&g_pw.t_layout, mono_ns() - tp);

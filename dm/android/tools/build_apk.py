@@ -73,6 +73,10 @@ def main():
     ap.add_argument('--debuggable', action='store_true', help='test builds: adb run-as can reach the private storage of the app')
     ap.add_argument('--profileable', action='store_true', help='test builds: simpleperf over adb can profile the app (<profileable android:shell="true"/>), without making it debuggable')
     a = ap.parse_args()
+    # A release needs the driver check (libdmprobe.so, DriverCheckService): v0.96-v0.98 shipped without it (the release scripts copied libnxnative.so only), so the
+    #   pre-Play driver check never ran for players ("UnsatisfiedLinkError ... libdmprobe.so", driver-check "attempt 0 skip"). Optional for test builds only
+    if a.official and not os.path.isfile(os.path.join(a.libs, 'libdmprobe.so')):
+        sys.exit(f'build_apk: --official, but {a.libs} has no libdmprobe.so (the driver check): copy it from out/host-<id>-vulkan/lib/ next to libnxnative.so')
     g = _game.load(a.game); fam = _game.family(g)   # the games the engine built for g runs (Pokémon Shield: Shield and Sword, one app)
     ic = g.get('app_icon', 'dc2832 182040').split(); icon = [tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)) for h in ic[:2]]   # app_icon: top colour, ground colour (hex)
     a.name = a.name or g.get('app_name', '') or ('Galar Native' if len(fam) > 1 else g.get('name'))   # the app's name (the base game's app_name: Galar Native runs Sword and Shield, Paldea Native Scarlet and Violet, Arceus Native Legends: Arceus; each game's own shortcut names it)
