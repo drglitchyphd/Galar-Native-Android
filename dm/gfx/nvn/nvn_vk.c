@@ -4908,7 +4908,7 @@ int nvn_vk_prewarm_progress(int *done, int *total) { *done = atomic_load(&g_pw_d
 static void prewarm_finished(void) { pthread_mutex_lock(&g_pw_mu); atomic_store(&g_pw_released_at, mono_ns()); atomic_store(&g_pw_hold, 0); pthread_cond_broadcast(&g_pw_cv); pthread_mutex_unlock(&g_pw_mu); }
 // the game's first submission: waits until the prewarm is done (at most DM_VK_PREWARM_WAIT seconds, 300 by default; then the rest is built while it plays)
 // the game is playing (its first submission past prewarm_wait): from then on the prewarm builds on one thread, one pipeline after each present (prewarm_pace)
-static atomic_int g_pw_playing; static atomic_int g_pw_warm; static void pw_release(const char *why);
+static atomic_int g_pw_playing; static _Atomic uint64_t g_pw_play_n; static atomic_int g_pw_warm; static void pw_release(const char *why);
 static void prewarm_wait(void) {
     { static int first; if (!first++) dm_boot_mark("the game's first submission"); }
     if (!atomic_load(&g_pw_hold)) { if (!atomic_load(&g_pw_warm)) atomic_store(&g_pw_playing, 1); return; }   // (a matched stamp: from the first present, mtl_present)
@@ -5165,6 +5165,7 @@ static int prewarm_one(int i, void *arg, int *waits) {
     if (cache_only) { VkPipeline p = pso_make(pr, k, NULL); if (p) { vkDestroyPipeline(g_dev, p, NULL); atomic_fetch_add(cache_only == 2 ? &g_pw.cached : &g_pw.built, 1); } else atomic_fetch_add(&g_pw.failed, 1); }   // (into the driver's cache, not kept)
     else if (pso_lookup(pr, &k, 0)) { atomic_fetch_add(&g_pw.built, 1); atomic_fetch_add(&g_pw.kept, 1); } else atomic_fetch_add(&g_pw.failed, 1);
     atomic_fetch_add(&g_pw.t_pipe, mono_ns() - tb);
+    if (atomic_load(&g_pw_playing)) atomic_fetch_add(&g_pw_play_n, 1);   // (handled while the game runs: a stamped start's prewarm goes on through the first loads, hle_nvn.c's [load] line)
     prewarm_pace(atomic_load(&g_pw.built) + atomic_load(&g_pw.cached) + atomic_load(&g_pw.failed), waits);
     return last_one;
 }
@@ -8458,6 +8459,7 @@ void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full) { *load = *store = 
 void mtl_create_ns(uint64_t *lib, uint64_t *pso) { *lib = *pso = 0; }
 void mtl_create_stats(uint64_t *lib, uint64_t *pso) { *lib = *pso = 0; }
 void mtl_pso_stats(uint64_t *draw, uint64_t *bg) { *draw = (uint64_t)atomic_load(&g_pso_ingame); *bg = atomic_load(&g_apso_done); }   // (pipelines built by draws / in the background: the load report, hle_nvn.c)
+uint64_t mtl_prewarm_play_n(void) { return atomic_load(&g_pw_play_n); }   // (list pipelines the start-up prewarm handled after the game went on: the load report, hle_nvn.c)
 uint64_t mtl_drawable_ns_take(void) { return 0; }
 uint64_t mtl_ds_omit(void) { return 0; }
 uint64_t mtl_pkg_miss(void) { return 0; }

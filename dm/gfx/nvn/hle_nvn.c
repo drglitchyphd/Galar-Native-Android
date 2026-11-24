@@ -1714,6 +1714,7 @@ extern _Atomic uint64_t dm_fs_read_bytes __attribute__((weak));   // (host hle_f
 __attribute__((weak)) void dm_touch_scan_stats(uint64_t *n, uint64_t *ns) { *n = *ns = 0; }   // (touch_menu.c: all-memory scans and their time)
 __attribute__((weak)) void mtl_pso_stats(uint64_t *draw, uint64_t *bg) { *draw = *bg = 0; }   // (nvn_vk.c: pipelines built by draws / in the background)
 __attribute__((weak)) void mtl_pre_stats(uint64_t *budget, uint64_t *queue) { *budget = *queue = 0; }   // (nvn_vk.c: textures left to their first use)
+__attribute__((weak)) uint64_t mtl_prewarm_play_n(void) { return 0; }   // (nvn_vk.c: list pipelines the start-up prewarm handled while the game ran; a stamped start, perf-1124 S3, holds nothing, so its prewarm goes on through the first loads)
 __attribute__((weak)) void mtl_upload_fg_stats(uint64_t *n, uint64_t *ns) { *n = *ns = 0; }   // (nvn_vk.c: uploads the drawing threads waited for)
 static load_det g_ld; static pthread_mutex_t g_ld_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_ld_on; static _Atomic uint64_t g_ld_since, g_ld_n;
 int dm_loading(void) { return atomic_load(&g_ld_on); }
@@ -1722,19 +1723,19 @@ uint64_t dm_loading_count(void) { return atomic_load(&g_ld_n); }      // loads s
 static uint64_t dm_fs_read_bytes_now(void) { return &dm_fs_read_bytes ? atomic_load(&dm_fs_read_bytes) : 0; }
 static uint64_t ld_now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
 // What one load cost (I1's corrected report), summed over its presents and printed when it ends
-static struct { uint64_t t0, frames, sync0, psod0, psob0, scans0, scan_ns0, preb0, preq0, up0, upns0; double work_ms, acq_ms; } g_ls;
+static struct { uint64_t t0, frames, sync0, psod0, psob0, pspw0, scans0, scan_ns0, preb0, preq0, up0, upns0; double work_ms, acq_ms; } g_ls;
 static void ld_change(int r, uint64_t t) {
-    if (r > 0) { memset(&g_ls, 0, sizeof g_ls); g_ls.t0 = t; g_ls.sync0 = atomic_load(&g_st_sync_ns); mtl_pso_stats(&g_ls.psod0, &g_ls.psob0);
+    if (r > 0) { memset(&g_ls, 0, sizeof g_ls); g_ls.t0 = t; g_ls.sync0 = atomic_load(&g_st_sync_ns); mtl_pso_stats(&g_ls.psod0, &g_ls.psob0); g_ls.pspw0 = mtl_prewarm_play_n();
         dm_touch_scan_stats(&g_ls.scans0, &g_ls.scan_ns0); mtl_pre_stats(&g_ls.preb0, &g_ls.preq0); mtl_upload_fg_stats(&g_ls.up0, &g_ls.upns0);
         atomic_store(&g_ld_since, t); atomic_fetch_add(&g_ld_n, 1); atomic_store(&g_ld_on, 1);
         LOG("[load] a loading screen (the game reads %.0f MB/s, under %d draws in each of the last %d presents)", load_det_rate(&g_ld, t, dm_fs_read_bytes_now()), LD_DRAWS, LD_PRESENTS); }
     else if (r < 0) { atomic_store(&g_ld_on, 0);
         uint64_t pd, pb, sc, scn, qb, qq, un, uns; mtl_pso_stats(&pd, &pb); dm_touch_scan_stats(&sc, &scn); mtl_pre_stats(&qb, &qq); mtl_upload_fg_stats(&un, &uns);
         LOG("[load] over after %.2f s: %llu frames presented, frame work %.1f ms on average, %.2f s slept in the image acquire (the pacing), %.2f s in GPU sync waits; "
-            "texture uploads the drawing threads waited for %llu, %.0f ms; textures left to their first use %llu (budget) + %llu (queue full); pipelines built %llu by draws + %llu in the background; "
+            "texture uploads the drawing threads waited for %llu, %.0f ms; textures left to their first use %llu (budget) + %llu (queue full); pipelines built %llu by draws + %llu in the background + %llu by the start-up prewarm; "
             "all-memory touch scans %llu, %.0f ms", (t - g_ls.t0) / 1e9, (unsigned long long)g_ls.frames, g_ls.frames ? g_ls.work_ms / g_ls.frames : 0, g_ls.acq_ms / 1e3,
             (atomic_load(&g_st_sync_ns) - g_ls.sync0) / 1e9, (unsigned long long)(un - g_ls.up0), (uns - g_ls.upns0) / 1e6, (unsigned long long)(qb - g_ls.preb0), (unsigned long long)(qq - g_ls.preq0),
-            (unsigned long long)(pd - g_ls.psod0), (unsigned long long)(pb - g_ls.psob0), (unsigned long long)(sc - g_ls.scans0), (scn - g_ls.scan_ns0) / 1e6); }
+            (unsigned long long)(pd - g_ls.psod0), (unsigned long long)(pb - g_ls.psob0), (unsigned long long)(mtl_prewarm_play_n() - g_ls.pspw0), (unsigned long long)(sc - g_ls.scans0), (scn - g_ls.scan_ns0) / 1e6); }
 }
 static void ld_present(uint64_t draws) {
     if (!&dm_fs_read_bytes) return;

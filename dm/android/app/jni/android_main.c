@@ -1981,7 +1981,8 @@ static void wait_prof(int start) {
 //   when they fit (boost_plan.h, fable-loads.md L3: busy threads plus the threads pinned already at most the fast cores), the phone's fast cores (a clock limit of
 //   70 % of the fastest or more). Each thread's own mask is saved and given back when the load is over. The touch menu's threads (dm-touch, dm-tapdrive,
 //   dm-discover) are left out: their memory scans run at nice 10 so they never come before the game (#112: dm-touch was moved to the fast cores at nice -4 in a
-//   load). Each boosted thread is sampled by the load profile too. DM_LOAD_BOOST=0: no boost; pin: always pin (the rule before); nice: never pin
+//   load). The start-up prewarm's threads (dm-prewarm) are left out too: after a stamped start (nvn_vk.c, perf-1124 S3) they build the rest of the list in the
+//   background at nice 10, one pipeline a present, through the first loads, and must not take the fast cores from the game. Each boosted thread is sampled by the load profile too. DM_LOAD_BOOST=0: no boost; pin: always pin (the rule before); nice: never pin
 #include "boost_plan.h"
 static void load_boost(int loading, uint64_t t) {
     static int mode = -1; if (mode < 0) { const char *e = getenv("DM_LOAD_BOOST"); mode = e && !strcmp(e, "0") ? 9 : e && !strcmp(e, "pin") ? BOOST_PIN : e && !strcmp(e, "nice") ? BOOST_NICE : BOOST_AUTO; }
@@ -2002,7 +2003,7 @@ static void load_boost(int loading, uint64_t t) {
         for (int i = 0; i < nc && nb + ncand < NB; i++) {
             uint64_t was = 0; int seen = 0; for (int j = 0; j < nprev; j++) if (prev[j].tid == cur[i].tid) { was = prev[j].ticks; seen = 1; break; }
             if (!seen || cur[i].ticks <= was || (double)(cur[i].ticks - was) / hz < 0.25 * win) continue;
-            if (!strcmp(cur[i].name, "dm-touch") || !strcmp(cur[i].name, "dm-tapdrive") || !strcmp(cur[i].name, "dm-discover")) continue;
+            if (!strcmp(cur[i].name, "dm-touch") || !strcmp(cur[i].name, "dm-tapdrive") || !strcmp(cur[i].name, "dm-discover") || !strcmp(cur[i].name, "dm-prewarm")) continue;
             int skip = 0; for (int k = 0; k < g_pin_n; k++) if (g_pin_tid[k] == cur[i].tid) skip = 1;
             for (int k = 0; k < nb; k++) if (btid[k] == cur[i].tid) skip = 1;
             if (!skip) cand[ncand++] = i;
