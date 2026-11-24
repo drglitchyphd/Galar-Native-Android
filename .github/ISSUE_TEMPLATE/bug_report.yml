@@ -62,8 +62,9 @@ body:
     attributes:
       label: Logs
       description: |
+        **The file is not added for you: attach it yourself** (tap "Paste, drop, or click to add files" under this box). An issue without it usually can't be fixed.
         Easiest: ☰ → Bug reports → **Make a debug report** (also offered after a crash), and attach the `...-debug-report.zip` from Download. It holds both logs, Android's crash record and your phone's GPU and driver details.
-        Otherwise attach `Download/PokemonShield-log-previous.txt` (or the Sword one) **from the run where the problem happened**, and `PokemonShield-log.txt` too.
+        Otherwise attach `PokemonShield-log-previous.txt` (or the Sword one) **from the run where the problem happened**, and `PokemonShield-log.txt` too: from v0.96 they are in `Documents/Galar Native/Logs` (older versions: Download).
         For a picture problem, ☰ → Bug reports → **Capture a frame** where it shows, and attach the `...-frame-capture.zip` from Download.
       placeholder: Drag the files here
     validations:
