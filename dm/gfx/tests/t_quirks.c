@@ -63,7 +63,8 @@ static int ref(int q, const gpu_id *g, const profile *P) {
     case Q_DMAHEAP: return g->vendor == 0x13B5 || g->vendor == 0x144D;          // :465  want = he ? atoi (he) : (!g_fdmap && !heap_crashed && (g_props.vendorID == 0x13B5 || ... == 0x144D))
     case Q_DMABUF_TRY: return g->vendor == 0x13B5;                              // :482  if (!g_fdmap && !g_heapmap && !fd_crashed && dmabuf && g_props.vendorID == 0x13B5)
     case Q_NO_DYNREN: return g->vendor == 0x5143;                               // :528  no = e ? atoi (e) != 0 : g_props.vendorID == 0x5143
-    case Q_NO_EDS: return P->qc11_no_eds && g->vendor == 0x5143 && VK_API_VERSION_MINOR(g->api) < 2 && VK_API_VERSION_MAJOR(g->api) == 1;   // :534 old_qc
+    case Q_NO_EDS: return (P->qc11_no_eds && g->vendor == 0x5143 && VK_API_VERSION_MINOR(g->api) < 2 && VK_API_VERSION_MAJOR(g->api) == 1)   // :534 old_qc
+        || (g->vendor == 0x13B5 && !g->custom && (g->driver_version >> 22) > 0 && (g->driver_version >> 22) < 44);   // Arm's own driver before r44: the per-draw stride ignored
     case Q_G615_SAFE: return g->vendor == 0x13B5 && (g->driver_version >> 22) < 49 && strstr(g->name, "G615") && !g->custom;   // :546
     case Q_BC_DECODE: return g->vendor == 0x1010;                               // :560  if (g_props.vendorID == 0x1010) { ... if (!tc) setenv ("DM_VK_BC_TRANSCODE", "off", 0)
     case Q_FLOAT_CONTROLS: return arm || sec;                                   // :602  g_fctl = fc.shaderSignedZeroInfNanPreserveFloat32 && (e ? atoi (e) != 0 : arm || sec)
@@ -266,12 +267,16 @@ static void phones(const profile *P) {
           && QD(Q_TF_CHECK, g615) && QD(Q_QUERY_LOD, g615) && !QD(Q_NO_DYNREN, g615) && !QD(Q_BARRIER_RELAXED, g615) && QD(Q_NVN_ASYNC, g615) == !arc,
           "%s, Mali-G615 MC2 on r44p1 (#82 #110): the full Arm set (and the new LOD query rule), full barriers", gm);
     CHECK(QD(Q_TF_SELFTEST, g615) && QD(Q_DRIVER_SELFTESTS, g615) == arc, "%s, Mali-G615 MC2: the transform feedback self-test where the game runs its self-tests (Legends: Arceus)", gm);
+    CHECK(!QD(Q_NO_EDS, g615), "%s, Mali-G615 MC2 on r44p1: per-draw strides kept (r44 reads them)", gm);
+    gpu_id g68 = phone(P, 1u << 22 | 1u << 12, 0x13B5, 9, 38, 1, 0, 0, "Mali-G68 MC4", 5600000, 1);
+    gpu_id g52 = phone(P, 1u << 22 | 1u << 12, 0x13B5, 9, 26, 0, 0, 0, "Mali-G52 MC2", 3800000, 1);
+    CHECK(QD(Q_NO_EDS, g68) && QD(Q_NO_EDS, g52), "%s, Mali-G68 r38p1 / G52 r26p0: Arm's driver before r44 ignores the per-draw stride, so it goes into each pipeline", gm);
     gpu_id g925 = phone(P, 1u << 22 | 3u << 12, 0x13B5, 9, 49, 1, 1, 0, "Mali-G925-Immortalis MC12", 11800000, 1);
     CHECK(QD(Q_CLAMP_ZERO, g925) && !QD(Q_G615_SAFE, g925) && !QD(Q_TEX_HALF_UNSAFE, g925), "%s, Mali-G925 beta r49p1 (#111): erratum workaround (beta), no G615 set", gm);
     gpu_id g925r = phone(P, 1u << 22 | 3u << 12, 0x13B5, 9, 49, 1, 0, 0, "Mali-G925-Immortalis MC12", 11800000, 1);
     CHECK(!QD(Q_CLAMP_ZERO, g925r), "%s, Mali r49p1 release: the erratum fixed", gm);
     gpu_id panvk = phone(P, 1u << 22 | 3u << 12, 0x13B5, 20, 25, 0, 0, 1, "Mali-G615 MC6 (Panfrost)", 7800000, 1);
-    CHECK(!QD(Q_FLOAT_CONTROLS, panvk) && !QD(Q_NAN_MINMAX, panvk) && !QD(Q_G615_SAFE, panvk) && !QD(Q_QUERY_LOD, panvk) && !QD(Q_TF_CHECK, panvk) && QD(Q_ARM_FORMATS, panvk)
+    CHECK(!QD(Q_FLOAT_CONTROLS, panvk) && !QD(Q_NO_EDS, panvk) && !QD(Q_NAN_MINMAX, panvk) && !QD(Q_G615_SAFE, panvk) && !QD(Q_QUERY_LOD, panvk) && !QD(Q_TF_CHECK, panvk) && QD(Q_ARM_FORMATS, panvk)
           && QD(Q_DMAHEAP, panvk), "%s, PanVK on a Mali-G615: none of Arm's driver workarounds, Mali's format lists and dma-buf pools kept", gm);
     gpu_id xcl = phone(P, 1u << 22 | 3u << 12, 0x144D, 21, 0, 0, 0, 0, "Samsung Xclipse 940", 7800000, 1);
     CHECK(QD(Q_HOST_IMPORT_OFF, xcl) && QD(Q_DMAHEAP, xcl) && QD(Q_FLOAT_CONTROLS, xcl) && QD(Q_CLEAR_BY_PASS, xcl) && !QD(Q_BARRIER_RELAXED, xcl) && !QD(Q_NO_DYNREN, xcl),
