@@ -1776,6 +1776,8 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
     return atomic_load(&g_done) >= fence;
 }
 void mtl_finish(void) { mtl_wait(g_fence, UINT64_MAX); defer_drain(); }
+// Fence f's work is held for the next present (DM_VK_FRAME_HOLD): a wait on it would send the held frame early (hle_nvn.c / nvn_rq.h rq_sync_fence waits for the present instead)
+int mtl_fence_held(uint64_t f) { return f > atomic_load(&g_submitted) && atomic_load(&g_nheld) > 0; }
 
 // Arena: per-submission host-visible memory, 4 MB blocks (bigger requests get their own), 256-byte aligned; reclaimed when the submission's command pool is reset
 static uint8_t *arena_alloc(sub_t *s, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off) {
@@ -7084,6 +7086,7 @@ static int pace_off(void) { static int v = -1; if (v < 0) { const char *e = gete
 // The display's refresh period for the game's vsync timer (hle_sdk16.c vsync_thread): its 60 Hz then follows the display's own clock; 0 when not pacing
 uint64_t dm_display_refresh_ns(void) { return pace_off() ? 0 : g_refresh_ns; }
 static struct { uint64_t last_log, n, uneven, pauses, sum, nsum, prev_actual; uint32_t id; } g_pace;
+static uint64_t g_pace_asked;   // the time the last frame presented asked to be shown (0: none: no display timing, pacing off, a rate the display's own); mtl_present
 // The asked times (vk_pace.h): the grid (g_vkp.next, shared with frame generation's pictures), the GPU's time of the last frames, the display's record of the
 //   frames paced by it (g_vkp_plain: by presentID, so frame generation's pictures, paced their own way, stay out of it). Off by default since the S25+ runs of
 //   2026-11-24: the display's record raised the lead to an interval and two refreshes (66.7 ms at 30 fps), and from there each late hand-over moved the grid and
@@ -7167,6 +7170,7 @@ static int pace_time(VkPresentTimeGOOGLE *pt) {
         g_vkp.next = want;
     }
     if (!adapt) g_vkp_plain[(g_pace.id + 1) % 64] = 0;
+    g_pace_asked = want;
     pt->presentID = ++g_pace.id; pt->desiredPresentTime = want;
     if (now - g_pace.last_log >= 10000000000ull) {
         if (g_pace.last_log && g_pace.n)
@@ -8340,6 +8344,7 @@ static void seg_record_prim(sub_t *s) {
     VKCHECK(vkEndCommandBuffer(s->prim)); s->nseg = 0;
 }
 void nvn_fgr_arm_series(void) { fgr_arm_series(atomic_load(&g_present_n)); }   // (hle_resscale.c: a battle begins)
+int nvn_on_replay_thread(void) __attribute__((weak));   // (hle_nvn.c: 1 on the replay thread, DM_NVN_ASYNC)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     { static _Atomic int first; if (!atomic_exchange(&first, 1)) { dm_boot_mark("first present"); atomic_store(&g_pw_playing, 1); } }   // (the prewarm builds one pipeline a present from here)
     uint64_t hp_scene = g_hp_scene_seq == g_hp_seq + 1;   // (HUD-free: this frame's scene copy was made; read before hp_learn starts the next frame)
@@ -8379,13 +8384,22 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (nshot < 0) { nshot = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL;
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 256; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); } }
     for (int i = 0; i < nshot; i++) if ((long)n == shots[i]) { vtex *x = tex_res(t); char path[1024]; snprintf(path, sizeof path, shot_path, (int)n); if (x && x->img) shot(x, crop, path); }
-    if (front_metal_layer()) present_window(tex_res(t), crop);
+    g_pace_asked = 0; if (front_metal_layer()) present_window(tex_res(t), crop);
 #ifndef __ANDROID__
     { static long of = -1; static const char *op; if (of < 0) { const char *e = getenv("DM_OVL_SHOT"), *c = e ? strchr(e, ':') : NULL; of = c ? atol(e) : 0; op = c ? c + 1 : NULL; }
       if (of && (long)n == of && op) { vtex *x = tex_res(t); if (x && x->img) ovl_shot(x, crop, op); } }
 #endif
+    // The present waits out the rest of the period since the last one (period_s: hle_nvn.c's present period). Not on the replay
+    //   thread (Faster rendering) for a frame that asked the display for its time (pace_time): the game is paced at its image acquire, rq_push holds a second
+    //   queued present back, and the display shows the frame at its time; the sleep here only held the replay back, and with it every game sync wait that drained
+    //   the queue (perf-1124 G1': S25+ "GPU sync" 4-10 ms a frame in the field, 23-32 ms in loads at 2.5-5 ms of GPU). A frame with no time asked (no display
+    //   timing, pacing off) keeps the sleep: nothing else would space it. DM_VK_PRESENT_SLEEP=1: the sleep everywhere, as before
+    static int sleep_all = -1; if (sleep_all < 0) { const char *e = getenv("DM_VK_PRESENT_SLEEP"); sleep_all = e && *e && strcmp(e, "0") && strcmp(e, "off");
+        VLOG("present: %s (DM_VK_PRESENT_SLEEP%s)", sleep_all ? "waits out the frame period on every thread" : "the replay thread does not wait out the frame period for a frame with a display time",
+             sleep_all ? "=1" : " unset; =1: always waits"); }
+    int nosleep = !sleep_all && g_pace_asked && nvn_on_replay_thread && nvn_on_replay_thread();
     uint64_t now = mono_ns(), due = g_last_present + (uint64_t)(period_s * 1e9);
-    if (period_s > 0 && due > now) { struct timespec ts = { (time_t)((due - now) / 1000000000ull), (long)((due - now) % 1000000000ull) }; nanosleep(&ts, NULL); now = due; }
+    if (period_s > 0 && due > now && !nosleep) { struct timespec ts = { (time_t)((due - now) / 1000000000ull), (long)((due - now) % 1000000000ull) }; nanosleep(&ts, NULL); now = due; }
     g_last_present = now; g_present_exit = mono_ns();
     if (n % 900 == 0 && atomic_load(&g_pso_new) >= 10) { static atomic_int busy; if (!atomic_exchange(&busy, 1)) {   // new pipelines: the cache file is rewritten in the background
         pthread_t t; void *saver(void *a); if (pthread_create(&t, NULL, saver, &busy)) atomic_store(&busy, 0); else pthread_detach(t); } }

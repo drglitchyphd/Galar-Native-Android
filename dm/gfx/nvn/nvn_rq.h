@@ -20,7 +20,15 @@
 //   33 ms frame). Now rq_push returns the present's place in the queue, the replay thread notes the fence it had reached right after replaying each present
 //   (rq_fence_now), and the acquire's sync waits for the replay to pass that place and then for that fence (rq_present_fence): never for work queued after it.
 //   DM_NVN_ACQUIRE_FENCE=all (hle_nvn.c): the old wait.
-// The includer defines LOG(...) and die(const char *), and the three functions declared below; mtl_reg_tex / mtl_reg_samp are the replay's ID tables (nvn_obj.h).
+// The game's own fences (perf-1124 G1'): Sword / Shield acquire with nvnQueueAcquireTexture, which hands out no sync, so the rule above never acts there. What they
+//   wait on, twice a frame, are fences of their own (nn::gfx Fence::Sync, main+0x18a55d0 → nvnSyncWait): the frame before's at the frame's end (main+0x5ea110) and
+//   the display object's [idx] right after present + acquire (main+0x5f19d0). A wait with a timeout drained the whole queue, the present just queued included, and
+//   with it the replay thread's pacing sleep in that present: 4-10 ms of "GPU sync" a frame in the field on the S25+, 25-28 ms in loads, game + replay in turn on
+//   phones whose replay takes 25-40 ms (#324: 12 + 33 = 45 ms). Now the fence keeps its place in the queue (rq_push_fence), the replay sets its value when it gets
+//   there, and the wait goes as far as that place (rq_sync_fence), then waits for that fence. A fence whose work the whole-frame hold (nvn_vk.c DM_VK_FRAME_HOLD)
+//   still holds is taken once the replay has sent it to the GPU at the next present (rq_fence_held), so the game's thread never flushes a held frame while the replay
+//   thread records; with the replay idle (no present coming) the wait sends it itself, as the drain's wait did. DM_NVN_SYNC_DRAIN=1 (hle_nvn.c): the old wait.
+// The includer defines LOG(...) and die(const char *), and the four functions declared below; mtl_reg_tex / mtl_reg_samp are the replay's ID tables (nvn_obj.h).
 #pragma once
 #include <pthread.h>
 #include <stdatomic.h>
@@ -44,6 +52,8 @@ typedef struct { int kind, n, idx; uint64_t *h; void *q, *s, *o; rq_reg *reg; do
 static int rq_on(void);                   // the includer's: whether the replay has a thread of its own (decided once)
 static void rq_run(const rq_item *it);    // the includer's: a submission, fence or present, on the replay thread
 static uint64_t rq_fence_now(void);       // the includer's: the fence of the work submitted so far (mtl_last_fence), read on the replay thread right after a present
+static int rq_fence_held(uint64_t f);     // the includer's: 1 while fence f's work is held back from the GPU until the next present (nvn_vk.c mtl_fence_held)
+static __thread int g_rq_self;            // 1 on the replay thread (hle_nvn.c nvn_on_replay_thread: its present does not sleep)
 enum { RQ_N = 512 };
 static rq_item g_rq[RQ_N]; static uint64_t g_rq_head, g_rq_tail; static int g_rq_presents;
 static pthread_mutex_t g_rq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_rq_cv = PTHREAD_COND_INITIALIZER;
@@ -72,7 +82,7 @@ static void rq_wait(const char *who) {
 static void rq_apply_regs(const rq_reg *r, int n) {
     for (int i = 0; i < n; i++) if (r[i].samp) mtl_reg_samp(r[i].id, &r[i].s); else mtl_reg_tex(r[i].id, r[i].ok ? &r[i].t : NULL, r[i].has_v ? &r[i].v : NULL);
 }
-static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
+static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay"); g_rq_self = 1;
 #ifdef __linux__
     atomic_store(&g_rq_tid, (int)syscall(SYS_gettid));   // (gettid needs _GNU_SOURCE on glibc: the PC test)
 #endif
@@ -124,6 +134,40 @@ static int rq_present_fence(uint64_t pos, uint64_t timeout_ns, uint64_t *fence) 
     }
     int ok = g_rq_tail >= pos;
     if (ok) { const rq_pf *p = &g_rq_pf[(pos - 1) % RQ_N]; *fence = p->pos == pos ? p->fence : g_rq_pf_last; }
+    pthread_mutex_unlock(&g_rq_mu);
+    return ok;
+}
+// The game fences a sync (perf-1124 G1'): an RQ_FENCE item, and the sync keeps its place in the queue (rq_pos: just past the item). Not signalled (UINT64_MAX)
+//   until the replay sets the fence there. Under the queue's lock, so a waiter on another thread never sees the new place with the old fence
+static void rq_push_fence(sync_t *s) {
+    pthread_mutex_lock(&g_rq_mu);
+    s->fence = UINT64_MAX; s->fenced = 4;
+    rq_put_locked((rq_item){ .kind = RQ_FENCE, .s = s }); s->rq_pos = g_rq_head;
+    pthread_mutex_unlock(&g_rq_mu);
+}
+// That sync's fence: once the replay has passed its place, and the fence's work is on the GPU's queue (not held for the next present; or the replay is idle, no
+//   present coming: the caller's mtl_wait then sends it, as after a drain), 1 and *fence. Waits up to timeout_ns (0: a poll, UINT64_MAX: for ever), else 0.
+//   Nothing is drained: work queued after the fence is not waited for. (The held fence is looked at again every millisecond: the present that sends it wakes the
+//   queue's waiters only once its pacing is done)
+static int rq_sync_fence(const sync_t *s, uint64_t timeout_ns, uint64_t *fence) {
+    if (timeout_ns > 1000000000000000ull) timeout_ns = UINT64_MAX;
+    pthread_mutex_lock(&g_rq_mu);
+    struct timespec end = { 0, 0 }, t0; clock_gettime(CLOCK_REALTIME, &t0);
+    if (timeout_ns && timeout_ns != UINT64_MAX) { uint64_t ns = (uint64_t)t0.tv_nsec + timeout_ns; end.tv_sec = t0.tv_sec + (time_t)(ns / 1000000000ull); end.tv_nsec = (long)(ns % 1000000000ull); }
+    int ok = 0, said = 0;
+    for (;;) {
+        if (g_rq_tail >= s->rq_pos && s->fence != UINT64_MAX && (g_rq_tail == g_rq_head || !rq_fence_held(s->fence))) { *fence = s->fence; ok = 1; break; }
+        if (!timeout_ns) break;
+        struct timespec now, ts; clock_gettime(CLOCK_REALTIME, &now);
+        ts = now; ts.tv_nsec += 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }   // (a millisecond at most: see above)
+        if (timeout_ns != UINT64_MAX) {
+            if (now.tv_sec > end.tv_sec || (now.tv_sec == end.tv_sec && now.tv_nsec >= end.tv_nsec)) break;
+            if (ts.tv_sec > end.tv_sec || (ts.tv_sec == end.tv_sec && ts.tv_nsec > end.tv_nsec)) ts = end;
+        } else if (!said && now.tv_sec - t0.tv_sec >= 5) { said = 1;
+            static int n; if (n++ < 20) LOG("[RED] a sync wait has waited 5 s on the replay thread: it is at %s, queue %llu..%llu, the sync's place %llu, %d presents", g_rq_at,
+                                            (unsigned long long)g_rq_tail, (unsigned long long)g_rq_head, (unsigned long long)s->rq_pos, g_rq_presents); }
+        pthread_cond_timedwait(&g_rq_cv, &g_rq_mu, &ts);
+    }
     pthread_mutex_unlock(&g_rq_mu);
     return ok;
 }

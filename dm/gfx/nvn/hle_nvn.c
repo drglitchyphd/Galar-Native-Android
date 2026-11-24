@@ -604,9 +604,11 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     return r;
 }
 static NVNsyncWaitResult sync_wait_(const sync_t *o, uint64_t timeout) {
-    if (o->fenced == 3) {   // an acquired image's previous present (nvnWindowAcquireTexture, perf-1124 G1): the replay up to that present, then its fence; later work is not waited for
+    // 3: an acquired image's previous present (nvnWindowAcquireTexture, perf-1124 G1): the replay up to that present, then its fence; 4: a fence the game set with the
+    //   replay on its own thread (sync_fence_now, G1'): the replay up to that fence's place, then the fence. Later work is not waited for in either
+    if (o->fenced == 3 || o->fenced == 4) {
         uint64_t t0 = timeout ? now_ns() : 0, f = 0;
-        if (!rq_present_fence(o->rq_pos, timeout, &f)) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;   // (a poll, or the time is up: the replay is not there yet)
+        if (!(o->fenced == 3 ? rq_present_fence(o->rq_pos, timeout, &f) : rq_sync_fence(o, timeout, &f))) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;   // (a poll, or the time is up: the replay is not there yet)
         if (mtl_wait(f, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
         uint64_t d = timeout ? now_ns() - t0 : 0, left = timeout == UINT64_MAX ? UINT64_MAX : timeout > d ? timeout - d : 0;
         return left && mtl_wait(f, left) ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
@@ -1125,9 +1127,18 @@ static void rq_run(const rq_item *it) {   // (nvn_rq.h rq_main: on the replay th
 // (nvn_rq.h rq_main, right after a present: the acquire's sync for that image waits for this. mtl_present sent the held frame first (DM_VK_FRAME_HOLD), and the
 //   replay thread is the only one that submits, so this fence is already submitted: the wait never flushes held work from the game's thread)
 static uint64_t rq_fence_now(void) { return mtl_last_fence(); }
+// (nvn_rq.h rq_sync_fence: a fence the whole-frame hold keeps from the GPU until the next present. The Metal backend holds nothing)
+__attribute__((weak)) int mtl_fence_held(uint64_t fence) { (void)fence; return 0; }
+static int rq_fence_held(uint64_t f) { return mtl_fence_held(f); }
+int nvn_on_replay_thread(void) { return g_rq_self; }   // (nvn_vk.c mtl_present: the replay thread's present does not sleep, perf-1124 G1')
 int nvn_async_on(void) { return rq_on(); }
 void rq_drain(void) { rq_drain_now(); }
+// DM_NVN_SYNC_DRAIN=1: a sync the game fences waits for everything queued, as before perf-1124 G1' (nvn_rq.h rq_sync_fence; unset / 0: only as far as its own fence)
+static int sync_drain(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SYNC_DRAIN"); v = e && *e && strcmp(e, "0") && strcmp(e, "off");
+    if (rq_on()) LOG("[nvn] the game's sync waits: %s (DM_NVN_SYNC_DRAIN%s)", v ? "everything queued first, then the fence" : "as far as the sync's own fence, at its place in the replay queue",
+                     v ? "=1" : " unset; =1: everything queued first"); } return v; }
 void sync_fence_now(sync_t *s) {   // this sync is signalled by what has been submitted so far: known once the queue has reached this point (UINT64_MAX until then: not signalled)
+    if (rq_on() && !sync_drain()) { rq_push_fence(s); return; }   // (fenced 4: its place in the queue)
     s->fenced = 1;
     if (rq_on()) { s->fence = UINT64_MAX; rq_push((rq_item){ .kind = RQ_FENCE, .s = s }); } else s->fence = mtl_last_fence();
 }
