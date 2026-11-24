@@ -14,7 +14,13 @@
 //     that range (a fit for Arceus #3, crashes at loading screens with Faster rendering): what is queued is replayed first.
 // Not queued (the console reads these from memory when the GPU runs, and a game must wait on a sync before it rewrites them, as it must here): bindless handles in
 //   uniform memory, indirect counts, index data, uniform and storage data.
-// The includer defines LOG(...) and die(const char *), and the two functions declared below; mtl_reg_tex / mtl_reg_samp are the replay's ID tables (nvn_obj.h).
+// A window's acquire (perf-1124 G1): on the console the sync handed out with a swapchain image is signalled once that image's previous present is done, which with
+//   two images is the frame before last, so the game builds frame N+1 while the GPU runs frame N. With the replay on its own thread the acquire fenced with everything
+//   submitted so far and the wait drained the whole queue: the game, the replay and the GPU took turns (Galaxy S25+, Sword / Shield: "GPU sync 30.0" in every long
+//   33 ms frame). Now rq_push returns the present's place in the queue, the replay thread notes the fence it had reached right after replaying each present
+//   (rq_fence_now), and the acquire's sync waits for the replay to pass that place and then for that fence (rq_present_fence): never for work queued after it.
+//   DM_NVN_ACQUIRE_FENCE=all (hle_nvn.c): the old wait.
+// The includer defines LOG(...) and die(const char *), and the three functions declared below; mtl_reg_tex / mtl_reg_samp are the replay's ID tables (nvn_obj.h).
 #pragma once
 #include <pthread.h>
 #include <stdatomic.h>
@@ -37,6 +43,7 @@ typedef struct { int id; uint8_t samp, ok, has_v; tex_t t; view_t v; samp_par s;
 typedef struct { int kind, n, idx; uint64_t *h; void *q, *s, *o; rq_reg *reg; double period; int crop[4]; } rq_item;   // RQ_REG: reg[n]
 static int rq_on(void);                   // the includer's: whether the replay has a thread of its own (decided once)
 static void rq_run(const rq_item *it);    // the includer's: a submission, fence or present, on the replay thread
+static uint64_t rq_fence_now(void);       // the includer's: the fence of the work submitted so far (mtl_last_fence), read on the replay thread right after a present
 enum { RQ_N = 512 };
 static rq_item g_rq[RQ_N]; static uint64_t g_rq_head, g_rq_tail; static int g_rq_presents;
 static pthread_mutex_t g_rq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_rq_cv = PTHREAD_COND_INITIALIZER;
@@ -46,6 +53,10 @@ static _Atomic int g_rq_tid;   // the replay thread's id (android_main.c: its lo
 //   game made them. The game's view of the ID tables (g_rq_tsh / g_rq_ssh: what is in the queue or applied, per ID) finds those that change nothing
 static rq_reg *g_rq_pend; static int g_rq_npend, g_rq_cpend;
 static rq_reg *g_rq_tsh, *g_rq_ssh; static uint8_t *g_rq_tshok, *g_rq_sshok; static int g_rq_ntsh, g_rq_nssh;
+// The fence the replay had reached right after each present, by the present's place in the queue (pos: the position just past it, as rq_push returns). A slot is
+//   reused RQ_N items later; a wait for a place whose slot holds a later present takes the latest fence instead (g_rq_pf_last: later, so never too early)
+typedef struct { uint64_t pos, fence; } rq_pf;
+static rq_pf g_rq_pf[RQ_N]; static uint64_t g_rq_pf_last;
 static uint64_t g_rq_reg_n, g_rq_reg_same;   // registrations queued / left out as unchanged (the log, the test)
 static int g_rq_order = -1;   // DM_NVN_ASYNC_ORDER (above): 1 registrations queued and a remap waits for the queue, 0 at once as before
 static int rq_order_on(void) { if (g_rq_order < 0) { const char *e = getenv("DM_NVN_ASYNC_ORDER"); g_rq_order = !(e && (!strcmp(e, "0") || !strcmp(e, "off")));
@@ -73,8 +84,10 @@ static void *rq_main(void *a) { DM_THREAD_NAME("dm-replay");
         pthread_mutex_unlock(&g_rq_mu);
         if (it.kind == RQ_REG) { g_rq_at = "registrations"; rq_apply_regs(it.reg, it.n); free(it.reg); }
         else rq_run(&it);
+        uint64_t f = it.kind == RQ_PRESENT ? rq_fence_now() : 0;
         g_rq_at = "idle";
         pthread_mutex_lock(&g_rq_mu);
+        if (it.kind == RQ_PRESENT) { g_rq_pf[g_rq_tail % RQ_N] = (rq_pf){ g_rq_tail + 1, f }; if (f > g_rq_pf_last) g_rq_pf_last = f; }   // (before the tail passes it)
         g_rq_tail++; if (it.kind == RQ_PRESENT) g_rq_presents--;
         pthread_cond_broadcast(&g_rq_cv); pthread_mutex_unlock(&g_rq_mu);
     }
@@ -89,11 +102,30 @@ static void rq_put_locked(rq_item it) {   // caller holds g_rq_mu: the pending r
     if (it.kind >= 0) { g_rq[g_rq_head++ % RQ_N] = it; if (it.kind == RQ_PRESENT) g_rq_presents++; }
     pthread_cond_broadcast(&g_rq_cv);
 }
-static void rq_push(rq_item it) {
+static uint64_t rq_push(rq_item it) {   // returns the queue position just past the item (rq_present_fence)
     pthread_mutex_lock(&g_rq_mu);
-    rq_put_locked(it);
+    rq_put_locked(it); uint64_t pos = g_rq_head;
     if (it.kind == RQ_PRESENT) while (g_rq_presents > 1) rq_wait("the next present");
     pthread_mutex_unlock(&g_rq_mu);
+    return pos;
+}
+// A present's fence (pos: rq_push's return for an RQ_PRESENT): once the replay has passed it, 1 and *fence = the fence it had reached right after it. Waits up to
+//   timeout_ns (0: a poll, UINT64_MAX: for ever) and returns 0 if the replay is not there yet. Nothing is drained: work queued after the present is not waited for
+static int rq_present_fence(uint64_t pos, uint64_t timeout_ns, uint64_t *fence) {
+    if (timeout_ns > 1000000000000000ull) timeout_ns = UINT64_MAX;   // (over 11 days, as NVN's maximum: for ever; the deadline sum below cannot overflow)
+    pthread_mutex_lock(&g_rq_mu);
+    if (g_rq_tail < pos && timeout_ns) {
+        struct timespec end; clock_gettime(CLOCK_REALTIME, &end);
+        if (timeout_ns != UINT64_MAX) { uint64_t ns = (uint64_t)end.tv_nsec + timeout_ns; end.tv_sec += (time_t)(ns / 1000000000ull); end.tv_nsec = (long)(ns % 1000000000ull); }
+        while (g_rq_tail < pos) {
+            if (timeout_ns == UINT64_MAX) rq_wait("an acquired image's previous present");
+            else if (pthread_cond_timedwait(&g_rq_cv, &g_rq_mu, &end) == ETIMEDOUT) break;
+        }
+    }
+    int ok = g_rq_tail >= pos;
+    if (ok) { const rq_pf *p = &g_rq_pf[(pos - 1) % RQ_N]; *fence = p->pos == pos ? p->fence : g_rq_pf_last; }
+    pthread_mutex_unlock(&g_rq_mu);
+    return ok;
 }
 // Wait until what is queued has been replayed (registrations made since the last submission included)
 static void rq_drain_now(void) {

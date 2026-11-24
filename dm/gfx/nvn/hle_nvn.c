@@ -580,6 +580,13 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     return r;
 }
 static NVNsyncWaitResult sync_wait_(const sync_t *o, uint64_t timeout) {
+    if (o->fenced == 3) {   // an acquired image's previous present (nvnWindowAcquireTexture, perf-1124 G1): the replay up to that present, then its fence; later work is not waited for
+        uint64_t t0 = timeout ? now_ns() : 0, f = 0;
+        if (!rq_present_fence(o->rq_pos, timeout, &f)) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;   // (a poll, or the time is up: the replay is not there yet)
+        if (mtl_wait(f, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+        uint64_t d = timeout ? now_ns() - t0 : 0, left = timeout == UINT64_MAX ? UINT64_MAX : timeout > d ? timeout - d : 0;
+        return left && mtl_wait(f, left) ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    }
     if (timeout) rq_drain();   // (a wait with a timeout: what is queued comes first. A poll just reads: not fenced yet is not signalled)
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
     if (mtl_wait(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
@@ -1091,6 +1098,9 @@ static void rq_run(const rq_item *it) {   // (nvn_rq.h rq_main: on the replay th
     else if (it->kind == RQ_FENCE) { g_rq_at = "fence"; ((sync_t *)it->s)->fence = mtl_last_fence(); }
     else { win_t *o = (win_t *)it->o; g_rq_at = "present"; gfx_enter(); GOLDEN_PRESENT(CTX(o->tex[it->idx]), it->crop); uint64_t t = mtl_present(CTX(o->tex[it->idx]), it->period, it->crop); o->ticket[it->idx] = t; gfx_leave(); }
 }
+// (nvn_rq.h rq_main, right after a present: the acquire's sync for that image waits for this. mtl_present sent the held frame first (DM_VK_FRAME_HOLD), and the
+//   replay thread is the only one that submits, so this fence is already submitted: the wait never flushes held work from the game's thread)
+static uint64_t rq_fence_now(void) { return mtl_last_fence(); }
 int nvn_async_on(void) { return rq_on(); }
 void rq_drain(void) { rq_drain_now(); }
 void sync_fence_now(sync_t *s) {   // this sync is signalled by what has been submitted so far: known once the queue has reached this point (UINT64_MAX until then: not signalled)
@@ -1254,8 +1264,15 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // The image is free once the work up to its own last present is done: with 2 images that is the frame before last, so the game builds the next frame while the GPU
     //   draws the last one, as on the console. Fenced with everything submitted so far, the game waited on its sync for the whole of the frame it had just submitted
     //   (Violet on a Galaxy S25+: 24.6 ms of each 43 ms frame, CPU and GPU taking turns). DM_NVN_ACQUIRE_FENCE=all: the old fence
-    { static int all = -1; if (all < 0) { const char *e = getenv("DM_NVN_ACQUIRE_FENCE"); all = e && !strcmp(e, "all"); }
+    // With the replay on its own thread (Faster rendering) the same rule (perf-1124 G1): that present's place in the replay queue (pq_pos), and the wait goes as far as
+    //   the replay passing it and the fence it had reached there (nvn_rq.h rq_present_fence, sync_wait_), not through work queued after it. Before, it fenced with
+    //   everything submitted and drained the queue: game, replay and GPU in turn, "GPU sync 30.0" in each long 33 ms frame of Sword / Shield on the S25+.
+    //   Sword / Shield and Scarlet / Violet; Legends: Arceus never runs the replay thread (nvn_async_never)
+    { static int all = -1; if (all < 0) { const char *e = getenv("DM_NVN_ACQUIRE_FENCE"); all = e && !strcmp(e, "all");
+          LOG("[nvn] the acquire's sync: %s (DM_NVN_ACQUIRE_FENCE%s)", all ? "everything submitted so far" : rq_on() ? "the image's previous present, at its place in the replay queue" : "the image's previous present",
+              all ? "=all" : " unset; =all: everything submitted"); }
       if (s && !all && !rq_on() && *idx < 4 && o->pfence[*idx]) { ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = o->pfence[*idx]; }
+      else if (s && !all && rq_on() && *idx < 4 && o->pq_pos[*idx]) { sync_t *y = (sync_t *)s; y->fence = UINT64_MAX; y->rq_pos = o->pq_pos[*idx]; y->fenced = 3; }
       else if (s) sync_fence_now((sync_t *)s); }
     // (the swapchain texture is available once the work fenced above is done; an `if (0)` left here made the frame-start line below dead code)
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
@@ -1682,7 +1699,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           if (w > 500000000ull) w = 500000000ull;   // (a load or a pause: counted as half a second, so one stall does not swamp the average)
           atomic_store(&g_nvn_game_work_avg_ns, a ? a + (uint64_t)(((int64_t)w - (int64_t)a) / 16) : w); } }   // (the average over about 16 frames: the fps guard's CPU test)
     if (idx >= 0 && idx < o->ntex && idx < 4) {
-        if (rq_on()) { rq_item it = { .kind = RQ_PRESENT, .o = o, .idx = idx, .period = present_period(o) / 1e9 }; memcpy(it.crop, o->crop, sizeof it.crop); gfx_leave(); rq_push(it); gfx_enter(); }
+        if (rq_on()) { rq_item it = { .kind = RQ_PRESENT, .o = o, .idx = idx, .period = present_period(o) / 1e9 }; memcpy(it.crop, o->crop, sizeof it.crop); gfx_leave(); o->pq_pos[idx] = rq_push(it); gfx_enter(); }   // (pq_pos: this image's next acquire waits for the replay to pass it)
         else { GOLDEN_PRESENT(CTX(o->tex[idx]), o->crop); o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); o->pfence[idx] = mtl_last_fence(); }   // enqueue only, return immediately
     }
     gfx_leave();
