@@ -4523,8 +4523,27 @@ static int pass_begin(void) {
     return 1;
 }
 static int getenv_nomerge(void) { static int v = -1; if (v < 0) v = getenv("DM_VK_NO_PASS_MERGE") != NULL; return v; }   // A/B switch
+// Pending clears of attachments the targets have (perf-1124 GPU fix A). OP_CLEAR_DS notes a depth / stencil clear whether or not the targets have a depth image, and
+//   pass_flush began "a pass just for them" all the same: with no depth attached that pass loaded and stored the colour targets and did nothing (Legends: Arceus, 9
+//   such passes a frame on a Galaxy S25+, 5 at 1080p: 48 MB loaded and 48 MB stored for nothing). A clear now counts only for an attachment pass_begin attaches: a
+//   colour slot holding a texture of a format, the depth / stencil image's aspect it clears (a stencil clear of a depth-only image did nothing there either).
+//   DM_VK_EMPTY_PASS=1: every noted clear counts, as before
+static int empty_pass_old(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_EMPTY_PASS"); v = e && atoi(e) == 1;
+    if (v) VLOG("clears with nothing to clear begin a pass of their own, as before (DM_VK_EMPTY_PASS=1)"); } return v; }
+static uint64_t g_empty_dropped;   // passes of clears with nothing to clear left out (the present line)
+static int pend_raw(void) { int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i]; return pend; }
+static int pend_clears(void) {
+    if (empty_pass_old()) return pend_raw();
+    for (int i = 0; i < 8; i++) if (R.clear_c[i] && i < R.rt.n && R.rt.color[i] && R.rt.color[i]->d.format) return 1;
+    if (!(R.clear_d || R.clear_s) || !R.rt.depth || !R.rt.depth->d.format) return 0;
+    vtex *x = tex_res(R.rt.depth); if (!x || !x->img) return 1;   // (no image: as before, pass_begin reports it)
+    return (R.clear_d && (x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) || (R.clear_s && (x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT));
+}
 static void pass_flush(void) {   // pending clears with no draw after them: a pass just for them
-    int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
+    int pend = pend_clears();
+    if (!pend && pend_raw()) {   // (nothing they could clear: no pass, and they do not carry over to the next targets, which a pass begun for them reset)
+        if (!P.open && g_sub) g_empty_dropped++;
+        memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0; }
     if (pend && !P.open && g_sub) pass_begin();
     pass_end();
 }
@@ -8459,6 +8478,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     atomic_store(&g_apso_budget_ns, g_apso_frame_ns);   // (each frame's wait for pipelines being built: apso_wait)
     if (n % 300 == 0 && atomic_load(&g_apso_done) + atomic_load(&g_apso_skipped)) VLOG("present %llu: pipelines built in the background %llu, draws skipped waiting for one %llu (DM_VK_ASYNC_PSO)", (unsigned long long)n, (unsigned long long)atomic_load(&g_apso_done), (unsigned long long)atomic_load(&g_apso_skipped));
     if (n % 300 == 0 && g_pass_resumed) VLOG("present %llu: %llu target changes kept their open pass (DM_VK_PASS_DEFER)", (unsigned long long)n, (unsigned long long)g_pass_resumed);
+    if (n % 300 == 0) VLOG("present %llu: passes left out so far: empty depth passes dropped %llu", (unsigned long long)n, (unsigned long long)g_empty_dropped);
     if (n % 300 == 0 && !VPROF_ON)   // (running totals: DM_VK_PROF prints these per 300 frames instead, and resets them)
         VLOG("passes so far: %llu begun; ended by a new target %llu, a uniform update %llu, a buffer copy %llu, a buffer fill %llu, any work outside a pass %llu (those three included); "
              "%llu opened onto exactly the attachments a target change had just ended", (unsigned long long)g_stat_begins, (unsigned long long)g_brk[0], (unsigned long long)g_brk[1],

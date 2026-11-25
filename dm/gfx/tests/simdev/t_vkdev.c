@@ -1293,6 +1293,44 @@ static void init_race(void) {
     printf("INIT three callers at once (the early set-up thread, a racer, the main thread): %d device made, each returned with the set-up complete: %s\n",
            atomic_load(&w_dev_count), main_ok && atomic_load(&g_race_ok) == 1 ? "yes" : "NO");
 }
+// ---- perf-1124 GPU fix A (nvn_vk.c pend_clears): clears with nothing to clear ----
+// A 64x64 DEPTH32F target D and an RGBA8 colour target C, the commands as hle_nvn.c records them: a depth clear with the colour target alone, and a stencil clear of
+//   the depth-only D, each followed by a target change. Before, each began a pass that loaded and stored its targets and cleared nothing; now none (DM_VK_EMPTY_PASS=1:
+//   as before). D read back by the CPU (mtl_read_texels) must hold what it held
+static uint8_t *lc_q;
+#define LCOP(op_, T, v) do { op_hdr h_ = { (op_), (uint32_t)((8 + sizeof(T) + 7) & ~7u) }; memcpy(lc_q, &h_, 8); memset(lc_q + 8, 0, h_.size - 8); memcpy(lc_q + 8, &(v), sizeof(T)); lc_q += h_.size; } while (0)
+static void lc_end(void) { op_hdr e = { OP_END, 8 }; memcpy(lc_q, &e, 8); lc_q += 8; }
+static void lc_zero(tex_t *T, uint32_t W, float v) { p_clear_tex ct; memset(&ct, 0, sizeof ct); ct.tex = T; ct.r.width = W; ct.r.height = W; ct.r.depth = 1; ct.mask = 0xf; ct.c.f[0] = v; clear_tex(&ct); }
+static int lc_bad(tex_t *T, uint32_t W, float want) {
+    static float got[64 * 64]; memset(got, 0xff, sizeof got); NVNcopyRegion r = { 0, 0, 0, (int)W, (int)W, 1 };
+    mtl_read_texels(T, 0, 0, &r, (uint8_t *)got, W * 4, W * W * 4); int bad = 0; for (uint32_t i = 0; i < W * W; i++) bad += got[i] != want; return bad;
+}
+static void lc_work(void) {
+    enum { W = 64 };
+    size_t n = 1u << 20; uint8_t *mem = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(mem != MAP_FAILED, "clears mmap"); if (mem == MAP_FAILED) return;
+    memset(mem, 0, n);
+    pool_t *pl = calloc(1, sizeof *pl); pl->magic = MAGIC('P', 'O', 'O', 'L'); pl->flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED; pl->mem = mem; pl->size = n;
+    tex_t *D = b10_tex(pl, mem + 0x10000, NVN_FORMAT_DEPTH32F, W, W, 0), *C = b10_tex(pl, mem + 0x50000, NVN_FORMAT_RGBA8, W, W, 0);
+    vtex *dx = tex_res(D), *cx = tex_res(C);
+    if (!dx || !dx->img || !(dx->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) || !cx || !cx->img) { printf("SIMGAP clears: no DEPTH32F / RGBA8 target here\n"); return; }
+    int olda = empty_pass_old(); uint64_t total = 0; int nbad = 0;
+    p_set_rt rd, rc; memset(&rd, 0, sizeof rd); rd.depth = D; memset(&rc, 0, sizeof rc); rc.n = 1; rc.color[0] = C;
+    static uint64_t cmd[512];
+    #define RUN() do { lc_end(); mtl_exec((const uint8_t *)cmd); } while (0)
+    p_clear_ds z50 = { 0.5f, 1, 0, 0 }, s1 = { 0.0f, 0, 7, 0xff };   // (depth 0.5; stencil 7: DEPTH32F has no stencil)
+    g_step = "clears: A";
+    { mtl_sub_begin(); lc_zero(D, W, 0); { uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish(); }
+      uint64_t b0 = g_stat_begins, e0 = g_empty_dropped; mtl_sub_begin(); lc_q = (uint8_t *)cmd; LCOP(OP_SET_RT, p_set_rt, rc); LCOP(OP_CLEAR_DS, p_clear_ds, z50); LCOP(OP_SET_RT, p_set_rt, rc);
+      LCOP(OP_SET_RT, p_set_rt, rd); LCOP(OP_CLEAR_DS, p_clear_ds, s1); LCOP(OP_SET_RT, p_set_rt, rc); RUN();
+      uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish(); uint64_t nb = g_stat_begins - b0; total += nb;
+      CHECK(nb == (olda ? 2u : 0u), "clears, A: %llu passes begun for a depth clear with no depth target and a stencil clear of a depth-only image, %d expected (DM_VK_EMPTY_PASS %d)", (unsigned long long)nb, olda ? 2 : 0, olda);
+      CHECK(olda || g_empty_dropped - e0 == 2, "clears, A: %llu empty passes dropped", (unsigned long long)(g_empty_dropped - e0));
+      int bad = lc_bad(D, W, 0.0f); CHECK(!bad, "clears, A: the depth image kept as it was (%d texels changed)", bad); nbad += bad != 0;
+      printf("WORK clears, A: %llu passes begun for clears with nothing to clear\n", (unsigned long long)nb); }
+    #undef RUN
+    printf("MEASURE clear-only passes (DM_VK_EMPTY_PASS old %d, %s, %s): %llu passes begun over the cases; %s\n",
+           olda, g_dynren ? "dynamic rendering" : "render passes", hold_dec() ? "held" : "as recorded", (unsigned long long)total, nbad ? "WRONG" : "every texel as before");
+}
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -1319,7 +1357,7 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "compose"; compose_work();
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "clears"; lc_work(); g_step = "compose"; compose_work();
                                                    g_step = "memlife"; memlife_work(); g_step = "shmod"; g_shmod_idle_ns = 1000000000ull; shmod_work(); g_shmod_idle_ns = 60000000000ull;
                                                    g_step = "prewarm"; prewarm_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
