@@ -1815,6 +1815,7 @@ static uint64_t g_dsc_gen = 1;   // descriptor pools reset (desc_flush's reuse: 
 static uint64_t g_wait_ring_ns;   // DM_VK_PROF: waits for a free submission slot (the GPU 6 submissions behind)
 _Atomic uint64_t g_st_slot_ns, g_st_submit_ns;   // the same, and the queue submissions, never reset (hle_nvn.c's long-frame log takes per-frame differences)
 static int hold_dec(void); static void seg_gap_begin(sub_t *s);   // (the held frame's pieces: below)
+static int g_nlc; static void lc_out_all(void);   // (lazy clears, perf-1124 GPU fix B: kept depth clears, written out by mtl_sub_commit; above pass_begin)
 // What draw_ last sent into the command buffer it records into (pipeline, dynamic state, vertex / index buffers, pushed descriptors: its state shadow, below) is
 //   known only while nothing else changed it. g_cb_epoch counts every command buffer begun for CB () (each submission's, each secondary of a held frame: Vulkan
 //   starts each one with its state undefined, and a handle can come back from the pool); g_gfx_bind_gen counts the other graphics work recorded into one (zcopy_draw,
@@ -2274,6 +2275,7 @@ uint64_t mtl_sub_commit(void) {
     sub_t *s = g_sub; if (!s) return g_fence;
     pass_end();
     if (s->dec && g_seg_in) rend_end(s->cb);   // (a pass still open: its secondary closed, a gap after it)
+    if (g_nlc) lc_out_all();   // (kept depth clears written out: no kept clear outlives its submission, so the CPU's reads, the present and later submissions see it)
     shadow_sync_ordered(s);   // (into the upload command buffer, which runs before this submission's work)
     if (g_tsq) vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, (uint32_t)(s - g_subs) * 2 + 1);
     if (g_rtq) { report_ts_flush(s->cb, s); vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rtq, (uint32_t)(s - g_subs) * RQ_PER + RQ_END); }
@@ -2542,7 +2544,8 @@ static void sk_resolve_locked(vtex *x, uint32_t lv, uint32_t ly, int asp, int ov
         x->sk[i] = x->sk[--x->nsk];
     }
 }
-static void sk_read(vtex *x) { if (x) { fgr_read_img(x, x->w, x->h, (uint32_t)x->fmt, FGR_READ); hp_read(x); }
+static vtex *g_lc_open; static void lc_read(vtex *x);   // (lazy clears, perf-1124 GPU fix B: above pass_begin)
+static void sk_read(vtex *x) { if (x) { if (g_nlc || x == g_lc_open) lc_read(x); fgr_read_img(x, x->w, x->h, (uint32_t)x->fmt, FGR_READ); hp_read(x); }
     if (x && (x->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && xf_on()) {   // (stage 3: a depth / stencil image read is never left out)
         pthread_mutex_lock(&g_fgrmu);
         if (xf_read(&x->xf)) { g_xf_bad++; RED_ONCE(62, "a depth store left out at a frame's end was read (%ux%u, format %d): stored again for good", x->w, x->h, (int)x->fmt); }
@@ -4233,7 +4236,8 @@ static int P_tf;   // the open pass is transform feedback captures' (tf_pass_beg
 static struct { uint64_t lo, hi; } g_tfw[64]; static int g_ntfw;   // what the captures in the open capture pass wrote
 static void ubd_flush(void);
 static int g_nubd;
-static void pass_end(void) { g_rt_stale = 0; if (P.open) { rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0; if (g_mw_px) mw_pass_end();
+static int g_lc_hazard;   // (lazy clears: the open pass took a clear by its load op and a draw in it samples that image; draw_ begins it again)
+static void pass_end(void) { g_rt_stale = 0; if (P.open) { g_lc_open = NULL; g_lc_hazard = 0; rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0; if (g_mw_px) mw_pass_end();
     if (!P_tf && P.hd) sk_ro_note(P.dkey, P.dwrote, 0);
     if (!P_tf && P.hs) sk_ro_note(P.skey, P.swrote, 0);
     g_after_pass = !P_tf; g_bar_clean = 0;
@@ -4350,7 +4354,7 @@ static int tf_batch_on(void) { static int v = -1; if (v < 0) { const char *e = g
 static int tf_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_ntfw; i++) if (lo < g_tfw[i].hi && g_tfw[i].lo < hi) return 1; return 0; }
 static void tf_pass_begin(int keep) {
     if (P.open && P_tf && keep && tf_batch_on()) return;
-    pass_end(); memset(&P, 0, sizeof P); P_tf = 1; g_bar_clean = g_after_pass = 0;
+    pass_end(); if (g_nlc) lc_out_all(); memset(&P, 0, sizeof P); P_tf = 1; g_bar_clean = g_after_pass = 0;   // (a kept depth clear is written out first: a capture's vertex shader may read the image)
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {1, 1}}, .layerCount = 1 };
     // a driver that drops the work of a pass with nothing attached (tf_selftest.h decides, g_tf_att): a 1x1 colour attachment it never writes (the pipelines get its
     //   format through P.cfmt like any pass's: pso_get's key)
@@ -4406,10 +4410,33 @@ static VkAttachmentStoreOp depth_store(vtex *x, int loads) {
     static int said; if (!said++) VLOG("passes: a %ux%u depth image (format %d) is no longer stored: nothing read it for 120 frames", x->w, x->h, (int)x->fmt);
     return VK_ATTACHMENT_STORE_OP_DONT_CARE;
 }
+// Lazy clears (perf-1124 GPU fix B). The games set a depth-only target, clear it and set the real targets: the clear was kept (R.clear_*), but the target change began
+//   a pass just for it (pass_flush) that cleared and stored the depth image, and the next pass on it loaded what had just been stored (Sword / Shield 8-10 such passes a
+//   frame at 1080p, two of them cleared twice with nothing between; Legends: Arceus 12: 59 / 81 MB stored and the same loaded back a frame at 1080p). Such a clear is
+//   now kept beside its image (g_lc: the image, its attachment view, size and layers, the targets and the values; lc_defer) and no pass begins for it:
+//   - the next game pass that attaches that view as its depth / stencil over the whole of it takes it as its load op CLEAR (lc_settle, pass_begin): what the clear's
+//     own pass and the load after it gave;
+//   - a second clear of the same view before then replaces it, aspect by aspect (as the second pass overwrote the first);
+//   - anything else first writes it out as the pass it was (lc_out: the same targets and values, through pass_begin): any other game pass (lc_settle: it may sample the
+//     image, or be on part of it), a capture pass (tf_pass_begin, tfp_pass_begin), a copy, blit or readback into a buffer from or into any image (copy_b2t, copy_t2t,
+//     and zcopy_draw / the blits inside it), a texture clear (clear_tex), a dispatch (dispatch), the submission's end (mtl_sub_commit: the CPU's reads, screenshots,
+//     the present and every later submission come after it), and as a last net any read of the image on the replay thread with no pass open (sk_read: sampled,
+//     copied, shown, read by the CPU: lc_read).
+//   A pass that took a clear by its load op and then samples that image (a draw binding it as a texture: sk_read) is ended and begun again, loading, before that draw
+//   is recorded (draw_, g_lc_hazard): memory then holds the clear, as the clear-only pass left it. Only depth / stencil clears with no colour target set and an image
+//   the CPU never fills are kept; colour clears and everything else are written as before. Two NVN textures over the same memory share one vtex (tex_res: g_alias),
+//   so the kept clear is found through either. Only the replay's own thread keeps and writes them (g_lc_thr). DM_VK_LAZY_CLEAR=0: every clear-only pass as before
+enum { LC_N = 8 };
+typedef struct { vtex *x; VkImageView v; uint32_t w, h, layers; p_set_rt rt; uint8_t d, s; float cd; uint32_t cs, lv, ly; } lc_ent;   // (lv / ly: the view's level and first layer)
+static lc_ent g_lc[LC_N], g_lc_cur;   // kept clears (g_nlc of them); the one the pass being begun takes
+static int g_lc_busy; static pthread_t g_lc_thr;   // (a kept clear being written out: its pass_begin takes and writes nothing; the thread that keeps them)
+static uint64_t g_lc_kept, g_lc_folded, g_lc_replaced, g_lc_written, g_lc_redo, g_lc_net;   // the present line: kept, taken by a load op, replaced, written out as before, passes begun again, by the read net
+static int lc_settle(void);
 static int pass_begin(void) {
     tf_end();
     if (P.open && g_rt_stale) rt_resolve();
     if (P.open) return 1;
+    int lc_take = g_nlc && !g_lc_busy ? lc_settle() : 0;   // (lazy clears: the one kept clear this pass takes by its load op; the others written out before it)
     if (!R.has_rt) { RED_ONCE(21, "draw with no render target set"); return 0; }
     static int prof = -1; if (prof < 0) prof = getenv("DM_VK_PROF") != NULL; uint64_t pt0 = prof ? mono_ns() : 0;   // (DM_VK_PROF: g_pb_ns)
     VkRenderingAttachmentInfo ca[8]; VkRenderingAttachmentInfo da = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO }, sa = da;
@@ -4454,6 +4481,10 @@ static int pass_begin(void) {
     if (R.rt.depth && R.rt.depth->d.format) {
         vtex *x; uint32_t w, h; VkImageView v = att_view(R.rt.depth, &R.rt.dview, R.rt.has_dview, &x, &w, &h);
         if (v && (x->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+            if (lc_take && x == g_lc_cur.x && v == g_lc_cur.v) {   // (lazy clears: the kept clear of this view, taken by the load op; a clear of this pass's own is newer and wins)
+                if (g_lc_cur.d && !R.clear_d) { R.clear_d = 1; R.cd = g_lc_cur.cd; }
+                if (g_lc_cur.s && !R.clear_s) { R.clear_s = 1; R.cs = g_lc_cur.cs; }
+                g_lc_open = x; g_lc_folded++; lc_take = 0; vtex_unref(g_lc_cur.x); g_lc_cur.x = NULL; }
             if (!nlay || g_att_layers < nlay) nlay = g_att_layers;
             VkAttachmentStoreOp dso = depth_store(x, ((x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !R.clear_d) || ((x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) && !R.clear_s));
             uint32_t dl = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0, dy = R.rt.has_dview && R.rt.dview.set_layers ? R.rt.dview.min_layer : 0;
@@ -4472,6 +4503,10 @@ static int pass_begin(void) {
                 if (P.hs) fga[fgn++] = (fgr_attin){ x, x->w, x->h, (uint32_t)x->fmt, (uint16_t)dl, (uint16_t)dy, 9, (uint8_t)(sa.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR), rp_store_code(sa.storeOp) }; }
         }
     }
+    if (lc_take) {   // (lc_settle and the block above see the same targets, so this does not happen; if it did, the clear is kept and written out at the next chance)
+        RED_ONCE(164, "a kept depth clear was meant for this pass but its depth view was not attached: kept for the next pass");
+        if (g_nlc < LC_N) g_lc[g_nlc++] = g_lc_cur; else vtex_unref(g_lc_cur.x);
+        g_lc_cur.x = NULL; lc_take = 0; }
     if (!any) {   // no target attached: an attachment-less pass at the viewport's size (nvn_mtl.m bare_dims), or nothing when targets were set but none could be attached
         int bare = !(R.rt.depth && R.rt.depth->d.format); for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && R.rt.color[i]->d.format) bare = 0;   // (format 0: off)
         if (!bare) {
@@ -4539,11 +4574,76 @@ static int pend_clears(void) {
     vtex *x = tex_res(R.rt.depth); if (!x || !x->img) return 1;   // (no image: as before, pass_begin reports it)
     return (R.clear_d && (x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) || (R.clear_s && (x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT));
 }
-static void pass_flush(void) {   // pending clears with no draw after them: a pass just for them
+// ---- lazy clears (see above pass_begin) ----
+static int lc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_LAZY_CLEAR"); v = !(e && !strcmp(e, "0"));
+    VLOG("depth clears with no draw after them: %s", v ? "taken by the next pass on the image as its load op (DM_VK_LAZY_CLEAR=0: a pass each, as before)" : "a pass each (DM_VK_LAZY_CLEAR=0)"); } return v; }
+static void lc_out(int i) {   // kept clear i written out as the pass it was, now
+    lc_ent e = g_lc[i]; g_lc[i] = g_lc[--g_nlc];
+    vtex *x = NULL; uint32_t w = 0, h = 0; VkImageView v = g_sub && !P.open && e.rt.depth ? att_view(e.rt.depth, &e.rt.dview, e.rt.has_dview, &x, &w, &h) : VK_NULL_HANDLE;
+    if (v && x == e.x && v == e.v) {   // (the targets still name the image: its pass as it was)
+        __typeof__(R) sv = R; int busy = g_lc_busy; g_lc_busy = 1;
+        R.rt = e.rt; R.has_rt = 1; memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = e.d; R.cd = e.cd; R.clear_s = e.s; R.cs = e.cs;
+        if (pass_begin()) pass_end();
+        g_lc_busy = busy; R = sv; g_lc_written++;
+    } else if (g_sub && !P.open && (e.x->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {   // (the texture object names another image by now: the kept one cleared directly, the same values)
+        g_pass_last_by_rt = 0; barrier_all(CB());   // (as outside_pass: no pass is open here)
+        VkClearDepthStencilValue cv = { e.cd, e.cs }; VkImageSubresourceRange rg = { (e.d ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) | (e.s ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u), e.lv, 1, e.ly, e.layers };
+        vkCmdClearDepthStencilImage(CB(), e.x->img, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &rg); barrier_all(CB()); g_lc_written++;
+    } else RED_ONCE(165, "a kept depth clear could not be written out (%s): lost", !g_sub ? "no submission" : P.open ? "a pass is open" : "its image takes no transfers");
+    vtex_unref(e.x);
+}
+static void lc_out_all(void) { while (g_nlc) lc_out(g_nlc - 1); }
+// At a target change with clears pending and no pass open (pass_flush): kept instead of a pass when they are depth / stencil clears of a depth-only target
+static int lc_defer(void) {
+    if (!lc_on() || g_lc_busy || !g_sub || P.open || !R.has_rt || !(R.clear_d || R.clear_s) || atomic_load(&g_cap) == 2) return 0;   // (a frame capture lists every pass)
+    for (int i = 0; i < 8; i++) if (R.clear_c[i]) return 0;
+    for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && R.rt.color[i]->d.format) return 0;   // (a colour target: the pass's area could be smaller than the depth view)
+    if (!R.rt.depth || !R.rt.depth->d.format) return 0;
+    vtex *x; uint32_t w, h; VkImageView v = att_view(R.rt.depth, &R.rt.dview, R.rt.has_dview, &x, &w, &h); uint32_t lay = g_att_layers;
+    if (!v || !(x->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) || x->pkg) return 0;
+    uint8_t d = R.clear_d && (x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT), s = R.clear_s && (x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
+    if (!d && !s) return 0;
+    for (int i = 0; i < g_nlc; i++) if (g_lc[i].x == x) {
+        if (g_lc[i].v == v && g_lc[i].w == w && g_lc[i].h == h && g_lc[i].layers == lay) {   // the same view cleared again: it replaces the first, aspect by aspect
+            if (d) { g_lc[i].d = 1; g_lc[i].cd = R.cd; } if (s) { g_lc[i].s = 1; g_lc[i].cs = R.cs; } g_lc[i].rt = R.rt; g_lc_replaced++; return 1; }
+        lc_out(i); break; }   // (another part of the same image: the first is written out, in order)
+    if (g_nlc == LC_N) lc_out(0);
+    uint32_t lv = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0, ly = R.rt.has_dview && R.rt.dview.set_layers ? R.rt.dview.min_layer : 0;
+    vtex_ref(x); g_lc[g_nlc++] = (lc_ent){ x, v, w, h, lay, R.rt, d, s, R.cd, R.cs, lv, ly }; g_lc_thr = pthread_self(); g_lc_kept++;
+    return 1;
+}
+// pass_begin, before anything else: whether the pass about to begin takes a kept clear by its load op (its depth view the kept one, over the whole of it: no colour
+//   target smaller or with fewer layers, as the pass's area is its smallest attachment's; not the scene depth HUD-free frame generation copies before the pass begins,
+//   hp_pass_begin); every other kept clear is written out first
+static int lc_settle(void) {
+    int take = -1;
+    if (R.has_rt && R.rt.depth && R.rt.depth->d.format && atomic_load(&g_cap) != 2) {
+        vtex *x; uint32_t w, h; VkImageView v = att_view(R.rt.depth, &R.rt.dview, R.rt.has_dview, &x, &w, &h); uint32_t lay = g_att_layers;
+        if (v && (x->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) && x != g_hp_Z)
+            for (int i = 0; i < g_nlc; i++) if (g_lc[i].x == x && g_lc[i].v == v && g_lc[i].w == w && g_lc[i].h == h && g_lc[i].layers == lay) take = i;
+        for (int i = 0; i < R.rt.n && i < 8 && take >= 0; i++) {
+            if (!R.rt.color[i] || !R.rt.color[i]->d.format || rt_dup_slot(&R.rt, i)) continue;
+            vtex *cx; uint32_t cw, ch; VkImageView cv = att_view(R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i], &cx, &cw, &ch);
+            if (!cv || !(cx->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) continue;
+            if (cw < w || ch < h || g_att_layers < lay) take = -1; }
+    }
+    if (take >= 0) { g_lc_cur = g_lc[take]; g_lc[take] = g_lc[--g_nlc]; }
+    lc_out_all();
+    return take >= 0;
+}
+// sk_read: a read of x. On the replay thread: a kept clear of x is written out (no pass open), or the draw being recorded begins its pass again (draw_)
+static void lc_read(vtex *x) {
+    if (!pthread_equal(pthread_self(), g_lc_thr)) return;   // (other threads read after a submission ended: mtl_sub_commit wrote every kept clear out)
+    if (x == g_lc_open && P.open && !P_tf) { g_lc_hazard = 1; return; }
+    if (g_lc_busy) return;
+    for (int i = 0; i < g_nlc; i++) if (g_lc[i].x == x) { if (P.open) g_lc_hazard = 1; else { g_lc_net++; lc_out(i); } return; }
+}
+static void pass_flush(void) {   // pending clears with no draw after them: a pass just for them (or none: kept for the next pass, lc_defer)
     int pend = pend_clears();
     if (!pend && pend_raw()) {   // (nothing they could clear: no pass, and they do not carry over to the next targets, which a pass begun for them reset)
         if (!P.open && g_sub) g_empty_dropped++;
         memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0; }
+    if (pend && lc_defer()) { memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0; pend = 0; }
     if (pend && !P.open && g_sub) pass_begin();
     pass_end();
 }
@@ -6068,6 +6168,14 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
     { int any = 0; for (int st = 0; st < 5; st++) any |= pr->sh[st] && pr->sh[st]->nres;
       if (any) { pthread_mutex_lock(&g_rmu); g_dsh = sh && !g_np; g_dsh_cnt = cnt; for (int st = 0; st < 5; st++) push_stage_h(pr->sh[st], st, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 1); g_dsh = 0; pthread_mutex_unlock(&g_rmu); } }
     if (sh && g_np) sh_desc_forget();   // (drawn with a descriptor set, bound at 0 below: the pushed descriptors are disturbed)
+    if (g_lc_hazard && !tfcap) {   // (lazy clears: this draw samples the depth image whose clear its pass took by the load op, so memory does not hold the clear yet. The pass is
+        //   ended (storing the clear and the draws so far) and begun again, loading, and the draw recorded there from the start: memory holds what the clear-only pass
+        //   and the passes after it left, as before. Nothing of this draw was drawn: its state and bindings in the old pass are left unused)
+        g_lc_hazard = 0; g_lc_redo++; D.n = 0;
+        pass_end(); if (g_nlc) lc_out_all();
+        if (pass_begin()) draw_(dw, di, NULL);
+        return;
+    }
     if (mark) mark[3] = mono_ns();
     if (tfcap) {   // the capture buffers, then the draw, then its writes made visible to what reads them (vertex streams, shaders, copies)
         VkWriteDescriptorSet w_[4]; VkDescriptorBufferInfo bi_[4]; uint32_t nw = 0;
@@ -6149,6 +6257,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
 static nvn_hmap g_cps = {.klen = sizeof(void *)};
 static int b10_quantize_region(VkCommandBuffer cb, vtex *x, uint32_t level, uint32_t z0, uint32_t nz, int32_t x0, int32_t y0, uint32_t w, uint32_t h);
 static void dispatch(const p_dispatch *dp) {
+    if (g_nlc) lc_out_all();   // (kept depth clears written out before the dispatch records anything, and before its barrier: it may read or write any image it binds)
     if (!S.cprog) { RED_ONCE(39, "dispatch with no program bound"); return; }
     vprog *pr = prog_get(S.cprog); vshader *cs = pr->sh[5]; if (!cs) { RED_ONCE(40, "dispatched program has no compute shader (or it is not mapped)"); return; }
     VkPipelineLayout pl = prog_layout(pr, 1); g_np = pr->np[1];
@@ -8478,7 +8587,10 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     atomic_store(&g_apso_budget_ns, g_apso_frame_ns);   // (each frame's wait for pipelines being built: apso_wait)
     if (n % 300 == 0 && atomic_load(&g_apso_done) + atomic_load(&g_apso_skipped)) VLOG("present %llu: pipelines built in the background %llu, draws skipped waiting for one %llu (DM_VK_ASYNC_PSO)", (unsigned long long)n, (unsigned long long)atomic_load(&g_apso_done), (unsigned long long)atomic_load(&g_apso_skipped));
     if (n % 300 == 0 && g_pass_resumed) VLOG("present %llu: %llu target changes kept their open pass (DM_VK_PASS_DEFER)", (unsigned long long)n, (unsigned long long)g_pass_resumed);
-    if (n % 300 == 0) VLOG("present %llu: passes left out so far: empty depth passes dropped %llu", (unsigned long long)n, (unsigned long long)g_empty_dropped);
+    if (n % 300 == 0) VLOG("present %llu: passes left out so far: clear-only passes folded %llu (depth clears kept %llu: taken by the next pass's load op %llu, replaced by a second clear %llu, "
+                           "written out as before %llu, of them by a read %llu; passes begun again for a draw sampling a taken clear %llu); empty depth passes dropped %llu",
+                           (unsigned long long)n, (unsigned long long)(g_lc_folded + g_lc_replaced - g_lc_redo), (unsigned long long)g_lc_kept, (unsigned long long)g_lc_folded, (unsigned long long)g_lc_replaced,
+                           (unsigned long long)g_lc_written, (unsigned long long)g_lc_net, (unsigned long long)g_lc_redo, (unsigned long long)g_empty_dropped);
     if (n % 300 == 0 && !VPROF_ON)   // (running totals: DM_VK_PROF prints these per 300 frames instead, and resets them)
         VLOG("passes so far: %llu begun; ended by a new target %llu, a uniform update %llu, a buffer copy %llu, a buffer fill %llu, any work outside a pass %llu (those three included); "
              "%llu opened onto exactly the attachments a target change had just ended", (unsigned long long)g_stat_begins, (unsigned long long)g_brk[0], (unsigned long long)g_brk[1],
