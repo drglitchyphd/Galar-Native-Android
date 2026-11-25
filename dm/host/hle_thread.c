@@ -87,6 +87,7 @@ typedef struct thr {
     _Atomic uint32_t svc_num; _Atomic uint64_t svc_at, svc_lr;   // the SVC it is in, where it is in the game's code and the return address there (thr_svc_enter; dm_main_where reads them from another thread)
     char comm[16];             // the kernel name it was given last (thr_comm)
     uint64_t wake_at;          // DM_SVC_STATS: when a waker decided to wake it (wake, holding G); block reads it when the thread runs again
+    _Atomic int wref;          // DM_SVC_WAKE=after: 1 while the record is in use, plus one per wake queued to be signalled after G is let go (thr_free / wake_flush: the last one frees it)
 } thr_t;
 static thr_t *g_all;
 static thr_t *g_main_thr;   // the game's main thread (svc_thread_main_init; never freed)
@@ -121,7 +122,30 @@ static void ss_wake_lat(uint64_t d) {
 static struct { int type; void *obj; } g_h[MAX_H];
 static pthread_key_t g_keythr;
 static uint64_t g_next_id = 0x51;
-static thr_t *g_wait;          // All waiting threads (lock / condition / address / synchronization)
+// Lock wake path (DM_SVC_WAKE; perf-1124 fable-game-deep.md section 3, item 1). locked (the default for v1.0): as before, one list of all waiting threads, and a woken
+//   thread is signalled while the waker still holds G, so it wakes only to sleep again on G until the waker lets go: two wake-ups per hand-over. The S25+ wait profiles
+//   show the main thread 4-6 % of its frame runnable inside ArbitrateLock and 1-2 % in ArbitrateUnlock. after: (a) ArbitrateUnlock 0x1b, SignalProcessWideKey 0x1d and
+//   SignalToAddress 0x35 queue the threads they wake (up to 16; more are signalled at once) and signal them right after letting G go, so the woken thread finds G free;
+//   (b) the waiting threads hang in 64 lists by lock address / condition key / address and one for WaitSynchronization, so finding the waiters of one lock no longer
+//   walks every waiting thread of the process. Who is woken, in what order (priority, then first come), the lock owner hand-over, timeouts and CancelSynchronization
+//   are decided exactly as before, under G; only the moment the host thread is signalled moves. A thread record is freed only once its queued signals went out (wref).
+//   The same in every game (shared engine). Measure with DM_SVC_STATS=1 (wake latency) before turning it on anywhere. Read once in svc_thread_main_init
+static int g_wake_after;
+#define WB_N 65               // waiting-thread lists: 64 by address or key, the last for synchronization waits; with DM_SVC_WAKE=locked everything is in list 0
+static thr_t *g_wait[WB_N];   // All waiting threads (lock / condition / address / synchronization)
+static __thread thr_t *t_wq[16]; static __thread int t_nwq, t_wq_on;   // wakes this thread queued while holding G (DM_SVC_WAKE=after; t_wq_on only inside 0x1b / 0x1d / 0x35)
+static int wb(int kind, uint64_t a) {
+    if (!g_wake_after) return 0;
+    if (kind == 4) return WB_N - 1;
+    return (int)(((a >> 2) * 0x9e3779b97f4a7c15ull) >> 58);   // (Fibonacci hash of the word address: 64 lists)
+}
+static int wb_of(const thr_t *t) { return wb(t->wkind, t->wkind == 2 ? t->wkey : t->waddr); }
+static void thr_release(thr_t *t) { pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t); }
+static void wake_flush(void) {   // after letting G go: signal the queued wakes
+    int n = t_nwq; t_nwq = 0; t_wq_on = 0;
+    for (int i = 0; i < n; i++) { thr_t *t = t_wq[i]; pthread_cond_signal(&t->cv); if (atomic_fetch_sub(&t->wref, 1) == 1) thr_release(t); }
+}
+static inline void g_unlock_wake(void) { pthread_mutex_unlock(&G); if (t_nwq) wake_flush(); else t_wq_on = 0; }
 
 static uint32_t h_new(int type, void *obj) {     // Caller holds G
     for (int i = 1; i < MAX_H; i++) if (!g_h[i].type) { g_h[i].type = type; g_h[i].obj = obj; return 0x1000 + i; }
@@ -176,29 +200,36 @@ int dm_yield_to_core_peers(unsigned max_us) {
 }
 
 // ---------- Wait primitives (called holding G) ----------
-static void wait_unlink(thr_t *t) {
-    for (thr_t **p = &g_wait; *p; p = &(*p)->next) if (*p == t) { *p = t->next; break; }
+static int wait_unlink_in(thr_t *t, int b) {
+    for (thr_t **p = &g_wait[b]; *p; p = &(*p)->next) if (*p == t) { *p = t->next; t->next = NULL; return 1; }
+    return 0;
+}
+static void wait_unlink(thr_t *t) {   // (from the list its current wait kind and address say; the others are searched only if it is not there, which would be a bug)
+    if (!wait_unlink_in(t, wb_of(t))) for (int b = 0; b < WB_N && !wait_unlink_in(t, b); b++) {}
     t->next = NULL;
 }
 // Pick a waiter in kernel order: numerically lower priority first, at equal priority the earlier registered first (holding G). kind 1 matches by lock address, 2 by condition key, 3 by address
 static uint64_t g_wseq;
 static thr_t *pick(int kind, uint64_t a) {
     thr_t *b = NULL;
-    for (thr_t *t = g_wait; t; t = t->next) {
+    for (thr_t *t = g_wait[wb(kind, a)]; t; t = t->next) {
         if (t->wkind != kind || (kind == 2 ? t->wkey : t->waddr) != a) continue;
         if (!b || t->prio < b->prio || (t->prio == b->prio && t->wseq < b->wseq)) b = t;
     }
     return b;
 }
 static void wake(thr_t *t, int64_t res) {
-    wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; pthread_cond_signal(&t->cv);
     if (g_ss_on) t->wake_at = now_ns();
+    wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res;
+    if (t_wq_on && t_nwq < 16) { atomic_fetch_add(&t->wref, 1); t_wq[t_nwq++] = t; }   // (DM_SVC_WAKE=after: signalled once G is let go, wake_flush)
+    else pthread_cond_signal(&t->cv);
     thr_t *self = pthread_getspecific(g_keythr);   // the woken thread is pinned to this core with a higher priority: on Horizon it preempts at once (see dm_yield_to_core_peers)
     if (self && self != t && !t->host_owned && t->prio < self->prio && t->mask == 1ull << (self->core & 63)) self->yield_pending = 1;
 }
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
 static int64_t block(thr_t *t, int kind, int64_t ns) {
-    t->wkind = kind; t->woke = 0; t->next = g_wait; g_wait = t; t->wseq = ++g_wseq;
+    t->wkind = kind; t->woke = 0; t->wseq = ++g_wseq;
+    { int b = wb_of(t); t->next = g_wait[b]; g_wait[b] = t; }
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     struct timespec dl;
     int det_wait = ns > 0 && dm_detclock_enabled();
@@ -229,7 +260,7 @@ static inline int cas32(uint64_t a, uint32_t *exp, uint32_t v) { return __atomic
 static void lock_handoff(uint64_t addr) {
     thr_t *w = pick(1, addr); int more = 0;
     if (!w) { st32(addr, 0); return; }
-    for (thr_t *t = g_wait; t; t = t->next) if (t != w && t->wkind == 1 && t->waddr == addr) { more = 1; break; }
+    for (thr_t *t = g_wait[wb(1, addr)]; t; t = t->next) if (t != w && t->wkind == 1 && t->waddr == addr) { more = 1; break; }
     st32(addr, w->wtag | (more ? WAITERS_BIT : 0));
     wake(w, 0);
 }
@@ -240,7 +271,9 @@ static void lock_acquire_for(thr_t *t, uint64_t addr, uint32_t tag) {
         if (v == 0) { if (cas32(addr, &v, tag)) { wake(t, 0); return; } continue; }
         if (cas32(addr, &v, v | WAITERS_BIT)) break;
     }
+    int ob = wb_of(t);                                   // (the condition key's list)
     t->wkind = 1; t->waddr = addr; t->wtag = tag;      // Still in g_wait, changed to a lock wait
+    int nb = wb_of(t); if (nb != ob) { wait_unlink_in(t, ob); t->next = g_wait[nb]; g_wait[nb] = t; }   // (DM_SVC_WAKE=after: into the lock address's list)
     t->wseq = ++g_wseq;                                  // The kernel inserts it anew into the lock owner's wait queue: at equal priority it goes after the existing lock waiters
 }
 
@@ -327,9 +360,9 @@ static void *thread_main(void *p) {
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
 }
-static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads chain and free
+static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads chain and free (DM_SVC_WAKE=after: once no queued wake still has to signal it, wake_flush)
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
-    pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
+    if (atomic_fetch_sub(&t->wref, 1) == 1) thr_release(t);
 }
 static void wake_sync_waiters(const void *obj);
 static void thread_exit(thr_t *t) {
@@ -418,9 +451,12 @@ uint32_t svc_thread_main_init(void) {
     pthread_key_create(&g_keythr, NULL);
     qos_map_init();
     { const char *e = getenv("DM_SVC_STATS"); g_ss_on = e && atoi(e) > 0; if (g_ss_on) LOG("DM_SVC_STATS=1: lock and wait SVC counts, time to take the SVC lock and wake latency, a line every 10 s"); }
+    { const char *e = getenv("DM_SVC_WAKE"); g_wake_after = e && !strcmp(e, "after");
+      if (e && strcmp(e, "after") && strcmp(e, "locked")) LOG("[RED] DM_SVC_WAKE=%s: not after / locked; locked", e);
+      else if (e) LOG("DM_SVC_WAKE=%s: %s", e, g_wake_after ? "lock wakes signalled after the SVC lock is let go, waiters listed by address" : "lock wakes signalled under the SVC lock (as before)"); }
     pause_install();
     thr_t *t = calloc(1, sizeof *t);
-    pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
+    pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL); atomic_store(&t->wref, 1);
     t->started = 1; t->prio = 44; t->core = 0; t->mask = 7; t->pt = pthread_self(); t->mport = pthread_mach_thread_np(t->pt); t->host_work = &dm_host_work;
 #ifdef __linux__
     t->ltid = (int)gettid();   // (the main guest thread too: the state dump finds it by this, thr_bt)
@@ -432,6 +468,17 @@ uint32_t svc_thread_main_init(void) {
     g_main_thr = t;
     return t->handle;
 }
+#ifdef DM_TEST_HOOKS
+// Unit tests (t_svc_wake): make the calling pthread a guest thread of the given priority, as CreateThread + StartThread would (svc_thread_main_init has run once before)
+uint32_t dm_test_thread_register(int prio) {
+    thr_t *t = calloc(1, sizeof *t);
+    pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL); atomic_store(&t->wref, 1);
+    t->started = 1; t->prio = prio; t->core = 0; t->mask = 7; t->pt = pthread_self(); t->host_work = &dm_host_work;
+    pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
+    pthread_setspecific(g_keythr, t);
+    return t->handle;
+}
+#endif
 
 static uint64_t g_main_yield_n, g_main_yield_ns;   // Written only by the guest main thread; the diagnostic line reads it on the same thread
 void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = g_main_yield_n; *ns = g_main_yield_ns; }
@@ -462,7 +509,7 @@ static int sig_obj(uint32_t h, int *bad) {    // 1 = signaled (holding G)
 // A synchronization object became signaled (an event, or a thread that exited): wake the WaitSynchronization waiters whose handle set holds it, so they re-check (holding G).
 // It used to wake every such waiter on every signal; each then re-checked its handles and went back to sleep, a wake-up per waiting thread per signal
 static void wake_sync_waiters(const void *obj) {
-    for (thr_t *w = g_wait; w; ) { thr_t *n = w->next;
+    for (thr_t *w = g_wait[wb(4, 0)]; w; ) { thr_t *n = w->next;
         if (w->wkind == 4) { int hit = !w->whs;
             for (int i = 0; i < w->whn && !hit; i++) { unsigned k = w->whs[i] - 0x1000; hit = k > 0 && k < MAX_H && g_h[k].obj == obj; }
             if (hit) wake(w, -1); }
@@ -473,7 +520,7 @@ static int64_t now_mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOT
 void dm_guest_clock_advanced(void) {
     if (!dm_detclock_enabled()) return;
     pthread_mutex_lock(&G);
-    for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) pthread_cond_signal(&t->cv);
+    for (int b = 0; b < WB_N; b++) for (thr_t *t = g_wait[b]; t; t = t->next) if (t->wkind) pthread_cond_signal(&t->cv);
     pthread_mutex_unlock(&G);
 }
 
@@ -811,9 +858,9 @@ static void ss_tick(void) {
     LOG("[svc-stats] %llu ms: lock 0x1a / unlock 0x1b / cv wait 0x1c / cv signal 0x1d / wait address 0x34 / signal address 0x35 / wait sync 0x18 / sleep-yield 0x0b: all threads %llu %llu %llu %llu %llu %llu %llu %llu, main thread %llu %llu %llu %llu %llu %llu %llu %llu",
         ms, (unsigned long long)a[0], (unsigned long long)a[1], (unsigned long long)a[2], (unsigned long long)a[3], (unsigned long long)a[4], (unsigned long long)a[5], (unsigned long long)a[6], (unsigned long long)a[7],
         (unsigned long long)m[0], (unsigned long long)m[1], (unsigned long long)m[2], (unsigned long long)m[3], (unsigned long long)m[4], (unsigned long long)m[5], (unsigned long long)m[6], (unsigned long long)m[7]);
-    LOG("[svc-stats] SVC lock G taken %llu times, %llu waited (%llu per mille) %llu µs in all, longest %llu µs; %llu wakes, latency mean %llu µs, longest %llu µs; by latency <5 µs %llu, <10 %llu, <20 %llu, <50 %llu, <100 %llu, <200 %llu, <1000 %llu, more %llu",
+    LOG("[svc-stats] SVC lock G taken %llu times, %llu waited (%llu per mille) %llu µs in all, longest %llu µs; %llu wakes (DM_SVC_WAKE=%s), latency mean %llu µs, longest %llu µs; by latency <5 µs %llu, <10 %llu, <20 %llu, <50 %llu, <100 %llu, <200 %llu, <1000 %llu, more %llu",
         (unsigned long long)take, (unsigned long long)cont, (unsigned long long)(take ? cont * 1000 / take : 0), (unsigned long long)(cns / 1000), (unsigned long long)(cmax / 1000),
-        (unsigned long long)wk, (unsigned long long)(wk ? wns / wk / 1000 : 0), (unsigned long long)(wmax / 1000),
+        (unsigned long long)wk, g_wake_after ? "after" : "locked", (unsigned long long)(wk ? wns / wk / 1000 : 0), (unsigned long long)(wmax / 1000),
         (unsigned long long)h[0], (unsigned long long)h[1], (unsigned long long)h[2], (unsigned long long)h[3], (unsigned long long)h[4], (unsigned long long)h[5], (unsigned long long)h[6], (unsigned long long)h[7]);
 }
 int svc_thread(int num, uint64_t *regs) {
@@ -836,7 +883,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     switch (num) {
     case 0x08: {  // CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)
         thr_t *t = calloc(1, sizeof *t);
-        pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
+        pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL); atomic_store(&t->wref, 1);
         t->entry = regs[1]; t->arg = regs[2]; t->stack_top = regs[3] & ~0xFull;
         // Core -2 (IdealCoreUseProcessValue) = the process's default ideal core (0 for this game), with an affinity mask of just that core - as in the Horizon kernel. It used to be recorded as -2 and GetCurrentProcessorNumber answered -2;
         //   SMBW's font engine picks its per-core engine slot by the current core number and crashed indexing with -2 (main +0x107dbc0, SequenceBackgroundWorker thread)
@@ -942,7 +989,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         pthread_mutex_unlock(&G);
         regs[0] = (uint64_t)r; return 1;
     }
-    case 0x1B: g_lock(); lock_handoff(regs[0]); pthread_mutex_unlock(&G); regs[0] = 0; return 1;
+    case 0x1B: g_lock(); t_wq_on = g_wake_after; lock_handoff(regs[0]); g_unlock_wake(); regs[0] = 0; return 1;
     case 0x1C: {  // WaitProcessWideKeyAtomic(x0 lock address, x1 condition key, w2 tag, x3 timeout)
         thr_t *t = cur(); uint64_t addr = regs[0], key = regs[1];
         g_lock();
@@ -970,11 +1017,11 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     }
     case 0x1D: {  // SignalProcessWideKey(x0 condition key, w1 count, <=0 all)
         uint64_t key = regs[0]; int cnt = (int)regs[1], n = 0;
-        g_lock();
+        g_lock(); t_wq_on = g_wake_after;
         for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(2, key)); n++) lock_acquire_for(w, w->waddr, w->wtag);   // In kernel order; once turned into a lock wait or woken it is no longer kind 2
-        int left = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
+        int left = 0; for (thr_t *w = g_wait[wb(2, key)]; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
         if (!left) st32(key, 0);
-        pthread_mutex_unlock(&G);
+        g_unlock_wake();
         regs[0] = 0; return 1;
     }
 
@@ -992,8 +1039,8 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     }
     case 0x35: {  // SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake, 1 increment if equal and wake, 2 if equal modify the value by waiter count and wake
         uint64_t addr = regs[0]; int type = (int)regs[1]; int32_t val = (int32_t)regs[2]; int cnt = (int)regs[3];
-        g_lock();
-        int nw = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
+        g_lock(); t_wq_on = g_wake_after;
+        int nw = 0; for (thr_t *w = g_wait[wb(3, addr)]; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
         int64_t r = 0;
         if (type != 0) {
             int32_t nv = val + 1;
@@ -1008,7 +1055,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         }
         if (!r) { int n = 0;
             for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(3, addr)); n++) wake(w, 0); }
-        pthread_mutex_unlock(&G);
+        g_unlock_wake();
         regs[0] = (uint64_t)r; return 1;
     }
 

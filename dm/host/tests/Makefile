@@ -66,3 +66,23 @@ $(B)/t_steptrace_linux: t_steptrace.c ../hle_steptrace.c ../hle.h ../dm.h t_linu
 linux-step: $(B)/t_steptrace_linux
 	$(B)/t_steptrace_linux
 .PHONY: linux-step
+# the lock and wait SVCs of hle_thread.c: t_condvar, its negative control, and t_svc_wake once per wake path (DM_SVC_WAKE=locked / after, T_SECS of stress
+#   each, default 10), whose "=" lines must agree
+T_SECS ?= 10
+LTHR = ../hle_thread.c t_condvar_stub.c t_linux_stub.c
+LDEP = $(LTHR) ../dm.h t_linux_prelude.h $(LGEN)/game_profile.h
+$(B)/t_condvar_linux: t_condvar.c $(LDEP)
+	$(LCC) -o $@ t_condvar.c $(LTHR) -ldl
+$(B)/t_condvar_old_linux: t_condvar.c $(LDEP)
+	$(LCC) -DDM_TEST_CV_OLD_ORDER -o $@ t_condvar.c $(LTHR) -ldl
+$(B)/t_svc_wake_linux: t_svc_wake.c $(LDEP)
+	$(LCC) -o $@ t_svc_wake.c $(LTHR) -ldl
+linux-thread: $(B)/t_condvar_linux $(B)/t_condvar_old_linux $(B)/t_svc_wake_linux
+	$(B)/t_condvar_linux
+	$(B)/t_condvar_old_linux
+	DM_SVC_WAKE=locked T_SECS=$(T_SECS) $(B)/t_svc_wake_linux | tee $(B)/svc_wake_locked.txt
+	DM_SVC_WAKE=after T_SECS=$(T_SECS) $(B)/t_svc_wake_linux | tee $(B)/svc_wake_after.txt
+	grep -q '^all passed' $(B)/svc_wake_locked.txt && grep -q '^all passed' $(B)/svc_wake_after.txt
+	grep '^=' $(B)/svc_wake_locked.txt > $(B)/svc_wake_locked.eq; grep '^=' $(B)/svc_wake_after.txt > $(B)/svc_wake_after.eq
+	diff $(B)/svc_wake_locked.eq $(B)/svc_wake_after.eq && echo "t_svc_wake: both wake paths give the same results"
+.PHONY: linux-thread
