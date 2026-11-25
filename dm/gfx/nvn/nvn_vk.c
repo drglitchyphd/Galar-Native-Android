@@ -108,6 +108,7 @@ static int g_dynren = 1, g_eds = 1;
 static int g_bar_clean, g_after_pass, g_game_bar;   // the barrier state of the submission's command buffer (barrier_all)
 static int32_t g_game_bits;   // the game's barrier bits since the last draw pass began (NVN_BARRIER_*: pass_begin narrows by them)
 static int g_store_none;   // VK_ATTACHMENT_STORE_OP_NONE usable (Vulkan 1.3, VK_KHR / VK_EXT_load_store_op_none): skip stores' read-only depth / stencil
+static int g_load_none;    // VK_ATTACHMENT_LOAD_OP_NONE usable (VK_KHR / VK_EXT_load_store_op_none enabled; DM_VK_LOAD_NONE=0: never): depth / stencil a held pass never touches
 // Uniform updates deferred inside a pass (ubd_on, DM_VK_UB_DEFER=0 / 1), from the Arceus engine (androidswithy 84fb5df): on by default for Legends: Arceus, where it was
 //   measured; off for Sword / Shield and Scarlet / Violet. The only switch that reads this now: that engine's relaxed barriers are vk_quirks.h's Q_BARRIER_RELAXED for
 //   every game (DM_VK_BARRIER), and its learnt attachment stores (DM_VK_SKIP_STORES) are off for every game. A per-game choice that is no GPU rule, by the program ID
@@ -430,10 +431,16 @@ static void mtl_init_(void) {
     if (has_ext(de, nde, "VK_KHR_push_descriptor") && !getenv("DM_VK_NO_PUSH")) dext[ndext++] = "VK_KHR_push_descriptor";
     else { g_nopush = 1; VLOG("no push descriptors: descriptor sets from per-submission pools"); }
     if (has_ext(de, nde, "VK_KHR_portability_subset")) { dext[ndext++] = "VK_KHR_portability_subset"; g_moltenvk = 1; }
-    if (g_api >= VK_API_VERSION_1_3) g_store_none = 1;
-    else if (has_ext(de, nde, "VK_KHR_load_store_op_none")) { dext[ndext++] = "VK_KHR_load_store_op_none"; g_store_none = 1; }
-    else if (has_ext(de, nde, "VK_EXT_load_store_op_none")) { dext[ndext++] = "VK_EXT_load_store_op_none"; g_store_none = 1; }
-    if (getenv("DM_VK_NO_STORE_NONE")) g_store_none = 0;
+    // (LOAD_OP_NONE is the extensions' alone: Vulkan 1.3 has STORE_OP_NONE but not the load op. So on 1.3 the extension is enabled as well where the driver lists it,
+    //   unless DM_VK_LOAD_NONE=0, which makes the device as before; without either extension no pass begins with LOAD_OP_NONE, seg_record_prim)
+    { const char *ln = getenv("DM_VK_LOAD_NONE"); int want_ln = !(ln && !strcmp(ln, "0"));
+      if (g_api >= VK_API_VERSION_1_3 && !want_ln) g_store_none = 1;
+      else if (has_ext(de, nde, "VK_KHR_load_store_op_none")) { dext[ndext++] = "VK_KHR_load_store_op_none"; g_store_none = 1; g_load_none = want_ln; }
+      else if (has_ext(de, nde, "VK_EXT_load_store_op_none")) { dext[ndext++] = "VK_EXT_load_store_op_none"; g_store_none = 1; g_load_none = want_ln; }
+      else if (g_api >= VK_API_VERSION_1_3) g_store_none = 1; }
+    if (getenv("DM_VK_NO_STORE_NONE")) g_store_none = g_load_none = 0;
+    VLOG("depth / stencil a pass does not write: %s; not touched at all: %s", g_store_none ? "store op NONE (DM_VK_NO_STORE_NONE=1: stored)" : "stored (no store op NONE here)",
+         g_load_none ? "load op NONE too (DM_VK_LOAD_NONE=0: loaded)" : "loaded (no load op NONE here)");
     if (!g_nopush) { VkPhysicalDevicePushDescriptorPropertiesKHR pd = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR };
         VkPhysicalDeviceProperties2 pp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pd }; if (vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(g_pd, &pp);
         if (pd.maxPushDescriptors) g_maxpush = pd.maxPushDescriptors; if (getenv("DM_VK_MAXPUSH")) g_maxpush = (uint32_t)atoi(getenv("DM_VK_MAXPUSH"));   // a lower limit tests the set path
@@ -1553,7 +1560,9 @@ typedef struct { VkBuffer buf; vmalloc_t a; uint8_t *map; VkDeviceSize used, siz
 // (work: a gap's commands that do something, counted by the gap_* wrappers; a gap with none, or only the barrier that stands for the Switch's own order between passes
 //   on the same targets, lets the passes on either side run as one: renderer phase 3, seg_record_prim)
 // (ra / box: the part of the target the pass's contents can write, seg_area: ra 0 unknown (the whole target), 1 known and nothing yet, 2 known: box)
-typedef struct { int pass, fgp; VkCommandBuffer cb; VkRenderingInfo ri; VkRenderingAttachmentInfo ca[8], da, sa; uint32_t cf[8], dsfmt, samples, work; int ra; VkRect2D box; } seg_t;
+// (dsk / dsw / dst: a game pass that pass_end closed knows whether it wrote its depth / stencil attachment (P.dwrote / swrote, a clear by load op included) and whether
+//   a draw in it tested either (P.dtest); dsk 0: not known (our own passes, a pass closed elsewhere), taken as written and tested: seg_record_prim's NONE ops)
+typedef struct { int pass, fgp; VkCommandBuffer cb; VkRenderingInfo ri; VkRenderingAttachmentInfo ca[8], da, sa; uint32_t cf[8], dsfmt, samples, work; int ra; VkRect2D box; uint8_t dsk, dsw, dst; } seg_t;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, ucb; int ucb_open; uint64_t fence;
     VkCommandBuffer prim; VkCommandBuffer *sec; int nsec, csec; int dec; seg_t *seg; int nseg, cseg; seg_t cur;   // (the held frame's pieces: above; prim the submission's own primary)
@@ -1919,11 +1928,14 @@ static void barrier_pass(VkCommandBuffer cb) {   // draw pass → draw pass: eve
 //   a framebuffer is made for each pass and destroyed with its submission (defer_add), so none outlives the views it names. Pipelines are made against a compatible
 //   render pass (rp_for_pipeline: the same formats and samples; ops and layouts do not matter for compatibility). A colour slot with no view stays VK_ATTACHMENT_UNUSED
 //   in both, as in the pipeline's colour format list.
-typedef struct { uint32_t cfmt[8], dsfmt; uint8_t n, samples, optimal, cop[8], dop, sop, pad, cst[8], dst, sst, pad2[2]; } rpkey;   // cop / dop / sop: 1 load, 2 clear; optimal: COLOR_ATTACHMENT_OPTIMAL (else GENERAL); cst / dst / sst: 0 store, 1 don't care, 2 none (skip stores)
+typedef struct { uint32_t cfmt[8], dsfmt; uint8_t n, samples, optimal, cop[8], dop, sop, pad, cst[8], dst, sst, pad2[2]; } rpkey;   // cop / dop / sop: 1 load, 2 clear, 3 none (dop / sop: rp_load_code); optimal: COLOR_ATTACHMENT_OPTIMAL (else GENERAL); cst / dst / sst: 0 store, 1 don't care, 2 none (skip stores)
 static nvn_hmap g_rp = {.klen = sizeof(rpkey)};
 static pthread_mutex_t g_rpmu = PTHREAD_MUTEX_INITIALIZER;   // the submit thread (passes), the game's and the prewarm thread (pipelines), the present thread
 static VkAttachmentStoreOp rp_store(uint8_t v) { return v == 1 ? VK_ATTACHMENT_STORE_OP_DONT_CARE : v == 2 ? VK_ATTACHMENT_STORE_OP_NONE : VK_ATTACHMENT_STORE_OP_STORE; }
 static uint8_t rp_store_code(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? 1 : o == VK_ATTACHMENT_STORE_OP_NONE ? 2 : 0; }
+// (a depth / stencil attachment's load op: an aspect not attached loads, as before; NONE only from seg_record_prim's ds_none, with the extension enabled)
+static uint8_t rp_load_code(const VkRenderingAttachmentInfo *a) { return !a ? 1 : a->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : a->loadOp == VK_ATTACHMENT_LOAD_OP_NONE_EXT ? 3 : 1; }
+static VkAttachmentLoadOp rp_load(uint8_t v) { return v == 2 ? VK_ATTACHMENT_LOAD_OP_CLEAR : v == 3 ? VK_ATTACHMENT_LOAD_OP_NONE_EXT : VK_ATTACHMENT_LOAD_OP_LOAD; }
 static VkRenderPass rp_get(const rpkey *k) {
     pthread_mutex_lock(&g_rpmu); VkRenderPass rp = (VkRenderPass)nvn_hm_get(&g_rp, k); pthread_mutex_unlock(&g_rpmu);
     if (rp) return rp;
@@ -1937,8 +1949,8 @@ static VkRenderPass rp_get(const rpkey *k) {
         cr[i] = (VkAttachmentReference){ na++, L };
     }
     if (k->dsfmt) {
-        a[na] = (VkAttachmentDescription){ 0, (VkFormat)k->dsfmt, sm, k->dop == 2 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, rp_store(k->dst),
-                                           k->sop == 2 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, rp_store(k->sst), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL };
+        a[na] = (VkAttachmentDescription){ 0, (VkFormat)k->dsfmt, sm, rp_load(k->dop), rp_store(k->dst),
+                                           rp_load(k->sop), rp_store(k->sst), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL };
         dr = (VkAttachmentReference){ na++, VK_IMAGE_LAYOUT_GENERAL };
     }
     VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = k->n, .pColorAttachments = k->n ? cr : NULL, .pDepthStencilAttachment = k->dsfmt ? &dr : NULL };
@@ -2097,7 +2109,7 @@ static void rend_begin_ex(VkCommandBuffer cb, const VkRenderingInfo *ri, const u
     const VkRenderingAttachmentInfo *d = ri->pDepthAttachment && ri->pDepthAttachment->imageView ? ri->pDepthAttachment : NULL,
                                     *s = ri->pStencilAttachment && ri->pStencilAttachment->imageView ? ri->pStencilAttachment : NULL;
     if (d || s) {   // (depth and stencil are aspects of one image and view here)
-        k.dsfmt = dsfmt; k.dop = d && d->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1; k.sop = s && s->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1;
+        k.dsfmt = dsfmt; k.dop = rp_load_code(d); k.sop = rp_load_code(s);
         k.dst = d ? rp_store_code(d->storeOp) : 1; k.sst = s ? rp_store_code(s->storeOp) : 1;   // (an aspect not attached: nothing to keep)
         memset(&cv[nv], 0, sizeof cv[nv]); cv[nv].depthStencil.depth = d ? d->clearValue.depthStencil.depth : 0; cv[nv].depthStencil.stencil = s ? s->clearValue.depthStencil.stencil : 0;
         views[nv++] = d ? d->imageView : s->imageView;
@@ -2137,7 +2149,7 @@ static VkRenderPass rp_compat(const VkRenderingInfo *ri, const uint32_t *cf, uin
     for (uint32_t i = 0; i < k.n && i < 8; i++) { const VkRenderingAttachmentInfo *c = &ri->pColorAttachments[i]; if (!c->imageView) continue;
         k.cfmt[i] = cf[i]; k.cop[i] = c->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1; k.cst[i] = rp_store_code(c->storeOp); if (c->imageLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) k.optimal = 1; }
     const VkRenderingAttachmentInfo *d = ri->pDepthAttachment && ri->pDepthAttachment->imageView ? ri->pDepthAttachment : NULL, *s = ri->pStencilAttachment && ri->pStencilAttachment->imageView ? ri->pStencilAttachment : NULL;
-    if (d || s) { k.dsfmt = dsfmt; k.dop = d && d->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1; k.sop = s && s->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 1;
+    if (d || s) { k.dsfmt = dsfmt; k.dop = rp_load_code(d); k.sop = rp_load_code(s);
         k.dst = d ? rp_store_code(d->storeOp) : 1; k.sst = s ? rp_store_code(s->storeOp) : 1; }
     return rp_get(&k);
 }
@@ -2552,11 +2564,12 @@ static void sk_read(vtex *x) { if (x) { if (g_nlc || x == g_lc_open) lc_read(x);
         pthread_mutex_unlock(&g_fgrmu); } if (!x || !x->nsk) return; pthread_mutex_lock(&g_skmu); sk_resolve_locked(x, ~0u, ~0u, 0, 0); pthread_mutex_unlock(&g_skmu); }
 // A pass begins with x's subresource as attachment slot (0-7 colour, 8 depth, 9 stencil), cleared or loaded: what was pending resolves, and whether this pass stores comes back
 static uint64_t g_sk_sig, g_sk_last;   // the pass's key so far (pass_begin); the key sk_attach made last
+static uint64_t sk_key(int slot) { uint64_t key = (g_sk_sig ^ (uint64_t)(slot + 1) * 0x9E3779B97F4A7C15ull) * 0xff51afd7ed558ccdull; key ^= key >> 31; return key; }   // (slot's key in the pass)
 static int sk_attach(vtex *x, uint32_t lv, uint32_t ly, int asp, int slot, int cleared) {
     pthread_mutex_lock(&g_skmu);
     sk_resolve_locked(x, lv, ly, asp, cleared);
     int dc = 0;
-    uint64_t key = (g_sk_sig ^ (uint64_t)(slot + 1) * 0x9E3779B97F4A7C15ull) * 0xff51afd7ed558ccdull; key ^= key >> 31;
+    uint64_t key = sk_key(slot);
     g_sk_last = key;
     skey_t *k = sk_on() ? sk_get(key) : NULL;
     if (k && !k->off && k->streak >= SK_LEARN && !x->presented) { dc = 1; g_sk_skipped++; }
@@ -2568,9 +2581,14 @@ static int sk_attach(vtex *x, uint32_t lv, uint32_t ly, int asp, int slot, int c
 // Depth and stencil only read by a pass (testing without writing: the passes after the depth pass, transparent and post passes) need no store at all: VK_ATTACHMENT_STORE_OP_NONE
 // keeps the image as it was, without writing tile memory back. Learnt per key as above: 4 read-only passes in a row and the next one begins with NONE. A draw (or clear) that writes
 // it after all ends that pass (its content was kept, so ending it is exact) and begins a new one that stores, and the key stops using NONE. DM_VK_NO_STORE_NONE=1 turns it off
+// Since perf-1124 GPU fix C (step 2) it runs without the store learning (sk_on) where frames are not held (Legends: Arceus, Xclipse, PowerVR, and any GPU without the
+//   held frame): it is exact by itself, as a write restarts the pass storing (pass_writes), and the pass's key is made in pass_begin either way (sk_key). Held frames
+//   decide depth / stencil stores from the whole pass instead (ds_none), so there it stays tied to sk_on as before
 enum { SK_RO_LEARN = 4 };
+static int hold_dec(void);
+static int ro_free(void) { return !sk_on() && g_store_none && !hold_dec(); }   // (sk_ro without the store learning)
 static int sk_ro(uint64_t key, int cleared) {   // whether the attachment sk_attach just keyed begins with store op NONE
-    if (cleared || !sk_on()) return 0;
+    if (cleared || !(sk_on() || ro_free())) return 0;
     pthread_mutex_lock(&g_skmu); skey_t *k = sk_get(key); int r = k && !k->rooff && k->ro >= SK_RO_LEARN; pthread_mutex_unlock(&g_skmu);
     return r;
 }
@@ -4040,7 +4058,7 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
 void mtl_prog_release(prog_t *p) { (void)p; }   // programs are kept (keyed by serial; a released one is never looked up again)
 
 // ================= Render passes =================
-static struct { int open; uint32_t cfmt[8], dfmt, sfmt, samples, tw, th; int hd, hs, ncolor; uint32_t layers; uint64_t dkey, skey; int dnone, snone, dwrote, swrote; uint32_t b10; } P;   // dkey..: skip stores   // layers: a layered pass (a 3D target's slices) when > 1   // b10: colour targets that are R11G11B10F's RGBA16F stand-in (bit i: colour i, DM_VK_B10_AS_RGBA16)
+static struct { int open; uint32_t cfmt[8], dfmt, sfmt, samples, tw, th; int hd, hs, ncolor; uint32_t layers; uint64_t dkey, skey; int dnone, snone, dwrote, swrote, dtest; uint32_t b10; } P;   // dkey..: skip stores   // dtest: a draw tested depth or stencil (seg_record_prim's LOAD_OP_NONE)   // layers: a layered pass (a 3D target's slices) when > 1   // b10: colour targets that are R11G11B10F's RGBA16F stand-in (bit i: colour i, DM_VK_B10_AS_RGBA16)
 // DM_VK_PROF: what ended each open pass (0 a new render target, 1 a uniform update, 2 a buffer copy, 3 a buffer fill), and the cost of opening one split into its
 //   attachment views, the barrier before it and the driver's begin (g_pb_ns); g_brk_other: any work outside a pass that ended one (the causes above included)
 static uint64_t g_brk[4], g_pb_ns[3], g_brk_other;
@@ -4237,7 +4255,9 @@ static struct { uint64_t lo, hi; } g_tfw[64]; static int g_ntfw;   // what the c
 static void ubd_flush(void);
 static int g_nubd;
 static int g_lc_hazard;   // (lazy clears: the open pass took a clear by its load op and a draw in it samples that image; draw_ begins it again)
-static void pass_end(void) { g_rt_stale = 0; if (P.open) { g_lc_open = NULL; g_lc_hazard = 0; rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0; if (g_mw_px) mw_pass_end();
+static void pass_end(void) { g_rt_stale = 0; if (P.open) { g_lc_open = NULL; g_lc_hazard = 0;
+    if (!P_tf && g_sub && g_sub->dec && g_seg_in) { g_sub->cur.dsk = 1; g_sub->cur.dsw = (uint8_t)(P.dwrote || P.swrote); g_sub->cur.dst = (uint8_t)P.dtest; }   // (a held game pass: what it did to its depth / stencil, seg_record_prim)
+    rend_end(CB()); fgr_pass_end(CB()); if (!P_tf) hp_pass_end(); P.open = 0; if (g_mw_px) mw_pass_end();
     if (!P_tf && P.hd) sk_ro_note(P.dkey, P.dwrote, 0);
     if (!P_tf && P.hs) sk_ro_note(P.skey, P.swrote, 0);
     g_after_pass = !P_tf; g_bar_clean = 0;
@@ -4445,7 +4465,7 @@ static int pass_begin(void) {
     fgr_attin fga[10]; int fgn = 0;   // (the frame recorder, while it records)
     vtex *hp_c0 = NULL, *hp_z = NULL; int hp_zclr = 0; float hp_zcd = 0; vtex *xf_x = NULL; int xf_clr = 0;   // (HUD-free: the pass's first colour target; depth guidance: its depth target, cleared to what)
     for (int i = 0; i < 8; i++) { ca[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO }; }
-    if (sk_on()) {   // this pass's key for the store learning (sk_attach): its render targets and how many times they were set before in this frame
+    if (sk_on() || ro_free()) {   // this pass's key for the store learning (sk_attach) and sk_ro: its render targets and how many times they were set before in this frame
         static struct { uint64_t sig; uint32_t n; } occ[256]; static uint64_t occ_frame = ~0ull;
         if (occ_frame != g_frame_no) { memset(occ, 0, sizeof occ); occ_frame = g_frame_no; }
         uint64_t hh = 1469598103934665603ull; const p_set_rt *r = &R.rt;
@@ -4489,12 +4509,12 @@ static int pass_begin(void) {
             VkAttachmentStoreOp dso = depth_store(x, ((x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !R.clear_d) || ((x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) && !R.clear_s));
             uint32_t dl = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0, dy = R.rt.has_dview && R.rt.dview.set_layers ? R.rt.dview.min_layer : 0;
             if (x->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) { da.imageView = v; da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-                da.storeOp = sk_on() && sk_attach(x, dl, dy, 2, 8, R.clear_d) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : dso; dkey = g_sk_last;
+                da.storeOp = sk_on() && sk_attach(x, dl, dy, 2, 8, R.clear_d) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : dso; dkey = sk_on() ? g_sk_last : sk_key(8);
                 if (da.storeOp == VK_ATTACHMENT_STORE_OP_STORE && g_store_none && sk_ro(dkey, R.clear_d)) { da.storeOp = VK_ATTACHMENT_STORE_OP_NONE; dnone = 1; }
                 da.loadOp = R.clear_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; da.clearValue.depthStencil.depth = R.cd; P.hd = 1; P.dfmt = (uint32_t)x->fmt;
                 hp_z = x; hp_zclr = R.clear_d; hp_zcd = R.cd; }
             if (x->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) { sa.imageView = v; sa.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-                sa.storeOp = sk_on() && sk_attach(x, dl, dy, 3, 9, R.clear_s) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : dso; skey = g_sk_last;
+                sa.storeOp = sk_on() && sk_attach(x, dl, dy, 3, 9, R.clear_s) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : dso; skey = sk_on() ? g_sk_last : sk_key(9);
                 if (sa.storeOp == VK_ATTACHMENT_STORE_OP_STORE && g_store_none && sk_ro(skey, R.clear_s)) { sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE; snone = 1; }
                 sa.loadOp = R.clear_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; sa.clearValue.depthStencil.stencil = R.cs; P.hs = 1; P.sfmt = (uint32_t)x->fmt; }
             P.samples = x->samples; if (w < tw) tw = w; if (h < th) th = h; any = 1; x->hp_stamp = g_hp_seq + 1;
@@ -6063,6 +6083,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di, uint64_t *mark) {
                    S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP);
         pass_writes(P.hd && S.ds.dt && S.ds.dw, st_w);
         if (!P.open) return;
+        if ((P.hd && S.ds.dt) || (P.hs && S.ds.st)) P.dtest = 1;   // (reads the attachment: seg_record_prim's LOAD_OP_NONE needs a pass that never does)
     }
     int prim = dw ? dw->prim : di->prim; VkPrimitiveTopology topo = topo_of(prim);
     if (tfcap && g_tf_pts > 0) topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;   // (a capture as points: one per vertex, tf_points.h)
@@ -8455,6 +8476,31 @@ static int seg_same(const seg_t *g, const seg_t *h) {
     if (a->pStencilAttachment && (g->sa.imageView != h->sa.imageView || (h->sa.imageView && h->sa.loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) || g->sa.resolveImageView)) return 0;
     return 1;
 }
+// Depth / stencil a held pass did not write (perf-1124 GPU fix C, step 1): the post and HUD passes attach the scene's D24S8 for one full-screen draw (Sword / Shield
+//   passes 120-122, 152, 154, 156 of a field frame; Legends: Arceus 16-34) and loaded and stored it each time, though nothing in them writes it. The pass and every pass
+//   run inside it (seg_record_prim) are known whole at the flush: when none wrote depth or stencil (pass_end's dsk / dsw: draws that write, clears in the pass, a clear by
+//   load op) the store is VK_ATTACHMENT_STORE_OP_NONE, which keeps the image as it is in memory: exact, nothing learnt, so a depth buffer the game samples, copies or
+//   keeps into the next frame afterwards reads what it held. Both aspects or none (D24S8 is one packed image): left as it is when either is DON'T CARE (a store the
+//   frame overwrites unread, seg_decide). When none of them tested either (P.dtest), nothing in the pass touches the attachment and it begins with
+//   VK_ATTACHMENT_LOAD_OP_NONE too (only with VK_KHR / VK_EXT_load_store_op_none enabled, g_load_none; else it loads as before). A store NONE that a later pass's
+//   begin chose (sk_ro) is put back to STORE when an earlier pass of the run wrote. DM_VK_NO_STORE_NONE=1: no NONE at all; DM_VK_LOAD_NONE=0: no load NONE
+static uint64_t g_dsn_store, g_dsn_load, g_dsn_fix;   // held passes stored with NONE here, of them loaded with NONE too; NONE stores put back for a run that wrote
+static void ds_none(sub_t *s, int i, int last) {
+    seg_t *g = &s->seg[i];
+    VkRenderingAttachmentInfo *a[2] = { g->ri.pDepthAttachment && g->da.imageView ? &g->da : NULL, g->ri.pStencilAttachment && g->sa.imageView ? &g->sa : NULL };
+    if (!a[0] && !a[1]) return;
+    int known = 1, wrote = 0, tested = 0;
+    for (int j = i; j <= last; j += 2) { const seg_t *h = &s->seg[j]; if (!h->dsk) known = 0; wrote |= h->dsw; tested |= h->dst; }
+    if (!known || wrote) { for (int k = 0; k < 2; k++) if (a[k] && a[k]->storeOp == VK_ATTACHMENT_STORE_OP_NONE) { a[k]->storeOp = VK_ATTACHMENT_STORE_OP_STORE; g_dsn_fix++; } return; }
+    if (!g_store_none) return;
+    for (int k = 0; k < 2; k++) if (a[k] && a[k]->storeOp != VK_ATTACHMENT_STORE_OP_STORE && a[k]->storeOp != VK_ATTACHMENT_STORE_OP_NONE) return;
+    int any = 0; for (int k = 0; k < 2; k++) if (a[k] && a[k]->storeOp == VK_ATTACHMENT_STORE_OP_STORE) { a[k]->storeOp = VK_ATTACHMENT_STORE_OP_NONE; any = 1; }
+    g_dsn_store += any;
+    if (!g_load_none || tested) return;
+    for (int k = 0; k < 2; k++) if (a[k] && a[k]->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) return;
+    for (int k = 0; k < 2; k++) if (a[k]) a[k]->loadOp = VK_ATTACHMENT_LOAD_OP_NONE_EXT;
+    g_dsn_load++;
+}
 // At the flush (caller holds g_cmu): the submission's primary runs its pieces in order, each pass begun and ended around its secondary with the stores decided now
 static void seg_record_prim(sub_t *s) {
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
@@ -8469,6 +8515,7 @@ static void seg_record_prim(sub_t *s) {
         seg_t *e = &s->seg[last];
         for (int t = 0; t < 8; t++) g->ca[t].storeOp = e->ca[t].storeOp;
         g->da.storeOp = e->da.storeOp; g->sa.storeOp = e->sa.storeOp;
+        ds_none(s, i, last);   // (fix C: depth / stencil none of these passes wrote)
         g->ri.pColorAttachments = g->ca; g->ri.pDepthAttachment = g->ri.pDepthAttachment ? &g->da : NULL; g->ri.pStencilAttachment = g->ri.pStencilAttachment ? &g->sa : NULL;
         g->ri.flags |= VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
         VkRect2D ra = seg_area(s, i, last); const VkRect2D *fa = &g->ri.renderArea;   // (the part of the targets these passes' draws reach)
@@ -8588,9 +8635,12 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (n % 300 == 0 && atomic_load(&g_apso_done) + atomic_load(&g_apso_skipped)) VLOG("present %llu: pipelines built in the background %llu, draws skipped waiting for one %llu (DM_VK_ASYNC_PSO)", (unsigned long long)n, (unsigned long long)atomic_load(&g_apso_done), (unsigned long long)atomic_load(&g_apso_skipped));
     if (n % 300 == 0 && g_pass_resumed) VLOG("present %llu: %llu target changes kept their open pass (DM_VK_PASS_DEFER)", (unsigned long long)n, (unsigned long long)g_pass_resumed);
     if (n % 300 == 0) VLOG("present %llu: passes left out so far: clear-only passes folded %llu (depth clears kept %llu: taken by the next pass's load op %llu, replaced by a second clear %llu, "
-                           "written out as before %llu, of them by a read %llu; passes begun again for a draw sampling a taken clear %llu); empty depth passes dropped %llu",
+                           "written out as before %llu, of them by a read %llu; passes begun again for a draw sampling a taken clear %llu); empty depth passes dropped %llu; "
+                           "depth stores skipped %llu (begun store-none %llu, written after all %llu; held passes stored with none %llu, loaded with none too %llu; none put back %llu)",
                            (unsigned long long)n, (unsigned long long)(g_lc_folded + g_lc_replaced - g_lc_redo), (unsigned long long)g_lc_kept, (unsigned long long)g_lc_folded, (unsigned long long)g_lc_replaced,
-                           (unsigned long long)g_lc_written, (unsigned long long)g_lc_net, (unsigned long long)g_lc_redo, (unsigned long long)g_empty_dropped);
+                           (unsigned long long)g_lc_written, (unsigned long long)g_lc_net, (unsigned long long)g_lc_redo, (unsigned long long)g_empty_dropped,
+                           (unsigned long long)(g_ro_passes - g_ro_wrong + g_dsn_store), (unsigned long long)g_ro_passes, (unsigned long long)g_ro_wrong,
+                           (unsigned long long)g_dsn_store, (unsigned long long)g_dsn_load, (unsigned long long)g_dsn_fix);
     if (n % 300 == 0 && !VPROF_ON)   // (running totals: DM_VK_PROF prints these per 300 frames instead, and resets them)
         VLOG("passes so far: %llu begun; ended by a new target %llu, a uniform update %llu, a buffer copy %llu, a buffer fill %llu, any work outside a pass %llu (those three included); "
              "%llu opened onto exactly the attachments a target change had just ended", (unsigned long long)g_stat_begins, (unsigned long long)g_brk[0], (unsigned long long)g_brk[1],

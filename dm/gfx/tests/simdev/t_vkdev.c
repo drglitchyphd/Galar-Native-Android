@@ -1380,6 +1380,55 @@ static void lc_work(void) {
            lazy, olda, g_dynren ? "dynamic rendering" : "render passes", hold_dec() ? "held" : "as recorded", (unsigned long long)total, (unsigned long long)g_lc_kept, (unsigned long long)g_lc_folded,
            (unsigned long long)g_lc_replaced, (unsigned long long)g_lc_written, (unsigned long long)g_lc_net, nbad ? "WRONG" : "every texel as before");
 }
+// ---- perf-1124 GPU fix C (nvn_vk.c ds_none, sk_ro without the store learning): depth / stencil a pass does not write ----
+// The load / store NONE extension a profile lists but lavapipe has not got (w_cd left it out): the ops it brings are not used here (a gap of the simulation)
+static void ds_simgap(void) {
+    int en = (w_has("VK_KHR_load_store_op_none") && lvp_has_ext("VK_KHR_load_store_op_none")) || (w_has("VK_EXT_load_store_op_none") && lvp_has_ext("VK_EXT_load_store_op_none"));
+    if (g_load_none && !en) { g_load_none = 0; printf("SIMGAP load / store NONE: the profile's extension is not lavapipe's: LOAD_OP_NONE not used here\n"); }
+    if (g_store_none && g_api < VK_API_VERSION_1_3 && !en) { g_store_none = 0; printf("SIMGAP load / store NONE: the profile's extension is not lavapipe's: STORE_OP_NONE not used here\n"); }
+    DEC("store_none", "%d", g_store_none); DEC("load_none", "%d", g_load_none);
+}
+// A 64x64 DEPTH32F target D at 0.5 with an RGBA8 colour target C, a game pass on both per frame (pass_begin / pass_end stand for its draws), read back after each:
+//   - held (DM_VK_FRAME_HOLD=2): a pass that writes nothing is stored with NONE at the flush (and loaded with NONE where the extension is), D still 0.5; a pass
+//     that clears D inside it (0.8) and a pass after it on the same targets that writes nothing (run as one on Adreno's profiles): stored, D 0.8;
+//   - as recorded: four passes on the same targets that only read, the fifth begins with store NONE (sk_ro, now without DM_VK_SKIP_STORES), D still 0.5; then a
+//     pass that clears D inside it: it is begun again storing (pass_writes), D 0.8.
+//   MEASURE: depth stores skipped
+static void ds_work(void) {
+    enum { W = 64 };
+    size_t n = 1u << 20; uint8_t *mem = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(mem != MAP_FAILED, "depth stores mmap"); if (mem == MAP_FAILED) return;
+    memset(mem, 0, n);
+    pool_t *pl = calloc(1, sizeof *pl); pl->magic = MAGIC('P', 'O', 'O', 'L'); pl->flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED; pl->mem = mem; pl->size = n;
+    tex_t *D = b10_tex(pl, mem + 0x10000, NVN_FORMAT_DEPTH32F, W, W, 0), *C = b10_tex(pl, mem + 0x50000, NVN_FORMAT_RGBA8, W, W, 0);
+    vtex *dx = tex_res(D), *cx = tex_res(C);
+    if (!dx || !dx->img || !(dx->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) || !cx || !cx->img) { printf("SIMGAP depth stores: no DEPTH32F / RGBA8 target here\n"); return; }
+    p_set_rt rcd; memset(&rcd, 0, sizeof rcd); rcd.n = 1; rcd.color[0] = C; rcd.depth = D;
+    static uint64_t cmd[64]; p_clear_ds z80 = { 0.8f, 1, 0, 0 };
+    int held = hold_dec(); uint64_t s0 = g_dsn_store, l0 = g_dsn_load, r0 = g_ro_passes, w0 = g_ro_wrong;
+    g_step = "depth stores"; mtl_sub_begin(); lc_zero(D, W, 0.5f); { uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish(); }
+    int nro = held ? 1 : 5, none_at = -1, bad = 0;
+    for (int i = 0; i < nro; i++) {   // passes that only read (or do nothing with) the depth
+        g_frame_no++; mtl_sub_begin(); lc_q = (uint8_t *)cmd; LCOP(OP_SET_RT, p_set_rt, rcd); lc_end(); mtl_exec((const uint8_t *)cmd);
+        CHECK(pass_begin(), "depth stores: the pass began"); if (P.dnone && none_at < 0) none_at = i; pass_end();
+        uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+        int b = lc_bad(D, W, 0.5f); bad += b; CHECK(!b, "depth stores: after read-only pass %d the depth image %d texels not 0.5", i, b); }
+    if (held) {
+        CHECK(!g_store_none || g_dsn_store == s0 + 1, "depth stores, held: a pass that wrote nothing stored with NONE (%llu)", (unsigned long long)(g_dsn_store - s0));
+        CHECK(g_dsn_load - l0 == (uint64_t)(g_store_none && g_load_none), "depth stores, held: loaded with NONE where the extension is (%llu, extension %d)", (unsigned long long)(g_dsn_load - l0), g_load_none);
+    } else CHECK(none_at == (ro_free() ? SK_RO_LEARN : -1), "depth stores, as recorded: the pass begun with store NONE: %d, expected %d (store NONE %d)", none_at, ro_free() ? SK_RO_LEARN : -1, g_store_none);
+    {   // a pass that writes the depth (a clear inside it), and one after it on the same targets that writes nothing
+        uint64_t sw = g_dsn_store; g_frame_no++; mtl_sub_begin(); lc_q = (uint8_t *)cmd; LCOP(OP_SET_RT, p_set_rt, rcd); lc_end(); mtl_exec((const uint8_t *)cmd);
+        CHECK(pass_begin(), "depth stores: the writing pass began"); int was_none = P.dnone;
+        lc_q = (uint8_t *)cmd; LCOP(OP_CLEAR_DS, p_clear_ds, z80); lc_end(); mtl_exec((const uint8_t *)cmd);   // (inside the open pass: clear_in_pass, pass_writes)
+        CHECK(!was_none || (g_ro_wrong == w0 + 1 && !P.dnone), "depth stores: the pass begun with NONE was begun again storing (%llu)", (unsigned long long)(g_ro_wrong - w0));
+        pass_end(); CHECK(pass_begin(), "depth stores: the pass after it began"); pass_end();
+        uint64_t f = mtl_sub_commit(); mtl_wait(f, UINT64_MAX); mtl_finish();
+        int b = lc_bad(D, W, 0.8f); bad += b; CHECK(!b, "depth stores: after the pass that cleared it to 0.8, %d texels not 0.8", b);
+        if (held) CHECK(g_dsn_store - sw <= 1, "depth stores, held: the writing pass kept its store (%llu passes stored with NONE)", (unsigned long long)(g_dsn_store - sw)); }
+    printf("MEASURE depth stores (%s, %s, store NONE %d, load NONE %d): depth stores skipped %llu (held passes stored with NONE %llu, loaded with NONE %llu; begun store-none %llu, written after all %llu); %s\n",
+           held ? "held" : "as recorded", g_dynren ? "dynamic rendering" : "render passes", g_store_none, g_load_none, (unsigned long long)(g_dsn_store - s0 + (g_ro_passes - r0) - (g_ro_wrong - w0)),
+           (unsigned long long)(g_dsn_store - s0), (unsigned long long)(g_dsn_load - l0), (unsigned long long)(g_ro_passes - r0), (unsigned long long)(g_ro_wrong - w0), bad ? "WRONG" : "every texel as before");
+}
 // A crash prints where it was (addresses for addr2line -f -e t_vkdev; the run's log keeps them) and the step the test was in
 static void on_crash(int sig) {
     void *bt[48]; int n = backtrace(bt, 48);
@@ -1406,7 +1455,8 @@ int main(void) {
     const char *profile = getenv("SIMDEV_PROFILE");
     decisions_and_checks(profile);
     quirk_checks();
-    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "clears"; lc_work(); g_step = "compose"; compose_work();
+    ds_simgap();
+    g_step = "work"; if (!getenv("SIMDEV_NO_WORK")) { work(); ring_work(); zcopy_work(); inttex_work(); shadow_work(); g_step = "b10"; b10_work(); g_step = "mali check"; mw_work(); g_step = "uniform snapshots"; snap_work(); g_step = "render area"; ra_work(); g_step = "clears"; lc_work(); g_step = "depth stores"; ds_work(); g_step = "compose"; compose_work();
                                                    g_step = "memlife"; memlife_work(); g_step = "shmod"; g_shmod_idle_ns = 1000000000ull; shmod_work(); g_shmod_idle_ns = 60000000000ull;
                                                    g_step = "prewarm"; prewarm_work(); }
     printf("%s t_vkdev %s: %d of %d checks failed\n", fails ? "FAIL" : "PASS", profile && *profile ? profile : "(no profile)", fails, checks);
