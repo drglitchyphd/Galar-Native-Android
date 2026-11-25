@@ -86,6 +86,7 @@ typedef struct thr {
     int ltid;                  // the host thread's kernel id (Android: the performance hint session, thr_frame_tids)
     _Atomic uint32_t svc_num; _Atomic uint64_t svc_at, svc_lr;   // the SVC it is in, where it is in the game's code and the return address there (thr_svc_enter; dm_main_where reads them from another thread)
     char comm[16];             // the kernel name it was given last (thr_comm)
+    uint64_t wake_at;          // DM_SVC_STATS: when a waker decided to wake it (wake, holding G); block reads it when the thread runs again
 } thr_t;
 static thr_t *g_all;
 static thr_t *g_main_thr;   // the game's main thread (svc_thread_main_init; never freed)
@@ -93,6 +94,29 @@ extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in
 static _Atomic uint64_t g_preempt_n, g_preempt_ns, g_preempt_cap;   // same-core preemption yields: count, total wait, cap hits (svc_thread)
 
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
+// Lock and wait SVC statistics (DM_SVC_STATS=1, off by default; perf-1124 fable-game-deep.md S-1). The S25+ wait profiles put Shield's main thread 1.5-3.5 ms a frame
+//   in ArbitrateLock / ArbitrateUnlock and the condition wait, but no log has counts of these SVCs. Counted by kind, for the game's main thread and for all threads; the
+//   time the lock SVCs wait to take G (a try first, so an uncontended take is not timed); and the wake latency, from the waker deciding the wake (wake, holding G) to the
+//   woken thread running again with G (block): the number the DM_SVC_WAKE change is meant to cut. One line every 10 s. Off: one load and a branch per SVC
+enum { SS_LOCK, SS_UNLOCK, SS_CVWAIT, SS_CVSIG, SS_AWAIT, SS_ASIG, SS_WSYNC, SS_SLEEP, SS_N };
+static int g_ss_on;   // read once in svc_thread_main_init
+static _Atomic uint64_t g_ss_all[SS_N], g_ss_main[SS_N], g_ss_take, g_ss_cont, g_ss_cont_ns, g_ss_cont_max, g_ss_wk, g_ss_wk_ns, g_ss_wk_max, g_ss_wk_h[8], g_ss_last;
+static const unsigned k_ss_h_us[7] = { 5, 10, 20, 50, 100, 200, 1000 };   // wake latency buckets (µs): under each bound, the last one 1 ms and over
+static void ss_max(_Atomic uint64_t *m, uint64_t v) { uint64_t o = atomic_load_explicit(m, memory_order_relaxed); while (v > o && !atomic_compare_exchange_weak_explicit(m, &o, v, memory_order_relaxed, memory_order_relaxed)) {} }
+static inline void ss_add(_Atomic uint64_t *c, uint64_t v) { atomic_fetch_add_explicit(c, v, memory_order_relaxed); }
+// Take G in a lock or wait SVC (timed under DM_SVC_STATS)
+static inline void g_lock(void) {
+    if (!g_ss_on) { pthread_mutex_lock(&G); return; }
+    ss_add(&g_ss_take, 1);
+    if (!pthread_mutex_trylock(&G)) return;
+    uint64_t t0 = now_ns(); pthread_mutex_lock(&G); uint64_t d = now_ns() - t0;
+    ss_add(&g_ss_cont, 1); ss_add(&g_ss_cont_ns, d); ss_max(&g_ss_cont_max, d);
+}
+static void ss_wake_lat(uint64_t d) {
+    ss_add(&g_ss_wk, 1); ss_add(&g_ss_wk_ns, d); ss_max(&g_ss_wk_max, d);
+    int b = 0; while (b < 7 && d >= (uint64_t)k_ss_h_us[b] * 1000) b++;
+    ss_add(&g_ss_wk_h[b], 1);
+}
 #define MAX_H 4096
 static struct { int type; void *obj; } g_h[MAX_H];
 static pthread_key_t g_keythr;
@@ -168,6 +192,7 @@ static thr_t *pick(int kind, uint64_t a) {
 }
 static void wake(thr_t *t, int64_t res) {
     wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; pthread_cond_signal(&t->cv);
+    if (g_ss_on) t->wake_at = now_ns();
     thr_t *self = pthread_getspecific(g_keythr);   // the woken thread is pinned to this core with a higher priority: on Horizon it preempts at once (see dm_yield_to_core_peers)
     if (self && self != t && !t->host_owned && t->prio < self->prio && t->mask == 1ull << (self->core & 63)) self->yield_pending = 1;
 }
@@ -190,6 +215,7 @@ static int64_t block(thr_t *t, int kind, int64_t ns) {
         } else rc = ns > 0 ? pthread_cond_timedwait(&t->cv, &G, &dl) : pthread_cond_wait(&t->cv, &G);
         if (rc == ETIMEDOUT && !t->woke && (!det_wait || guest_ns() >= guest_deadline)) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     }
+    if (t->wake_at) { ss_wake_lat(now_ns() - t->wake_at); t->wake_at = 0; }   // (DM_SVC_STATS: woken and running again, G held)
     return t->wres;
 }
 
@@ -391,6 +417,7 @@ static void ctx_fill(const thr_t *t, hz_ctx_t *o) {   // holding G, t is stopped
 uint32_t svc_thread_main_init(void) {
     pthread_key_create(&g_keythr, NULL);
     qos_map_init();
+    { const char *e = getenv("DM_SVC_STATS"); g_ss_on = e && atoi(e) > 0; if (g_ss_on) LOG("DM_SVC_STATS=1: lock and wait SVC counts, time to take the SVC lock and wake latency, a line every 10 s"); }
     pause_install();
     thr_t *t = calloc(1, sizeof *t);
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
@@ -765,8 +792,33 @@ static void sleep_precise(uint64_t dl) {
         struct timespec ts = {(time_t)(s / 1000000000u), (long)(s % 1000000000u)}; nanosleep(&ts, 0);
     }
 }
+// DM_SVC_STATS: count a lock / wait SVC, and every 10 s the line (whichever thread comes first after the 10 s takes it). Integers only: an SVC may run on a small guest stack
+static void ss_count(int num, const thr_t *me) {
+    int k = num == 0x1A ? SS_LOCK : num == 0x1B ? SS_UNLOCK : num == 0x1C ? SS_CVWAIT : num == 0x1D ? SS_CVSIG : num == 0x34 ? SS_AWAIT : num == 0x35 ? SS_ASIG : num == 0x18 ? SS_WSYNC : num == 0x0B ? SS_SLEEP : -1;
+    if (k < 0) return;
+    ss_add(&g_ss_all[k], 1); if (me && me == g_main_thr) ss_add(&g_ss_main[k], 1);
+}
+static void ss_tick(void) {
+    uint64_t now = now_ns(), last = atomic_load_explicit(&g_ss_last, memory_order_relaxed);
+    if (!last) { atomic_compare_exchange_strong(&g_ss_last, &last, now); return; }
+    if (now - last < 10000000000ull || !atomic_compare_exchange_strong(&g_ss_last, &last, now)) return;
+    uint64_t a[SS_N], m[SS_N], h[8];
+    for (int i = 0; i < SS_N; i++) { a[i] = atomic_exchange(&g_ss_all[i], 0); m[i] = atomic_exchange(&g_ss_main[i], 0); }
+    for (int i = 0; i < 8; i++) h[i] = atomic_exchange(&g_ss_wk_h[i], 0);
+    uint64_t take = atomic_exchange(&g_ss_take, 0), cont = atomic_exchange(&g_ss_cont, 0), cns = atomic_exchange(&g_ss_cont_ns, 0), cmax = atomic_exchange(&g_ss_cont_max, 0);
+    uint64_t wk = atomic_exchange(&g_ss_wk, 0), wns = atomic_exchange(&g_ss_wk_ns, 0), wmax = atomic_exchange(&g_ss_wk_max, 0);
+    unsigned long long ms = (now - last) / 1000000u;
+    LOG("[svc-stats] %llu ms: lock 0x1a / unlock 0x1b / cv wait 0x1c / cv signal 0x1d / wait address 0x34 / signal address 0x35 / wait sync 0x18 / sleep-yield 0x0b: all threads %llu %llu %llu %llu %llu %llu %llu %llu, main thread %llu %llu %llu %llu %llu %llu %llu %llu",
+        ms, (unsigned long long)a[0], (unsigned long long)a[1], (unsigned long long)a[2], (unsigned long long)a[3], (unsigned long long)a[4], (unsigned long long)a[5], (unsigned long long)a[6], (unsigned long long)a[7],
+        (unsigned long long)m[0], (unsigned long long)m[1], (unsigned long long)m[2], (unsigned long long)m[3], (unsigned long long)m[4], (unsigned long long)m[5], (unsigned long long)m[6], (unsigned long long)m[7]);
+    LOG("[svc-stats] SVC lock G taken %llu times, %llu waited (%llu per mille) %llu µs in all, longest %llu µs; %llu wakes, latency mean %llu µs, longest %llu µs; by latency <5 µs %llu, <10 %llu, <20 %llu, <50 %llu, <100 %llu, <200 %llu, <1000 %llu, more %llu",
+        (unsigned long long)take, (unsigned long long)cont, (unsigned long long)(take ? cont * 1000 / take : 0), (unsigned long long)(cns / 1000), (unsigned long long)(cmax / 1000),
+        (unsigned long long)wk, (unsigned long long)(wk ? wns / wk / 1000 : 0), (unsigned long long)(wmax / 1000),
+        (unsigned long long)h[0], (unsigned long long)h[1], (unsigned long long)h[2], (unsigned long long)h[3], (unsigned long long)h[4], (unsigned long long)h[5], (unsigned long long)h[6], (unsigned long long)h[7]);
+}
 int svc_thread(int num, uint64_t *regs) {
     int r = svc_thread_impl(num, regs);
+    if (g_ss_on) ss_tick();
     thr_t *me = pthread_getspecific(g_keythr);
     static int on = -1; if (on < 0) { const char *e = getenv("DM_PREEMPT"); on = e ? atoi(e) != 0 : DM_GAME_CORE_PREEMPT; }
     // Not only "whom did this SVC wake": when a higher-priority thread of the same core is already running (busy, not waiting, at the time of the signal), on hardware the calling thread does not get the CPU at all.
@@ -779,7 +831,7 @@ int svc_thread(int num, uint64_t *regs) {
     return r;
 }
 static int svc_thread_impl(int num, uint64_t *regs) {
-    { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } }
+    { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } if (g_ss_on) ss_count(num, me); }
     if (g_flag.thr && num != 0x0B) { thr_t *me = pthread_getspecific(g_keythr); LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx", me ? me->handle : 0, num, regs[0], regs[1], regs[2], regs[3]); }
     switch (num) {
     case 0x08: {  // CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)
@@ -878,7 +930,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
 
     case 0x1A: {  // ArbitrateLock(w0 owner handle, x1 address, w2 this thread's tag)
         thr_t *t = cur(); uint64_t addr = regs[1];
-        pthread_mutex_lock(&G);
+        g_lock();
         int64_t r = 0;
         if (ld32(addr) == ((uint32_t)regs[0] | WAITERS_BIT)) { t->waddr = addr; t->wtag = (uint32_t)regs[2];
             // Under DM_QOS_MAP the owner runs at least at this thread's class until the lock is handed over (the Horizon kernel lends the waiter's priority the same way): a user-interactive
@@ -890,10 +942,10 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         pthread_mutex_unlock(&G);
         regs[0] = (uint64_t)r; return 1;
     }
-    case 0x1B: pthread_mutex_lock(&G); lock_handoff(regs[0]); pthread_mutex_unlock(&G); regs[0] = 0; return 1;
+    case 0x1B: g_lock(); lock_handoff(regs[0]); pthread_mutex_unlock(&G); regs[0] = 0; return 1;
     case 0x1C: {  // WaitProcessWideKeyAtomic(x0 lock address, x1 condition key, w2 tag, x3 timeout)
         thr_t *t = cur(); uint64_t addr = regs[0], key = regs[1];
-        pthread_mutex_lock(&G);
+        g_lock();
         // The order matters: first set the condition key = 1, then release the mutex. The SDK's InternalConditionVariable::Signal first reads the condition key in user mode, and does not issue svc 0x1D if it is 0;
         // grabbing the mutex in user mode does not go through G either. It used to do lock_handoff first and set the key after: after the release and before the key was set, another thread could grab the lock in user mode, change the condition, read key 0 and not wake anyone,
         // and this thread would then link itself in and wait forever (under parallel load the resource table read-write lock main+0x320e5e0 deadlocked: reader count 0, lock free, writer condition key 1, writer still waiting).
@@ -918,7 +970,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     }
     case 0x1D: {  // SignalProcessWideKey(x0 condition key, w1 count, <=0 all)
         uint64_t key = regs[0]; int cnt = (int)regs[1], n = 0;
-        pthread_mutex_lock(&G);
+        g_lock();
         for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(2, key)); n++) lock_acquire_for(w, w->waddr, w->wtag);   // In kernel order; once turned into a lock wait or woken it is no longer kind 2
         int left = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
         if (!left) st32(key, 0);
@@ -929,7 +981,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x34: {  // WaitForAddress(x0 address, w1 type, x2 value, x3 timeout): 0 wait if less than, 1 decrement if less than then wait, 2 wait if equal, 3 wait if the 64-bit value is equal
         // (Horizon 18; SDK 19's nn::os::WaitForAddress(const long*, long) uses it, which before fell into the 32-bit less-than test)
         thr_t *t = cur(); uint64_t addr = regs[0]; int type = (int)regs[1]; int32_t val = (int32_t)regs[2];
-        pthread_mutex_lock(&G);
+        g_lock();
         int64_t r; uint32_t v = ld32(addr);
         int ok = type == 3 ? ld64(addr) == regs[2] : type == 2 ? (int32_t)v == val : (int32_t)v < val;
         if (ok && type == 1) { while (!cas32(addr, &v, v - 1)) if (!((int32_t)v < val)) { ok = 0; break; } }
@@ -940,7 +992,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     }
     case 0x35: {  // SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake, 1 increment if equal and wake, 2 if equal modify the value by waiter count and wake
         uint64_t addr = regs[0]; int type = (int)regs[1]; int32_t val = (int32_t)regs[2]; int cnt = (int)regs[3];
-        pthread_mutex_lock(&G);
+        g_lock();
         int nw = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
         int64_t r = 0;
         if (type != 0) {
@@ -983,7 +1035,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x18: {  // WaitSynchronization(→w1 index; x1 handle array, w2 count, x3 timeout)
         thr_t *t = cur(); const uint32_t *hs = (const uint32_t *)regs[1]; int n = (int)regs[2]; int64_t ns = (int64_t)regs[3];
         int64_t deadline = ns > 0 ? (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns()) + ns : 0;
-        pthread_mutex_lock(&G);
+        g_lock();
         int64_t r; int idx = -1;
         for (;;) {
             if (t->cancel) { t->cancel = 0; r = R_CANCELLED; break; }
