@@ -3545,8 +3545,11 @@ static void shmod_count(VkShaderModule m, int64_t bytes, int sign) { if (m) { at
 // Integer vertex formats under float inputs (DM_VK_VFMT_INTBITS, default on; 0 turns it off): see spv_vin_raw. The game feeds 8 / 16-bit UINT attributes (packed
 //   normals, colours, indices: Sword / Shield's field at locations 7, 8, 11) into inputs the translated shader declares float and converts itself. Adreno hands the
 //   bits over unchanged; Arm r44 converts the integer first, and the lit field went white (POCO X6 Pro, G615: 79 % of the lit target at 1024+ -> 0 %)
-static int intbits_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_VFMT_INTBITS"); v = !(e && *e == '0');
-    VLOG("vertex attributes: 8 / 16-bit integer formats under float inputs %s", v ? "read as integers and bitcast in the vertex shader" : "left as they are (DM_VK_VFMT_INTBITS=0)"); } return v; }
+// Arm (Mali) only since v1.01: on Qualcomm's old 1.1.128 driver (Xiaomi 12, Adreno 730, v1.0) the rewritten vertex modules left the field's ground undrawn (sky
+//   through the terrain); that driver has no depth clip control, so it draws with the GL-depth copy, as Mali does. Adreno's driver hands the integer's bits over
+//   unchanged anyway (the reason it never showed the white field). DM_VK_VFMT_INTBITS=1 / 0 still forces it on / off on any GPU
+static int intbits_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_VFMT_INTBITS"); v = e && *e ? *e != '0' : g_gpuid.vendor == 0x13B5;
+    VLOG("vertex attributes: 8 / 16-bit integer formats under float inputs %s", v ? "read as integers and bitcast in the vertex shader" : "left as they are (Arm's GPUs only; DM_VK_VFMT_INTBITS=1 on any)"); } return v; }
 static int intbits_kind(VkFormat f) {   // 1 an 8 / 16-bit UINT format, 2 SINT, 0 other
     switch (f) { case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT:
                  case VK_FORMAT_R16G16B16_UINT: case VK_FORMAT_R16G16B16A16_UINT: return 1;
