@@ -55,3 +55,14 @@ $(B)/t_crash_line: t_crash_line.c ../crash_line.h ../dm.h $(GAME_H) | $(B)
 	cc -O1 -fPIE -pie -Wno-unused-function -I../../android/compat -I.. $(GINC) -o $@ t_crash_line.c -ldl
 linux: $(B)/t_crash_line
 	$(B)/t_crash_line
+# PC Linux (WSL, glibc, any CPU): host files built with cc against dm/android/compat, t_linux_prelude.h in place of the Android one (make GAME=<base game title ID> linux-step / linux-thread)
+LGEN = $(B)/linux-gen/$(if $(strip $(GAME)),$(GAME),$(error GAME is not set: make GAME=<base game title ID>))
+LCC = cc -O1 -g -pthread -Wall -Wno-unused-function -Wno-unused-variable -Wno-format -include t_linux_prelude.h -I../../android/compat -I.. -I$(LGEN) -DDM_TEST_HOOKS
+$(LGEN)/game_profile.h: | $(B)
+	mkdir -p $(dir $@); python3 ../../games/game.py header $(GAME) $@
+# the step trace's reads (hle_steptrace.c) on a fake main image
+$(B)/t_steptrace_linux: t_steptrace.c ../hle_steptrace.c ../hle.h ../dm.h t_linux_prelude.h $(LGEN)/game_profile.h
+	$(LCC) -o $@ t_steptrace.c
+linux-step: $(B)/t_steptrace_linux
+	$(B)/t_steptrace_linux
+.PHONY: linux-step
