@@ -25,6 +25,8 @@ PARTS = ['gfx/tools', 'ios/tools', 'third_party/ryujinx', 'android/xlate_aot']
 GENS = {
     'pre-fmz': 'the translator before chain 2026-11-13 (Galar Native v0.8x): no FMZ in Ryujinx InstEmitFloatArithmetic.cs, the else-if fold in AstOptimizer.cs, '
                'XLATE_DEBUG 1 by default (dmsh_chain.py / dmsh_build.py), Program.cs without the DebugMode retry; Arceus Native and Paldea Native ship it',
+    'pre-fmz-drawp': 'pre-fmz with one change in Program.cs: QueryHasConstantBufferDrawParameters answers true, so vertex shaders read gl_BaseInstance / gl_BaseVertex / gl_DrawID '
+                     '(indirect draws of GPU-culled objects: buildings, rocks, walls, trees); Paldea Native ships it from 1.01 on',
 }
 
 

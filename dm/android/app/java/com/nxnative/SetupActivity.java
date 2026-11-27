@@ -75,7 +75,7 @@ public final class SetupActivity extends Activity {
         try (BufferedReader r = new BufferedReader(new FileReader(f))) { String l; while ((l = r.readLine()) != null) { String[] k = l.split("\t", 2); if (k.length == 2) ns.add(k); } } catch (IOException e) { }
         f.delete(); boolean block = false;
         for (String[] n : ns) {
-            if (n[0].equals("mods")) Toast.makeText(this, n[1], Toast.LENGTH_LONG).show();
+            if (n[0].equals("mods") || n[0].equals("driver_pkg")) Toast.makeText(this, n[1], Toast.LENGTH_LONG).show();   // (driver_pkg: the chosen driver package did not load, nvn_vk.c pkg_check)
             else if (n[0].equals("driver")) { block = true; final String gpu = n[1];
                 new android.app.AlertDialog.Builder(this).setTitle(T.t(this, "The game closed while starting its graphics"))
                     .setMessage(T.t(this, "Last time, %s closed while starting its graphics on this phone's own driver (%s). ", gameName(), gpu) + driverAdvice(this, gpu))

@@ -1,127 +1,71 @@
-# Galar Native
+# Paldea Native
 
-*(formerly PKShield)*
-
-**Pokémon Sword and Shield (Switch, update 1.3.2) running natively on Android.** Not emulation: the game's own ARM64 code runs on the phone, and its graphics (NVN) run on Vulkan.
+**Pokémon Scarlet and Violet (Switch, update 4.0.0) running natively on Android.** Not emulation: the game's own ARM64 code runs on the phone, and its graphics (NVN) run on Vulkan. Built on the engine of [Galar Native](https://github.com/simipoB/Galar-Native-Android) (Sword and Shield).
 
 > [!WARNING]
-> **Beta. v0.96 is a pre-release**, so far played only briefly on one test phone (Snapdragon 8 Elite, Adreno 830). See [Compatibility](#compatibility). Reports with logs help most ([CONTRIBUTING.md](CONTRIBUTING.md)).
+> **Work in progress.** On a Galaxy S25+ (Adreno 830) Violet and Scarlet boot, and Violet plays its opening at about 30 fps: language, look and name selection, the academy application with its ID photo, and the 3D classroom scene. Gameplay past the opening has not been tested yet. The current release, **v0.96, is a pre-release**: it brings Scarlet and Violet up to the engine Galar Native and Arceus Native share (one engine, one version number), and **Scarlet and Violet have not been played on our test phone with it.** See [Known problems](#known-problems).
 
 > [!NOTE]
-> **No game files, code, shaders or keys are included.** You need the ExeFS and RomFS folders extracted from your own copy of the game, with update 1.3.2 applied.
+> **No game files, code, shaders or keys are included.** You need the ExeFS and RomFS folders extracted from your own copy of the game, with update 4.0.0 applied.
 
 ## Install
 
-1. Install `GalarNative.apk` from [Releases](https://github.com/simipoB/Galar-Native-Android/releases) (or [build it](docs/BUILDING.md)).
-2. Choose your **game files**: the ExeFS and RomFS folders (the folder holding both, or each in turn), plus one RomFS folder per DLC with **Add DLC**. See [Your game files](#your-game-files).
-3. **Set up the game.** Setup tells Sword from Shield by your files and copies them into the app. When it's done, the app opens straight into the game.
+1. Install `PaldeaNative.apk` from [Releases](https://github.com/simipoB/Paldea-Native-Android/releases) (or [build it](#building)).
+2. Choose your **game files**: the **ExeFS** and **RomFS** folders you extracted from your game with **update 4.0.0 applied** (the folder holding both, or each in turn), plus one RomFS folder per DLC with **Add DLC** (its folder name must carry the DLC's title ID or number). Setup copies them into the app; with too little room it offers to move them instead. No keys and no `.nsp` / `.xci` any more: v0.98 deletes keys an older version stored.
+3. **Set up the game.** Setup detects Scarlet or Violet from your files. One app runs both, each with its own setup, saves, settings and mods, its own name and icon on its home screen shortcut.
 
-- One app runs both games, each with its own setup, saves, settings and mods. With both installed, the app icon lets you choose; each game's home screen shortcut has its own name and icon.
-- It updates PKShield in place (package `com.nxnative.pokemonshield`), so your setup and saves are kept.
-- **Players and Start over:** sharing the phone? Under **Save data** on the setup screen (with two games, **Set up or manage a game**; with one, hold the app icon → **Settings**), add a player for each person: each gets their own save in both games, your existing save stays as **Player 1**, and the app shows who is playing before the game starts. **Start over** begins a new game for the current player and keeps the old save as a backup (**Restore the previous save** brings it back). No reinstall, no Android/data access needed.
-- Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`. Any other build says "Unofficial build".
+- Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`, the same key as Galar Native's and Arceus Native's. Any other build says "Unofficial build". An official update installs over the last one (v0.60 or v0.82) and keeps your setup and saves; v0.96 needs no new setup.
 - **Updates:** ☰ → About → Updates checks this repository's releases for a newer full release (never a pre-release) and installs it after you confirm. It only installs the official build signed with the key above. Turn off **Look for updates when the app starts** to stop the check.
 
-### Your game files
+## Requirements (expected)
 
-- On your own console or PC, dump the game's **ExeFS** and **RomFS** with **update 1.3.2 applied** (the update merged into the base game). Dump tools and emulators that have "dump ExeFS / RomFS" make a folder holding `exefs` and `romfs`: choose that folder once. Copy it to the phone's storage first.
-- The ExeFS folder holds `main`, `main.npdm`, `rtld`, `sdk` and `subsdk*`. Setup reads its version from `main`: without the update you'll be told to dump again with 1.3.2.
-- **DLC:** dump each DLC's RomFS too. Its folder name must carry the DLC's title ID (Sword `0100ABF008969001` / `…9002`, Shield `01008DB008C2D001` / `…D002`) or its number (`1`, `2`) so setup knows which DLC it is.
-- No keys and no `.nsp` / `.xci`: the app doesn't use them any more, and deletes keys an older version stored. Setup needs room for a copy of the files; if there isn't any, it offers to move them into the app instead.
+- Android 12+, arm64, Vulkan 1.0 or later (Vulkan 1.0 not yet tried on a real phone).
+- About 11 GB free per game: the game data (9.3 GB) and its translated shaders, compressed (0.85 GB).
+- 8 GB of RAM or more; 12 GB recommended. Scarlet and Violet are heavier than Sword and Shield: **Auto** settings pick one tier lower for them.
 
-## Requirements
+## What it shares with Galar Native
 
-- Android 12+, arm64, Vulkan 1.0 or later.
-- About 15 GB free per game, besides your extracted files (setup copies them in; with too little room it can move them instead). 8 GB of RAM or more is best; on 6 GB phones the app picks lighter settings for you.
+Everything that is not game-specific comes from the same engine and app:
 
-## Compatibility
+- **In-game settings panel** (☰, or − and + held together on a controller): picture, upscaling (Sharp, SGSR, Smooth, FSR 1), colour, graphics, mode, frame rate, battery saver, textures, rumble, performance overlay, controller remapping, touch controls (with floating sticks), mods, saves, online room, graphics driver, language, quit the game, bug reports, updates.
+- **Shaders built before you play:** every shader your phone has used is built before the game starts (☰ → Performance → Shaders at start → While playing for the old way). The very first play still builds them as it goes.
+- **Auto settings** from the phone's CPU, GPU and memory tiers, and the display's refresh rates.
+- **Mali, Xclipse and PowerVR:** the game's BC textures converted to ETC2 / EAC / ASTC once and kept on disk (the size they have on the Switch, not 4–8 times it).
+- **Graphics drivers:** the phone's own, Turnip, PanVK or any driver package.
+- **Mods:** RomFS and `.pchtxt`, load order, conflict warnings, notes; their shaders translated before the game starts, and shaders the game builds while it runs translated in the background.
+- **Setup that fits the phone:** workers sized to the memory the phone has free (4 GB phones included), the shader pack compressed.
+- **Languages:** English, Español, Português, Français, 日本語.
 
-| GPU | Driver | Status |
-| --- | --- | --- |
-| **Adreno 6xx–8xx** (Snapdragon 845+) | Qualcomm or **Turnip** | Plays. Turnip fixes old-driver crashes (#44). |
-| **Mali G57 / G68 / G77 / G78** | Stock or **PanVK** | Starts; stock driver has rendering gaps (#32). Try PanVK. |
-| **Mali G52 / G72 / G76** | Stock or PanVK | Low settings. |
-| **Mali G610–G925, Immortalis** | Stock or **PanVK** | White screen on Arm's own driver, not fixed yet (#215, #227, #282, #311, #316). PanVK (downloaded separately) draws the game. |
-| **Xclipse 540 / 940** | Stock | Crash fixes (#41, #45), awaiting reports. |
-| **PowerVR** (Tensor G5 / G6) | Stock | Untested. |
+## What is specific to Scarlet and Violet
 
-## What's new
+- **Trinity engine data.** Almost everything is in `arc/data.trpfs`, every file Oodle-compressed. Oodle's decoder is not open source, so setup decodes with the game's own decoder (`dmoodle`: the engine running the game's `OodleLZ_Decompress`), and only the files that hold shaders leave it. Violet has 35,937 shaders.
+- **Memory.** The game reserves 12 GB of address space for its allocator and the SDK 1 GB more for its own bookkeeping, more than a phone process can map; both are cut (4 GB, 62 MB) as for Pokémon Legends: Z-A, which uses the same engine.
+- **Scarlet and Violet share one engine build and one shader chain**, as Sword and Shield do.
+- **Frame rate:** 30 is the default. 60 and Dynamic are Paldea Native's own frame-rate code (experimental, not played on a phone yet): the game's step follows the frame rate the phone really holds, so the game speed should stay right. A change applies from the next start.
+- **Mode:** Auto, Quality (docked, 1080p) or Performance (handheld, 720p). Switching to handheld applies while playing; switching back to docked applies from the next start.
+- **Frame generation** is switched off for Scarlet and Violet for now, including Lossless Scaling.
 
-**v0.96** (pre-release). Galar Native, Arceus Native and Paldea Native now share one engine and one version number. Install over v0.94 or the v0.95 preview; no new setup is needed. Full notes: [releases page](https://github.com/simipoB/Galar-Native-Android/releases).
+## Known problems
 
-- **Locked at 30 fps.** Sword and Shield always run at 30; 60 and Dynamic are gone for now and come back once they run at the right speed on every phone that can hold them. When the phone can't keep up, the 3D picture steps down (to 35 %), and if that isn't enough, the next start uses lighter shadows and draw distance. Your own settings always win.
-- **Shaders built before you play:** a short wait at the start, then fewer missing objects and stutters, even on the very first play.
-- **Heat guard** on every Graphics level, and a **Battery saver** (☰ → Performance → Power).
-- **New settings:** Shadows, Draw distance, Resolution, Mode, Colour, and FSR 1 upscaling.
-- **Updates from inside the app** (☰ → About → Updates), **Quit the game**, and a performance report for slow scenes (☰ → System → Bug reports).
-- **More phones and fewer crashes:** Vulkan 1.0 drivers, older Snapdragon drivers, PowerVR textures, older ARMv8.0 CPUs, and a Turnip crash after playing a while. The game's clock now changes days at your local midnight.
-- **Frame generation stays off** for Sword and Shield in this release.
+- **Not played on our test phone** with v0.96: it was built and checked on a PC.
+- **Frame rate 60 and Dynamic** have not been played on a phone yet. If anything looks too fast, too slow or jumpy, go back to 30.
+- **No 3D render scale, widescreen camera or heat guard yet** (Widescreen only stretches the picture, like Fill).
+- **Rocks, walls, trees and building fronts may be invisible** on some phones; the fix needs a new setup and is not in this release.
+- **Mali:** with Arm's own driver, a new route should help where characters were missing (not confirmed). With PanVK, new textures can load slowly, and a black screen was reported with a test build.
+- **Xclipse 530:** about 20 to 27 fps, and the phone gets very hot.
+- **Snapdragon:** Faster rendering is now on by default; if the game misbehaves or closes at a loading screen, set ☰ → System → Faster rendering → Off.
+- Occasional short hitches during play.
 
-**Earlier:** each version's notes are on the [releases page](https://github.com/simipoB/Galar-Native-Android/releases).
+Full notes for each version are on the [releases page](https://github.com/simipoB/Paldea-Native-Android/releases).
 
-## Playing
+## Building
 
-- **Touch:** on-screen controls, with **☰** (settings) next to −. Two-finger tap = B.
-- **Controllers:** hide the touch controls automatically. Hold **−** and **+** together for 1 s for ☰, or **−** for 3 s to remap buttons. Rumble works on controllers and phones.
-- **Handhelds** (AYN Odin / Thor, Retroid Pocket, AYANEO, Anbernic, Logitech G Cloud...): detected; the built-in controls are used from the start.
-- **Logs:** `Documents/Galar Native/Logs/PokemonSword-log.txt` or `…/PokemonShield-log.txt` (the run before: `…-log-previous.txt`). If that folder cannot be written, they go to `Download/` as before.
-
-## Settings (☰)
-
-| Setting | Choices |
-| --- | --- |
-| Picture | 16:9, fill screen, widescreen (the HUD stays 16:9) |
-| Resolution | 720p, 1080p, 1440p (from the next start) |
-| 3D render scale | Auto, or 35–100 % |
-| Upscaling | Auto, Sharp, SGSR, Smooth, FSR 1 |
-| Colour | Natural, Vibrant, Cinematic |
-| Graphics | Auto, High, Low, Adaptive |
-| Mode | Auto, Quality, Performance |
-| Shadows | Normal, Low, Lowest (from the next start) |
-| Draw distance | 50–200 % for grass and field details (from the next start) |
-| Power | Balanced, Battery saver |
-| Textures | Auto, Full, Half |
-| Shaders at start | Build before play (default), or While playing (start at once, build as you go) |
-| Frame generation | Off, On, Lossless Scaling (your own `Lossless.dll`); switched off for Sword and Shield in v0.96 |
-| Graphics driver | Phone's own, Turnip, PanVK, or any driver package (with their options) |
-| Controls | Button layout, remapping, camera sensitivity (50–200 %), touch look and layout, rumble |
-| Performance overlay | fps, temperature, GPU, free memory, battery |
-| Online room | Server and room code for local play over the internet |
-| Mods, saves | Import, switch, order and annotate mods; export / import saves |
-| System | Quit the game; Bug reports (record a slow scene's frame for an issue) |
-| About | Version, official / unofficial build, Updates |
-| Language | English, Español, Português, Français, 日本語 (Auto: the phone's) |
-
-**Auto** rates the phone's CPU, GPU and RAM and picks graphics, textures and filtering from that; while you play it keeps 30 fps steady and the phone cool. The menu shows what it picked.
-
-## Local play
-
-Link battles, trades and Max Raids with nearby phones on the same Wi-Fi, or with friends anywhere through an **Online room** ([host your own server](dm/server/README.md), e.g. on Railway). Mods must be off. Nintendo's online services aren't available.
-
-## Mods
-
-Import a mod `.zip` (`romfs/` file replacements, `exefs/*.pchtxt` code patches for 1.3.2) and switch mods on or off in ☰ → Mods. **Order and notes** sets the load order (higher wins), warns when two mods replace the same files, and keeps each mod's readme as its notes. If the game crashes with mods on, they're switched off on the next start. When the mods change, the app translates any new shaders they bring before the game starts (a short wait, once).
-
-## Known gaps
-
-- Nintendo's online services (Surprise Trade, online battles and raids).
-- Wild Area water renders darker than on the Switch.
-- 60 fps and frame generation are switched off for now.
-- Mali with Arm's own driver: white screen, not fixed yet (use PanVK).
-- Dynamax crash on some phones (#211): attach the log if it happens to you.
-- Occasional short hitches (about 60 ms) during play.
-
-## License
-
-Galar Native is free software under the **GNU General Public License, version 3 or later** ([LICENSE](LICENSE), [NOTICE](NOTICE)): you may use, share and change it, and anything you distribute that is based on it must be under the same license with its source available. The code that came from d2r-mobile / nxnative, and Galar Native's code from before the switch, also stay under their original [MIT notice](LICENSE-MIT). Lossless Scaling is not included: its frame generation uses the `Lossless.dll` from your own copy.
+```sh
+GAME=01008F6008C5E000 scripts/build_apk_pc.sh   # → PaldeaNative.apk (Scarlet + Violet)
+```
 
 ## Credits
 
-- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** and **nxnative** (MIT): the engine this is built on.
-- **Ryujinx** (MIT): shader translator. **[LibHac](https://github.com/Thealexbarney/LibHac)**: NSP / XCI reading.
-- **[libadrenotools](https://github.com/bylaws/libadrenotools)** (BSD-2-Clause) and **Mesa Turnip / PanVK**: custom drivers.
-- **[Snapdragon Game Super Resolution](https://github.com/SnapdragonStudios/snapdragon-gsr)** (Qualcomm, BSD-3-Clause): the SGSR upscaler.
-- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**, **yuzu**: references.
-- **SPIRV-Cross**, **CPython**, **capstone**, **LZ4**, **libvpx**, **stb_vorbis**, **Vulkan Headers**, **DejaVu Sans**, **native_app_glue**.
+The engine and tools are Galar Native's: see its README. Pokémon Legends: Z-A's port in the same engine showed the way through Trinity's packs and its allocator.
 
-Pokémon, Pokémon Sword and Pokémon Shield are trademarks of Nintendo, Creatures Inc. and GAME FREAK inc. Not affiliated with or endorsed by them.
+Pokémon, Pokémon Scarlet and Pokémon Violet are trademarks of Nintendo, Creatures Inc. and GAME FREAK inc. Not affiliated with or endorsed by them.
