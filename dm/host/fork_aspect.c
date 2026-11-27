@@ -20,6 +20,7 @@
 static _Atomic uint32_t g_win;   // the window in landscape, width << 16 | height (gfx/nvn/nvn_vk.c swap_ensure_now)
 void dm_fork_window(uint32_t w, uint32_t h) { atomic_store(&g_win, (w & 0xffff) << 16 | (h & 0xffff)); }
 static double win_ratio(void) { uint32_t p = atomic_load(&g_win), w = p >> 16, h = p & 0xffff; return w && h ? (double)w / h : 0; }
+double dm_fork_win_ratio(void) { return win_ratio(); }   // (host/fork_violet.c, Paldea fork)
 // the ratio the picture is corrected for, 0 when it is not (another Picture setting, or a screen within 2 % of 16:9)
 static double fix_ratio(void) {
     if (dm_aspect() != DM_ASPECT_FIX) return 0;
@@ -27,7 +28,8 @@ static double fix_ratio(void) {
 }
 // gfx/nvn/fork_ui.h and android/app/jni/touch_menu.c: the UI's scale in x and y (1, 1 = none)
 void dm_fork_ui_scale(float *kx, float *ky) {
-    *kx = *ky = 1; double r = fix_ratio(); if (!r) return;
+    *kx = *ky = 1; { int dm_fork_violet_active(void); if (dm_fork_violet_active()) return; }   // (Paldea fork: Violet lays its UI out itself, host/fork_violet.c)
+    double r = fix_ratio(); if (!r) return;
     if (r < 16.0 / 9.0) *ky = (float)(r / (16.0 / 9.0)); else *kx = (float)(16.0 / 9.0 / r);
 }
 

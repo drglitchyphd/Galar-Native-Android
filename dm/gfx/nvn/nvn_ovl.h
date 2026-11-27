@@ -32,8 +32,9 @@ static inline int dm_aspect(void) {
     return m;
 }
 static inline int dm_aspect_20_9(void) { return dm_aspect() == DM_ASPECT_20_9; }
+int dm_fork_violet_active(void) __attribute__((weak));   // FORK (Paldea fork)
 static inline void dm_picture_box(int32_t ww, int32_t wh, int32_t sw, int32_t sh, int32_t box[4]) {
-    if ((dm_aspect() == DM_ASPECT_FILL || (dm_aspect() == DM_ASPECT_FIX && ww >= wh)) && ww > 0 && wh > 0)   // FORK: || FIX (landscape only)
+    if ((dm_aspect() == DM_ASPECT_FILL || (dm_aspect() == DM_ASPECT_FIX && (ww >= wh || (dm_fork_violet_active && dm_fork_violet_active())))) && ww > 0 && wh > 0)   // FORK: || FIX (landscape only; Paldea fork: Violet in portrait too, host/fork_violet.c)
         { box[0] = box[1] = 0; box[2] = ww; box[3] = wh; return; }
     double ar = dm_aspect_20_9() ? 20.0 / 9.0 : sh > 0 ? (double)sw / sh : 16.0 / 9.0, bh = fmin((double)wh, ww / ar), bw = bh * ar;
     box[2] = (int32_t)bw > 0 ? (int32_t)bw : 1; box[3] = (int32_t)bh > 0 ? (int32_t)bh : 1; box[0] = (ww - box[2]) / 2; box[1] = (wh - box[3]) / 2;

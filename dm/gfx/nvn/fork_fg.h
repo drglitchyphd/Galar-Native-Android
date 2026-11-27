@@ -215,7 +215,7 @@ static int fork_fg_present(vtex *x, const int crop[4]) {
     int st = atomic_load(&FG.state);
     if (st == 0) { atomic_store(&FG.state, 1); pthread_t t; if (pthread_create(&t, NULL, fg_load, NULL)) atomic_store(&FG.state, -1); else pthread_detach(t); return 0; }
     if (st != 2) return 0;
-    g_fk_census_fg = fg_still_on();   // v50: the screen kind is needed
+    g_fk_census_fg = DM_GAME_PROGRAM_ID == 0x01008DB008C2C000ull && fg_still_on();   // v50: the screen kind is needed (Paldea fork: Sword / Shield's screen guess only)
     { int k = atomic_load(&dm_fork_screen), still = fg_still_on() && (k == 1 || k == 3);
       if (still != dm_fork_fg_paused) { dm_fork_fg_paused = still; if (!still) g_fg_skip = 2;
           static int lines; if (lines++ < 200) VLOG("[FORK] fg: %s (%s)", still ? "paused on a still screen" : "resumed", k == 1 ? "menu" : k == 3 ? "dialogue" : k == 2 ? "battle" : "field");

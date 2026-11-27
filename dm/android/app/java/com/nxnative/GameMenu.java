@@ -350,9 +350,11 @@ public final class GameMenu {
         if (dll) sm.add(new String[] { t(a, "60 on screen (Lossless 2x)"), t(a, "The game at 30, a generated frame between every two: 60 on screen. Animations keep their speed. From the next start"), "30", "2x", "" });
         combo(a, t(a, "Smoothness"), new String[] { "DM_FPS_TARGET", "DM_FORK_FG", "DM_FRAMEGEN" }, sm.toArray(new String[0][]));
         if (!dll) note(a, t(a, "Lossless frame generation: choose your Lossless.dll on the setup screen (System, Setup screen, Frame generation)."));
+        if (GameSettings.galar(a)) {   // FORK (Paldea fork): Sword / Shield's render scale only
         // FORK v49: how far the heat / frame-rate guard may lower the 3D resolution (hle_resscale.c scale_floor)
         choice(a, "DM_FORK_SCALE_FLOOR", t(a, "Lowest resolution when hot"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: the picture may get much softer when the phone is hot or slow (down to about half)") },
             { "85", "85 %", t(a, "85 %: stays sharp; a hot phone shows fewer frames instead (from the next start)") }, { "70", "70 %", t(a, "70 %: a middle way (from the next start)") } });
+        }
         // FORK: frame pacing slack (nvn_vk.c pace_time, DM_FORK_PACE_MARGIN); the pacer counts in the screen's own top rate (v46: automatic, nvn_vk.c fork_refresh)
         choice(a, "DM_FORK_PACE_MARGIN", t(a, "Frame pacing"), new String[][] { { "", t(a, "Stock"), t(a, "Stock: each frame aimed one refresh ahead (least delay)") },
             { "2", t(a, "Smooth"), t(a, "Smooth: two refreshes ahead, frames a little late still show on time (about 4 ms more delay)") },
@@ -360,6 +362,7 @@ public final class GameMenu {
         String fgv = GameSettings.get(a, "DM_FORK_FG");
         if (dll && fgv.equals("2x")) {   // the fork's frame generation's own settings
             slider(a, t(a, "Frame generation: flow scale"), "DM_FORK_FG_FLOW", 25, 100, 75, v -> v + " %");
+            if (GameSettings.galar(a))   // FORK (Paldea fork): still screens are told by Sword's screen guess
             choice(a, "DM_FORK_FG_STILL", t(a, "Frame generation on still screens"), new String[][] { { "", t(a, "Keep"), t(a, "Keep: frame generation runs everywhere") },   // FORK v50 (fork_fg.h)
                 { "pause", t(a, "Pause"), t(a, "Pause: in menus and dialogue (nothing moves) it stops and the screen drops to 60 Hz: less battery and heat (from the next start)") } });
             choice(a, "DM_FORK_FG_PERF", t(a, "Frame generation: model"), new String[][] { { "", t(a, "Performance"), t(a, "Performance: lighter on the GPU (recommended on phones)") },
@@ -421,7 +424,7 @@ public final class GameMenu {
             note(a, GameSettings.arceus(a) ? t(a, "Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.")
                                            : t(a, "Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp."));
         }
-        if (GameSettings.has60(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"), new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", GameSettings.arceus(a) ? "30" : p[5]) },
+        if (GameSettings.has60(a) && !Fork.shared(a)) choice(a, "DM_FPS_TARGET", t(a, "Frame rate"),   /* FORK: the fork holds 30 (Smoothness above; Fork.exportRoot) */ new String[][] { { "", t(a, "Auto"), t(a, "Auto: this phone gets %s fps", GameSettings.arceus(a) ? "30" : p[5]) },
             { "30", "30 fps", t(a, "30 fps, as the game is made") }, { "60", "60 fps", GameSettings.paldea(a) ? t(a, "Up to 60 fps: smoother where the phone can, the game keeps its real speed")
                                                                                                : t(a, "60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)") },
             { "dyn", t(a, "Dynamic"), t(a, "Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right") } });
@@ -491,6 +494,7 @@ public final class GameMenu {
         //   The ⊞ button brings every button back until the screen changes (the screen is a guess from what the game draws)
         choice(a, "DM_FORK_GESTURES", t(a, "Gesture shortcuts"), new String[][] { { "", t(a, "Off"), "" },   // FORK v47 (touch_ui.c gestures_event)
             { "on", t(a, "On"), t(a, "A quick three-finger tap opens this menu; two fingers swiped down together press X (the game's menu)") } });
+        if (GameSettings.galar(a)) {   // FORK (Paldea fork): context and battle controls need the screen guess, made from Sword / Shield's own shaders (gfx/nvn/fork_ui.h)
         heading(a, t(a, "Context controls"));
         note(a, t(a, "The fork guesses the screen from what the game draws. If buttons you need are hidden, tap ⊞ (top centre) for every button until the screen changes. Arrange a screen's own layout with Move the touch controls while on it."));
         choice(a, "DM_FORK_CTX_DIALOGUE", t(a, "Dialogue"), new String[][] { { "", t(a, "Same as elsewhere"), "" },
@@ -508,16 +512,21 @@ public final class GameMenu {
         if ("on".equals(GameSettings.get(a, "DM_FORK_BATTLE"))) {
             slider(a, t(a, "Battle opacity"), "DM_FORK_BATTLE_OPACITY", 0, 100, 0, v -> v == 0 ? t(a, "same as elsewhere") : v + " %");
             slider(a, t(a, "Battle: fade after"), "DM_FORK_BATTLE_FADE", -1, 10, -1, v -> v < 0 ? t(a, "same as elsewhere") : v == 0 ? t(a, "never fade") : t(a, "%d s without a touch", v)); }
+        }
         action(a, t(a, "Move the touch controls"), t(a, "Drag a control to move it, pinch to resize, double-tap to hide. Save, Reset or Cancel on the bar at the top. Each screen and orientation keeps its own layout."), () -> {
             if (dlg != null) dlg.dismiss(); try { nativeEditTouch(); ForkTouch.bar(a); } catch (UnsatisfiedLinkError e) { } });   // FORK: ForkTouch.bar
     }
     // FORK v59 (Steven, Nov 19): Tweaks, the fork's changes that are not about the controls (performance and display settings stay on their own pages)
     private static void tweaks(Activity a) {
+        if (!GameSettings.galar(a)) { heading(a, t(a, "Tweaks")); note(a, t(a, "Nothing here for this game yet: fast-forward and the info panels work with Pokémon Sword only.")); return; }   // FORK (Paldea fork): fast-forward scales Sword's own frame step (host/fork_ff.c); Violet at 30 has none to scale
         heading(a, t(a, "Game speed"));
-        choice(a, "DM_FORK_FF", t(a, "Fast-forward"), new String[][] { { "", t(a, "Off"), "" },
+        String[][] ffo = { { "", t(a, "Off"), "" },
             { "battle", t(a, "In battles"), t(a, "In battles: the ⏩ button shows during battles. Tap: on / off. Hold: fast while held") },
-            { "all", t(a, "Anywhere"), t(a, "Anywhere: the ⏩ button is always there (walking, hatching, battles)") } });
+            { "all", t(a, "Anywhere"), t(a, "Anywhere: the ⏩ button is always there (walking, hatching, battles)") } };
+        if (!GameSettings.galar(a)) ffo = new String[][] { ffo[0], ffo[2] };   // FORK (Paldea fork): "in battles" needs Sword's screen guess
+        choice(a, "DM_FORK_FF", t(a, "Fast-forward"), ffo);
         choice(a, "DM_FORK_FF_SPEED", t(a, "Fast-forward speed"), new String[][] { { "125", "1.25x", "" }, { "", "1.5x", "" }, { "200", "2x", "" }, { "300", "3x", "" } });
+        if (!GameSettings.galar(a)) return;   // FORK (Paldea fork): the research log and the info panels read Sword's memory
         heading(a, t(a, "Research"));
         // FORK v62: menu touch, step 1 (host/fork_menudiag.c): log only
         choice(a, "DM_FORK_MENU_DIAG", t(a, "Menu touch: look at the menus"), new String[][] { { "", t(a, "Off"), "" },

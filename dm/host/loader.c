@@ -1071,7 +1071,8 @@ static int builtin_patches(module_t *m, uint64_t lim, int64_t p0, int64_t p1, in
     (void)modded;
     if (strcmp(m->name, "main")) return 0;
     int n = bmod_apply(m, lim, p0, p1);
-    if (pfps_build(m->build_id)) return n + paldea_fps_patch(m, lim, p0, p1);   // (Scarlet / Violet 4.0.0: none of the Sword / Shield patches below are its)
+    if (pfps_build(m->build_id)) { int dm_fork_violet_load(module_t *, int (*)(const module_t *, uint64_t, size_t, int64_t, int64_t), int64_t, int64_t);   // FORK (Paldea fork): Fill, corrected for Violet (host/fork_violet.c)
+        return n + paldea_fps_patch(m, lim, p0, p1) + dm_fork_violet_load(m, overlaps_rewrite, p0, p1); }   // (Scarlet / Violet 4.0.0: none of the Sword / Shield patches below are its)
     if (!strncasecmp(m->build_id, "aee8f150dda1b5a838806e1a5ea6827a", 32)) return n + arc_wide(m, lim, p0, p1) + arc_res(m, p0, p1) + arc_wide_render(m, p0, p1) + arc_pool_retry(m, lim, p0, p1) + arc_scale(m, lim, p0, p1);   // (Legends: Arceus 1.1.1: its 60 is hle_nvn.c arc_step, not the Sword / Shield patch)
     n += wide_patch(m, lim, p0, p1);
     n += galar_shadow_patch(m, p0, p1) + galar_draw_patch(m, p0, p1) + galar_step_pin(m, p0, p1);

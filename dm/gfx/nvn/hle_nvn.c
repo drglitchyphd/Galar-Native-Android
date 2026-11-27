@@ -1816,6 +1816,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
     dm_fps_lock_tick(); dm_res_scale_tick(); dm_step_trace_present(t_sync_ns, t_acq_ns);
     { void dm_fork_aspect_tick(void); dm_fork_aspect_tick(); }   // FORK: Picture "Fill, corrected", the camera (host/fork_aspect.c)
+    { void dm_fork_violet_tick(void); dm_fork_violet_tick(); }   // FORK (Paldea fork): Violet's Fill, corrected follows the screen (host/fork_violet.c)
     { void dm_fork_ff_tick(void); dm_fork_ff_tick(); }   // FORK: fast-forward (host/fork_ff.c)
     { void dm_fork_enc_tick(void); dm_fork_enc_tick(); }   // FORK v47: encounter info probe, log only (host/fork_enc.c)
     { void dm_fork_menudiag_tick(void); dm_fork_menudiag_tick(); }   // FORK v62: menu touch research, log only (host/fork_menudiag.c)
