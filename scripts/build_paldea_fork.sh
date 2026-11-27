@@ -6,7 +6,7 @@
 #
 # PALDEA_FORK_VERSION: this app's own versionCode (raise it for every build; the app re-unpacks its scripts only on a new version)
 set -euo pipefail
-PALDEA_FORK_VERSION=${PALDEA_FORK_VERSION:-1}
+PALDEA_FORK_VERSION=${PALDEA_FORK_VERSION:-2}
 export GAME=${GAME:-01008F6008C5E000}   # Pokémon Violet (Scarlet's code stays in place, untested)
 export FORK_PACKAGE=${FORK_PACKAGE:-com.nxnative.paldeafork}
 export FORK_NAME=${FORK_NAME:-Paldea Fork}

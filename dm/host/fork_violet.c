@@ -23,6 +23,12 @@ static const uint32_t k_cave[31] = {   // assembled at 0x01760F98 (llvm, checked
     0x1e3e185d, 0x1e3d385f, 0x1e2c101c, 0x1f1c03e0, 0x1e2043a2, 0x14072b56,   // UI: ... b 0x0192bd38
     0x1e301824, 0x1c00015e, 0x1e2c501f, 0x1e3f0bde, 0x1e2e101f, 0x1e3f23c0, 0x5400006c, 0x4f9e9021, 0x17d640b2, 0x1e3e1884, 0x17d640b0,   // 3D: ... b 0x00cf12cc
     0x3fe38e39 };   // the ratio, 16/9 as written
+// v2 (Steven, Nov 27: full-screen 2D backgrounds such as the enrollment desk were squeezed too, the 3D behind showing in the bars): a recorder in front of the UI
+//   cave at 0x01761014 keeps the last 64 rects the lookup returns (id, x, y, w, h) in a ring on a page mapped near main (its adrp patched at load); each present
+//   the new ids are logged once ("[FORK] violet rect"), to tell the full-screen layouts from the HUD's
+enum { O_DIAG = 0x01761014 };
+static const uint32_t k_diag[13] = { 0x2d418d02, 0x90000009, 0xb940012a, 0x1100054b, 0xb900012b, 0x1200154a, 0x91008129, 0x8b0a1529, 0xb940010b, 0xb900012b, 0x2d008520, 0x2d018d22, 0x17ffffd5 };
+static volatile uint32_t *g_ring;   // [0] count, then 64 x { id, x, y, w, h, -, -, - } from byte 32
 static _Atomic int g_on;   // the code is in (this run)
 static uint32_t *g_lit; static float g_lit_now = 16.0f / 9.0f;
 
@@ -38,6 +44,21 @@ int dm_fork_violet_load(module_t *m, int (*ov)(const module_t *, uint64_t, size_
         if (w != chk[i].want || ov(m, chk[i].off, 4, p0, p1)) { LOG("[FORK] [RED] violet: main+%#llx is %08x, not %08x (a mod there, or rewritten): Fill, corrected left out", (unsigned long long)chk[i].off, w, chk[i].want); return 0; } }
     if (ov(m, O_CAVE, sizeof k_cave, p0, p1)) { LOG("[FORK] [RED] violet: the callback's body at main+%#x was rewritten: Fill, corrected left out", O_CAVE); return 0; }
     uint32_t nop = 0xd503201fu, bu = b_to(O_UI, O_CAVE), b3 = b_to(O_3D, O_3DCAVE);
+    {   // v2: the rect recorder, when a page within the adrp's reach (4 GB) can be mapped
+        uintptr_t at = (uintptr_t)(m->base + O_DIAG), pc = at + 4; void *pg = MAP_FAILED;
+        for (int64_t d = 1; d < 64 && pg == MAP_FAILED; d++) { uintptr_t want = ((pc & ~(uintptr_t)0xfff) - (uintptr_t)d * 0x4000000u) & ~(uintptr_t)0x3fff;
+            void *p = mmap((void *)want, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED) continue;
+            int64_t delta = (int64_t)((uintptr_t)p >> 12) - (int64_t)(pc >> 12);
+            if (delta >= -(1 << 20) && delta < (1 << 20)) pg = p; else munmap(p, 0x4000); }
+        if (pg != MAP_FAILED && !ov(m, O_DIAG, sizeof k_diag, p0, p1)) {
+            int64_t imm = (int64_t)((uintptr_t)pg >> 12) - (int64_t)(pc >> 12);
+            uint32_t d[13]; memcpy(d, k_diag, sizeof d);
+            d[1] = 0x90000009u | (uint32_t)(imm & 3) << 29 | (uint32_t)((imm >> 2) & 0x7ffff) << 5;   // adrp x9, the page
+            memcpy(m->base + O_DIAG, d, sizeof d); __builtin___clear_cache((char *)(m->base + O_DIAG), (char *)(m->base + O_DIAG + sizeof d));
+            g_ring = (volatile uint32_t *)pg; bu = b_to(O_UI, O_DIAG);
+            LOG("[FORK] violet: rect recorder on (ring at %p)", pg); }
+        else LOG("[FORK] violet: rect recorder off (no page near main)"); }
     memcpy(m->base + O_CAVE, k_cave, sizeof k_cave);
     memcpy(m->base + O_NOP, &nop, 4); memcpy(m->base + O_UI, &bu, 4); memcpy(m->base + O_3D, &b3, 4);
     __builtin___clear_cache((char *)(m->base + O_CAVE), (char *)(m->base + O_CAVE + sizeof k_cave));
@@ -48,8 +69,22 @@ int dm_fork_violet_load(module_t *m, int (*ov)(const module_t *, uint64_t, size_
 }
 static double win_ratio(void) { extern double dm_fork_win_ratio(void); return dm_fork_win_ratio(); }
 // each present (hle_nvn.c): the screen's ratio into the code's word when it changed (the code page writable for the moment of the store)
+static void rect_log(void) {   // v2: each rect id the lookup returned, once, with its values (at most 120 lines)
+    static uint32_t seen = 0, ids[256], vals[256][4]; static int nid, lines;
+    if (!g_ring || lines >= 120) return;
+    uint32_t n = g_ring[0]; if (n == seen) return;
+    uint32_t from = n - seen > 64 ? n - 64 : seen;
+    for (uint32_t i = from; i < n; i++) { const volatile uint32_t *e = g_ring + 8 + (i & 63) * 8; uint32_t id = e[0], v[4] = { e[1], e[2], e[3], e[4] };
+        int k = 0; while (k < nid && !(ids[k] == id && !memcmp(vals[k], v, sizeof v))) k++;
+        if (k < nid || nid >= 256) continue;
+        ids[nid] = id; memcpy(vals[nid], v, sizeof v); nid++;
+        float f[4]; memcpy(f, v, sizeof f);
+        if (lines++ < 120) LOG("[FORK] violet rect: id %08x: x %.2f y %.2f w %.2f h %.2f (the game's own values)", id, f[0], f[1], f[2], f[3]); }
+    seen = n;
+}
 void dm_fork_violet_tick(void) {
     if (!atomic_load(&g_on) || dm_aspect() != DM_ASPECT_FIX) return;
+    rect_log();
     double r = win_ratio(); if (!(r > 0.3 && r < 4.0)) return;
     float f = (float)r; if (fabsf(f - g_lit_now) < 0.0005f) return;
     uintptr_t pg = (uintptr_t)g_lit & ~(uintptr_t)0x3fff;
