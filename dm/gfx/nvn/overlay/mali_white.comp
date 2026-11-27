@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+// The Mali white-screen detector (nvn_vk.c mali_white_vk.inc): a 32 x 18 grid of texel fetches over the drawn part of the lit scene's target (R11G11B10F, or its
+//   RGBA16F stand-in), and another over the picture shown (the texture handed to the present: a white that comes from a later pass than the lit scene), dispatched
+//   as 1 x 18 x 2 groups of 32 (z: 0 the lit target, 1 the picture shown). Per texel two words for the CPU, read once the pass's fence has signalled: its flags and
+//   its largest finite channel (float bits, for the log). Flags: bit 0 a colour channel at or above the threshold (thr: 1024 by default; the stand-in does not
+//   clamp at R11G11B10F's 65024 and a white Arm left finite values such as 21250), bit 1 +infinity, bit 2 NaN, bit 3 a channel at or above the lower bucket
+//   (thr_low: 64, for the log), bit 4 near black (every channel below thr_dark, none infinite or NaN: a cleared, black or never drawn target says nothing), bit 5
+//   every colour channel at or above the grid's "all" threshold (the picture shown: thr_shown, 0.99, white; the lit target: thr). Judged on the bits with integer
+//   operations only, so a compiler that takes infinities and NaN as absent cannot fold the checks away (positive floats order as their bits do).
+//   Both images are read at every texel, each at a place inside it (the other grid's reads at 0, 0), so no read is ever out of either image, whichever way a
+//   compiler arranges the choice. Vulkan 1.0: sampled images read without a sampler (OpImageFetch) and a storage buffer. Built into mali_white_spv.h by
+//   build_comp_spv.sh
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) uniform texture2D lit;
+layout(set = 0, binding = 1, std430) writeonly buffer Out { uint v[]; } o;
+layout(set = 0, binding = 2) uniform texture2D shown;
+// the lit target's drawn rectangle (texels), the first word of this sample's slot, the thresholds' bits; the picture shown's rectangle (w 0: none) and its white
+layout(push_constant) uniform P { int x0, y0, w, h; uint base, thr, thr_low, thr_dark; int sx0, sy0, sw, sh; uint thr_shown; } p;
+void main() {
+    uint gx = gl_LocalInvocationID.x, gy = gl_WorkGroupID.y, half_ = gl_WorkGroupID.z;
+    bool on_shown = half_ != 0u;
+    ivec4 rc = on_shown ? ivec4(p.sx0, p.sy0, max(p.sw, 0), max(p.sh, 0)) : ivec4(p.x0, p.y0, p.w, p.h);
+    ivec2 c = ivec2(rc.x + int((2u * gx + 1u) * uint(rc.z) / 64u), rc.y + int((2u * gy + 1u) * uint(rc.w) / 36u));   // (each cell's centre)
+    vec4 tl = texelFetch(lit, on_shown ? ivec2(0) : c, 0), ts = texelFetch(shown, on_shown ? c : ivec2(0), 0);
+    vec4 t = on_shown ? ts : tl;
+    uint all_thr = on_shown ? p.thr_shown : p.thr;
+    uint flags = 48u, mx = 0u;   // (near black and all at the threshold until a channel says otherwise)
+    for (int i = 0; i < 3; i++) {
+        uint b = floatBitsToUint(t[i]);
+        if ((b & 0x7f800000u) == 0x7f800000u) {   // NaN; +inf (-inf: stored as 0)
+            bool nan_ = (b & 0x007fffffu) != 0u, pinf = !nan_ && (b >> 31) == 0u;
+            flags = (flags & ~16u) | (nan_ ? 4u : pinf ? 2u : 0u);
+            if (!pinf) flags &= ~32u;
+            continue; }
+        if ((b >> 31) != 0u) { flags &= ~32u; continue; }   // negative: R11G11B10F holds 0 there
+        if (b >= p.thr) flags |= 1u;
+        if (b >= p.thr_low) flags |= 8u;
+        if (b >= p.thr_dark) flags &= ~16u;
+        if (b < all_thr) flags &= ~32u;
+        mx = max(mx, b);
+    }
+    uint k = p.base + 2u * (half_ * 576u + gy * 32u + gx);
+    o.v[k] = flags; o.v[k + 1u] = mx;
+}

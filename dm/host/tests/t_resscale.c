@@ -54,7 +54,7 @@ int main(void) {
     game_sets(0.8f); dm_res_scale_tick();
     dm_res_cap_set(1.0f); dm_res_scale_tick(); CHECK(is(0.8f), "cap lifted: the game's last request (0.8) back");
     game_sets(1.0f); dm_res_scale_tick(); CHECK(is(1.0f), "no cap: the game's 1.0 stays");
-    dm_res_cap_set(0.4f); CHECK(dm_res_cap_get() == 1.0f, "cap 0.4 (under 0.5): ignored");
+    dm_res_cap_set(0.3f); CHECK(dm_res_cap_get() == 1.0f, "cap 0.3 (under 0.35): ignored");
     dm_res_cap_set(1.5f); CHECK(dm_res_cap_get() == 1.0f, "cap 1.5 (over 1): ignored");
     game_sets(5.0f); dm_res_cap_set(0.6f); dm_res_scale_tick(); CHECK(is(5.0f), "an unexpected game value (5.0): left alone");
     game_sets(1.0f); dm_res_scale_tick(); CHECK(is(0.6f), "then a valid one: capped again (0.6)");
@@ -69,7 +69,10 @@ int main(void) {
     game_sets(0.001f); dm_res_scale_tick(); CHECK(is(0.001f), "factor 0.85, the game asks 0.001 (background): kept as it is");
     game_sets(1.0f); dm_res_cap_set(0.6f); dm_res_scale_tick(); CHECK(is(0.6f), "factor 0.85 under cap 0.6, the game asks 1.0: 0.6");
     dm_res_cap_set(1.0f); dm_res_scale_tick(); CHECK(is(0.85f), "cap lifted, factor 0.85: 0.85");
-    dm_res_factor_set(0.4f); dm_res_scale_tick(); CHECK(is(0.85f), "factor 0.4 (under 0.5): ignored");
+    dm_res_factor_set(0.3f); dm_res_scale_tick(); CHECK(is(0.85f), "factor 0.3 (under 0.35): ignored");
+    dm_res_factor_set(0.35f); game_sets(0.8f); dm_res_scale_tick(); CHECK(is(0.35f), "factor 0.35, the game asks 0.8: held at the 0.35 floor (not 0.28)");
+    dm_res_cap_set(0.4f); game_sets(1.0f); dm_res_factor_set(1.0f); dm_res_scale_tick(); CHECK(is(0.4f), "cap 0.4 (a budget GPU): 0.4");
+    dm_res_cap_set(1.0f); dm_res_factor_set(0.85f); dm_res_scale_tick(); CHECK(is(0.85f), "cap lifted, factor 0.85 again: 0.85");
     dm_res_factor_set(1.0f); dm_res_scale_tick(); CHECK(is(1.0f), "factor back to 1: the game's 1.0");
     // the game's mode: lowered in 1 (dynamic) and 2 (fixed 0.8) only; 0 is a scene pinned to full size (the menus showing Pokémon models, #97), 3 the background
     dm_res_factor_set(0.7f); game_sets(1.0f); dm_res_scale_tick(); CHECK(is(0.7f) && dm_res_scale_applies(), "mode 1, factor 0.7: 0.7");
@@ -86,8 +89,9 @@ int main(void) {
     ctl_ovr(4); dm_res_scale_tick(); CHECK(is(0.7f), "override off (4), mode 1: 0.7");
     memset(sys + 0xd0, 0, sizeof ctl); dm_res_scale_tick(); CHECK(is(1.0f) && !dm_res_scale_applies(), "controller gone (mode unknown): the game's 1.0 back");
     memcpy(sys + 0xd0, &ctl, sizeof ctl); dm_res_factor_set(1.0f); dm_res_scale_tick(); CHECK(is(1.0f) && dm_res_scale_applies(), "controller back, factor 1: 1.0");
-    // DM_RES_CAP: read once, 0.5 - 1 only
+    // DM_RES_CAP: read once, 0.35 - 1 only
     g_cap_bits = 0; setenv("DM_RES_CAP", "0.75", 1); CHECK(dm_res_cap_get() == 0.75f, "DM_RES_CAP=0.75");
+    g_cap_bits = 0; setenv("DM_RES_CAP", "0.35", 1); CHECK(dm_res_cap_get() == 0.35f, "DM_RES_CAP=0.35");
     g_cap_bits = 0; setenv("DM_RES_CAP", "2", 1); CHECK(dm_res_cap_get() == 1.0f, "DM_RES_CAP=2: no cap");
     g_cap_bits = 0; unsetenv("DM_RES_CAP"); CHECK(dm_res_cap_get() == 1.0f, "no DM_RES_CAP: no cap");
     printf("%d checks, %d failed\n", checks, fails);

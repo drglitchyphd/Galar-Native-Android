@@ -4,9 +4,9 @@
 | --- | --- |
 | `app/jni/android_main.c` | The game's native activity: starts the host, input (touch, controllers, the phone's keyboard for names), settings from `env.txt`, logs, graphics Auto |
 | `app/jni/touch_ui.c` | The touch controls and their in-game layout editor (hold − for 2 s) |
-| `app/java/com/nxnative/SetupActivity.java` | The first screen: game files, keys, settings, setup; then straight into the game |
+| `app/java/com/nxnative/SetupActivity.java` | The first screen: game files (ExeFS / RomFS folders), settings, setup; then straight into the game |
 | `app/java/com/nxnative/GameActivity.java` | NativeActivity plus controller connection (a connected controller hides the touch controls) |
-| `tools/setup_game.py` | The setup the phone runs: unpack (nx_extract), rewrite the code (patch_nso.py), translate and pack the shaders; `--captures` adds the shaders the game builds in memory |
+| `tools/setup_game.py` | The setup the phone runs: copy the extracted ExeFS / RomFS (the game told by main's build ID), rewrite the code (patch_nso.py), translate and pack the shaders; `--captures` adds the shaders the game builds in memory |
 | `tools/build_apk.py` | Packs the APK: native libraries, Java, CPython's standard library, the setup scripts |
 | `extract_aot/`, `xlate_aot/` | The unpacker (LibHac) and the shader translator (Ryujinx) built for Android with .NET NativeAOT |
 | `spirv_cross/`, `python/`, `pyshim/` | SPIRV-Cross for Android; the Python launcher; the LZ4 stand-in the setup scripts import |
@@ -14,7 +14,7 @@
 | `host/movie_avc_android.c` | H.264 movies (the staff credits) on MediaCodec |
 | `Makefile.host`, `tools/win_build_lib.py` | Build the engine library (Linux / macOS, or Windows) |
 
-Setup builds shader locations, facts, and pairs from the selected game dump instead of assuming it contains every shader in the profile's reference map. This lets base-game-only setups use their actual package indices; profile entries for shaders captured later at runtime are retained.
+Setup builds shader locations, facts, and pairs from the player's game files instead of assuming it contains every shader in the profile's reference map. This lets base-game-only setups use their actual package indices; profile entries for shaders captured later at runtime are retained.
 
 Save data can be exported as a ZIP and edited externally, then imported from the launcher with **Import edited save data**. The archive is validated and staged privately; the next Play action atomically swaps it into place and keeps the previous save as a backup.
 

@@ -29,8 +29,8 @@ static char g_fk_sqkey[17];   // the shrunk draw's vertex shader (the log below)
 extern _Atomic int dm_fork_screen;   // (below)
 volatile int dm_fork_capture_trainer;   // FORK v41: android_main.c DM_FORK_CAPTURE=trainer (the menu's "Capture the trainer-spotted moment"): captures the first frame
 //   in the overworld whose shrunk UI has a shader other than the overworld's usual ones (56af7f00, af0ef3ac, af80749a), at once (no 90-frame wait)
-static void fork_ui_fill(VkCommandBuffer cb) {
-    if (!g_fk_sq) return; g_fk_sq = 0;
+static int fork_ui_fill(VkCommandBuffer cb) {   // FORK merge (Nov 27): 1 when it set the viewport and scissor itself (nvn_vk.c then lets its state shadow send them again)
+    if (!g_fk_sq) return 0; g_fk_sq = 0;
     { static char seen[96][24]; static int ns;   // FORK diagnostics: each kind of shrunk UI draw once (shader, largest texture side), to tell overlays from icons
       char k[24]; snprintf(k, sizeof k, "%.8s %d", g_fk_sqkey, g_fk_ntex ? g_fk_texmax : 0); int i;
       for (i = 0; i < ns && strcmp(seen[i], k); i++) {}
@@ -66,7 +66,7 @@ static void fork_ui_fill(VkCommandBuffer cb) {
         sc.offset.y = (int32_t)floorf(y0); sc.extent.height = (uint32_t)(ceilf(y1) > floorf(y0) ? ceilf(y1) - floorf(y0) : 0);
         vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
         static int said[3]; int wh = shade ? 1 : shade2 ? 2 : 0; if (!said[wh]++) VLOG("[FORK] spotted %s: kept on the screen's %s edge (scale %.3f, origin %s)", wh == 1 ? "shading" : wh == 2 ? "shading (2nd draw, top left)" : "banner", top ? "top" : "bottom", k, ll ? "lower left" : "upper left");
-        return; }
+        return 1; }
     // v51: the side fade at the "!" (Steven's screen recording, Nov 13: dark from the left and right, cut off at the UI band's edges). Best match from the logs:
     //   7c73d8ac with no texture (a shaded gradient), drawn in the overworld right before trainer battles. The same shader draws parts of the battle HUD and menus,
     //   so only in the overworld with the 3D under it (screen kind 0, a composite this frame) is it kept full size
@@ -74,9 +74,10 @@ static void fork_ui_fill(VkCommandBuffer cb) {
     if (sidefade) { static int said; if (!said++) VLOG("[FORK] spotted side fade (7c73d8ac, no texture, overworld): kept full size"); }
     int full = !strncmp(g_fk_sqkey, "fa0b9117", 8) || !strncmp(g_fk_sqkey, "63b6f752", 8) || shading || sidefade;   // (v50: + the spotted fades; v51: + the side fade)
     if (shading) { static int said; if (!said++) VLOG("[FORK] spotted fades: kept full size (the screen's corners)"); }
-    if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
+    if (!full && (!g_fk_ntex || g_fk_texmax > 4)) return 0;   // FORK v42: v38's "screenish" rule removed (the party list's Pokémon icons come from one large icon sheet: they were kept full size, off their rows; it did not fix the trainer fade either)   // FORK v38: || screenish (full-screen effects from a picture-sized image: 766fba38 / a63059a8 at 1920)
     vkCmdSetViewport(cb, 0, 1, &g_fk_v0); vkCmdSetScissor(cb, 0, 1, &g_fk_sc0);
     if (++g_fk_fills == 1 || g_fk_fills % 1000 == 0) VLOG("[FORK] fill draws kept full size: %llu", (unsigned long long)g_fk_fills);
+    return 1;
 }
 // The census (for telling battles, menus and the world apart later): which UI shaders each frame draws into the picture and whether it has 3D under them.
 // A frame's set is logged when it differs from the last logged one and has held for 15 frames ([FORK] ui census), at most 400 lines a run

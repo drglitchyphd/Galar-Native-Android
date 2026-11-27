@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the installable app (PokemonShield.apk) from this repository on a PC: Linux, or Windows through WSL (Ubuntu). No game files or keys are involved:
-# the app sets the game up on the phone from the player's own dump.
+# the app sets the game up on the phone from the player's own extracted game files (ExeFS and RomFS).
 #
 #   bash scripts/build_apk_pc.sh            the app, with libadrenotools so players can pick a custom Vulkan driver (Mesa Turnip / PanVK) on the setup screen
 #   TURNIP=0 bash scripts/build_apk_pc.sh   without it: the phone's own Vulkan driver only
@@ -10,7 +10,9 @@
 #   capstone 5.0.7 and lz4 1.10.0 (sources), spirv-cross (Khronos), and unless TURNIP=0 libadrenotools
 # Needs on the PC: git, curl, python3 (with venv), a C/C++ compiler (gcc / g++), make, and cmake + ninja unless TURNIP=0,
 #   e.g. sudo apt install git curl python3-venv build-essential cmake ninja-build   (a JDK is fetched too when none is installed)
-# The APK is signed with a debug key made on first use ($WORK/debug.keystore); keep it to install updates over a first install.
+# The APK is signed with a debug key made on first use ($WORK/debug.keystore); keep it to install updates over a first install. Such a build says "Unofficial build".
+#   KS=<keystore> OFFICIAL=1 VERSION=60 bash scripts/build_apk_pc.sh   an official release: signed with KS, and the build fails unless KS is the release key
+#   (build_apk.py --official); VERSION sets versionCode 60 / versionName 0.60 (build_apk.py --version)
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd); A=$REPO/dm/android
 WORK=${WORK:-$HOME/psa-build}; mkdir -p "$WORK"; cd "$WORK"
@@ -59,9 +61,9 @@ step "2/8 the engine (libnxnative.so)"
 make -C "$A" -f Makefile.host GAME=$GAME NDK="$NDK" API=$API -j"$(nproc)" lib | tail -1
 cp "$A/out/host-$GAME-vulkan/lib/libnxnative.so" "$LIBS/"
 
-step "3/8 the NSP / XCI unpacker and the shader translator (.NET NativeAOT for Android)"
-bash "$A/extract_aot/build_extract_aot.sh" | tail -1; cp "$A/extract_aot/out/libnx_extract.so" "$LIBS/"
-bash "$A/xlate_aot/build_xlate_aot.sh" | tail -1; cp "$A/xlate_aot/out/libdmsh_xlate.so" "$LIBS/"
+step "3/8 the shader translator (.NET NativeAOT for Android)"
+bash "$A/extract_aot/build_extract_aot.sh" | tail -1; cp "$A/extract_aot/out/libnx_extract.so" "$LIBS/"   # FORK: the NSP / XCI unpacker kept (setup from a dump + keys; upstream dropped it)
+GAME=$GAME bash "$A/xlate_aot/build_xlate_aot.sh" | tail -1; cp "$A/xlate_aot/out/libdmsh_xlate.so" "$LIBS/"
 
 step "4/8 spirv-cross"
 NDK=$NDK API=$API bash "$A/spirv_cross/build_spirv_cross.sh" | tail -1; cp "$A/spirv_cross/out/libspirv_cross.so" "$LIBS/"
@@ -72,7 +74,9 @@ if [ ! -f "$PY/prefix/lib/libpython3.14.so" ]; then
     mkdir -p "$PY"; curl -fsSLo py.tar.gz "https://www.python.org/ftp/python/$PYV/python-$PYV-aarch64-linux-android.tar.gz"; tar -xzf py.tar.gz -C "$PY"; rm py.tar.gz
 fi
 cp "$PY/prefix/lib/libpython3.14.so" "$PY/prefix/lib/libssl_python.so" "$PY/prefix/lib/libcrypto_python.so" "$LIBS/"
-"$CC" -O2 -fPIE -pie $P16 -I"$PY/prefix/include/python3.14" "$A/python/pylaunch.c" -L"$PY/prefix/lib" -lpython3.14 -o "$LIBS/libpython_exe.so"
+# (-rpath $ORIGIN: the launcher finds libpython3.14.so beside itself. Phones find it through LD_LIBRARY_PATH; the Android emulator's arm64 translation ignores that
+#  variable for programs an app starts, and the setup stopped there with "library libpython3.14.so not found".)
+"$CC" -O2 -fPIE -pie $P16 -Wl,-rpath,'$ORIGIN' -I"$PY/prefix/include/python3.14" "$A/python/pylaunch.c" -L"$PY/prefix/lib" -lpython3.14 -o "$LIBS/libpython_exe.so"
 "$CC" -O2 -fPIE -pie $P16 "$A/gate/dmsh_gate.c" -o "$LIBS/libdmsh_gate.so"   # the setup's memory gate for the shader translators
 "$CC" -O2 -fPIE -pie $P16 "$A/oodle/dmoodle.c" -ldl -o "$LIBS/libdmoodle.so"   # the game's own Oodle decoder for Trinity games' shader scan (Violet)
 
@@ -101,5 +105,5 @@ step "8/8 the APK"
 OUT="$WORK/$(python3 "$REPO/dm/games/game.py" $GAME app_name | tr -d ' ').apk"   # GalarNative.apk / PaldeaNative.apk
 OUT=${APK_OUT:-$OUT}   # FORK: scripts/build_fork.sh names its own APK
 python3 "$A/tools/build_apk.py" --game $GAME --libs "$LIBS" --pylib "$PY/prefix/lib/python3.14" --capstone-py "$WORK/capstone-py/capstone" --bt "$BT" --jar "$JAR" \
-    --ks "$WORK/debug.keystore" --out "$OUT" ${APK_ARGS[@]+"${APK_ARGS[@]}"}   # FORK: extra build_apk.py arguments (scripts/build_fork.sh)
+    --ks "${KS:-$WORK/debug.keystore}" --out "$OUT" $([ "${OFFICIAL:-0}" = 1 ] && echo --official) $([ -n "${VERSION:-}" ] && echo --version "$VERSION") ${APK_ARGS[@]+"${APK_ARGS[@]}"}   # FORK: extra build_apk.py arguments (scripts/build_fork.sh)
 echo; echo "done: $OUT (install it, open it, choose your game files and keys)"

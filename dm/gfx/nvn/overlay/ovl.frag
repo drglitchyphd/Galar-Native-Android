@@ -1,6 +1,6 @@
 #version 450
-// shape.x: 0 disc, 1 ring, 2 rounded rectangle; shape.y: ring / border width in uv units; shape.z: corner radius (rectangles); shape.w: rectangle aspect (w / h)
-// glyph.x: atlas cell (-1 none), glyph.y: glyph scale (fraction of the control), glyph.z: glyph alpha
+// shape.x: 0 disc, 1 ring, 2 rounded rectangle, 3 a disc's top half; shape.y: ring / border width in uv units; shape.z: corner radius (rectangles); shape.w: rectangle aspect (w / h)
+// glyph.x: atlas cell (-1 none), glyph.y: glyph scale (fraction of the control), glyph.z: glyph alpha, glyph.w: 0 white glyph .. 1 black (the game's own button prompts)
 layout(push_constant) uniform P { vec4 rect; vec4 color; vec4 shape; vec4 glyph; vec2 target; } p;
 layout(binding = 0) uniform sampler2D font;
 layout(binding = 1) uniform sampler2D icons;   // FORK v61: Pokémon icons (16 x 16 cells, RGBA; host/fork_icons.c from the player's RomFS)
@@ -11,7 +11,8 @@ void main() {
     float a;
     if (p.shape.x < 0.5) { float d = length(uv); a = 1.0 - smoothstep(1.0 - aa, 1.0, d); }
     else if (p.shape.x < 1.5) { float d = length(uv); a = (1.0 - smoothstep(1.0 - aa, 1.0, d)) * smoothstep(1.0 - p.shape.y - aa, 1.0 - p.shape.y, d); }
-    else { vec2 q = abs(uv) * vec2(p.shape.w, 1.0); vec2 b = vec2(p.shape.w, 1.0) - p.shape.z; float d = length(max(q - b, 0.0)) - p.shape.z; a = 1.0 - smoothstep(-aa, 0.0, d); }
+    else if (p.shape.x < 2.5) { vec2 q = abs(uv) * vec2(p.shape.w, 1.0); vec2 b = vec2(p.shape.w, 1.0) - p.shape.z; float d = length(max(q - b, 0.0)) - p.shape.z; a = 1.0 - smoothstep(-aa, 0.0, d); }
+    else { float d = length(uv); a = (1.0 - smoothstep(1.0 - aa, 1.0, d)) * (1.0 - smoothstep(-aa, 0.0, uv.y)); }   // 3: the disc's top half
     vec4 col = vec4(p.color.rgb, p.color.a * a);
     if (p.glyph.x >= 999.5) {   // FORK v61: an icon: cell glyph.x - 1000; glyph.w: 0 colour, 1 faded, 2 a black silhouette
         vec2 g = (uv / p.glyph.y) * 0.5 + 0.5;
@@ -28,7 +29,7 @@ void main() {
             float nc = float(textureSize(font, 0).x / textureSize(font, 0).y);   // FORK: the cell count from the atlas's width (the fork's is 32 wide: fork_glyphs.py)
             vec2 t = vec2(p.glyph.x + g.x, g.y) / vec2(nc, 1.0);
             float s = texture(font, t).r; float ga = smoothstep(0.35, 0.65, s) * p.glyph.z;
-            col.rgb = mix(col.rgb, p.glyph.w > 0.5 ? p.color.rgb : vec3(1.0), ga); col.a = max(col.a, ga);   // FORK v53: glyph.w = 1: the label in the fill colour
+            col.rgb = mix(col.rgb, p.glyph.w > 1.5 ? p.color.rgb : vec3(1.0 - p.glyph.w), ga); col.a = max(col.a, ga);   // FORK v53 + upstream: glyph.w 2 = the label in the fill colour (coloured text), else 0 white .. 1 black
         }
     }
     o = vec4(col.rgb * col.a, col.a);   // premultiplied

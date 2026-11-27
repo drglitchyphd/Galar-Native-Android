@@ -12,7 +12,6 @@ Adaptive	Adaptatif
 Adaptive: High, a lighter picture while the phone is hot or slow	Adaptatif : Élevé, une image plus légère quand le téléphone chauffe ou ralentit
 Add %s to the home screen	Ajouter %s à l'écran d'accueil
 Adding %d shader(s) the game made last time...	Ajout de %d shader(s) créé(s) par le jeu la dernière fois...
-Allow access to all files so the app can read your dump where it is (it is several GB; nothing is copied).	Autorisez l'accès à tous les fichiers pour que l'app lise votre dump là où il est (plusieurs Go ; rien n'est copié).
 Applies next start	Au prochain lancement
 Auto	Auto
 Auto (the phone's language)	Auto (la langue du téléphone)
@@ -34,12 +33,9 @@ Controller buttons	Boutons de la manette
 Controller buttons reset.	Boutons de la manette réinitialisés.
 Controllers only	Manettes uniquement
 Controls	Commandes
-Copying %d selected file(s) into app storage...	Copie de %d fichier(s) sélectionné(s) dans le stockage de l'app...
-Copying %d selected game file(s) into app storage; large files need extra free space...	Copie de %d fichier(s) du jeu dans le stockage de l'app ; les gros fichiers demandent de l'espace libre en plus...
 Could not add the new shaders (%s); the game still plays without them.	Impossible d'ajouter les nouveaux shaders (%s) ; le jeu fonctionne sans eux.
 Could not add your mods' shaders (%s); the game still plays, some mod effects may not show.	Impossible d'ajouter les shaders de vos mods (%s) ; le jeu fonctionne, certains effets peuvent manquer.
 Could not export the save: %s	Impossible d'exporter la sauvegarde : %s
-Could not import game file: %s	Impossible d'importer le fichier du jeu : %s
 Could not import the save: %s	Impossible d'importer la sauvegarde : %s
 Could not install the mod: %s	Impossible d'installer le mod : %s
 Delete	Supprimer
@@ -49,6 +45,9 @@ Deleted: applies the next time you start the game.	Supprimé : s'applique au pro
 Display	Affichage
 Done	Terminé
 Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset).	Faites glisser une commande pour la déplacer. Pour la redimensionner, touchez-la, puis pincez avec deux doigts n'importe où. Touchez deux fois pour la masquer. Maintenez − 2 s pour enregistrer (maintenez + pour réinitialiser).
+Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	Faites glisser une commande pour la déplacer, pincez pour la redimensionner, touchez deux fois pour la masquer. Maintenez − 2 s pour enregistrer (maintenez + et − ensemble pour réinitialiser).
+Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	Faites glisser une commande pour la déplacer. Pour la redimensionner, touchez-la, puis pincez avec deux doigts n'importe où. Touchez deux fois pour la masquer. Maintenez − 2 s pour enregistrer (maintenez + et − ensemble pour réinitialiser).
+Button size	Taille des boutons
 Edit notes	Modifier les notes
 Enter both the server and the room code.	Saisissez le serveur et le code du salon.
 Export save data	Exporter la sauvegarde
@@ -64,7 +63,6 @@ Full decode: more memory, no conversion (Snapdragon is not affected either way)	
 Full: the game's textures as they are	Complètes : les textures du jeu telles quelles
 GPU	GPU
 GPU memory reported to the game	Mémoire GPU annoncée au jeu
-Game file(s) copied into app storage and selected.	Fichier(s) du jeu copié(s) et sélectionné(s).
 Game files	Fichiers du jeu
 Graphics	Graphismes
 Graphics driver	Pilote graphique
@@ -122,7 +120,6 @@ Please wait for the current setup or file copy to finish.	Attendez la fin de l'i
 Preparing...	Préparation...
 Press a key…	Appuyez sur un bouton…
 Press the controller button for %s.	Appuyez sur le bouton de la manette pour %s.
-Previously copied selections are ready.	Les sélections copiées auparavant sont prêtes.
 Put each mod in its own folder in Android/data/%s/files/mods/ — <mod>/romfs for files, <mod>/exefs for .pchtxt code patches (they must be made for %s %s).	Mettez chaque mod dans son propre dossier dans Android/data/%s/files/mods/ — <mod>/romfs pour les fichiers, <mod>/exefs pour les correctifs .pchtxt (ils doivent être faits pour %s %s).
 Reading the shaders of your mods...	Lecture des shaders de vos mods...
 Ready. The setup log is in Android/data/%s/files/setup_work.	Prêt. Le journal est dans Android/data/%s/files/setup_work.
@@ -140,7 +137,6 @@ Saved: applies the next time you start the game.	Enregistré : s'applique au pro
 Saved: close the game and start it again, then use the game's local link options.	Enregistré : fermez le jeu, relancez-le, puis utilisez les options de communication locale du jeu.
 Saves	Sauvegardes
 Screen	Écran
-Set the game up from your own dump. No game files or keys come with this app; yours never leave the phone.	Installez le jeu à partir de votre propre dump. Aucun fichier de jeu ni clé n'est fourni ; les vôtres ne quittent jamais le téléphone.
 Set up the game	Installer le jeu
 Settings (picture, graphics, textures, controller buttons, touch controls, mods) are in the game: tap the menu button at the top left, or hold − on a controller for 3 seconds for the controller buttons.	Les paramètres (image, graphismes, textures, boutons de la manette, commandes tactiles, mods) sont dans le jeu : touchez le bouton de menu en haut, ou maintenez − sur une manette 3 secondes pour les boutons.
 Setup failed: %s	L'installation a échoué : %s
@@ -156,8 +152,6 @@ Tap a button, then press the controller key you want for it.	Touchez un bouton, 
 Texture format	Format des textures
 Textures	Textures
 The %s shortcut is on the home screen.	Le raccourci de %s est sur l'écran d'accueil.
-The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.	Le sélecteur n'a pas renvoyé de fichier. Essayez l'app Fichiers du téléphone et choisissez un fichier dans Téléchargements ou Documents.
-The file picker returned no selected file. Try the phone's Files app and select a file from Downloads or Documents.	Le sélecteur n'a renvoyé aucun fichier. Essayez l'app Fichiers du téléphone et choisissez un fichier dans Téléchargements ou Documents.
 The game closed while starting its graphics	Le jeu s'est fermé au démarrage de ses graphismes
 The new driver is used from the next start.	Le nouveau pilote est utilisé au prochain lancement.
 The phone's own driver	Le pilote du téléphone
@@ -195,25 +189,16 @@ server (address:port)	serveur (adresse:port)
 shares files with %d other mod(s)	partage des fichiers avec %d autre(s) mod(s)
 translate %s shaders	traduire %s shaders
 translate the shaders	traduire les shaders
-unpack the game	décompresser le jeu
 warm	tiède
-%s is compressed (NSZ): decompress it to .nsp / .xci first, then choose that.	%s est compressé (NSZ) : décompressez-le d'abord en .nsp / .xci, puis choisissez celui-ci.
-%s is not a Switch game file (.nsp or .xci).	%s n'est pas un fichier de jeu Switch (.nsp ou .xci).
-%s is not a game file: choose it under Your keys.	%s n'est pas un fichier de jeu : choisissez-le dans Vos clés.
-%s is not a key file: choose prod.keys (and title.keys).	%s n'est pas un fichier de clés : choisissez prod.keys (et title.keys).
-(kept in the app's private storage)	(conservé dans le stockage privé de l'app)
 Background	Arrière-plan
 Change the driver (only if the game does not start)	Changer de pilote (seulement si le jeu ne démarre pas)
 Choose	Choisir
-Choose game files	Choisir les fichiers du jeu
-Choose keys	Choisir les clés
 Clear	Effacer
 Could not read %s.	Impossible de lire %s.
 Game	Jeu
 Keep playing	Continuer à jouer
 Keep playing: the game and its sound go on in the background	Continuer à jouer : le jeu et son son continuent en arrière-plan
 Leaving the game	En quittant le jeu
-No game files or keys come with this app; yours never leave the phone.	Aucun fichier de jeu ni clé n'est fourni ; les vôtres ne quittent jamais le téléphone.
 Pause	Pause
 Pause: the game stops while it is not on screen	Pause : le jeu s'arrête tant qu'il n'est pas à l'écran
 Ready: tap Play.	Prêt : touchez Jouer.
@@ -222,26 +207,16 @@ Set up	Installer
 Set up again	Réinstaller
 Set up or manage a game	Installer ou gérer un jeu
 Tap Clear and choose your files again.	Touchez Effacer et choisissez à nouveau vos fichiers.
-The base game (.nsp or .xci), the %s update and any DLC. You can choose them all at once.	Le jeu de base (.nsp ou .xci), la mise à jour %s et les DLC. Vous pouvez tous les choisir en même temps.
 The setup log is in Android/data/%s/files/setup_work.	Le journal d'installation se trouve dans Android/data/%s/files/setup_work.
-These files are from different games (%s): set up one game at a time. Tap Clear and choose the files of one game.	Ces fichiers viennent de jeux différents (%s) : installez un jeu à la fois. Touchez Effacer et choisissez les fichiers d'un seul jeu.
-Welcome! To play, set up %s from your own Switch dump. It takes three steps.	Bienvenue ! Pour jouer, installez %s à partir de votre propre dump Switch. Il y a trois étapes.
 Your game files	Vos fichiers de jeu
-Your keys	Vos clés
 none chosen	rien de choisi
 or	ou
-prod.keys from your own Switch (and title.keys if your dump needs it).	prod.keys de votre propre Switch (et title.keys si votre dump en a besoin).
 the phone's own Vulkan driver	le pilote Vulkan du téléphone
-Set up anyway	Installer quand même
-Set up anyway?	Installer quand même ?
-The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	Les parties endommagées de vos fichiers sont gardées telles quelles. Le jeu peut planter ou afficher des défauts là où il les utilise. Recopier vos fichiers en entier est la vraie solution.
-the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	la copie de %s s'est arrêtée trop tôt (%s sur %s Mo) : choisissez-le à nouveau, de préférence depuis le stockage du téléphone
-%s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s est incomplet : il contient %s de ses %s Mo. Il a été coupé pendant la copie ou le téléchargement : recopiez le fichier en entier.
-Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)	Jusqu'à 60 fps : plus fluide là où le téléphone le peut, la vitesse du jeu reste juste (mod Dynamic FPS de Fl4sh)
+Up to 60 fps: smoother where the phone can, the game keeps its real speed	Jusqu'à 60 fps : plus fluide là où le téléphone le peut, le jeu garde sa vraie vitesse
 Shadows	Ombres
 Standard	Standard
 Standard: 1024 × 1024, as the game is made	Standard : 1024 × 1024, comme le jeu d'origine
-Sharp: 2048 × 2048 shadow maps, more GPU work (Fl4sh's 2K Shadows mod)	Nettes : ombres en 2048 × 2048, plus de travail pour le GPU (mod 2K Shadows de Fl4sh)
+Sharp: 2048 × 2048 shadow maps, more GPU work	Nettes : ombres en 2048 × 2048, plus de travail pour le GPU
 60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)	60 fps : plus fluide ; passe en 720p quand il le faut pour tenir 60 (avec Graphismes sur Auto ou Adaptatif)
 Android stopped the setup to free memory: going on from where it was (%s of 3)...	Android a arrêté l'installation pour libérer de la mémoire : elle reprend là où elle en était (%s sur 3)...
 Step %s of %s: %s	Étape %s sur %s : %s
@@ -249,7 +224,6 @@ Running for %s	En cours depuis %s
 Almost done with this step: its last part shows no progress and can take several minutes.	Cette étape est presque finie : sa dernière partie n'affiche pas de progression et peut prendre plusieurs minutes.
 Imported %d save file(s) into %s (%s). Tap Play to load it; your current save is kept as a backup.	%d fichier(s) de sauvegarde importé(s) dans %s (%s). Touchez Jouer pour la charger ; votre sauvegarde actuelle est gardée en copie.
 Could not import save data: %s	Impossible d'importer la sauvegarde : %s
-Your files are the base game only: this app needs the %s update too. Choose the update (.nsp, its title ID ends in 800) as well.	Vos fichiers ne contiennent que le jeu de base : cette app a aussi besoin de la mise à jour %s. Choisissez aussi la mise à jour (.nsp, son ID de titre finit par 800).
 Bug reports	Rapports de bug
 Capture a frame	Capturer une image
 Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue.	Fermez ce menu dans les 3 secondes et restez là où le problème se voit : l'image suivante est enregistrée, étape par étape, en images et en notes dans Download (un ZIP qui finit par frame-capture.zip). Joignez-le à votre signalement.
@@ -264,15 +238,25 @@ Auto: on with ARM's driver (v0.52)	Auto : activé avec le pilote d'ARM (v0.52)
 Off: the shaders as before v0.52	Désactivé : les shaders comme avant la v0.52
 Merge render passes	Fusionner les passes de rendu
 Off: every render target change starts a new pass	Désactivé : chaque changement de cible de rendu commence une nouvelle passe
+Lower specs	Configuration allégée
+Off: the world as the game draws it	Non : le monde tel que le jeu le dessine
+On: shorter draw distance for Pokémon, people and trees, lighter shadows	Oui : distance d'affichage réduite pour les Pokémon, les gens et les arbres, ombres allégées
+Lowest: shorter draw distance and no shadows	Minimal : distance d'affichage réduite et pas d'ombres
+No reflections	Sans reflets
+On: smooth ground lighting, no purple shadows	Oui : éclairage du sol lissé, sans ombres violettes
+Off: the ground's full lighting detail (purple shadows in places)	Non : tout le détail d'éclairage du sol (ombres violettes par endroits)
+Preparing the ground's lighting (No reflections)...	Préparation de l'éclairage du sol (Sans reflets)...
+Could not prepare No reflections (%s); the game plays as it draws itself.	Impossible de préparer Sans reflets (%s) ; le jeu s'affiche tel qu'il se dessine.
 Close	Fermer
 Choose a driver	Choisir un pilote
 Start anyway	Lancer quand même
 A recent Mesa Turnip package for Adreno usually fixes this: choose its .zip as the graphics driver.	Un paquet Mesa Turnip récent pour Adreno règle généralement ce problème : choisissez son .zip comme pilote graphique.
 FristOneRR's PanVK driver supports this Mali: download its .zip from the developer's GitHub Releases and choose it as the graphics driver.	Le pilote PanVK de FristOneRR prend en charge ce Mali : téléchargez son .zip depuis les GitHub Releases du développeur et choisissez-le comme pilote graphique.
-No replacement driver supports this GPU yet. Please report it with the log in Download (the -log-previous.txt file), so the app can be fixed for it.	Aucun pilote de remplacement ne prend encore en charge ce GPU. Signalez-le avec le journal dans Download (le fichier -log-previous.txt) pour que l'application puisse être corrigée.
+No replacement driver supports this GPU yet. Please report it with the log in Documents, in the app's Logs folder (the -log-previous.txt file), so the app can be fixed for it.	Aucun pilote de remplacement ne prend encore en charge ce GPU. Signalez-le avec le journal dans Documents, dossier Logs de l'application (le fichier -log-previous.txt) pour que l'application puisse être corrigée.
 Faster rendering (experimental)	Rendu plus rapide (expérimental)
 On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub	Activé : le travail graphique tourne sur son propre fil, à côté de celui du jeu. Pas encore testé sur tous les téléphones : si le jeu se comporte mal, désactivez-le et dites-le-nous sur GitHub
 Freed %s GB left over from an earlier setup.	%s Go restants d’une configuration précédente ont été libérés.
+Set up from the installed app	Installer depuis l'appli installée
 Min / max as on the Switch	Min / max comme sur la Switch
 Auto: on with ARM's driver (v0.57)	Auto : activé avec le pilote d'ARM (v0.57)
 Off: the shaders as before v0.57	Désactivé : les shaders comme avant la v0.57
@@ -330,14 +314,29 @@ Save folder	Dossier de sauvegarde
 App folder	Dossier de l'app
 App folder: Android/data, as before	Dossier de l'app : Android/data, comme avant
 Documents	Documents
-Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/Galar Native/%s/save, pour les outils de synchronisation comme Syncthing. Votre sauvegarde y est copiée au prochain démarrage ; ce qui s'y trouvait déjà est gardé en copie de secours. Nécessite l'accès à tous les fichiers
+Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/%s/%s/save, pour les outils de synchronisation comme Syncthing. Votre sauvegarde y est copiée au prochain démarrage ; ce qui s'y trouvait déjà est gardé en copie de secours. Nécessite l'accès à tous les fichiers
 The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	La dernière installation n'a traduit qu'une partie des shaders du jeu, d'où des parties du jeu non affichées. Touchez Installer encore une fois : elle les termine (celles déjà faites sont gardées).
 FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0 : l'upscaler d'AMD, agrandissement attentif aux contours puis netteté
 Faster rendering	Rendu plus rapide
-Auto: on for Adreno GPUs, off for others	Auto : activé sur les GPU Adreno, désactivé sur les autres
+Auto: on for Adreno, Mali, PowerVR and Xclipse GPUs, off for others	Auto : activé sur les GPU Adreno, Mali, PowerVR et Xclipse, désactivé sur les autres
 Off: the graphics work runs on the game's own thread	Désactivé : le travail graphique se fait sur le fil du jeu lui-même
+Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself.	Scènes éclairées : deux corrections de l'écran blanc avec le pilote Mali d'ARM. Auto laisse le jeu en choisir une et vérifier l'image lui-même.
 Bright scenes in a wider format	Scènes éclairées dans un format plus large
 On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	Activé : la scène éclairée est dessinée dans un format plus large (RGBA16F au lieu de R11G11B10F), un test pour les images blanches ou qui clignotent ; utilise un peu plus de mémoire
+Bright scenes without compression	Scènes éclairées sans compression
+On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth	Activé : la scène éclairée garde son format mais est stockée sans la compression du framebuffer du GPU (AFBC), un test pour les images blanches ; utilise plus de bande passante mémoire
+Auto: on with ARM's own Mali driver for Sword / Shield; the game checks the picture while you play and moves to the second fix if it stays white	Auto : activé avec le pilote Mali d'ARM pour Sword / Shield ; le jeu vérifie l'image pendant que vous jouez et passe à la deuxième correction si elle reste blanche
+Off: the lit scene in its own packed format (R11G11B10F)	Désactivé : la scène éclairée dans son propre format compact (R11G11B10F)
+Auto: used when the game finds that the first fix did not take on ARM's own Mali driver	Auto : utilisé quand le jeu constate que la première correction n'a pas fonctionné avec le pilote Mali d'ARM
+Off: the framebuffer compression the driver chooses	Désactivé : la compression du framebuffer choisie par le pilote
+Mali: the white-screen fix did not take; trying the second fix at the next start	Mali : la correction de l'écran blanc n'a pas fonctionné ; la deuxième correction sera essayée au prochain démarrage
+Mali: the white-screen fix did not take; the next start tries the other fix again	Mali : la correction de l'écran blanc n'a pas fonctionné ; le prochain démarrage réessaiera l'autre correction
+Mali: a test switch in the settings overrides the white-screen fix	Mali : un réglage de test dans les paramètres remplace la correction de l'écran blanc
+Mali: a test switch in the settings (%s) overrides the white-screen fix	Mali : un réglage de test dans les paramètres (%s) remplace la correction de l'écran blanc
+Mali: neither white-screen fix took; the next start offers the PanVK driver	Mali : aucune correction de l'écran blanc n'a fonctionné ; le prochain démarrage proposera le pilote PanVK
+White screen on this phone's own driver	Écran blanc avec le pilote du téléphone
+On this phone's own Mali driver (%s), %s drew its lit scenes white, and both of the app's fixes were tried at earlier starts without success.	Avec le pilote Mali du téléphone (%s), %s a affiché ses scènes éclairées en blanc, et les deux corrections de l'application ont été essayées lors des démarrages précédents sans succès.
+The PanVK driver draws the game on many Mali phones: download its .zip and choose it as the graphics driver.	Le pilote PanVK affiche le jeu sur de nombreux téléphones Mali : téléchargez son .zip et choisissez-le comme pilote graphique.
 AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1 : mise à l'échelle qui suit les contours, puis netteté (Netteté règle la quantité)
 Colour	Couleur
 Natural	Naturel
@@ -355,9 +354,9 @@ Off: this GPU needs %s ms for each picture, more than the game can spare. Switch
 Off until the next start (see the log for why).	Désactivée jusqu'au prochain démarrage (la raison est dans le journal).
 Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	Désactivée : même au plus léger, elle coûtait au jeu ses propres images ici (jusqu'à %s fps). Désactivez-la puis réactivez-la pour réessayer.
 Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	Désactivée à 30 fps : la génération d'images demande le jeu à 60 fps stables (Performances → Images par seconde : 60).
-Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.	En pause : le jeu tourne ici à %s fps, et la génération d'images demande 60 stables. Elle se réactive seule quand le jeu tient 60.
-On: a picture is made between each two of the game's frames, so 60 fps moves like 120. Only while the game holds a locked 60 fps; your input shows about 8 ms later	Activé : une image est créée entre chaque paire d'images du jeu, 60 fps paraissent donc 120. Seulement quand le jeu tient 60 fps stables ; vos commandes s'affichent environ 8 ms plus tard
-Auto: 2x, light (the game at a locked 60 shown at 120)	Auto : 2x, léger (le jeu à 60 stables affiché à 120)
+Paused: the game runs at %s fps here, under its own frame rate. Frame generation comes back on by itself once the game holds it again.	En pause : le jeu tourne à %s ips ici, sous sa propre cadence. La génération d'images revient d'elle-même dès que le jeu la tient à nouveau.
+On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Only while the game holds its own frame rate; your input shows a little later	Activé : une image est créée entre chaque paire d'images du jeu, 30 ips bougent donc comme 60. Seulement quand le jeu tient sa propre cadence ; vos commandes s'affichent un peu plus tard
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	Auto : autant que la fréquence de l'écran le permet (un jeu à 30 ips : 4x à 120 Hz, 3x à 90 Hz, 2x à 60 Hz)
 Widescreen	Grand écran
 Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	Grand écran : la caméra du jeu aussi large que votre écran, rien n'est étiré (Sword / Shield 1.3.2 ; l'interface est étirée)
 Output	Sortie
@@ -382,3 +381,163 @@ Updating the shaders	Mise à jour des shaders
 3D render scale	Échelle du rendu 3D
 Auto: what the Graphics setting gives, lowered by itself when the phone is hot	Auto : ce que donne le réglage Graphismes, abaissé tout seul quand le téléphone chauffe
 50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50 % : la 3D à moitié de sa taille, le plus frais et le plus rapide (le texte et les menus restent nets)
+Quit the game	Quitter le jeu
+Closes the game completely	Ferme complètement le jeu
+Quit the game? Progress you have not saved in the game is lost, as on the console.	Quitter le jeu ? La progression non sauvegardée dans le jeu est perdue, comme sur la console.
+Quit	Quitter
+Power	Énergie
+Balanced	Équilibré
+Balanced: the best picture this phone holds at a steady frame rate	Équilibré : la meilleure image que ce téléphone tient à une fréquence d’images stable
+Battery saver	Économie de batterie
+Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up	Économie de batterie : un téléphone plus frais et plus d’autonomie : 30 i/s en Auto, une image plus légère, et il ralentit plus tôt quand le téléphone chauffe
+Record the frame's passes	Enregistrer les passes de l’image
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	Pour les scènes lentes : fermez ce menu dans les 3 secondes et restez là où le jeu ralentit. Les passes de rendu de trois images, avec leur temps GPU si le téléphone le donne, sont enregistrées dans Téléchargements (un fichier finissant par framegraph.txt). Joignez-le à votre issue.
+Recording in 3 seconds: close the menu.	Enregistrement dans 3 secondes : fermez le menu.
+Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	À gauche : Auto, ce que donne le réglage Graphismes, abaissé tout seul quand le téléphone chauffe. Plus bas : plus frais et plus rapide, la 3D plus douce ; le texte et les menus restent nets.
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	En pause : ici le jeu tourne à %s i/s, sous sa fréquence d’images réglée. Elle se réactive seule dès que le jeu la tient à nouveau.
+Mode	Mode
+Auto: as the Graphics setting decides	Auto : ce que décide le réglage Graphismes
+Quality	Qualité
+Quality: docked: 1080p and the game's full effects	Qualité : sur le dock : 1080p et tous les effets du jeu
+Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	Performances : la 3D en 720p : plus frais et plus stable (le HUD et le texte restent nets)
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	Performances : portable : 720p et les réglages plus légers du jeu : plus frais et plus stable
+Resolution	Résolution
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p : le plus léger, pour les téléphones qui ne tiennent pas 30 (au prochain lancement)
+1080p, as the game is made	1080p, comme le jeu est conçu
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p : plus net, mais plus lourd pour le GPU (moins de fps, téléphone plus chaud ; au prochain lancement)
+Dynamic	Dynamique
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	Dynamique : 60 là où le téléphone le peut, 30 ailleurs, à pleine qualité d'image ; la vitesse du jeu reste juste
+100 % (as on the Switch)	100 % (comme sur la Switch)
+How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick.	La vitesse de rotation du stick droit et de la caméra tactile. Moins : plus lente et plus précise. Plus : pleine vitesse avec moins de stick.
+Auto: on for a Mali-G615 on ARM's driver older than r49, which needed it to start	Auto : activé sur un Mali-G615 avec le pilote d'ARM antérieur à r49, qui en avait besoin pour démarrer
+Off: the GPU reads the game's uniform data directly (a test for invisible characters and Pokémon; if the game then closes at start, set Auto again)	Désactivé : le GPU lit directement les données uniformes du jeu (un test pour les personnages et Pokémon invisibles ; si le jeu se ferme au démarrage, remettez Auto)
+Animated models: a render target for their capture	Modèles animés : une cible de rendu pour leur capture
+Auto: a quick test at each start on ARM's driver decides (the log says which)	Auto : un test rapide à chaque démarrage avec le pilote d'ARM décide (le journal indique lequel)
+Off: as before v0.35	Désactivé : comme avant la v0.35
+On: for a driver that skips the work of a pass with nothing to draw into (invisible characters and Pokémon)	Activé : pour un pilote qui saute le travail d'une passe sans rien où dessiner (personnages et Pokémon invisibles)
+Style move effects	Effets des styles
+Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before	Désactivé : pas d'animation plein écran au début d'une capacité en style Puissant ou Rapide (elle laissait des cadres gris sur beaucoup de téléphones) ; les capacités fonctionnent comme avant
+On: the game's own animation (grey boxes on some phones)	Activé : l'animation du jeu (cadres gris sur certains téléphones)
+Touch camera sensitivity	Sensibilité de la caméra tactile
+Touch camera	Caméra tactile
+Drag	Glisser
+Drag: the camera follows the finger's movement and stops when it stops	Glisser : la caméra suit le mouvement du doigt et s'arrête quand il s'arrête
+Stick	Stick
+Stick: where the finger lands is the centre; hold it away to keep turning, faster the further (hold-to-lock-on is off)	Stick : l'endroit où le doigt se pose est le centre ; maintenez-le écarté pour continuer à tourner, plus vite plus il est loin (le verrouillage par appui long est désactivé)
+Right stick on screen	Stick droit à l'écran
+Show	Afficher
+Hide	Masquer
+Hide: the camera is turned with a finger only	Masquer : la caméra se tourne seulement au doigt
+Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle	Panoramique : la caméra du jeu aussi large que ton écran, rien n'est étiré ; l'interface reste en 16:9 au centre
+Barriers between passes	Barrières entre les passes
+Fewer	Moins
+Every pass	Chaque passe
+Auto: fewer on Adreno, one before every pass on other GPUs	Auto : moins sur Adreno, une avant chaque passe sur les autres GPU
+Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	Moins : plus rapide, le GPU reste occupé ; sur Xclipse, Mali et PowerVR les ombres peuvent clignoter
+Every pass: the safest picture, slower	Chaque passe : l'image la plus sûre, plus lent
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p : plus net, mais plus lourd pour le GPU (moins de fps, téléphone plus chaud)
+Model tests (Adreno)	Tests des modèles (Adreno)
+For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	Pour les polygones étirés ou qui explosent. Redémarre le jeu après l'avoir changé et dis-nous sur GitHub s'ils ont disparu.
+Copy shared data on the GPU	Copier les données partagées sur le GPU
+On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	Activé : les données que le jeu place hors de l'alignement du pilote sont copiées sur le GPU, après ce que le GPU a écrit avant, au lieu du CPU (un test pour les polygones qui explosent sur les anciens Adreno)
+Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	À gauche : Auto, la résolution du jeu lui-même. Plus bas : plus frais et plus rapide, la 3D plus douce ; le texte et les menus restent nets.
+Auto: 2x, light (the game's frame rate shown doubled)	Auto : 2x, léger (la fréquence d’images du jeu, affichée doublée)
+Draw distance	Distance d'affichage
+Near	Proche
+Default	Par défaut
+Far	Loin
+Very far	Très loin
+Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)	Proche : arbres et détails plus proches, moins de personnes et de Pokémon chargés : plus léger (au prochain lancement)
+Default: as the game draws it	Par défaut : comme le jeu le dessine
+Far: trees, terrain detail and animation half as far again (from the next start)	Loin : arbres, détail du terrain et animation 50 % plus loin (au prochain lancement)
+Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	Très loin : arbres, détail du terrain et animation deux fois plus loin : plus lourd pour le GPU (au prochain lancement)
+Edge-run	Course au bord
+On: push the stick past its ring to dash	Oui : poussez le stick au-delà de son anneau pour courir
+Off: the stick only walks and runs	Non : le stick ne fait que marcher et courir
+Ride button	Bouton de monture
+Tap or swipe	Toucher ou glisser
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	Touchez + pour appeler un Pokémon monture ; glissez à gauche / droite pour en changer
+Tap only	Toucher seulement
++ works as on the console	+ fonctionne comme sur la console
+the game's own (100 %)	celle du jeu (100 %)
+Normal	Normal
+Normal: as the game is made	Normal : comme le jeu est conçu
+Low: softer shadows, lighter on the GPU (from the next start)	Basses : ombres plus douces, moins de charge GPU (au prochain démarrage)
+Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	Minimales : ombres douces seulement près de vous, pas d'ombres lointaines : le plus léger (au prochain démarrage)
+How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	Jusqu'où l'herbe et les détails du terrain sont affichés (au prochain démarrage). Moins : plus léger et plus frais. Plus : plus de détails au loin, plus de charge GPU.
+Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	La génération d'images de Lossless Scaling ne peut pas tourner sur ce téléphone : celle de l'appli est utilisée à la place (le journal dit pourquoi).
+# the in-app updater (AppUpdater.java, About -> Updates)
+Updates	Mises à jour
+An unofficial build cannot update itself to an official release. Uninstall it and install the official app to get updates.	Une version non officielle ne peut pas se mettre à jour vers une version officielle. Désinstallez-la et installez l'application officielle pour recevoir les mises à jour.
+Update now	Mettre à jour
+Check for updates	Rechercher des mises à jour
+Look for updates when the app starts: on	Rechercher des mises à jour au démarrage : oui
+Look for updates when the app starts: off	Rechercher des mises à jour au démarrage : non
+Checking…	Recherche…
+Downloading the update: %d%%	Téléchargement de la mise à jour : %d%%
+The update is ready: confirm the installation on the screen that opens.	La mise à jour est prête : confirmez l'installation sur l'écran qui s'ouvre.
+This is the latest version.	C'est la dernière version.
+Version %s is available. The game closes when the update installs, so save first.	La version %s est disponible. Le jeu se ferme quand la mise à jour s'installe : sauvegardez d'abord.
+%s %s is available. Open the menu, then About, to install it.	%s %s est disponible. Ouvrez le menu, puis À propos, pour l'installer.
+Could not check for updates. Check the internet connection.	Impossible de rechercher des mises à jour. Vérifiez la connexion internet.
+The update could not be downloaded: %s	Impossible de télécharger la mise à jour : %s
+The downloaded file is not an official %s release, so it was not installed.	Le fichier téléchargé n'est pas une version officielle de %s : il n'a pas été installé.
+The update could not be installed: %s	Impossible d'installer la mise à jour : %s
+Local play	Jeu local
+Off: the game says local play is unavailable.	Désactivé : le jeu indique que le jeu local est indisponible.
+On: link battles, trades and raids with phones on the same Wi-Fi.	Activé : combats, échanges et raids avec des téléphones sur le même Wi-Fi.
+%s has no file named main: it is not an ExeFS folder.	%s n'a pas de fichier nommé main : ce n'est pas un dossier ExeFS.
+%s is empty.	%s est vide.
+%s: update %s	%s : mise à jour %s
+Add DLC	Ajouter un DLC
+Allow access to all files so the app can read your game folders where they are.	Autorisez l'accès à tous les fichiers pour que l'application puisse lire les dossiers du jeu là où ils sont.
+Choose a folder	Choisir un dossier
+DLC: %s	DLC : %s
+ExeFS chosen. Now choose the RomFS folder.	ExeFS choisi. Choisissez maintenant le dossier RomFS.
+ExeFS: %s	ExeFS : %s
+Move the files instead	Déplacer les fichiers
+Move them	Les déplacer
+Move your files instead?	Déplacer vos fichiers ?
+Moving your files into the app...	Déplacement de vos fichiers dans l'application...
+No game files come with this app; yours never leave the phone.	Aucun fichier de jeu n'est fourni avec cette application ; les vôtres ne quittent jamais le téléphone.
+Nothing was chosen. Try again, through the phone's own storage.	Rien n'a été choisi. Réessayez depuis le stockage du téléphone.
+Or use the game from the %s app already on this phone (nothing to choose):	Ou utilisez le jeu de l'application %s déjà présente sur ce téléphone (rien à choisir) :
+RomFS chosen. Now choose the ExeFS folder.	RomFS choisi. Choisissez maintenant le dossier ExeFS.
+RomFS: %s	RomFS : %s
+Set the game up from your own game files. No game files come with this app; yours never leave the phone.	Installez le jeu à partir de vos propres fichiers de jeu. Aucun fichier de jeu n'est fourni avec cette application ; les vôtres ne quittent jamais le téléphone.
+The ExeFS and RomFS folders extracted from your own game, with the update included. Choose the folder that holds both, or each one in turn.	Les dossiers ExeFS et RomFS extraits de votre propre jeu, mise à jour incluse. Choisissez le dossier qui contient les deux, ou chacun à son tour.
+The app can't read %s. Allow it access to all files in Android's settings, then choose the folder again.	L'application ne peut pas lire %s. Autorisez-lui l'accès à tous les fichiers dans les paramètres d'Android, puis choisissez à nouveau le dossier.
+There isn't room for a copy of your game files. The setup can move your RomFS and DLC folders into the app instead: nothing is copied, but they leave the folder you chose, and uninstalling the app deletes them. If the setup fails, they are moved back.	Il n'y a pas la place de copier vos fichiers de jeu. L'installation peut plutôt déplacer vos dossiers RomFS et DLC dans l'application : rien n'est copié, mais ils quittent le dossier choisi et la désinstallation de l'application les supprime. Si l'installation échoue, ils sont remis à leur place.
+This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	Ce dossier ne peut pas être lu. Choisissez-le depuis le stockage du téléphone (pas Récents ni Téléchargements).
+Welcome! To play, set up %s from your own game files. It takes two steps.	Bienvenue ! Pour jouer, installez %s à partir de vos propres fichiers de jeu. Cela se fait en deux étapes.
+copy the game files	copier les fichiers du jeu
+Player: %s. Players are changed on the setup screen, with the game closed.	Joueur : %s. Le joueur se change sur l'écran de configuration, jeu fermé.
+Playing as %s. Tap Play, or change the player below.	Joueur actuel : %s. Touchez Jouer, ou changez de joueur plus bas.
+Player: %s	Joueur : %s
+Change player	Changer de joueur
+Add a player	Ajouter un joueur
+Rename	Renommer
+Delete player	Supprimer le joueur
+Start over	Recommencer
+Restore the previous save	Restaurer la sauvegarde précédente
+Who is playing?	Qui joue ?
+Now playing as %s.	Joueur actuel : %s.
+That did not work: %s	Échec : %s
+Player %d	Joueur %d
+New player	Nouveau joueur
+Rename player	Renommer le joueur
+Add	Ajouter
+Type a name.	Saisissez un nom.
+That name is taken.	Ce nom est déjà pris.
+Added %s. Their game starts from the beginning.	%s ajouté. Sa partie commence depuis le début.
+Delete %s?	Supprimer %s ?
+The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.	Les sauvegardes de %s dans tous les jeux de cette appli sont supprimées définitivement. Exportez-les d'abord pour les garder.
+%s deleted. Now playing as %s.	%s supprimé. Joueur actuel : %s.
+Start over?	Recommencer ?
+%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.	%s recommence %s depuis le début. La sauvegarde actuelle est conservée en secours, et Restaurer la sauvegarde précédente la ramène. Une seule copie est gardée : une plus ancienne est supprimée.
+Done: the game starts from the beginning. The old save is kept as a backup.	C'est fait : le jeu commence depuis le début. L'ancienne sauvegarde est conservée en secours.
+There is no save yet: the game already starts from the beginning.	Pas encore de sauvegarde : le jeu commence déjà depuis le début.
+Restore the previous save?	Restaurer la sauvegarde précédente ?
+The backup becomes the save again, and the save you have now becomes the backup, so you can switch back.	La copie de secours redevient la sauvegarde, et la sauvegarde actuelle devient la copie : vous pouvez revenir en arrière.
+Restore	Restaurer
+The previous save is back.	La sauvegarde précédente est revenue.

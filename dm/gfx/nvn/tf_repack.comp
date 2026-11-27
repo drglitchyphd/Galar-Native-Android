@@ -1,0 +1,7 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, rgba32ui) uniform readonly uimage2D img;
+layout(set = 0, binding = 1, std430) buffer Buf { uint w[]; } buf;
+layout(push_constant) uniform P { uint count; uint width; uint nc; uint base; } p;
+void main() { uint i = gl_GlobalInvocationID.x; if (i >= p.count) return; uvec4 v = imageLoad(img, ivec2(int(i % p.width), int(i / p.width)));
+  for (uint k = 0u; k < p.nc; k++) buf.w[p.base + i * p.nc + k] = v[k]; }

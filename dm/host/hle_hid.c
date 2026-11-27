@@ -57,13 +57,30 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
     if (!atomic_load(&dm_touch_cam_own)) { rx = rsens(rx); ry = rsens(ry); } lsens(&lx, &ly);   // FORK v47: lsens; the touch camera's own sensitivity
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
 }
+// Gyro aiming (DM_GYRO: "aim" = while ZL is held, as the game aims; "on" = always; off by default): the phone's gyroscope turns the camera, added to the right stick
+//   of every source. GameActivity.java reads the sensor and hands its rates in radians per second about the screen as it is held (yaw: turning left / right,
+//   positive to the right; pitch: tilting, positive with the top edge going away). Full stick at 2.5 rad/s (about 145 degrees a second), times the camera
+//   sensitivity; below 0.03 rad/s nothing (the hand's tremor, the sensor's drift). A reading older than 0.1 s counts as still
+_Atomic int dm_gyro_mode = -1;   // 0 off, 1 while aiming, 2 always; -1 not read yet (android_main.c sets it from the menu)
+static _Atomic uint64_t g_gyro, g_gyro_t;
+static int gyro_mode(void) { int m = atomic_load(&dm_gyro_mode); if (m < 0) { const char *e = getenv("DM_GYRO"); m = e && !strcmp(e, "on") ? 2 : e && !strcmp(e, "aim") ? 1 : 0; atomic_store(&dm_gyro_mode, m); } return m; }
+static int32_t gyro_axis(float r) {
+    float a = r < 0 ? -r : r; if (a < 0.03f) return 0;
+    float v = (a - 0.03f) / 2.5f * 32767.0f; if (v > 32767.0f) v = 32767.0f; return rsens((int32_t)(r < 0 ? -v : v));
+}
+void dm_gyro_set(float yaw, float pitch) { atomic_store(&g_gyro, pack(0, 0, gyro_axis(yaw), gyro_axis(pitch))); atomic_store(&g_gyro_t, now_ns()); }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     rx = rsens(rx); ry = rsens(ry); lsens(&lx, &ly);   // FORK v47: lsens
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }
 // Timed presses from the host itself (the Android touch menu driver, touch_menu.c): buttons held until the given time, ORed with the other sources
 static _Atomic uint64_t g_auto_btn, g_auto_until;
-void dm_input_press(uint64_t buttons, uint64_t hold_ns) { atomic_store(&g_auto_until, now_ns() + hold_ns); atomic_store(&g_auto_btn, buttons); atomic_fetch_or(&g_latch, buttons); }
+static _Atomic uint64_t g_auto_frame;   // ... and until the game has shown this frame (dm_input_press_frames)
+void dm_input_press(uint64_t buttons, uint64_t hold_ns) { atomic_store(&g_auto_frame, 0); atomic_store(&g_auto_until, now_ns() + hold_ns); atomic_store(&g_auto_btn, buttons); atomic_fetch_or(&g_latch, buttons); }
+// Held for at least hold_ns and at least the next `frames` frames the game shows: some of its controls act only on a button held across several of its frames
+// (Legends: Arceus's item selector takes L / R so; at 5 fps, in the Android Emulator, 0.2 s was one frame and the press did nothing)
+void dm_input_press_frames(uint64_t buttons, uint64_t hold_ns, unsigned frames) {
+    atomic_store(&g_auto_frame, dm_guest_frame() + frames); atomic_store(&g_auto_until, now_ns() + hold_ns); atomic_store(&g_auto_btn, buttons); atomic_fetch_or(&g_latch, buttons); }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR (plus the sticks LLeft LUp LRight LDown and RLeft RUp RRight RDown) Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown,
 //   and T<x>x<y> = a touch at normalized picture coordinates (origin top left) for the hold time;
@@ -142,9 +159,12 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
     uint64_t b = atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_pad_btn) | atomic_exchange(&g_pad_latch, 0);
-    if (now_ns() < atomic_load(&g_auto_until)) b |= atomic_load(&g_auto_btn);
+    if (now_ns() < atomic_load(&g_auto_until) || dm_guest_frame() < atomic_load(&g_auto_frame)) b |= atomic_load(&g_auto_btn);
     uint64_t k = atomic_load(&g_axes), p = atomic_load(&g_pad_axes);
     s->lx = pick(ax(k, 0), ax(p, 0)); s->ly = pick(ax(k, 1), ax(p, 1)); s->rx = pick(ax(k, 2), ax(p, 2)); s->ry = pick(ax(k, 3), ax(p, 3));
+    { int gm = gyro_mode(); if (gm && (gm == 2 || (b & (1u << 8))) && now_ns() - atomic_load(&g_gyro_t) < 100000000ull) {   // (bit 8: ZL)
+        uint64_t g = atomic_load(&g_gyro); int32_t x = s->rx + ax(g, 2), y = s->ry + ax(g, 3);
+        s->rx = x > 32767 ? 32767 : x < -32767 ? -32767 : x; s->ry = y > 32767 ? 32767 : y < -32767 ? -32767 : y; } }
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
     if (s->ly > STICK_THRESH) b |= 1u << 17;

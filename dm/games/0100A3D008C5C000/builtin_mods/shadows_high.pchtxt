@@ -1,0 +1,13 @@
+@nsobid-421C5411B487EB4D049DD065FEC9547773E8E598
+
+# Pokémon Scarlet [0100A3D008C5C000] v4.0.0 - 2048 Shadows (Paldea Native, DM_SHADOWS=2k, test only)
+
+@flag print_values
+@flag offset_shift 0x100
+
+// The sun's shadow map at 2048x2048 instead of the game's 1024x1024. Where the game sizes the map (main+0x146e804): a size of 2048 becomes 1024
+// (CMP W24, #0x800; B.NE; MOVZ W8, #0x400 at +0x146e80c; STR W8, [X19, #0x30]); here MOVZ W8, #0x800. Violet 4.0.0's main holds the same code there.
+
+@enabled
+0146e80c 08008152 // MOVZ W8, #0x800
+@stop

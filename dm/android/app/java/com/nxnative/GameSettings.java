@@ -50,6 +50,27 @@ final class GameSettings {
         String[] g = game(c); if (g == games(c).get(0)) return root(c);
         File d = new File(root(c), g[0]); d.mkdirs(); return d;
     }
+    // every game's folder (the first game's is the app's own)
+    static List<File> dirs(Context c) { List<File> d = new ArrayList<>(); List<String[]> g = games(c); for (int i = 0; i < g.size(); i++) d.add(i == 0 ? root(c) : new File(root(c), g.get(i)[0])); return d; }
+    // The chosen player's save in the chosen game (Profiles; android_main.c choose_profile): the folder holding save/, save_place.txt and save_import/
+    static File saveRoot(Context c) { File d = Profiles.saveRoot(dir(c), Profiles.current(root(c))); d.mkdirs(); return d; }
+    // that save in Documents (android_main.c save_place, the menu's Save folder → Documents): Documents/<docs dir>/<title id>/save, another player's under profiles/<id>/
+    static File sharedSave(Context c) {
+        File t = new File("/storage/emulated/0/Documents/" + docsDir(c) + "/" + game(c)[0].toUpperCase(java.util.Locale.ROOT)); String id = Profiles.current(root(c));
+        return new File(Profiles.saveRoot(t, id), "save");
+    }
+    static boolean saveShared(Context c) {
+        try (BufferedReader r = new BufferedReader(new FileReader(new File(saveRoot(c), "save_place.txt")))) { String l = r.readLine(); return l != null && l.trim().equals("shared"); } catch (IOException e) { return false; }
+    }
+    // the folder the save is in now: in Documents while save_place.txt says "shared", else the app's
+    static File activeSave(Context c) { return saveShared(c) ? sharedSave(c) : new File(saveRoot(c), "save"); }
+    // what Start over and Restore move: the app's copy, and the Documents copy while that is the save (the engine falls back to the app's copy when Documents is empty)
+    static List<File> saveDirs(Context c) { List<File> l = new ArrayList<>(); l.add(new File(saveRoot(c), "save")); if (saveShared(c)) l.add(sharedSave(c)); return l; }
+    // an export's file name: <game>-save.zip, with the player's name in it once there is more than one player
+    static String saveZipName(Context c) {
+        String n = game(c)[2]; if (Profiles.list(root(c)).size() > 1) n += "-" + Profiles.currentName(root(c)).replaceAll("[^\\p{L}\\p{N} ._-]", "_");
+        return n + "-save.zip";
+    }
     static File envFile(Context c) { return new File(dir(c), "env.txt"); }
     static String get(Context c, String key) {
         try (BufferedReader r = new BufferedReader(new FileReader(envFile(c)))) { String l; while ((l = r.readLine()) != null) if (l.startsWith(key + "=")) return l.substring(key.length() + 1); } catch (IOException e) { }
@@ -77,13 +98,28 @@ final class GameSettings {
         try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getAssets().open("app"), "UTF-8"))) { String[] a = r.readLine().split("\t"); if (a.length >= 2) return a; } catch (Exception e) { }
         return new String[] { "Galar Native", "github.com/simipoB/Galar-Native-Android" };
     }
+    // the installed app the chosen game can be set up from instead of a dump (assets/setup_from, the profile's setup_from_app: the PC-built Legends: Arceus app), else null
+    static String setupFromApp(Context c) {
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getAssets().open("setup_from"), "UTF-8"))) {
+            String l, id = game(c)[0]; while ((l = r.readLine()) != null) { String[] a = l.split("\t"); if (a.length >= 2 && a[0].equalsIgnoreCase(id)) return a[1]; } } catch (Exception e) { }
+        return null;
+    }
     static boolean isShield(Context c) { return "01008DB008C2C000".equalsIgnoreCase(game(c)[0]); }
     // the games the built-in 60 fps patch knows (loader.c FPS_SITES: Pokémon Shield and Sword 1.3.2)
-    // the frame-rate setting: Sword / Shield 1.3.2 (loader.c fps_patch), Scarlet / Violet 4.0.0 (loader.c's built-in Dynamic FPS mod)
+    // the frame-rate setting: Sword / Shield 1.3.2 (loader.c fps_patch), Scarlet / Violet 4.0.0 (loader.c paldea_fps_patch)
     static final boolean AUTO_60 = false;
-    static boolean has60(Context c) { String id = game(c)[0]; return "01008DB008C2C000".equalsIgnoreCase(id) || "0100ABF008968000".equalsIgnoreCase(id) || paldea(c); }
-    // Frame generation and Faster rendering are locked off for now (android_main.c forces them off); env.txt DM_UNLOCK_EXPERIMENTS=1 lifts the lock (development)
-    static boolean experimentsUnlocked(Context c) { return get(c, "DM_UNLOCK_EXPERIMENTS").equals("1"); }
+    // Sword / Shield: 30 fps for every player (2026-11-21; android_main.c ignores a saved 60): no Frame rate choice unless DM_UNLOCK_EXPERIMENTS=1 (development).
+    //   Scarlet / Violet and Legends: Arceus keep their choice
+    static boolean has60(Context c) { return galar(c) ? get(c, "DM_UNLOCK_EXPERIMENTS").equals("1") : paldea(c) || arceus(c); }
+    static boolean galar(Context c) { String id = game(c)[0]; return "01008DB008C2C000".equalsIgnoreCase(id) || "0100ABF008968000".equalsIgnoreCase(id); }
+    // Frame generation and Faster rendering are locked off for now on Sword / Shield and Scarlet / Violet (android_main.c forces them off); env.txt DM_UNLOCK_EXPERIMENTS=1 lifts the lock (development)
+    static boolean experimentsUnlocked(Context c) { return arceus(c) || get(c, "DM_UNLOCK_EXPERIMENTS").equals("1"); }   // (Legends: Arceus: never locked, as its releases: android_main.c leaves DM_FRAMEGEN alone for DM_PORT_ARCEUS)
+    // Pokémon Legends: Arceus: its "Lower specs" (the POTATO mod's RomFS files, android_main.c lowspec); 60 fps since its frame step follows the frame time (hle_nvn.c arc_step)
+    static boolean arceus(Context c) { return "01001F5010DFA000".equalsIgnoreCase(game(c)[0]); }
+    // Legends: Arceus "No reflections": the ground's normal maps made flat (setup_game.py flat_normals, android_main.c flat_normals): on unless DM_FLAT_NORMALS=0
+    static boolean flatNormals(Context c) { return arceus(c) && !"0".equals(get(c, "DM_FLAT_NORMALS")); }
+    // the shared save folder's name in Documents (android_main.c save_place: the profile key docs_dir, DM_GAME_DOCS_DIR), as each app's releases made it
+    static String docsDir(Context c) { return arceus(c) ? "NXNative" : paldea(c) ? "Paldea Native" : "Galar Native"; }
     static boolean paldea(Context c) { String id = game(c)[0]; return "0100A3D008C5C000".equalsIgnoreCase(id) || "01008F6008C5E000".equalsIgnoreCase(id); }
 
     // What Auto gives this phone, from what it is rather than a list of models: { chip family, a description, graphics, textures, anisotropic filtering, frame rate, upscaler }.
@@ -119,13 +155,16 @@ final class GameSettings {
         String fps = AUTO_60 && !heavy && cpu == 2 && gpu == 2 && ram == 2 && displayDivides(c, 60) ? "60" : "30";
         String scaler = gpu >= 1 ? "sgsr" : "sharp";
         String shadows = "";   // (2K shadow maps: removed from Auto and the menu at the owner's request; DM_SHADOWS=2k in env.txt still applies them, for testing)   // (SGSR's extra passes on a GPU with room for them; the cheaper Sharp on a low one)
+        // Legends: Arceus' Lower specs (android_main.c lowspec: the POTATO mod's shorter draw distance and lighter shadows) on a phone with a low CPU or GPU, where its
+        // handheld mode alone does not hold 30; never Lowest (no shadows) by itself
+        String lowspec = arceus(c) && (cpu == 0 || gpu == 0) ? "1" : "";
         String[] t = { "low", "mid", "top" };
         String what = String.format(java.util.Locale.ROOT, "%s CPU%s, %s GPU, %s memory (%.0f GB), display up to %.0f Hz", t[cpu], khz > 0 ? String.format(java.util.Locale.ROOT, " %.1f GHz", khz / 1e6) : "",
                                     t[gpu], t[ram], Math.ceil(gb), maxRefresh(c));
         // HD texture packs (the player's own retexture mods, android_main.c texture_pack): on Auto only with top memory (12 GB+) and at least a mid GPU, and not
         //   for a game that already gets half textures; a weaker phone keeps the game's own textures and its 30 fps
         String hd = ram == 2 && gpu >= 1 && tex.equals("full") ? "on" : "off";
-        return new String[] { n, what, gfx, tex, aniso, fps, scaler, shadows, hd };
+        return new String[] { n, what, gfx, tex, aniso, fps, scaler, shadows, lowspec, hd };   // (p[8] lowspec: Arceus; p[9] HD textures)
     }
     // whether the mods folder holds a switched-on HD texture pack: a mod whose romfs is 100 MB or more with at least 3/4 of its bytes under a path naming
     //   "texture" (the same test as android_main.c texture_pack); the menu offers the HD textures setting only then

@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-enum { OVL_DISC = 0, OVL_RING = 1, OVL_RRECT = 2 };
+enum { OVL_DISC = 0, OVL_RING = 1, OVL_RRECT = 2, OVL_HALF = 3 };   // (OVL_HALF: a disc's top half; Vulkan overlay only)
 enum { OVL_G_A, OVL_G_B, OVL_G_X, OVL_G_Y, OVL_G_L, OVL_G_R, OVL_G_ZL, OVL_G_ZR, OVL_G_PLUS, OVL_G_MINUS, OVL_G_L3, OVL_G_R3, OVL_G_FF, OVL_G_BALL, OVL_G_BACK, OVL_G_INFO, OVL_G_TURBO, OVL_G_ALL, OVL_G_STAR, OVL_G_HALF, OVL_G_RUN,   /* FORK: cells 12-20 (19: a lower half disc, 20: run, v52) (17: the all-buttons override, v47; 18: a star, v48; the ASCII 33-95 at their codes); (dm/fork/tools/fork_glyphs.py; the atlas is 32 cells wide) */ OVL_G_NONE = -1 };   // (the atlas cells: overlay/ovl_font.h)
 typedef struct {
     float x, y, w, h;          // rectangle, pixels
@@ -14,6 +14,7 @@ typedef struct {
     float radius;              // OVL_RRECT corner radius, fraction of the height
     int glyph; float gscale, galpha;   // OVL_G_* label, its size as a fraction of the control, its opacity
     int gtint;                 // FORK v53: 1 = the label in the fill colour (r g b) instead of white (coloured text: the encounter panel's IVs)
+    float gdark;               // the label's darkness: 0 white .. 1 black (Vulkan overlay only; Metal draws it white)
 } dm_ovl_item;
 // Fills up to max items for a surface of width x height pixels; returns how many (0: nothing drawn)
 int front_overlay(dm_ovl_item *it, int max, int width, int height);

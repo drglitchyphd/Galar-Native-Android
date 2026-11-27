@@ -16,3 +16,7 @@ void nvn_dirty_stats(uint64_t *faults, uint64_t *preps);           // Cumulative
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns);   // Cumulative: this module's mprotect call count, pages covered, time spent
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total); // Currently live slots, slot table high-water mark, total number of registrations
 void nvn_dirty_runs(const void *addr, size_t len, uint64_t stamp, void (*cb)(uintptr_t a, size_t n, void *u), void *u);   // runs of pages written after stamp (untracked: all of it)
+int nvn_dirty_off(void);                                            // 1 when the tracking is off (DM_NO_DIRTY, the Android emulator)
+void nvn_dirty_freeze(const void *addr, size_t len, int wp);       // Other threads' writes (wp) and protection changes there wait until nvn_dirty_thaw (a pool's pages being moved: nvn_vk.c)
+void nvn_dirty_thaw(void);                                          // The frozen pages' protection set from their tracking state, the waiting threads let go
+void nvn_dirty_release(const void *addr, size_t len);               // Protected pages made writable and stamped as written (as before a host write)

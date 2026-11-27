@@ -494,10 +494,18 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     return RES_OK;
 }
 _Atomic uint64_t dm_fs_read_bytes;   // bytes the game has read from its files (android_main.c: a burst of reads is a load)
+_Atomic uint64_t dm_fs_read_ns;   // time spent inside those reads, all threads together (android_main.c: a load's report)
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
-    if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
+    if (!out) return RES_FAIL;
+    *out = 0;
+    if (!h) return RES_FAIL;   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
+    if (!sz) return RES_OK;
+    // a null destination: the game's own allocation failed (one of its memory pools ran dry, the #211 family) and it reads into the result anyway. pread into it
+    //   would end in EFAULT or a fault in the host; the game gets a failed read instead, as for a file it could not read
+    if (!buf) { static int n; if (n++ < 8) LOG("[RED] fs: a read of %zu bytes into a null buffer (the game's allocation failed): refused", sz); return RES_FAIL; }
     size_t got = 0;
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
+    struct timespec rt0; clock_gettime(CLOCK_MONOTONIC, &rt0);
     while (got < sz) {
         ssize_t r = pread((int)h, (uint8_t *)buf + got, sz - got, off + got);
         if (r < 0) { if (errno == EINTR) continue;
@@ -511,6 +519,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         atomic_fetch_add(&dm_fs_read_bytes, (uint64_t)r);
         got += r;
     }
+    { struct timespec rt1; clock_gettime(CLOCK_MONOTONIC, &rt1); atomic_fetch_add(&dm_fs_read_ns, (uint64_t)((rt1.tv_sec - rt0.tv_sec) * 1000000000LL + (rt1.tv_nsec - rt0.tv_nsec))); }
     *out = got;
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)

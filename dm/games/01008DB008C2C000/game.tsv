@@ -17,6 +17,9 @@ app_category	public.app-category.games
 
 # ---- Versions ----
 build	v458752	1.3.2	main=a16802625e7826bf83b6f9708e475b91	subsdk0=93ff8252d975adf07230cb86c83301c5	subsdk1=a36dac0e0a5ed3b41482b6bb85625c73	sdk=fcf93a41b08c5193a1410d262602dc62
+# versions the app does not run, for setup's message (setup_game.py identify): the main build ID of a player's files says which version they are (1.0.0: the base game
+# without its update, read from a 1.0.0 dump's ExeFS and control.nacp)
+other_build	1.0.0	main=b56ca071216570e8943206f10c3f3f2f
 package	v458752
 shader_versions	v458752
 
@@ -52,3 +55,17 @@ shader_note	Pokémon Shield shaders
 # ---- After the rewrite ----
 # the rewritten modules are larger than the default 64 MB of used memory (Age of Calamity: 66.6 MB → 72 MB)
 mem_used	0x4c00000
+
+# ---- Port (engine unification: docs/ENGINE_UNIFY.md) ----
+# the released app (Galar Native; Pokémon Sword takes these through tables_from); the shared save folder Documents/<docs_dir>/<title id>/save
+port	galar
+docs_dir	Galar Native
+# the game's own GPU choices (dm/games/game.py ENGINE_QUIRKS; Pokémon Sword takes them through tables_from): on Arm's own Mali driver, the lit R11G11B10F target drawn
+# as an RGBA16F stand-in and checked for the white screen while playing (#47 #110 #111 #172)
+engine_quirks	mali_lit_standin
+# draws per submission part when a frame is not held whole (nvn_vk.c sub_split, DM_VK_SPLIT): Sword / Shield rarely wait on the submission they just made (32 early
+# flushes in 2,400 frames, #349), so fewer, larger parts (8 submissions a frame at 1,200 draws with 150); Pokémon Sword takes it through tables_from
+vk_split	600
+# a frame held whole until its present (Adreno, Arm: the replay on its own thread) is not split at all: its parts would wait for the present anyway, and from the 5th
+# the hold was flushed early, so above ~750 draws the frame was never whole (fable-cpu fix 4); Scarlet / Violet keep splitting held frames (default split)
+vk_split_held	whole

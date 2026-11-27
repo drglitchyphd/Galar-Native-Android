@@ -5,25 +5,34 @@
 **Pokémon Sword and Shield (Switch, update 1.3.2) running natively on Android.** Not emulation: the game's own ARM64 code runs on the phone, and its graphics (NVN) run on Vulkan.
 
 > [!WARNING]
-> **Beta.** See [Compatibility](#compatibility). Reports with logs help most ([CONTRIBUTING.md](CONTRIBUTING.md)).
+> **Beta. v0.96 is a pre-release**, so far played only briefly on one test phone (Snapdragon 8 Elite, Adreno 830). See [Compatibility](#compatibility). Reports with logs help most ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 > [!NOTE]
-> **No game files, code, shaders or keys are included.** You need your own dump (base game + update 1.3.2) and your console's `prod.keys`.
+> **No game files, code, shaders or keys are included.** You need the ExeFS and RomFS folders extracted from your own copy of the game, with update 1.3.2 applied.
 
 ## Install
 
 1. Install `GalarNative.apk` from [Releases](https://github.com/simipoB/Galar-Native-Android/releases) (or [build it](docs/BUILDING.md)).
-2. Choose your **game files** (`.nsp` / `.xci`, update 1.3.2, any DLC) and **keys**. Keys stay on the phone.
-3. **Set up the game.** Setup detects Sword or Shield from your files. When it's done, the app opens straight into the game.
+2. Choose your **game files**: the ExeFS and RomFS folders (the folder holding both, or each in turn), plus one RomFS folder per DLC with **Add DLC**. See [Your game files](#your-game-files).
+3. **Set up the game.** Setup tells Sword from Shield by your files and copies them into the app. When it's done, the app opens straight into the game.
 
 - One app runs both games, each with its own setup, saves, settings and mods. With both installed, the app icon lets you choose; each game's home screen shortcut has its own name and icon.
 - It updates PKShield in place (package `com.nxnative.pokemonshield`), so your setup and saves are kept.
+- **Players and Start over:** sharing the phone? Under **Save data** on the setup screen (with two games, **Set up or manage a game**; with one, hold the app icon → **Settings**), add a player for each person: each gets their own save in both games, your existing save stays as **Player 1**, and the app shows who is playing before the game starts. **Start over** begins a new game for the current player and keeps the old save as a backup (**Restore the previous save** brings it back). No reinstall, no Android/data access needed.
 - Official releases are signed with `SHA-256: a5f49b44b6181758d82504f3beb0851c92093f454c792b49688728130673a070`. Any other build says "Unofficial build".
+- **Updates:** ☰ → About → Updates checks this repository's releases for a newer full release (never a pre-release) and installs it after you confirm. It only installs the official build signed with the key above. Turn off **Look for updates when the app starts** to stop the check.
+
+### Your game files
+
+- On your own console or PC, dump the game's **ExeFS** and **RomFS** with **update 1.3.2 applied** (the update merged into the base game). Dump tools and emulators that have "dump ExeFS / RomFS" make a folder holding `exefs` and `romfs`: choose that folder once. Copy it to the phone's storage first.
+- The ExeFS folder holds `main`, `main.npdm`, `rtld`, `sdk` and `subsdk*`. Setup reads its version from `main`: without the update you'll be told to dump again with 1.3.2.
+- **DLC:** dump each DLC's RomFS too. Its folder name must carry the DLC's title ID (Sword `0100ABF008969001` / `…9002`, Shield `01008DB008C2D001` / `…D002`) or its number (`1`, `2`) so setup knows which DLC it is.
+- No keys and no `.nsp` / `.xci`: the app doesn't use them any more, and deletes keys an older version stored. Setup needs room for a copy of the files; if there isn't any, it offers to move them into the app instead.
 
 ## Requirements
 
-- Android 12+, arm64, Vulkan 1.1+.
-- About 15 GB free per game. 8 GB of RAM or more is best.
+- Android 12+, arm64, Vulkan 1.0 or later.
+- About 15 GB free per game, besides your extracted files (setup copies them in; with too little room it can move them instead). 8 GB of RAM or more is best; on 6 GB phones the app picks lighter settings for you.
 
 ## Compatibility
 
@@ -32,43 +41,58 @@
 | **Adreno 6xx–8xx** (Snapdragon 845+) | Qualcomm or **Turnip** | Plays. Turnip fixes old-driver crashes (#44). |
 | **Mali G57 / G68 / G77 / G78** | Stock or **PanVK** | Starts; stock driver has rendering gaps (#32). Try PanVK. |
 | **Mali G52 / G72 / G76** | Stock or PanVK | Low settings. |
-| **Mali G610–G925, Immortalis** | Stock only | White-screen fix (#40, #47), awaiting reports. |
+| **Mali G610–G925, Immortalis** | Stock or **PanVK** | White screen on Arm's own driver, not fixed yet (#215, #227, #282, #311, #316). PanVK (downloaded separately) draws the game. |
 | **Xclipse 540 / 940** | Stock | Crash fixes (#41, #45), awaiting reports. |
 | **PowerVR** (Tensor G5 / G6) | Stock | Untested. |
 
 ## What's new
 
-- **Mali crash fix (v0.69).** Arm's driver makes more screen buffers than the game asks for (14 for 8 on a Mali-G57). The game had room for 8, so on some Mali phones the driver closed it a few frames in (#158, #163). It now has room for 32 and uses the count the driver reports.
-- **Screen setup fallbacks (v0.72).** If a driver refuses the screen setup, the game tries again with the plainest settings every driver must accept. Before, that left a black screen.
-- **Two Mali tests (v0.72),** in ☰ → White screen tests (Mali), both off by default:
-  - *Multiply by zero as on the Switch.* On the Switch's GPU, 0 × infinity is 0. On phones it's NaN, which can show as white or glowing surfaces. This rewrites each shader's SPIR-V as it loads so that every multiply follows the Switch's rule, so you don't need to run setup again. A little slower.
-  - *Keep unused depth in tile memory.* Depth that nothing reads afterwards isn't written back to memory, which is faster on Mali. Tell us if anything flickers.
-- **Engine built with link-time optimization (v0.72).** The compiler now optimizes the whole engine at once instead of file by file. It should take less CPU time per frame; not yet measured on a phone.
+**v0.96** (pre-release). Galar Native, Arceus Native and Paldea Native now share one engine and one version number. Install over v0.94 or the v0.95 preview; no new setup is needed. Full notes: [releases page](https://github.com/simipoB/Galar-Native-Android/releases).
+
+- **Locked at 30 fps.** Sword and Shield always run at 30; 60 and Dynamic are gone for now and come back once they run at the right speed on every phone that can hold them. When the phone can't keep up, the 3D picture steps down (to 35 %), and if that isn't enough, the next start uses lighter shadows and draw distance. Your own settings always win.
+- **Shaders built before you play:** a short wait at the start, then fewer missing objects and stutters, even on the very first play.
+- **Heat guard** on every Graphics level, and a **Battery saver** (☰ → Performance → Power).
+- **New settings:** Shadows, Draw distance, Resolution, Mode, Colour, and FSR 1 upscaling.
+- **Updates from inside the app** (☰ → About → Updates), **Quit the game**, and a performance report for slow scenes (☰ → System → Bug reports).
+- **More phones and fewer crashes:** Vulkan 1.0 drivers, older Snapdragon drivers, PowerVR textures, older ARMv8.0 CPUs, and a Turnip crash after playing a while. The game's clock now changes days at your local midnight.
+- **Frame generation stays off** for Sword and Shield in this release.
+
+**Earlier:** each version's notes are on the [releases page](https://github.com/simipoB/Galar-Native-Android/releases).
 
 ## Playing
 
 - **Touch:** on-screen controls, with **☰** (settings) next to −. Two-finger tap = B.
 - **Controllers:** hide the touch controls automatically. Hold **−** and **+** together for 1 s for ☰, or **−** for 3 s to remap buttons. Rumble works on controllers and phones.
 - **Handhelds** (AYN Odin / Thor, Retroid Pocket, AYANEO, Anbernic, Logitech G Cloud...): detected; the built-in controls are used from the start.
-- **Logs:** `Download/PokemonSword-log.txt` or `Download/PokemonShield-log.txt`.
+- **Logs:** `Documents/Galar Native/Logs/PokemonSword-log.txt` or `…/PokemonShield-log.txt` (the run before: `…-log-previous.txt`). If that folder cannot be written, they go to `Download/` as before.
 
 ## Settings (☰)
 
 | Setting | Choices |
 | --- | --- |
-| Picture | 16:9, fill screen, 20:9 (for widescreen mods) |
-| Upscaling | Auto, Sharp, SGSR, Smooth |
-| Graphics | Auto, High (1080p), Low (720p), Adaptive |
-| Textures | Auto, Full, Half; texture format (compact on Mali / Xclipse / PowerVR) |
-| Frame rate | Auto, 30, 60 (experimental), Sword & Shield |
+| Picture | 16:9, fill screen, widescreen (the HUD stays 16:9) |
+| Resolution | 720p, 1080p, 1440p (from the next start) |
+| 3D render scale | Auto, or 35–100 % |
+| Upscaling | Auto, Sharp, SGSR, Smooth, FSR 1 |
+| Colour | Natural, Vibrant, Cinematic |
+| Graphics | Auto, High, Low, Adaptive |
+| Mode | Auto, Quality, Performance |
+| Shadows | Normal, Low, Lowest (from the next start) |
+| Draw distance | 50–200 % for grass and field details (from the next start) |
+| Power | Balanced, Battery saver |
+| Textures | Auto, Full, Half |
+| Shaders at start | Build before play (default), or While playing (start at once, build as you go) |
+| Frame generation | Off, On, Lossless Scaling (your own `Lossless.dll`); switched off for Sword and Shield in v0.96 |
 | Graphics driver | Phone's own, Turnip, PanVK, or any driver package (with their options) |
-| Controls | Button layout, remapping, touch look and layout, rumble |
+| Controls | Button layout, remapping, camera sensitivity (50–200 %), touch look and layout, rumble |
 | Performance overlay | fps, temperature, GPU, free memory, battery |
 | Online room | Server and room code for local play over the internet |
 | Mods, saves | Import, switch, order and annotate mods; export / import saves |
+| System | Quit the game; Bug reports (record a slow scene's frame for an issue) |
+| About | Version, official / unofficial build, Updates |
 | Language | English, Español, Português, Français, 日本語 (Auto: the phone's) |
 
-**Auto** rates the phone's CPU, GPU and RAM (top, mid or low) and picks graphics, textures and filtering from that. The menu shows what it picked.
+**Auto** rates the phone's CPU, GPU and RAM and picks graphics, textures and filtering from that; while you play it keeps 30 fps steady and the phone cool. The menu shows what it picked.
 
 ## Local play
 
@@ -82,6 +106,10 @@ Import a mod `.zip` (`romfs/` file replacements, `exefs/*.pchtxt` code patches f
 
 - Nintendo's online services (Surprise Trade, online battles and raids).
 - Wild Area water renders darker than on the Switch.
+- 60 fps and frame generation are switched off for now.
+- Mali with Arm's own driver: white screen, not fixed yet (use PanVK).
+- Dynamax crash on some phones (#211): attach the log if it happens to you.
+- Occasional short hitches (about 60 ms) during play.
 
 ## License
 

@@ -1,0 +1,15 @@
+#version 450
+// Synthetic golden frame, GOLDEN_SYNTH_B10 (golden_synth.c): a compute shader storing into two R11G11B10F images, one declared r11f_g11f_b10f, one declared without a
+//   format, the values of b10v.frag's row 0 (every rounding rule stores them alike: negative, -0, -inf, NaN, +inf, past the range, exact) with alpha 0.25
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, r11f_g11f_b10f) uniform writeonly image2D img0;
+layout(set = 0, binding = 1) uniform writeonly image2D img1;
+const uint SP[24] = uint[](0xbf800000u, 0x4788b800u, 0x7fc00000u, 0x7f800000u, 0xff800000u, 0x80000000u, 0x477e0000u, 0x477c0000u, 0x477e4c00u, 0x477fff00u,
+                           0x501502f9u, 0x3f000000u, 0x3f800000u, 0x38800000u, 0x40400000u, 0x3f400000u, 0x3fc00000u, 0x42c80000u, 0x44800000u, 0x00000000u,
+                           0xc2c80000u, 0x7fffffffu, 0xffc00000u, 0x46000000u);
+void main() {
+    uvec2 g = gl_GlobalInvocationID.xy; uint i = g.y * 16u + g.x;
+    vec4 v = vec4(uintBitsToFloat(SP[i % 24u]), uintBitsToFloat(SP[(i + 7u) % 24u]), uintBitsToFloat(SP[(i + 14u) % 24u]), 0.25);
+    imageStore(img0, ivec2(g), v);
+    imageStore(img1, ivec2(g), v.zxyw);
+}

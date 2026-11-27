@@ -12,7 +12,6 @@ Adaptive	自動調整
 Adaptive: High, a lighter picture while the phone is hot or slow	自動調整：通常は高、端末が熱いときや重いときは軽い画質
 Add %s to the home screen	%sをホーム画面に追加
 Adding %d shader(s) the game made last time...	前回ゲームが作ったシェーダー%d個を追加中...
-Allow access to all files so the app can read your dump where it is (it is several GB; nothing is copied).	ダンプをその場所のまま読めるよう、すべてのファイルへのアクセスを許可してください（数GBあり、コピーはしません）。
 Applies next start	次回起動から
 Auto	自動
 Auto (the phone's language)	自動（端末の言語）
@@ -34,12 +33,9 @@ Controller buttons	コントローラーのボタン
 Controller buttons reset.	コントローラーのボタンをリセットしました。
 Controllers only	コントローラーのみ
 Controls	操作
-Copying %d selected file(s) into app storage...	選択した%d個のファイルをアプリの保存領域にコピー中...
-Copying %d selected game file(s) into app storage; large files need extra free space...	ゲームファイル%d個をアプリの保存領域にコピー中。大きなファイルには追加の空き容量が必要です...
 Could not add the new shaders (%s); the game still plays without them.	新しいシェーダーを追加できませんでした（%s）。なくてもゲームは遊べます。
 Could not add your mods' shaders (%s); the game still plays, some mod effects may not show.	Modのシェーダーを追加できませんでした（%s）。ゲームは遊べますが、一部の効果が表示されないことがあります。
 Could not export the save: %s	セーブを書き出せませんでした：%s
-Could not import game file: %s	ゲームファイルを読み込めませんでした：%s
 Could not import the save: %s	セーブを読み込めませんでした：%s
 Could not install the mod: %s	Modをインストールできませんでした：%s
 Delete	削除
@@ -49,6 +45,9 @@ Deleted: applies the next time you start the game.	削除しました：次に�
 Display	表示
 Done	完了
 Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + to reset).	ドラッグで移動。サイズを変えるには、ボタンに触れてから画面のどこでも2本指でピンチ。ダブルタップで非表示。−を2秒長押しで保存（+の長押しでリセット）。
+Drag a control to move it, pinch to resize, double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	ドラッグで移動、ピンチでサイズ変更、ダブルタップで非表示。−を2秒長押しで保存（+と−を同時に長押しでリセット）。
+Drag a control to move it. To resize one, touch it, then pinch with two fingers anywhere. Double-tap to hide. Hold − for 2 s to save (hold + and − together to reset).	ドラッグで移動。サイズを変えるには、ボタンに触れてから画面のどこでも2本指でピンチ。ダブルタップで非表示。−を2秒長押しで保存（+と−を同時に長押しでリセット）。
+Button size	ボタンのサイズ
 Edit notes	メモを編集
 Enter both the server and the room code.	サーバーとルームコードの両方を入力してください。
 Export save data	セーブデータを書き出す
@@ -64,7 +63,6 @@ Full decode: more memory, no conversion (Snapdragon is not affected either way)	
 Full: the game's textures as they are	フル：ゲームのテクスチャそのまま
 GPU	GPU
 GPU memory reported to the game	ゲームに伝えるGPUメモリ
-Game file(s) copied into app storage and selected.	ゲームファイルをコピーして選択しました。
 Game files	ゲームファイル
 Graphics	グラフィック
 Graphics driver	グラフィックドライバー
@@ -122,7 +120,6 @@ Please wait for the current setup or file copy to finish.	現在のセットア�
 Preparing...	準備中...
 Press a key…	ボタンを押してください…
 Press the controller button for %s.	%sに割り当てるボタンを押してください。
-Previously copied selections are ready.	以前コピーしたものは使えます。
 Put each mod in its own folder in Android/data/%s/files/mods/ — <mod>/romfs for files, <mod>/exefs for .pchtxt code patches (they must be made for %s %s).	各ModはAndroid/data/%s/files/mods/内の個別フォルダーへ — ファイルは<mod>/romfs、.pchtxtパッチは<mod>/exefs（%s %s用であること）。
 Reading the shaders of your mods...	Modのシェーダーを読み込み中...
 Ready. The setup log is in Android/data/%s/files/setup_work.	完了。ログはAndroid/data/%s/files/setup_workにあります。
@@ -140,7 +137,6 @@ Saved: applies the next time you start the game.	保存しました：次にゲ�
 Saved: close the game and start it again, then use the game's local link options.	保存しました：ゲームを再起動し、ゲーム内のローカル通信を使ってください。
 Saves	セーブ
 Screen	画面
-Set the game up from your own dump. No game files or keys come with this app; yours never leave the phone.	ご自身でダンプしたデータからセットアップします。このアプリにゲームファイルや鍵は含まれず、あなたのデータが端末の外に出ることはありません。
 Set up the game	ゲームをセットアップ
 Settings (picture, graphics, textures, controller buttons, touch controls, mods) are in the game: tap the menu button at the top left, or hold − on a controller for 3 seconds for the controller buttons.	設定（画面、グラフィック、テクスチャ、ボタン、タッチ操作、Mod）はゲーム内にあります：上部のメニューボタンをタップ、またはコントローラーの−を3秒長押しでボタン設定。
 Setup failed: %s	セットアップに失敗しました：%s
@@ -156,8 +152,6 @@ Tap a button, then press the controller key you want for it.	ボタンをタッ�
 Texture format	テクスチャ形式
 Textures	テクスチャ
 The %s shortcut is on the home screen.	%sのショートカットはホーム画面にあります。
-The file picker did not return a file. Try the phone's Files app and select a file from Downloads or Documents.	ファイルが返されませんでした。端末のファイルアプリで「ダウンロード」か「ドキュメント」から選んでください。
-The file picker returned no selected file. Try the phone's Files app and select a file from Downloads or Documents.	ファイルが選択されませんでした。端末のファイルアプリで「ダウンロード」か「ドキュメント」から選んでください。
 The game closed while starting its graphics	グラフィックの起動中にゲームが終了しました
 The new driver is used from the next start.	新しいドライバーは次回起動から使われます。
 The phone's own driver	端末標準のドライバー
@@ -195,25 +189,16 @@ server (address:port)	サーバー（アドレス:ポート）
 shares files with %d other mod(s)	他の%d個のModとファイルが重複
 translate %s shaders	シェーダー%s個を変換
 translate the shaders	シェーダーを変換
-unpack the game	ゲームを展開
 warm	やや高温
-%s is compressed (NSZ): decompress it to .nsp / .xci first, then choose that.	%s は圧縮されています (NSZ)。先に .nsp / .xci に展開してから、そちらを選んでください。
-%s is not a Switch game file (.nsp or .xci).	%s は Switch のゲームファイル (.nsp または .xci) ではありません。
-%s is not a game file: choose it under Your keys.	%s はゲームファイルではありません。「鍵」で選んでください。
-%s is not a key file: choose prod.keys (and title.keys).	%s は鍵ファイルではありません。prod.keys (と title.keys) を選んでください。
-(kept in the app's private storage)	(アプリ専用の保存領域に保管)
 Background	バックグラウンド
 Change the driver (only if the game does not start)	ドライバーを変更 (ゲームが起動しない場合のみ)
 Choose	選択
-Choose game files	ゲームファイルを選択
-Choose keys	鍵を選択
 Clear	クリア
 Could not read %s.	%s を読み込めませんでした。
 Game	ゲーム
 Keep playing	プレイを続ける
 Keep playing: the game and its sound go on in the background	プレイを続ける: ゲームと音声はバックグラウンドで続きます
 Leaving the game	ゲームを離れたとき
-No game files or keys come with this app; yours never leave the phone.	このアプリにゲームファイルや鍵は含まれず、あなたのデータが端末の外に出ることはありません。
 Pause	一時停止
 Pause: the game stops while it is not on screen	一時停止: 画面に表示されていない間、ゲームは止まります
 Ready: tap Play.	準備完了: 「プレイ」をタップしてください。
@@ -222,26 +207,16 @@ Set up	セットアップ
 Set up again	もう一度セットアップ
 Set up or manage a game	ゲームのセットアップ・管理
 Tap Clear and choose your files again.	「クリア」をタップして、ファイルを選び直してください。
-The base game (.nsp or .xci), the %s update and any DLC. You can choose them all at once.	本編 (.nsp または .xci)、%s の更新データ、DLC。まとめて選べます。
 The setup log is in Android/data/%s/files/setup_work.	セットアップのログは Android/data/%s/files/setup_work にあります。
-These files are from different games (%s): set up one game at a time. Tap Clear and choose the files of one game.	異なるゲームのファイルです (%s)。1 本ずつセットアップしてください。「クリア」をタップして、1 本分のファイルを選んでください。
-Welcome! To play, set up %s from your own Switch dump. It takes three steps.	ようこそ! プレイするには、ご自身の Switch のダンプから %s をセットアップします。3 ステップです。
 Your game files	ゲームファイル
-Your keys	鍵
 none chosen	未選択
 or	または
-prod.keys from your own Switch (and title.keys if your dump needs it).	ご自身の Switch の prod.keys (ダンプに必要なら title.keys も)。
 the phone's own Vulkan driver	端末標準の Vulkan ドライバー
-Set up anyway	このままセットアップ
-Set up anyway?	このままセットアップしますか?
-The damaged parts of your files are kept as they are. The game may crash or show glitches where it uses them. Copying your files again in full is the real fix.	ファイルの壊れた部分はそのまま使われます。その部分を使う場面でゲームが落ちたり表示が乱れたりすることがあります。ファイルをもう一度完全にコピーするのが本当の解決策です。
-the copy of %s stopped early (%s of %s MB): choose it again, ideally from the phone's own storage	%s のコピーが途中で止まりました (%s / %s MB)。もう一度選んでください。できれば端末本体のストレージから選んでください
-%s is incomplete: it holds %s of its %s MB. It was cut short while being copied or downloaded: copy the whole file again.	%s は不完全です (%s / %s MB)。コピーまたはダウンロードの途中で切れています。ファイル全体をもう一度コピーしてください。
-Up to 60 fps: faster where the phone can, game speed stays right (Fl4sh's Dynamic FPS mod)	最大60fps: 端末が出せる場面では滑らかに、ゲーム速度は正しいまま (Fl4sh氏のDynamic FPS Mod)
+Up to 60 fps: smoother where the phone can, the game keeps its real speed	最大60fps: 端末が出せる場面では滑らかに、ゲーム速度は実時間のまま
 Shadows	影
 Standard	標準
 Standard: 1024 × 1024, as the game is made	標準: 1024 × 1024 (ゲーム本来の設定)
-Sharp: 2048 × 2048 shadow maps, more GPU work (Fl4sh's 2K Shadows mod)	シャープ: 2048 × 2048 の影、GPU負荷が増えます (Fl4sh氏の2K Shadows Mod)
+Sharp: 2048 × 2048 shadow maps, more GPU work	シャープ: 2048 × 2048 の影、GPU負荷が増えます
 60 fps: smoother; drops to 720p when needed to hold 60 (with Graphics on Auto or Adaptive)	60fps: より滑らか。60を保つため必要に応じて720pに下げます (グラフィックが自動または適応のとき)
 Android stopped the setup to free memory: going on from where it was (%s of 3)...	Android がメモリ確保のためセットアップを止めました: 途中から再開します (%s / 3)...
 Step %s of %s: %s	ステップ %s / %s: %s
@@ -249,7 +224,6 @@ Running for %s	経過時間 %s
 Almost done with this step: its last part shows no progress and can take several minutes.	このステップはもうすぐ終わります。最後の部分は進み具合が表示されず、数分かかることがあります。
 Imported %d save file(s) into %s (%s). Tap Play to load it; your current save is kept as a backup.	%d 個のセーブファイルを %s に取り込みました (%s)。プレイを押すと読み込みます。今のセーブはバックアップとして残ります。
 Could not import save data: %s	セーブデータを取り込めませんでした: %s
-Your files are the base game only: this app needs the %s update too. Choose the update (.nsp, its title ID ends in 800) as well.	選んだファイルは本体ソフトのみです。このアプリには更新データ %s も必要です。更新データ (.nsp、タイトルIDの末尾が 800) も選んでください。
 Bug reports	不具合の報告
 Capture a frame	1 フレームを記録
 Close this menu within 3 seconds and stay where the problem shows: the next frame is saved, step by step, as pictures and notes in Download (a ZIP ending in frame-capture.zip). Attach it to your issue.	3 秒以内にこのメニューを閉じ、問題が見える場所にいてください。次のフレームが段階ごとの画像とメモとして Download に保存されます (frame-capture.zip で終わる ZIP)。報告に添付してください。
@@ -264,15 +238,25 @@ Auto: on with ARM's driver (v0.52)	自動：ARMのドライバーでオン (v0.5
 Off: the shaders as before v0.52	オフ：v0.52以前のシェーダー
 Merge render passes	レンダーパスを統合
 Off: every render target change starts a new pass	オフ：レンダーターゲットを変えるたびに新しいパスを開始
+Lower specs	軽量設定
+Off: the world as the game draws it	オフ：ゲーム本来の描画
+On: shorter draw distance for Pokémon, people and trees, lighter shadows	オン：ポケモン・人・木の描画距離を短く、影を軽く
+Lowest: shorter draw distance and no shadows	最低：描画距離を短く、影なし
+No reflections	反射なし
+On: smooth ground lighting, no purple shadows	オン：地面の陰影をなめらかに、紫の影なし
+Off: the ground's full lighting detail (purple shadows in places)	オフ：地面の陰影を細部まで（場所により紫の影）
+Preparing the ground's lighting (No reflections)...	地面の陰影を準備しています（反射なし）...
+Could not prepare No reflections (%s); the game plays as it draws itself.	反射なしを準備できませんでした（%s）。ゲーム本来の描画で遊べます。
 Close	閉じる
 Choose a driver	ドライバーを選ぶ
 Start anyway	このまま起動
 A recent Mesa Turnip package for Adreno usually fixes this: choose its .zip as the graphics driver.	Adreno向けの新しいMesa Turnipパッケージで通常は解決します。その.zipをグラフィックドライバーとして選んでください。
 FristOneRR's PanVK driver supports this Mali: download its .zip from the developer's GitHub Releases and choose it as the graphics driver.	FristOneRRのPanVKドライバーはこのMaliに対応しています。開発者のGitHub Releasesから.zipをダウンロードし、グラフィックドライバーとして選んでください。
-No replacement driver supports this GPU yet. Please report it with the log in Download (the -log-previous.txt file), so the app can be fixed for it.	このGPUに対応する代替ドライバーはまだありません。Downloadフォルダーのログ（-log-previous.txtファイル）を添えて報告してください。アプリの修正に役立ちます。
+No replacement driver supports this GPU yet. Please report it with the log in Documents, in the app's Logs folder (the -log-previous.txt file), so the app can be fixed for it.	このGPUに対応する代替ドライバーはまだありません。Documents内のアプリのLogsフォルダーにあるログ（-log-previous.txtファイル）を添えて報告してください。アプリの修正に役立ちます。
 Faster rendering (experimental)	高速レンダリング（実験的）
 On: the graphics work runs on its own thread, next to the game's. Not tested on every phone yet: if the game misbehaves, turn it off and tell us on GitHub	オン：グラフィック処理をゲームとは別のスレッドで動かします。まだすべての端末で試されていません。ゲームの動作がおかしい場合はオフにして、GitHubでお知らせください
 Freed %s GB left over from an earlier setup.	以前のセットアップで残っていた %s GB を解放しました。
+Set up from the installed app	インストール済みアプリから準備
 Min / max as on the Switch	Switchと同じ最小／最大
 Auto: on with ARM's driver (v0.57)	自動：ARMのドライバーでオン (v0.57)
 Off: the shaders as before v0.57	オフ：v0.57以前のシェーダー
@@ -330,14 +314,29 @@ Save folder	セーブの保存先
 App folder	アプリのフォルダー
 App folder: Android/data, as before	アプリのフォルダー：これまでどおり Android/data
 Documents	ドキュメント
-Documents/Galar Native/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/Galar Native/%s/save（Syncthingなどの同期ツール用）。次回の起動時にセーブがそこへコピーされ、既にあったものはバックアップとして残ります。すべてのファイルへのアクセスが必要です
+Documents/%s/%s/save, for sync tools such as Syncthing. Your save is copied there at the next start; anything already there is kept as a backup. Needs All files access	Documents/%s/%s/save（Syncthingなどの同期ツール用）。次回の起動時にセーブがそこへコピーされ、既にあったものはバックアップとして残ります。すべてのファイルへのアクセスが必要です
 The last setup translated only part of the game's shaders, so parts of the game were not drawn. Tap Set up once more: it finishes them (the ones already done are kept).	前回のセットアップはゲームのシェーダーの一部しか変換しなかったため、ゲームの一部が描画されませんでした。もう一度セットアップをタップしてください。残りを仕上げます（変換済みのものは保持されます）。
 FSR 1.0: AMD's upscaler, edge-aware enlarging then sharpening	FSR 1.0：AMDのアップスケーラー。輪郭を考慮して拡大し、その後シャープ化します
 Faster rendering	高速レンダリング
-Auto: on for Adreno GPUs, off for others	自動：Adreno GPUではオン、それ以外ではオフ
+Auto: on for Adreno, Mali, PowerVR and Xclipse GPUs, off for others	自動：Adreno、Mali、PowerVR、XclipseのGPUではオン、それ以外ではオフ
 Off: the graphics work runs on the game's own thread	オフ：グラフィック処理をゲーム自身のスレッドで行います
+Bright scenes: two fixes for the white screen on ARM's own Mali driver. Auto lets the game pick one and check the picture by itself.	明るい場面：ARM純正のMaliドライバーで画面が白くなる問題への2つの修正です。自動にすると、ゲームが修正を選び、画面を自分で確認します。
 Bright scenes in a wider format	明るい場面をより広い形式で描画
 On: the lit scene is drawn in a format with more room (RGBA16F instead of R11G11B10F), a test for white or flickering pictures; uses a little more memory	オン：明るい場面をより余裕のある形式（R11G11B10Fの代わりにRGBA16F）で描画します。白い画面やちらつきのテストです。メモリを少し多く使います
+Bright scenes without compression	明るい場面を圧縮なしで描画
+On: the lit scene keeps its format but is stored without the GPU's framebuffer compression (AFBC), a test for white pictures; uses more memory bandwidth	オン：明るい場面の形式はそのままで、GPUのフレームバッファ圧縮（AFBC）を使わずに保存します。白い画面のテストです。メモリ帯域を多く使います
+Auto: on with ARM's own Mali driver for Sword / Shield; the game checks the picture while you play and moves to the second fix if it stays white	自動：ソード／シールドでARM純正のMaliドライバーのときオン。プレイ中に画面を確認し、白いままなら2つ目の修正に切り替えます
+Off: the lit scene in its own packed format (R11G11B10F)	オフ：明るい場面を本来の圧縮形式（R11G11B10F）で描画します
+Auto: used when the game finds that the first fix did not take on ARM's own Mali driver	自動：ARM純正のMaliドライバーで1つ目の修正が効かなかったとゲームが判断したときに使います
+Off: the framebuffer compression the driver chooses	オフ：ドライバーが選ぶフレームバッファ圧縮のまま
+Mali: the white-screen fix did not take; trying the second fix at the next start	Mali：白い画面の修正が効きませんでした。次回の起動時に2つ目の修正を試します
+Mali: the white-screen fix did not take; the next start tries the other fix again	Mali：白い画面の修正が効きませんでした。次回の起動時にもう一方の修正をもう一度試します
+Mali: a test switch in the settings overrides the white-screen fix	Mali：設定のテスト用スイッチが白い画面の修正より優先されています
+Mali: a test switch in the settings (%s) overrides the white-screen fix	Mali：設定のテスト用スイッチ（%s）が白い画面の修正より優先されています
+Mali: neither white-screen fix took; the next start offers the PanVK driver	Mali：白い画面の修正はどちらも効きませんでした。次回の起動時にPanVKドライバーを提案します
+White screen on this phone's own driver	この端末のドライバーで画面が白くなります
+On this phone's own Mali driver (%s), %s drew its lit scenes white, and both of the app's fixes were tried at earlier starts without success.	この端末のMaliドライバー（%s）では、%sの明るい場面が白く描画され、アプリの2つの修正も以前の起動で試しましたが効果がありませんでした。
+The PanVK driver draws the game on many Mali phones: download its .zip and choose it as the graphics driver.	PanVKドライバーは多くのMali端末でゲームを描画できます。その.zipをダウンロードして、グラフィックドライバーとして選んでください。
 AMD FidelityFX Super Resolution 1: edge-aware upscaling, then sharpening (Sharpness sets how much)	AMD FidelityFX Super Resolution 1：輪郭を保つ拡大の後にシャープ化（シャープネスで強さを調整）
 Colour	色合い
 Natural	ナチュラル
@@ -355,9 +354,9 @@ Off: this GPU needs %s ms for each picture, more than the game can spare. Switch
 Off until the next start (see the log for why).	次回の起動までオフ（理由はログにあります）。
 Off: even at its lightest it cost the game its own frames here (down to %s fps). Switch it off and on to try again.	オフ：最も軽い設定でも、ここではゲーム自身のフレームを奪っていました（%s fpsまで低下）。オフにしてからオンにすると再試行します。
 Off at 30 fps: frame generation needs the game at a locked 60 fps (Performance → Frame rate: 60).	30 fpsではオフ：フレーム生成にはゲームが60 fpsで安定している必要があります（パフォーマンス → フレームレート：60）。
-Paused: the game runs at %s fps here, and frame generation needs a locked 60. It comes back on by itself once the game holds 60.	一時停止中：ここではゲームが%s fpsで動いており、フレーム生成には安定した60が必要です。ゲームが60を保つと自動で再開します。
-On: a picture is made between each two of the game's frames, so 60 fps moves like 120. Only while the game holds a locked 60 fps; your input shows about 8 ms later	オン：ゲームの2フレームごとに中間の画像を作り、60 fpsを120のように動かします。ゲームが60 fpsで安定しているときだけ。操作は約8 ms遅れて表示されます
-Auto: 2x, light (the game at a locked 60 shown at 120)	自動：2x、軽め（60で安定したゲームを120で表示）
+Paused: the game runs at %s fps here, under its own frame rate. Frame generation comes back on by itself once the game holds it again.	一時停止中：ここではゲームが %s fps で、本来のフレームレートを下回っています。ゲームが再び保てるようになると、フレーム生成は自動で戻ります。
+On: a picture is made between each two of the game's frames, so 30 fps moves like 60. Only while the game holds its own frame rate; your input shows a little later	オン：ゲームのフレームの間に1枚ずつ画像を作るので、30 fps が 60 のように動きます。ゲームが本来のフレームレートを保っている間だけ。操作の反映が少し遅れます
+Auto: as many as the screen's rate allows (a 30 fps game: 4x at 120 Hz, 3x at 90 Hz, 2x at 60 Hz)	自動：画面のリフレッシュレートに合わせて最大まで（30 fps のゲームなら 120 Hz で 4x、90 Hz で 3x、60 Hz で 2x）
 Widescreen	ワイド
 Widescreen: the game's camera made as wide as your screen, nothing stretched (Sword / Shield 1.3.2; the HUD is stretched)	ワイド：ゲームのカメラを画面の横幅いっぱいに広げ、引き伸ばしません（ソード／シールド 1.3.2。HUDは引き伸ばされます）
 Output	出力
@@ -382,3 +381,163 @@ Updating the shaders	シェーダーを更新中
 3D render scale	3D描画スケール
 Auto: what the Graphics setting gives, lowered by itself when the phone is hot	自動：グラフィック設定に従い、端末が熱いと自動で下げます
 50 %: the 3D at half size, the coolest and fastest (text and menus stay sharp)	50%：3Dを半分のサイズで描画。最も涼しく速い（文字とメニューは鮮明なまま）
+Quit the game	ゲームを終了
+Closes the game completely	ゲームを完全に閉じます
+Quit the game? Progress you have not saved in the game is lost, as on the console.	ゲームを終了しますか？ゲーム内でセーブしていない進行状況は、本体と同じく失われます。
+Quit	終了
+Power	電力
+Balanced	バランス
+Balanced: the best picture this phone holds at a steady frame rate	バランス：この端末が安定したフレームレートで保てる最高の画質
+Battery saver	バッテリー節約
+Battery saver: a cooler phone and a longer battery: 30 fps on Auto, a lighter picture, and it eases off sooner when the phone warms up	バッテリー節約：端末の発熱を抑え電池を長持ち：自動では30fps、軽めの画質、端末が温まると早めに負荷を下げます
+Record the frame's passes	フレームのパスを記録
+For slow scenes: close this menu within 3 seconds and stay where the game is slow. Three frames' render passes, with their GPU time where the phone gives it, are saved in Download (a file ending in framegraph.txt). Attach it to your issue.	重い場面向け：3秒以内にこのメニューを閉じ、ゲームが重い場所にとどまってください。3フレーム分の描画パス（端末が対応していればGPU時間付き）がダウンロードに保存されます（framegraph.txt で終わるファイル）。issue に添付してください。
+Recording in 3 seconds: close the menu.	3秒後に記録します：メニューを閉じてください。
+Left: Auto, what the Graphics setting gives, lowered by itself when the phone is hot. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	左端：自動（グラフィック設定どおり、端末が熱いと自動で下げます）。下げるほど発熱が減り速くなり、3Dはやわらかくなります。文字やメニューはくっきりのままです。
+Paused: the game runs at %s fps here, under its frame rate setting. It comes back on by itself once the game holds it again.	一時停止中：ここではゲームが %s fps で、設定したフレームレートを下回っています。ゲームが再びそのレートを保つと自動で再開します。
+Mode	モード
+Auto: as the Graphics setting decides	自動：グラフィック設定に従います
+Quality	画質優先
+Quality: docked: 1080p and the game's full effects	画質優先：TVモード：1080p、ゲーム本来のすべての効果
+Performance: the 3D at 720p: cooler and steadier (the HUD and text stay sharp)	パフォーマンス優先：3Dを720pで描画：より涼しく安定（HUDと文字は鮮明なまま）
+Performance: handheld: 720p and the game's lighter settings: cooler and steadier	パフォーマンス優先：携帯モード：720p、ゲームの軽い設定：より涼しく安定
+Resolution	解像度
+720p: lightest, for phones that cannot hold 30 (from the next start)	720p：最も軽い、30を保てない端末向け（次回起動から）
+1080p, as the game is made	1080p、ゲーム本来の解像度
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone; from the next start)	1440p：より鮮明だがGPU負荷が増加（fps低下・発熱、次回起動から）
+Dynamic	ダイナミック
+Dynamic: 60 where the phone can, 30 where it cannot, at the full picture; game speed stays right	ダイナミック：可能な所は60、無理な所は30、画質はそのまま。ゲーム速度は正しく保たれます
+100 % (as on the Switch)	100 %（Switchと同じ）
+How fast the right stick and the touch camera turn. Lower: slower and finer. Higher: full speed with less of the stick.	右スティックとタッチ操作でカメラが回る速さです。低い：ゆっくり細かく。高い：スティックを少し倒すだけで最高速。
+Auto: on for a Mali-G615 on ARM's driver older than r49, which needed it to start	自動：r49より前のARMのドライバーのMali-G615でオン（起動に必要でした）
+Off: the GPU reads the game's uniform data directly (a test for invisible characters and Pokémon; if the game then closes at start, set Auto again)	オフ：GPUがゲームのユニフォームデータを直接読みます（キャラクターやポケモンが見えない問題のテスト。起動時にゲームが閉じる場合は自動に戻してください）
+Animated models: a render target for their capture	アニメーションモデル：キャプチャ用のレンダーターゲット
+Auto: a quick test at each start on ARM's driver decides (the log says which)	自動：ARMのドライバーで起動ごとに短いテストを行い決めます（ログに記録）
+Off: as before v0.35	オフ：v0.35以前と同じ
+On: for a driver that skips the work of a pass with nothing to draw into (invisible characters and Pokémon)	オン：描画先のないパスの処理を省くドライバー向け（キャラクターやポケモンが見えない場合）
+Style move effects	スタイル技の演出
+Off: no full-screen animation as a strong or agile style move starts (it left grey boxes on many phones); the moves work as before	オフ：力業・速業の開始時の全画面演出なし（多くの端末で灰色の四角が出ていました）。技の効果は変わりません
+On: the game's own animation (grey boxes on some phones)	オン：ゲーム本来の演出（一部の端末で灰色の四角が出ます）
+Touch camera sensitivity	タッチカメラの感度
+Touch camera	タッチカメラ
+Drag	ドラッグ
+Drag: the camera follows the finger's movement and stops when it stops	ドラッグ：指の動きにカメラが追従し、指が止まると止まります
+Stick	スティック
+Stick: where the finger lands is the centre; hold it away to keep turning, faster the further (hold-to-lock-on is off)	スティック：指を置いた位置が中心になり、離して押さえ続けると回り続けます。離すほど速くなります（長押しでのロックオンはオフ）
+Right stick on screen	画面上の右スティック
+Show	表示
+Hide	非表示
+Hide: the camera is turned with a finger only	非表示：カメラは指だけで動かします
+Widescreen: the game's camera made as wide as your screen, nothing stretched; the HUD stays 16:9 in the middle	ワイド：ゲームのカメラを画面の幅まで広げます。引き伸ばしはなく、HUDは中央の16:9のままです
+Barriers between passes	パス間のバリア
+Fewer	少なく
+Every pass	毎パス
+Auto: fewer on Adreno, one before every pass on other GPUs	自動：Adrenoでは少なく、他のGPUでは各パスの前に1回
+Fewer: faster, the GPU stays busy; on Xclipse, Mali and PowerVR shadows may flicker	少なく：速く、GPUが休みません。Xclipse、Mali、PowerVRでは影がちらつくことがあります
+Every pass: the safest picture, slower	毎パス：最も安全な画面、遅め
+1440p: sharper, but heavier on the GPU (fewer fps, a warmer phone)	1440p：より鮮明ですがGPUの負荷が増えます（fpsが下がり、端末が熱くなります）
+Model tests (Adreno)	モデルのテスト（Adreno）
+For stretched or exploding polygons. Restart the game after changing it, and tell us on GitHub whether they're gone.	ポリゴンが伸びたり爆発したりする場合に。変更後にゲームを再起動し、直ったかをGitHubで教えてください。
+Copy shared data on the GPU	共有データをGPUでコピー
+On: data the game places off the driver's alignment is copied on the GPU, after what the GPU wrote before it, instead of on the CPU (a test for exploding polygons on older Adreno phones)	オン：ドライバーのアラインメントから外れた位置にあるデータを、CPUではなくGPUで、それ以前のGPUの書き込みの後にコピーします（古いAdrenoでポリゴンが爆発する問題のテスト）
+Left: Auto, the game's own resolution. Lower: cooler and faster, the 3D softer; text and menus stay sharp.	左端：自動（ゲーム本来の解像度）。下げるほど発熱が減り速くなり、3Dはやわらかくなります。文字やメニューはくっきりのままです。
+Auto: 2x, light (the game's frame rate shown doubled)	自動：2x、軽め（ゲームのフレームレートを2倍で表示）
+Draw distance	描画距離
+Near	近い
+Default	標準
+Far	遠い
+Very far	とても遠い
+Near: trees and detail closer, fewer people and Pokémon loaded: lighter (from the next start)	近い：木や細部を近くまで、読み込む人やポケモンを減らして軽く（次回起動から）
+Default: as the game draws it	標準：ゲーム本来の描画
+Far: trees, terrain detail and animation half as far again (from the next start)	遠い：木・地形の細部・アニメーションを1.5倍遠くまで（次回起動から）
+Very far: trees, terrain detail and animation twice as far: heavier on the GPU (from the next start)	とても遠い：木・地形の細部・アニメーションを2倍遠くまで：GPU負荷が増えます（次回起動から）
+Edge-run	端で走る
+On: push the stick past its ring to dash	オン：スティックを輪の外まで押すとダッシュ
+Off: the stick only walks and runs	オフ：スティックは歩く・走るだけ
+Ride button	ライドボタン
+Tap or swipe	タップかスワイプ
+Tap + to call a ride Pokémon, swipe it left / right to change Pokémon	＋をタップでライドポケモンを呼ぶ、左右にスワイプで切り替え
+Tap only	タップのみ
++ works as on the console	＋は本体と同じ動作
+the game's own (100 %)	ゲーム本来（100 %）
+Normal	標準
+Normal: as the game is made	標準：ゲーム本来の設定
+Low: softer shadows, lighter on the GPU (from the next start)	低：影が柔らかくなり、GPUの負荷が減ります（次回起動から）
+Lowest: soft shadows near you only, far shadows off: the lightest (from the next start)	最低：近くの影だけ（柔らかめ）、遠くの影なし：最も軽い（次回起動から）
+How far grass and field details are drawn (from the next start). Lower: lighter and cooler. Higher: more detail in the distance, heavier on the GPU.	草やフィールドの細部を描く距離です（次回起動から）。低い：軽く、発熱が少ない。高い：遠くまで細かく、GPUの負荷が増えます。
+Lossless Scaling's frame generation can't run on this phone, so the app's own frame generation is used instead (see the log for why).	この端末では Lossless Scaling のフレーム生成を使えないため、代わりにアプリ独自のフレーム生成を使います（理由はログを参照）。
+# the in-app updater (AppUpdater.java, About -> Updates)
+Updates	アップデート
+An unofficial build cannot update itself to an official release. Uninstall it and install the official app to get updates.	非公式ビルドは公式版にアップデートできません。アップデートを受け取るには、アンインストールして公式アプリをインストールしてください。
+Update now	今すぐアップデート
+Check for updates	アップデートを確認
+Look for updates when the app starts: on	アプリ起動時にアップデートを確認: オン
+Look for updates when the app starts: off	アプリ起動時にアップデートを確認: オフ
+Checking…	確認中…
+Downloading the update: %d%%	アップデートをダウンロード中: %d%%
+The update is ready: confirm the installation on the screen that opens.	アップデートの準備ができました。表示される画面でインストールを確認してください。
+This is the latest version.	最新バージョンです。
+Version %s is available. The game closes when the update installs, so save first.	バージョン%sが利用できます。アップデートのインストール時にゲームが終了するので、先にセーブしてください。
+%s %s is available. Open the menu, then About, to install it.	%s %sが利用できます。メニューの「このアプリについて」からインストールできます。
+Could not check for updates. Check the internet connection.	アップデートを確認できませんでした。インターネット接続を確認してください。
+The update could not be downloaded: %s	アップデートをダウンロードできませんでした: %s
+The downloaded file is not an official %s release, so it was not installed.	ダウンロードしたファイルは%sの公式版ではないため、インストールしませんでした。
+The update could not be installed: %s	アップデートをインストールできませんでした: %s
+Local play	ローカル通信
+Off: the game says local play is unavailable.	オフ：ゲームではローカル通信が使えないと表示されます。
+On: link battles, trades and raids with phones on the same Wi-Fi.	オン：同じWi-Fiの端末と対戦・交換・レイドができます。
+%s has no file named main: it is not an ExeFS folder.	%s に main というファイルがありません。ExeFS フォルダーではありません。
+%s is empty.	%s は空です。
+%s: update %s	%s：アップデート %s
+Add DLC	DLC を追加
+Allow access to all files so the app can read your game folders where they are.	ゲームのフォルダーをその場所のまま読めるよう、すべてのファイルへのアクセスを許可してください。
+Choose a folder	フォルダーを選ぶ
+DLC: %s	DLC：%s
+ExeFS chosen. Now choose the RomFS folder.	ExeFS を選びました。次に RomFS フォルダーを選んでください。
+ExeFS: %s	ExeFS：%s
+Move the files instead	代わりにファイルを移動
+Move them	移動する
+Move your files instead?	代わりにファイルを移動しますか？
+Moving your files into the app...	ファイルをアプリに移動しています...
+No game files come with this app; yours never leave the phone.	このアプリにゲームのファイルは含まれていません。あなたのファイルがスマホの外に出ることはありません。
+Nothing was chosen. Try again, through the phone's own storage.	何も選ばれませんでした。スマホ本体のストレージからもう一度選んでください。
+Or use the game from the %s app already on this phone (nothing to choose):	または、このスマホにすでにある %s アプリのゲームを使う（選ぶものはありません）：
+RomFS chosen. Now choose the ExeFS folder.	RomFS を選びました。次に ExeFS フォルダーを選んでください。
+RomFS: %s	RomFS：%s
+Set the game up from your own game files. No game files come with this app; yours never leave the phone.	あなた自身のゲームファイルからゲームを準備します。このアプリにゲームのファイルは含まれていません。あなたのファイルがスマホの外に出ることはありません。
+The ExeFS and RomFS folders extracted from your own game, with the update included. Choose the folder that holds both, or each one in turn.	あなた自身のゲームから取り出した ExeFS と RomFS のフォルダー（アップデート適用済み）。両方を含むフォルダーを選ぶか、1 つずつ選んでください。
+The app can't read %s. Allow it access to all files in Android's settings, then choose the folder again.	アプリが %s を読めません。Android の設定ですべてのファイルへのアクセスを許可してから、もう一度フォルダーを選んでください。
+There isn't room for a copy of your game files. The setup can move your RomFS and DLC folders into the app instead: nothing is copied, but they leave the folder you chose, and uninstalling the app deletes them. If the setup fails, they are moved back.	ゲームファイルをコピーする空き容量がありません。代わりに RomFS と DLC のフォルダーをアプリ内に移動できます。コピーはしませんが、選んだフォルダーからはなくなり、アプリをアンインストールすると削除されます。準備に失敗した場合は元の場所に戻します。
+This folder can't be read. Choose it through the phone's own storage (not Recent or Downloads).	このフォルダーは読めません。スマホ本体のストレージから選んでください（「最近」や「ダウンロード」からではなく）。
+Welcome! To play, set up %s from your own game files. It takes two steps.	ようこそ！遊ぶには、あなた自身のゲームファイルから %s を準備してください。2 ステップで終わります。
+copy the game files	ゲームファイルをコピー
+Player: %s. Players are changed on the setup screen, with the game closed.	プレイヤー：%s。プレイヤーはゲームを閉じてからセットアップ画面で切り替えます。
+Playing as %s. Tap Play, or change the player below.	%sでプレイします。プレイをタップするか、下でプレイヤーを切り替えてください。
+Player: %s	プレイヤー：%s
+Change player	プレイヤーを切り替え
+Add a player	プレイヤーを追加
+Rename	名前を変更
+Delete player	プレイヤーを削除
+Start over	最初から始める
+Restore the previous save	前のセーブに戻す
+Who is playing?	誰がプレイしますか？
+Now playing as %s.	%sでプレイします。
+That did not work: %s	できませんでした：%s
+Player %d	プレイヤー%d
+New player	新しいプレイヤー
+Rename player	プレイヤー名を変更
+Add	追加
+Type a name.	名前を入力してください。
+That name is taken.	その名前はすでに使われています。
+Added %s. Their game starts from the beginning.	%sを追加しました。ゲームは最初から始まります。
+Delete %s?	%sを削除しますか？
+The saves of %s in every game in this app are deleted for good. Export them first if you want to keep them.	このアプリのすべてのゲームにある%sのセーブは完全に削除されます。残したい場合は先に書き出してください。
+%s deleted. Now playing as %s.	%sを削除しました。%sでプレイします。
+Start over?	最初から始めますか？
+%s starts %s again from the beginning. The current save is kept as a backup, and Restore the previous save brings it back. Only one backup is kept: an older one is deleted.	%sは%sを最初から始めます。現在のセーブはバックアップとして残り、「前のセーブに戻す」で元に戻せます。バックアップは1つだけ残り、古いものは削除されます。
+Done: the game starts from the beginning. The old save is kept as a backup.	完了：ゲームは最初から始まります。前のセーブはバックアップとして残っています。
+There is no save yet: the game already starts from the beginning.	まだセーブがありません。ゲームはすでに最初から始まります。
+Restore the previous save?	前のセーブに戻しますか？
+The backup becomes the save again, and the save you have now becomes the backup, so you can switch back.	バックアップが現在のセーブになり、今のセーブがバックアップになります。いつでも元に戻せます。
+Restore	戻す
+The previous save is back.	前のセーブに戻しました。
